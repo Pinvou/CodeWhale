@@ -1,11 +1,258 @@
 //! Process-private Windows host driver for the feature's real reader regression.
+#[path = "controlled_admission_tests.rs"]
+mod controlled_admission_tests;
+
 use std::io::Read;
 use std::time::{Duration, Instant};
 use tauri::Manager as _;
 
 #[test]
+fn real_controller_start_lifecycle_fences() {
+    const CASE: &str = "PINVOU_CONTROLLER_START_FENCE_CASE";
+    if let Ok(case) = std::env::var(CASE) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(crate::features::remote_control::RemoteControlManager::verify_controller_start_fence(|| {
+            let mut context = crate::build_tauri_context();
+            context.config_mut().app.windows.clear();
+            let app = tauri::Builder::default().any_thread()
+                .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
+                .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
+                .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
+                .build(context).unwrap();
+            let relay = crate::features::remote_control::RemoteControlManager::new(app.handle().clone());
+            (relay, app)
+        }, &case));
+        return;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let filter = format!("{module}::real_controller_start_lifecycle_fences");
+    for case in [
+        "lane-stop",
+        "reader-revocation",
+        "cleanup-refresh",
+        "stop",
+        "refresh",
+        "failed-start",
+        "late-drop",
+    ] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &filter, "--nocapture"])
+            .env(CASE, case)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (status, output, errors) = collect_reader_child(child, Duration::from_secs(30));
+        assert!(
+            status.success(),
+            "controller-start {case} failed: {output}\n{errors}"
+        );
+        assert!(
+            output.contains("test result: ok. 1 passed;"),
+            "zero-match child is not evidence"
+        );
+        println!("controller-start {case}: isolated real host passed");
+    }
+}
+
+#[test]
+fn real_controlled_operation_admission_fences() {
+    const CASE: &str = "PINVOU_CONTROLLED_ADMISSION_CASE";
+    if let Ok(case) = std::env::var(CASE) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(controlled_admission_tests::run(&case));
+        return;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let filter = format!("{module}::real_controlled_operation_admission_fences");
+    for case in [
+        "stop-first",
+        "refresh-first",
+        "admission-first",
+        "setup-error",
+    ] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &filter, "--nocapture"])
+            .env(CASE, case)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (status, output, errors) = collect_reader_child(child, Duration::from_secs(30));
+        assert!(
+            status.success(),
+            "Controlled admission {case} failed: {output}\n{errors}"
+        );
+        assert!(
+            output.contains("test result: ok. 1 passed;"),
+            "zero-match child is not evidence"
+        );
+        println!("Controlled admission {case}: isolated real host passed");
+    }
+}
+
+#[test]
+fn real_registration_task_exit_closes_start_refresh_and_preserves_successors() {
+    const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        run_reader_child(
+            "real_registration_task_exit_closes_start_refresh_and_preserves_successors",
+            false,
+            false,
+            25,
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use crate::features::remote_control::controller::controlled::{ControlledDeviceManager, ControlledStatusKind};
+        use crate::features::remote_control::controller::relay_runtime::ControlledRelayWorker;
+        use crate::features::remote_control::RemoteControlManager;
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{Value, json};
+        use tokio_tungstenite::tungstenite::Message;
+        let home = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/relay", listener.local_addr().unwrap());
+        // This process owns all runtime overrides and its ephemeral endpoint.
+        unsafe {
+            std::env::set_var("PINVOU3_HOME", home.path());
+            std::env::set_var("PINVOU_REMOTE_RELAY_WS_URL", &url);
+            std::env::set_var("PINVOU_REMOTE_RUNTIME_RELAY_WS_URL", &url);
+        }
+        let mut context = crate::build_tauri_context();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread()
+            .manage(ControlledDeviceManager::default())
+            .build(context).unwrap();
+        let handle = app.handle().clone();
+        let relay = RemoteControlManager::new(handle.clone());
+        let manager = handle.state::<ControlledDeviceManager>();
+        let mut socket = None;
+        for refreshed in [false, true] {
+            // No race / stopped / replacement start / replacement refresh.
+            for interference in 0..4 {
+                for while_waiting in [false, true] {
+                    let initial = manager.start(None, Vec::new()).unwrap();
+                    let operation = if refreshed {
+                        let retiring = manager.begin_refresh().unwrap();
+                        manager.complete_refresh_revoked(retiring).unwrap()
+                    } else { initial };
+                    let registration = ControlledRelayWorker::start(
+                        handle.clone(), relay.clone(), operation.clone(),
+                        std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledBusiness { app:handle.clone() }),
+                    ).await.unwrap();
+                    if socket.is_none() {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let mut connected = tokio_tungstenite::accept_hdr_async(stream,
+                            crate::features::remote_control::controller::test_support::ControllerReaderProtocol).await.unwrap();
+                        let Message::Text(frame) = connected.next().await.unwrap().unwrap() else { panic!("endpoint register") };
+                        let frame:Value=serde_json::from_str(&frame).unwrap();
+                        assert_eq!(frame["type"], "desktop_endpoint_register");
+                        connected.send(Message::Text(json!({"v":2,"type":"desktop_endpoint_registered","endpoint_id":frame["endpoint_id"],"web_client_connected":false}).to_string().into())).await.unwrap();
+                        socket=Some(connected);
+                    }
+                    // Observe the actual production registration request before
+                    // aborting its real task; no result or watchdog is fabricated.
+                    loop {
+                        match socket.as_mut().unwrap().next().await.unwrap().unwrap() {
+                            Message::Text(text) => {
+                                let frame:Value=serde_json::from_str(&text).unwrap();
+                                if frame["type"]=="desktop_pairing_register" {
+                                    assert_eq!(frame["remote_control_generation"], operation.generation());
+                                    break;
+                                }
+                            },
+                            Message::Ping(data) => socket.as_mut().unwrap().send(Message::Pong(data)).await.unwrap(),
+                            _ => {},
+                        }
+                    }
+                    assert_eq!(manager.status().kind(), ControlledStatusKind::Registering);
+                    let abort = registration.abort_handle_for_test();
+                    let mut emitted = None;
+                    let mut replacement_channel = None;
+                    {
+                        let wait = super::super::desktop_remote_controlled::wait_controlled_registration(
+                            &manager, operation.clone(), registration.wait(),
+                            |generation| relay.stop_controller_relay(generation),
+                            |status| emitted=Some(status.clone()),
+                        );
+                        tokio::pin!(wait);
+                        if while_waiting {
+                            std::future::poll_fn(|cx| {
+                                assert!(std::future::Future::poll(wait.as_mut(),cx).is_pending());
+                                std::task::Poll::Ready(())
+                            }).await;
+                        }
+                        if interference != 0 {
+                            manager.stop();
+                            relay.stop_controller_relay(operation.generation());
+                        }
+                        if interference >= 2 {
+                            manager.start(None, Vec::new()).unwrap();
+                            if interference == 3 {
+                                let old=manager.begin_refresh().unwrap();
+                                manager.complete_refresh_revoked(old).unwrap();
+                            }
+                            let next = manager.current_operation().unwrap();
+                            replacement_channel = Some(relay.start_controller_relay(next.generation()).await.unwrap());
+                        }
+                        abort.abort();
+                        let error=tokio::time::timeout(Duration::from_secs(3),wait).await.unwrap().unwrap_err();
+                        assert_eq!(error,"pairing_registration_failed");
+                    }
+                    if interference==0 {
+                        assert_eq!(manager.status().kind(),ControlledStatusKind::Error);
+                        assert!(emitted.is_some());
+                    } else {
+                        assert!(emitted.is_none());
+                        assert_eq!(manager.status().kind(),if interference==1 {ControlledStatusKind::Stopped} else {ControlledStatusKind::Registering});
+                    }
+                    // A real lane can be installed again after the old task is
+                    // joined. A stale command must not retire this new owner.
+                    if interference<=1 { manager.start(None,Vec::new()).unwrap(); }
+                    let next=manager.current_operation().unwrap();
+                    let channel = if let Some(channel) = replacement_channel {
+                        assert!(matches!(relay.start_controller_relay(next.generation()).await,
+                            Err(code) if code=="desktop_controller_relay_busy"));
+                        channel
+                    } else {
+                        relay.start_controller_relay(next.generation()).await.unwrap()
+                    };
+                    assert!(manager.is_pending_handshake(next.clone()));
+                    manager.stop();
+                    relay.stop_controller_relay(next.generation());
+                    drop(channel);
+                }
+            }
+        }
+        relay.shutdown_loopback_test_endpoint();
+        if let Some(mut socket)=socket {let _=socket.close(None).await;}
+    });
+}
+
+#[test]
 fn real_reader_manager_worker_resume_round_trip() {
     run_isolated_reader(false, false, false, None);
+}
+
+#[test]
+fn real_reader_failed_prepare_write_ends_recovery() {
+    run_isolated_reader(false, false, false, Some("prepare_write"));
+}
+
+#[test]
+fn real_reader_legacy_socket_close_ends_recovery() {
+    run_isolated_reader(false, false, false, Some("prepare_legacy"));
 }
 
 #[test]
@@ -39,6 +286,21 @@ fn real_reader_resume_activation_holds_lifecycle_owner_commit() {
 }
 
 #[test]
+fn real_reader_second_disconnect_ends_prepared_recovery() {
+    run_isolated_reader(false, false, false, Some("resume_prepared"));
+}
+
+#[test]
+fn real_reader_second_disconnect_ends_provisional_recovery() {
+    run_isolated_reader(false, false, false, Some("resume_provisional"));
+}
+
+#[test]
+fn real_reader_second_disconnect_ends_pending_recovery() {
+    run_isolated_reader(false, false, false, Some("resume_pending"));
+}
+
+#[test]
 fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
     const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
     if std::env::var(CHILD).as_deref() != Ok("1") {
@@ -60,7 +322,21 @@ fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
     runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(60),
             crate::features::remote_control::controller::relay_runtime::reader_resume_tests::journal_owner_tests::journal_owner_round_trip(
-                |probe| super::super::desktop_remote_task::journal_owner_tests::host(Some(probe)),
+                |probe, diagnostics| {
+                    use tauri::Listener as _;
+                    let (handle, business, host) =
+                        super::super::desktop_remote_task::journal_owner_tests::host(Some(probe));
+                    let listener = handle.listen(
+                        crate::features::remote_control::controller::relay_runtime::reader_resume_tests::journal_owner_tests::JournalOwnerDiagnostics::EVENT_NAME,
+                        move |event| diagnostics.event(event.payload()),
+                    );
+                    let listener = JournalStatusListener {
+                        handle: handle.clone(),
+                        listener,
+                    };
+                    // Unregister before the owned Wry host, including unwind.
+                    (handle, business, (listener, host))
+                },
                 |handle,lease,remote_ref| {
                     use tauri::Manager as _;
                     handle.state::<std::sync::Arc<super::super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
@@ -68,6 +344,18 @@ fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
                 }
             )).await.unwrap();
     });
+}
+
+struct JournalStatusListener {
+    handle: tauri::AppHandle,
+    listener: u32,
+}
+
+impl Drop for JournalStatusListener {
+    fn drop(&mut self) {
+        use tauri::Listener as _;
+        self.handle.unlisten(self.listener);
+    }
 }
 
 #[test]
@@ -121,6 +409,11 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
 }
 
 #[test]
+fn real_reader_reservation_retries_preserve_single_handshake_and_deadline() {
+    run_isolated_reader(false, false, false, Some("reservation-replay"));
+}
+
+#[test]
 fn real_worker_final_admission_preserves_timeout_and_signed_deadline() {
     run_isolated_reader(false, false, true, None);
 }
@@ -167,38 +460,69 @@ fn run_isolated_reader(
                 .build()
                 .unwrap()
         };
+        use crate::features::remote_control::controller::relay_runtime::reader_resume_tests as reader_fixture;
+        let final_admission_observer = final_admission
+            .then(|| std::sync::Arc::new(reader_fixture::FinalAdmissionObservation::new()));
         runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
-                crate::features::remote_control::controller::relay_runtime::reader_resume_tests::resume_round_trip(|| {
-                    let mut context = crate::build_tauri_context();
-                    context.config_mut().app.windows.clear();
-                    let app = tauri::Builder::default().any_thread()
-                        .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
-                        .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
-                        .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
-                        .build(context).unwrap();
-                    if final_admission {
-                        let handle = app.handle().clone();
-                        handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
-                        let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
-                        handle.state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
-                            .register_cleanup_sink(cleanup.clone());
-                        handle.manage(cleanup);
-                    }
-                    (app.handle().clone(), app)
-                }, retire_endpoint))
-                .await
-                .unwrap();
+            let build_host = || {
+                let mut context = crate::build_tauri_context();
+                context.config_mut().app.windows.clear();
+                let app = tauri::Builder::default().any_thread()
+                    .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
+                    .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
+                    .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
+                    .build(context).unwrap();
+                if final_admission || owner_case.is_some_and(|case| {
+                    case.starts_with("resume_") || matches!(case, "prepare_write" | "prepare_legacy")
+                }) {
+                    let handle = app.handle().clone();
+                    handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
+                    let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
+                    handle.state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
+                        .register_cleanup_sink(cleanup.clone());
+                    handle.manage(cleanup);
+                }
+                (app.handle().clone(), app)
+
+            };
+            let result = if let Some(observer) = final_admission_observer.as_ref() {
+                tokio::time::timeout(
+                    Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
+                    reader_fixture::with_final_admission_observation(
+                        observer.clone(),
+                        reader_fixture::resume_round_trip(build_host, retire_endpoint),
+                    ),
+                ).await
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
+                    reader_fixture::resume_round_trip(build_host, retire_endpoint),
+                ).await
+            };
+            if result.is_err() {
+                if let Some(observer) = final_admission_observer.as_ref() {
+                    observer.report_timeout();
+                }
+            }
+            result.unwrap();
         });
         return;
     }
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.
     let name = match owner_case {
+        Some("reservation-replay") => {
+            "real_reader_reservation_retries_preserve_single_handshake_and_deadline"
+        }
         Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
         Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
+        Some("prepare_write") => "real_reader_failed_prepare_write_ends_recovery",
+        Some("prepare_legacy") => "real_reader_legacy_socket_close_ends_recovery",
         Some("challenge") => "real_reader_old_tick_challenge_cannot_mask_successor_suspicion",
+        Some("resume_prepared") => "real_reader_second_disconnect_ends_prepared_recovery",
+        Some("resume_provisional") => "real_reader_second_disconnect_ends_provisional_recovery",
+        Some("resume_pending") => "real_reader_second_disconnect_ends_pending_recovery",
         Some(other) => panic!("unknown isolated ownership case: {other}"),
         None if final_admission => {
             "real_worker_final_admission_preserves_timeout_and_signed_deadline"

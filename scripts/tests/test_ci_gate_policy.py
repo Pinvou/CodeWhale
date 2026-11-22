@@ -1,5 +1,7 @@
+import json
 import re
 from ci_routing_test_support import default_ci_routing
+from ci_artifact_policy_support import legacy_artifact_policy
 import os
 import shutil
 import subprocess
@@ -11,11 +13,22 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 
+ARTIFACT_TLS_ENV = '        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n'
+
 ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
 TAURI_MANIFEST = ROOT / "pinvou3-app/src-tauri/Cargo.toml"
+
+
+def _eval_default_without_reuse(code):
+    # Legacy route truth tables model the default without success evidence.
+    # Separate reuse regressions exercise verified and unverified skips.
+    code = re.sub(r"contains\(fromJSON\(needs\.changes\.outputs\.reused_jobs (?:\|\||or) '\[\]'\), '[\w-]+'\)", "False", code)
+    code = code.replace("needs.changes.outputs.reuse_verified", repr("False"))
+    code = re.sub(r"!(?!=)", "not ", code)
+    return eval(code, {"__builtins__": {}}, {})
 
 
 def _extract_quoted_paths(block):
@@ -228,6 +241,97 @@ def _changes_block(workflow_text):
         )[0]
     )
 
+def _extract_install_contract_src_tauri_reads(contract_test):
+    r"""从 connector_online_install_contract.test.js 源码派生全部 src-tauri 读取目标。
+
+    `read("src-tauri", …)` 多段字面量逐段拼接成精确文件目标;无扩展名的
+    字面量段落累积为目录前缀,带文件扩展名(.rs/.jsx/.js/.mjs/.sh/.json/.md)
+    的字面量发射目标且**不消费**前缀——三元选择分支(connector === "lark-cli"
+    ? "feishu.rs" : …)的三个分支字面量因此各成一条目标。三元比较分支的
+    字面量(`\w+ === "…"` 形态)先剔除,不参与路径拼接。首参必须是完整的
+    引号字面量 "src-tauri"(scripts 读取由 _extract_install_contract_script_reads
+    锁定,前端 src 读取天然被前端任务触发,均不在本提取器范围);含计算段
+    (osDir/archDir 变量)的调用按字面前缀目录派生 `/**` 目录目标——路由宁过
+    勿漏。精确文件目标必须真实存在(注释里提及的 .rs 不在 read( 内,不受
+    影响);目录目标其目录必须存在。派生结果为空即红。
+    """
+    targets = set()
+    for args in re.findall(r"read\(([^)]*)\)", contract_test, re.S):
+        parts = re.findall(r'"([^"]*)"', args)
+        if not parts or parts[0] != "src-tauri":
+            continue
+        if not re.match(r'\s*"src-tauri"', args):
+            raise AssertionError(
+                f"read() 首参必须是完整的 \"src-tauri\" 字面量: {args[:80]}"
+            )
+        # 剔除比较分支字面量(三元条件),它们不是路径段。
+        args_wo_cmp = re.sub(r'\w+\s*===\s*"[^"]*"', "", args)
+        # 逐项切分:引号字面量内容 vs 标识符(变量参数,单组交替下捕获为 '')。
+        items = re.findall(r'"([^"]*)"|[A-Za-z_$][A-Za-z0-9_$.]*', args_wo_cmp)
+        computed_idx = next((i for i, s in enumerate(items) if s == ""), None)
+        prefix = ["pinvou3-app/src-tauri"]
+        emitted = 0
+        for i, lit in enumerate(items[1:], start=1):
+            if computed_idx is not None and i >= computed_idx:
+                break  # 计算段之后的字面量不再参与精确拼接(路由取宽前缀)
+            if re.search(r"\.(rs|jsx|js|mjs|sh|json|md)$", lit):
+                targets.add("/".join(prefix + [lit]))
+                emitted += 1
+            else:
+                prefix.append(lit)
+        if computed_idx is not None:
+            targets.add("/".join(prefix) + "/**")
+        elif emitted == 0:
+            raise AssertionError(
+                f"read(\"src-tauri\", …) 未能派生任何文件目标(形态变更须同步"
+                f"本提取器): {args[:80]}"
+            )
+    if not targets:
+        raise AssertionError(
+            "connector_online_install_contract.test.js 未派生出任何 src-tauri"
+            " 读取目标——读取形态变更须同步本提取器"
+        )
+    for target in sorted(targets):
+        if target.endswith("/**"):
+            if not (ROOT / target[:-3]).is_dir():
+                raise AssertionError(
+                    f"派生的目录目标不存在(提取器解析出错误路径): {target}"
+                )
+        elif not (ROOT / target).is_file():
+            raise AssertionError(
+                f"派生的读取目标不存在(提取器解析出错误路径): {target}"
+            )
+    return sorted(targets)
+
+
+def _extract_mcp_wheel_contract_src_tauri_reads(contract_test):
+    """从 mcp_python_dependencies_contract.test.js 源码派生全部 src-tauri 读取目标。
+
+    该测试的读取形态:`read('src-tauri/<rel>.rs')` 单引号整相对路径,每个以
+    src-tauri/ 开头、.rs 结尾的引号字面量即一条精确文件目标(与
+    _extract_consent_marker_read_targets 同款归一化)。manifest() 的模板串
+    读取(resources/mcp-servers JSON)非 Rust 源,不在此列。目标必须真实
+    存在;派生结果为空即红;数量断言防正则漂移——新增读取会使计数失配,
+    强制同步提取器与路由。
+    """
+    targets = sorted(
+        {
+            "pinvou3-app/" + literal
+            for literal in re.findall(r"'(src-tauri/[^']*\.rs)'", contract_test)
+        }
+    )
+    if not targets:
+        raise AssertionError(
+            "mcp_python_dependencies_contract.test.js 未派生出任何 src-tauri"
+            " 读取目标——读取形态变更须同步本提取器"
+        )
+    for target in targets:
+        if not (ROOT / target).is_file():
+            raise AssertionError(
+                f"派生的读取目标不存在(提取器解析出错误路径): {target}"
+            )
+    return targets
+
 
 def _frontend_filter_entries(workflow_text):
     """从 pr-check.yml 的 changes 块提取 frontend filter 的路径条目列表。"""
@@ -328,7 +432,7 @@ def _evaluate_github_condition(
     evaluated = re.sub(r"\btrue\b", "True", evaluated, flags=re.IGNORECASE)
     evaluated = re.sub(r"\bfalse\b", "False", evaluated, flags=re.IGNORECASE)
     evaluated = " ".join(evaluated.split())
-    return bool(eval(evaluated, {"__builtins__": {}}, {}))
+    return bool(_eval_default_without_reuse(evaluated))
 
 
 def _changes_block(text):
@@ -468,6 +572,48 @@ def _step_named(job_block, name):
             f"expected exactly one step named {name!r}, found {len(matches)}"
         )
     return matches[0]
+
+
+def _step_run_lines(step_body):
+    """Extract one live run scalar, refusing duplicate or unknown shapes."""
+    lines = step_body.splitlines()
+    indices = [i for i, line in enumerate(lines) if re.match(r"^        run:", line)]
+    if len(indices) != 1:
+        raise AssertionError("expected exactly one live step run scalar")
+    index = indices[0]
+    value = lines[index].split(":", 1)[1].strip()
+    if value != "|":
+        if not value or value in {">", ">-", "|-"}:
+            raise AssertionError("unsupported run scalar; review command extraction")
+        return [value]
+    body = []
+    for line in lines[index + 1:]:
+        if not line.strip():
+            continue
+        if not line.startswith("          "):
+            break
+        body.append(line[10:].strip())
+    if not body:
+        raise AssertionError("empty run scalar")
+    return body
+
+
+def _account_closure_source_shell_arguments(workflow, job):
+    """Pin the existing implicit shell, including both defaults scopes.
+
+    This template has no workflow/Account job defaults. Adding either needs
+    explicit review instead of silently changing the source step's shell or
+    working directory while the execution probe assumes Bash errexit.
+    """
+    if re.search(r'''(?m)^(?:defaults|'defaults'|"defaults")\s*:''', workflow):
+        raise AssertionError("closure source must not inherit workflow defaults")
+    if re.search(r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''', job):
+        raise AssertionError("closure source must not inherit Account job defaults")
+    source = _step_named(job, "Verify Account closure source and API contracts")
+    if re.search(r'''(?m)^        (?:shell|'shell'|"shell")\s*:''', source):
+        raise AssertionError("closure source must retain its implicit Bash shell")
+    # The Account job is pinned to ubuntu-22.04 by the existing job contract.
+    return ["-e", "-c"]
 
 
 def _step_if_tokens(step_body):
@@ -624,11 +770,18 @@ GATE_JOB_LEVEL_IFS = {
         "(github.event_name == 'pull_request' || "
         "github.event_name == 'merge_group') && "
         "(needs.changes.outputs.frontend == 'true' || "
-        "needs.changes.outputs.pet == 'true') }}"
+        "needs.changes.outputs.pet == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}"
     ),
     "relay-test": (
         "${{ !cancelled() && needs.changes.outputs.relay == 'true' && "
         "(github.event_name == 'merge_group' || github.event_name == 'pull_request') }}"
+    ),
+    "frontend-browser-test": (
+        "${{ !cancelled() && github.event.action != 'closed' && "
+        "needs.changes.outputs.pure_release_backflow != 'true' && "
+        "(github.event_name == 'merge_group' || "
+        "(github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && "
+        "(needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}"
     ),
     "release-contract-test": (
         "${{ !cancelled() && github.event.action != 'closed' && "
@@ -808,6 +961,21 @@ PINNED_GATE_STEP_NAMES = {
     ),
 }
 
+# Product checks retain their exact original route plus the verified-reuse guard.
+def _with_verified_reuse_guard(value, name):
+    expression = " ".join(value.removeprefix("${{").removesuffix("}}").split())
+    guard = "!(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), '{name}'))".replace("{name}", name)
+    suffix = " && " + guard
+    if expression.endswith(suffix): expression = expression[:-len(suffix)]
+    return "${{ (" + expression + ") && " + guard + " }}"
+
+GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not in {'merge-authored-audit', 'fast-gate', 'commit-message', 'changes', 'backflow-portability', 'required-gate'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
+# Frontend setup artifact gate: frontend-test / frontend-browser-test 追加
+# needs.frontend-setup.result == 'success' 尾卫,setup 失败时消费者显式跳过,
+# 不再空跑后死于工件缺失(与 pr-check.yml 的 job 级 if 逐字一致)。
+GATE_JOB_LEVEL_IFS = {name: (value.removesuffix(" }}") + " && needs['frontend-setup'].result == 'success' }}") if name in {'frontend-test', 'frontend-browser-test'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
 
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
@@ -839,6 +1007,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", job)
         self.assertIn("needs: changes", job)
         self.assertIn("node scripts/run-windows-relay-tools-tests.mjs", job)
+        self.assertIn('run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs', job)
+        receipt = _step_named(job, "Preserve Windows relay tools process receipt")
+        self.assertIn('if: always()', receipt)
+        self.assertIn('path: ${{ runner.temp }}/windows-relay-tools-process.json', receipt)
         self.assertIn('node-version: "24"', job)
         self.assertIn("timeout-minutes: 10", job)
         expression = re.search(r"if: \$\{\{ (.*?) \}\}", job).group(1)
@@ -852,7 +1024,7 @@ class CiGatePolicyTests(unittest.TestCase):
                         condition = condition.replace("github.event.pull_request.draft", repr(draft))
                         condition = condition.replace("needs.changes.outputs.relay", repr(str(changed).lower()))
                         condition = condition.replace("&&", " and ").replace("||", " or ")
-                        self.assertEqual(bool(eval(condition, {"__builtins__": {}}, {})),
+                        self.assertEqual(bool(_eval_default_without_reuse(condition)),
                                          changed and action != "closed" and event in ("pull_request", "merge_group"))
         filters = re.search(r"\n            relay:\n((?:              .*\n)+)", self.workflow).group(1)
         paths = _extract_quoted_paths(filters)
@@ -863,6 +1035,7 @@ class CiGatePolicyTests(unittest.TestCase):
                      "scripts/remote-control-local-selftest.ps1", "scripts/run-remote-control-endpoint.ps1",
                      "scripts/run-windows-relay-tools-tests.mjs", "scripts/windows-relay-tools-test-summary.mjs",
                      "scripts/windows-relay-tools-preflight.mjs",
+                     "scripts/ci-fixture-process.py", "scripts/tests/test_ci_fixture_process.py",
                      ".github/workflows/pr-check.yml"):
             self.assertTrue(_matches_paths_filter(path, paths), path)
 
@@ -872,7 +1045,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}", gate)
         self.assertIn("RELAY_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.relay == 'true' }}", gate)
         self.assertIn('"windows-relay-tools-test:$WINDOWS_RELAY_RESULT"', gate)
-        body = gate.split("        run: |\n", 1)[1]
+        body = _step_named(gate, "汇总所有适用检查").split("        run: |\n", 1)[1]
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
@@ -891,7 +1064,7 @@ class CiGatePolicyTests(unittest.TestCase):
 
     def test_required_gate_requires_actual_success_for_applicable_windows_dacl(self):
         gate = self.workflow.split("\n  required-gate:", 1)[1]
-        body = gate.split("        run: |\n", 1)[1]
+        body = _step_named(gate, "汇总所有适用检查").split("        run: |\n", 1)[1]
         shell = "\n".join(line[10:] for line in body.splitlines())
         environment = {**os.environ, "BACKFLOW_MODE": "full",
                        "WINDOWS_RUST_REQUIRED_BY_POLICY": "false"}
@@ -937,12 +1110,14 @@ class CiGatePolicyTests(unittest.TestCase):
             required_gate,
         )
 
-    def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
+    def test_pr_verifier_checks_registered_history_and_keeps_release_closure(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertRegex(verifier_gate, r"(?m)^\s+run: \./scripts/verify-public-submodule\.sh\s*$")
+        self.assertNotIn("--registered-snapshot", verifier_gate)
+        self.assertNotIn("registered_snapshot", verifier)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
@@ -1037,10 +1212,11 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_node_suites_under_scripts_tests_are_all_wired(self):
-        # Nothing auto-discovers scripts/tests/*.test.mjs:
-        # version-consistency's explicit node --test list is the only
-        # runner (the PR #745 round-2 review found a suite that only ever
-        # ran locally). Pin both directions so the class stays closed:
+        # Nothing auto-discovers scripts/tests/*.test.mjs. Most suites use
+        # version-consistency; the Account contracts also have dedicated
+        # jobs with their own runtime dependencies and path routing.
+        # Pin their live commands and filters before including those suites.
+        # Pin both directions so the class stays closed:
         # every suite on disk must be listed (a forgotten new suite
         # silently never runs), and every listed scripts/tests entry must
         # exist (a renamed suite must not leave a dead entry green).
@@ -1057,6 +1233,70 @@ class CiGatePolicyTests(unittest.TestCase):
                 r"scripts/tests/[A-Za-z0-9_./-]+\.test\.mjs", version_consistency
             )
         )
+        dedicated = {
+            "token-management-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "token-management-phase-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Token management authorization contracts",
+            ),
+            "account-platform-authorization-coverage.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify Account Platform authorization contracts",
+            ),
+            "f18-hold-recovery-owned-fixture.test.mjs": (
+                "account-platform-test", "account_platform",
+                "Verify F18 owned fixture contract",
+            ),
+            "account-platform-invocation-environment.test.mjs": (
+                "frontend-test", "frontend",
+                "Verify Account invocation environment contracts",
+            ),
+        }
+        changes = _changes_block(self.pr_workflow)
+        for filename, (job_name, group, step_name) in dedicated.items():
+            path = f"scripts/tests/{filename}"
+            job = _without_inline_comments(_extract_job_block(self.pr_workflow, job_name))
+            step = _step_named(job, step_name)
+            command_path = f"../{path}" if job_name == "frontend-test" else path
+            self.assertRegex(
+                step, rf"(?m)^\s+(?:run:\s*)?node --test {re.escape(command_path)}\s*$",
+                f"{path} must have a live node --test command in {job_name}",
+            )
+            self.assertNotRegex(step, r"(?m)^        (?:if|continue-on-error):")
+            entries = _extract_quoted_paths(_dorny_filter_group(changes, group))
+            self.assertIn(path, entries, f"{path} must trigger its {job_name} runner")
+            self.assertTrue(_matches_paths_filter(path, entries), f"{path} must not be excluded")
+            self.assertIn('node-version: "24"', job)
+            if job_name == "frontend-test":
+                self.assertIn("working-directory: pinvou3-app", job)
+                # Setup 工件化(2026-11-16 调查:三次 vite build ×5 → ×1):
+                # 构建产物在 frontend-setup 一次完成,frontend-test 经 needs
+                # 消费产物工件;npm ci 保留在本 job(网络绑定、CPU 占用低,
+                # 156MB node_modules 包在自建机上行实测 stall 至死,产物小件
+                # 才是链路扛得动的体积)。双向钉住防解线:消费方必须 needs
+                # frontend-setup、本 job 安装先于 npm test,setup 安装先于 build。
+                self.assertRegex(job, r"(?m)^    needs: \[changes, frontend-setup\]$")
+                install = _step_named(job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", install)
+                self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
+                self.assertLess(job.index(install), job.index(step))
+                setup_job = _without_inline_comments(
+                    _extract_job_block(self.pr_workflow, "frontend-setup")
+                )
+                self.assertIn("working-directory: pinvou3-app", setup_job)
+                setup_install = _step_named(setup_job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", setup_install)
+                self.assertLess(setup_job.index(setup_install), setup_job.index("npm run build:ui"))
+                for name in ("personal", "models", "invocation"):
+                    source = f"account-platform/deploy/production/compose.{name}.yaml"
+                    self.assertIn(source, entries)
+
+                    self.assertTrue(_matches_paths_filter(source, entries))
+            self.assertNotIn(path, listed, f"{path} must not be redundantly run twice")
+            listed.add(path)
         on_disk = {
             f"scripts/tests/{path.name}"
             for path in (ROOT / "scripts" / "tests").glob("*.test.mjs")
@@ -1064,9 +1304,312 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertEqual(
             listed,
             on_disk,
-            "scripts/tests node 套件与 version-consistency 显式列表不一致"
+            "scripts/tests node 套件与已核验的 CI runner 集合不一致"
             "(缺失=永不执行;多余=死条目)",
         )
+
+    def test_account_closure_ci_steps_are_precisely_pinned(self):
+        """Keep the closure source and isolated-PG gates live and fail-closed."""
+        job = _without_inline_comments(_extract_job_block(self.pr_workflow, "account-platform-test")) + _without_inline_comments(_extract_job_block(self.pr_workflow, "account-closure-test"))
+
+        def assert_contract(text):
+            source_owner = _extract_job_block(text, "account-platform-test")
+            postgres_owner = _extract_job_block(text, "account-closure-test")
+            _account_closure_source_shell_arguments(self.pr_workflow, source_owner)
+            for owner, expected_route in (
+                (source_owner, _with_verified_reuse_guard(
+                    "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}",
+                    "account-platform-test")),
+                (postgres_owner, "${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true' && contains(fromJSON(fromJSON(toJSON(needs.changes.outputs)).reused_jobs || '[]'), 'account-closure-test')) }}"),
+            ):
+                self.assertNotRegex(owner, r'''(?m)^    (?:defaults|'defaults'|"defaults")\s*:''')
+                header = owner.split("\n    steps:", 1)[0]
+                self.assertRegex(header, r"(?m)^    needs: changes$")
+                self.assertRegex(header, r"(?m)^    if:")
+                self.assertEqual(_step_if_tokens(header), expected_route)
+                self.assertNotRegex(header, r"(?m)^    continue-on-error:")
+            source = _step_named(text, "Verify Account closure source and API contracts")
+            self.assertEqual(source, _step_named(source_owner, "Verify Account closure source and API contracts"))
+            self.assertEqual(_step_run_lines(source), [
+                "npm --prefix account-platform ci --ignore-scripts --no-audit --fund=false",
+                "npm --prefix account-platform run test:closure-contracts",
+            ])
+            self.assertNotRegex(source, r"(?m)^        (?:if|continue-on-error):")
+            self.assertNotRegex(source, r"(?m)^        shell:")
+            postgres = _step_named(text, "Account closure contracts on isolated PostgreSQL")
+            self.assertEqual(postgres, _step_named(postgres_owner, "Account closure contracts on isolated PostgreSQL"))
+            self.assertRegex(postgres, r"(?m)^        shell: bash$")
+            self.assertEqual(_step_run_lines(postgres), ["set -euo pipefail",
+                "python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py",
+                'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- python3 scripts/test-account-closure-postgres.py',
+            ])
+            for field, output in (("PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL", "financial_url"),
+                    ("PINVOU_ACCOUNT_CI_PG_PORT", "financial_port"),
+                    ("PINVOU_ACCOUNT_CI_PG_SYSTEM_ID", "financial_system"),
+                    ("PINVOU_ACCOUNT_CI_PG_DIRECTORY", "financial_directory")):
+                self.assertEqual(re.findall(rf"(?m)^          {field}: (.*)$", postgres), ["${{ steps.account-pg.outputs." + output + " }}"])
+            self.assertEqual(re.findall(r"(?m)^          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: (.*)$", postgres), ["${{ runner.temp }}/account-closure-postgres"])
+            self.assertNotRegex(postgres, r"(?m)^        (?:if|continue-on-error):")
+
+        assert_contract(job)
+        source = _step_named(job, "Verify Account closure source and API contracts")
+        postgres = _step_named(job, "Account closure contracts on isolated PostgreSQL")
+        source_owner = _extract_job_block(job, "account-platform-test")
+        postgres_owner = _extract_job_block(job, "account-closure-test")
+        mutations = [
+            job.replace(source, "", 1),
+            job.replace(postgres, "", 1),
+            job.replace("npm --prefix account-platform run test:closure-contracts", "true", 1),
+            job.replace("python3 scripts/test-account-closure-postgres.py", "true", 1),
+            job.replace('python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- ', "", 1),
+            job.replace("account_platform == 'true'", "account_platform == 'true' && false", 1),
+            job.replace(source_owner, source_owner.replace("reuse_verified == 'true'", "reuse_verified == 'false'", 1), 1),
+            job.replace(source_owner, source_owner.replace("'account-platform-test'))", "'another-job'))", 1), 1),
+            job.replace(postgres, "", 1).replace(source, source + "\n" + postgres, 1),
+            job.replace(source, "", 1) + "\n" + source,
+            job.replace("account_platform == 'true' && !(", "account_platform == 'true' && false && !(", 1),
+            job.replace(postgres_owner, postgres_owner.replace(".reuse_verified == 'true'", ".reuse_verified == 'false'", 1), 1),
+            job.replace(postgres_owner, postgres_owner.replace("'account-closure-test'))", "'another-job'))", 1), 1),
+            job.replace(postgres, postgres.replace("financial_system", "other_system", 1), 1),
+            job.replace(postgres, postgres.replace("${{ runner.temp }}/account-closure-postgres", "/tmp/uncollected", 1), 1),
+            job.replace(source, source.replace(source.splitlines()[0], source.splitlines()[0] + "\n        shell: bash -c {0}", 1), 1),
+        ]
+        for step in (source, postgres):
+            name = step.splitlines()[0]
+            mutations.extend([
+                job.replace(step, step.replace(name, name + "\n        if: false", 1), 1),
+                job.replace(step, step.replace(name, name + "\n        continue-on-error: true", 1), 1),
+                job + "\n" + name + "\n        run: true\n",
+            ])
+            for command in _step_run_lines(step):
+                if command == "set -euo pipefail":
+                    continue
+                for replacement in ("# " + command, "echo " + command, command + " || true", "exit 0\n          " + command):
+                    mutations.append(job.replace(step, step.replace(command, replacement, 1), 1))
+        for index, mutated in enumerate(mutations):
+            self.assertNotEqual(mutated, job)
+            with self.subTest(mutation=index), self.assertRaises(AssertionError):
+                assert_contract(mutated)
+
+        # Both YAML defaults scopes affect an otherwise unchanged source step.
+        # Include block/flow and quoted-key forms; do not infer the shell from
+        # just the two run commands, or from an independently forced mock flag.
+        for key in ("defaults", "'defaults'", '"defaults"'):
+            for value in ("\n  run:\n    shell: bash -c {0}",
+                          " {run: {shell: 'echo {0}'}}"):
+                defaults = key + ":" + value
+                workflow = defaults + "\n" + self.pr_workflow
+                with self.subTest(scope="workflow", defaults=defaults), self.assertRaises(AssertionError):
+                    _account_closure_source_shell_arguments(workflow, job)
+                for owner_name in ("account-platform-test", "account-closure-test"):
+                    owner = _extract_job_block(job, owner_name)
+                    inherited = job.replace(owner, owner.replace("\n    steps:", "\n" + textwrap.indent(defaults, "    ") + "\n    steps:", 1), 1)
+                    self.assertNotEqual(inherited, job)
+                    with self.subTest(scope=owner_name, defaults=defaults), self.assertRaises(AssertionError):
+                        assert_contract(inherited)
+                    # YAML mapping key order does not affect the effective defaults.
+                    after_steps = job.replace(owner, owner + "\n" + textwrap.indent(defaults, "    ") + "\n", 1)
+                    with self.subTest(scope=owner_name+"-after-steps", defaults=defaults), self.assertRaises(AssertionError):
+                        assert_contract(after_steps)
+
+    def test_account_required_gate_member_triple_is_pinned(self):
+        original = self.pr_workflow
+        wires = ("      - account-platform-test\n",
+                 "          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}\n",
+                 '            "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \\\n')
+        def assert_member():
+            self.assert_required_gate_wiring("account-platform-test", "ACCOUNT_PLATFORM_RESULT")
+            self.assertEqual(re.findall(r"(?m)^          ACCOUNT_PLATFORM_RESULT: (.*)$", self._required_gate()), ["${{ needs.account-platform-test.result }}"])
+            self.assertEqual(re.findall(r"(?m)^          ACCOUNT_PLATFORM_REQUIRED: (.*)$", self._required_gate()), ["${{ needs.changes.outputs.account_platform }}"])
+        assert_member()
+        gate = self._required_gate()
+        self.assertIn("ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}", gate)
+        try:
+            for wire in wires:
+                self.assertEqual(gate.count(wire), 1)
+                for replacement in ("", "# " + wire.lstrip()):
+                    self.pr_workflow = original.replace(gate, gate.replace(wire, replacement, 1), 1)
+                    with self.subTest(wire=wire, replacement=replacement), self.assertRaises(AssertionError):
+                        assert_member()
+            for replacement in ("", "          ACCOUNT_PLATFORM_REQUIRED: false\n"):
+                self.pr_workflow = original.replace(gate, gate.replace("          ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}\n", replacement, 1), 1)
+                with self.subTest(required_flag=replacement), self.assertRaises(AssertionError):
+                    assert_member()
+            self.pr_workflow = original.replace(gate, gate.replace("          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}\n", "          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}\n          ACCOUNT_PLATFORM_RESULT: success\n", 1), 1)
+            with self.assertRaises(AssertionError):
+                assert_member()
+        finally:
+            self.pr_workflow = original
+
+    def test_account_closure_actual_commands_propagate_each_failure(self):
+        self.test_account_closure_ci_steps_are_precisely_pinned()
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432")):
+                candidate = Path(base) / "Git/bin/bash.exe" if base else None
+                if candidate and candidate.is_file():
+                    bash = str(candidate)
+                    break
+        self.assertIsNotNone(bash, "the existing Bash CI contracts require Bash")
+        prefix = """fixture_calls=0
+fixture_mock() {
+  ((fixture_calls+=1))
+  printf 'MOCK|%s\\n' "$1"
+  if [[ "$fixture_calls" == "$CI_FIXTURE_FAIL_AT" ]]; then return 7; fi
+}
+npm() { fixture_mock npm "$@"; }
+python3() { fixture_mock python3 "$@"; }
+"""
+        for name, owner in (("Verify Account closure source and API contracts", "account-platform-test"),
+                            ("Account closure contracts on isolated PostgreSQL", "account-closure-test")):
+            job = _extract_job_block(self.pr_workflow, owner)
+            script = "\n".join(_step_run_lines(_step_named(job, name)))
+            switches = (_account_closure_source_shell_arguments(self.pr_workflow, job)
+                        if name == "Verify Account closure source and API contracts"
+                        else ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c"])
+            for failure in (0, 1, 2):
+                with self.subTest(step=name, failure=failure), tempfile.TemporaryDirectory(prefix="account-closure-wiring-") as directory:
+                    result = subprocess.run([bash, *switches, prefix + script], cwd=directory,
+                        env={**os.environ, "CI_FIXTURE_FAIL_AT": str(failure),
+                             "PINVOU_CI_RESOURCE_LEDGER": directory}, capture_output=True, text=True, timeout=30, check=False)
+                    self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
+                    self.assertEqual(len(result.stdout.splitlines()), failure or 2, result.stdout)
+
+    def test_deployment_contract_artifacts_are_attempt_scoped(self):
+        job = _without_inline_comments(
+            _extract_job_block(self.pr_workflow, "account-platform-test")
+        )
+        step = _step_named(
+            job, "Production history and managed PostgreSQL release contracts"
+        )
+        self.assertRegex(
+            step,
+            r'--artifacts "\$RUNNER_TEMP/account-platform-deployment-contracts-\$postgres_version-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}"',
+        )
+        self.assertNotIn(
+            '--artifacts "$RUNNER_TEMP/account-platform-deployment-contracts-$postgres_version"',
+            step,
+        )
+
+    def test_dedicated_node_suite_wiring_rejects_missing_or_commented_commands(self):
+        original = self.pr_workflow
+        try:
+            for name in (
+                "token-management-authorization-coverage",
+                "token-management-phase-coverage",
+                "account-platform-authorization-coverage",
+                "account-platform-invocation-environment",
+            ):
+                path = f"scripts/tests/{name}.test.mjs"
+                command = f"node --test {'../' if 'invocation' in name else ''}{path}"
+                for replacement in ("echo controlled-command-removed", "# " + command):
+                    with self.subTest(suite=name, replacement=replacement):
+                        self.assertEqual(original.count(command), 1)
+                        self.pr_workflow = original.replace(command, replacement, 1)
+                        with self.assertRaises(AssertionError):
+                            self.test_node_suites_under_scripts_tests_are_all_wired()
+                with self.subTest(suite=name, missing_filter=True):
+                    entry = f"              - '{path}'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+            for name in ("personal", "models", "invocation"):
+                with self.subTest(missing_compose_filter=name):
+                    entry = f"              - 'account-platform/deploy/production/compose.{name}.yaml'\n"
+                    self.assertEqual(original.count(entry), 1)
+                    self.pr_workflow = original.replace(entry, "", 1)
+                    with self.assertRaises(AssertionError):
+                        self.test_node_suites_under_scripts_tests_are_all_wired()
+        finally:
+            self.pr_workflow = original
+
+    def test_approval_center_browser_regression_is_registered(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        finance = package["scripts"]["test:account-platform-finance-ui"]
+        self.assertIn("node tests/account_platform_approval_center_smoke.mjs", finance)
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertIn('command("npm", "test:account-platform-finance-ui")', selector)
+
+    def test_organization_member_smokes_resolve_to_real_browser_files(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        for feature, filenames in (
+            ("organization", ("account_platform_organization_ui_smoke.mjs", "account_platform_member_units_ui_smoke.mjs", "account_platform_organization_boundaries_ui_smoke.mjs", "account_platform_organization_recharge_ui_smoke.mjs")),
+            ("member-units", ("account_platform_member_units_ui_smoke.mjs",)),
+        ):
+            command = f"test:account-platform-{feature}-ui"
+            self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{filename}" for filename in filenames))
+            for filename in filenames:
+                self.assertTrue((ROOT / "pinvou3-app/tests" / filename).is_file())
+            self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_entitlement_correction_production_smoke_is_registered_for_full_and_feature_runs(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-entitlement-correction-ui"
+        self.assertEqual(package["scripts"][command], "node tests/account_platform_entitlement_production_smoke.mjs")
+        self.assertTrue((ROOT / "pinvou3-app/tests/account_platform_entitlement_production_smoke.mjs").is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_registration_bonus_smokes_resolve_to_both_compiled_browser_suites(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-registration-bonus-ui"
+        files = ("admin_registration_bonus_ui_smoke.mjs", "admin_registration_bonus_precision_ui_smoke.mjs")
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+    def test_closure_smokes_include_production_recovery_and_original_contract(self):
+        package = json.loads((ROOT / "pinvou3-app/package.json").read_text(encoding="utf-8"))
+        command = "test:account-platform-closure-ui"
+        # The composite must retain the original and production suites and also
+        # execute the polling regression through the real frontend CI selector.
+        files = (
+            "account_platform_closure_ui_smoke.mjs",
+            "account_platform_closure_production_smoke.mjs",
+            "account_platform_closure_polling_smoke.mjs",
+        )
+        self.assertEqual(package["scripts"][command], " && ".join(f"node tests/{name}" for name in files))
+        for name in files:
+            self.assertTrue((ROOT / "pinvou3-app/tests" / name).is_file())
+        selector = (ROOT / "scripts/select-frontend-smokes.mjs").read_text(encoding="utf-8")
+        self.assertGreaterEqual(selector.count(f'command("npm", "{command}")'), 2)
+
+        # Installed-host coverage has its own full/account selector lane; it must
+        # remain present without running twice through the closure composite.
+        installed_command = "test:account-platform-installed-hosts-ui"
+        installed_file = "account_platform_installed_hosts_ui_smoke.mjs"
+        self.assertEqual(package["scripts"][installed_command], f"node tests/{installed_file}")
+        self.assertTrue((ROOT / "pinvou3-app/tests" / installed_file).is_file())
+        self.assertGreaterEqual(selector.count(f'command("npm", "{installed_command}")'), 2)
+
+    def test_embedded_account_portal_assets_are_rebuilt_and_checked(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        paths = _extract_quoted_paths(
+            changes.split("            frontend:", maxsplit=1)[1].split(
+                "            relay:", maxsplit=1
+            )[0]
+        )
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
+        self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
+        frontend = self.pr_workflow.split("\n  frontend-setup:", maxsplit=1)[1].split(
+            "\n  relay-test:", maxsplit=1
+        )[0]
+        gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(
+            "      - name:", maxsplit=1
+        )[0]
+        self.assertNotIn("if:", gate)
+        self.assertIn("npm run build:account-portal", gate)
+        self.assertIn("git diff --exit-code -- ../account-platform/internal/portal/static", gate)
+        self.assertIn("git ls-files --others --exclude-standard", gate)
+        self.assertIn('test -z "$(git ls-files', gate)
 
     def test_cross_language_contract_rust_sources_route_to_frontend_test(self):
         # multiagent_plan_normalize.test.mjs reads the Rust sources below for
@@ -1183,6 +1726,62 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"install contract 测试读取的 {target}"
                 " 未被 frontend filter 覆盖,scripts-only 改动会静默跳过该"
                 " node 门禁",
+            )
+
+    def test_install_contract_src_tauri_reads_fully_routed(self):
+        # connector_online_install_contract.test.js 除 scripts/ 外还读取十处
+        # src-tauri Rust 源与 platforms resources 锁(版本钉/HTTPS 门/重定向
+        # 守卫断言都在这些源上)——Rust-only PR 若不在 frontend filter 中,
+        # frontend-test 被静默跳过,契约漂移在该 node 门禁不可见。从测试
+        # 源码派生全部 src-tauri 读取目标逐一断言 frontend filter 覆盖;
+        # 新增读取而未路由、或已路由文件被挪走,都会在这里失败(本套件在
+        # fast-gate 每个 PR 必跑)。
+        frontend_paths = _frontend_filter_entries(self.pr_workflow)
+        contract_test = (
+            ROOT
+            / "pinvou3-app/tests/connector_online_install_contract.test.js"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_install_contract_src_tauri_reads(contract_test)
+
+        # 数量锁防正则漂移:一次重构若把字面量读改成模板串/计算值,派生
+        # 集合会静默缩水而覆盖循环照常通过——计数失配宁可误红。
+        self.assertEqual(
+            len(targets),
+            12,
+            f"install contract src-tauri 读取目标漂移，实际解析出： {targets}",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_paths),
+                f"install contract 测试读取的 {target} 未被 frontend filter "
+                "覆盖,Rust-only 改动会静默跳过该 node 门禁",
+            )
+
+    def test_mcp_wheel_contract_src_tauri_reads_fully_routed(self):
+        # mcp_python_dependencies_contract.test.js 读取六处 src-tauri Rust 源
+        # (wheel 钉扎/runtime bundle 提取断言)——Rust-only PR 若不在
+        # frontend filter 中,frontend-test 被静默跳过,契约漂移在该 node
+        # 门禁不可见。从测试源码派生全部 src-tauri 读取目标逐一断言
+        # frontend filter 覆盖;新增读取而未路由会使计数锁失配,在这里失败
+        #(本套件在 fast-gate 每个 PR 必跑)。
+        frontend_paths = _frontend_filter_entries(self.pr_workflow)
+        contract_test = (
+            ROOT / "pinvou3-app/tests/mcp_python_dependencies_contract.test.js"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_mcp_wheel_contract_src_tauri_reads(contract_test)
+
+        self.assertEqual(
+            len(targets),
+            6,
+            f"mcp wheel contract src-tauri 读取目标漂移，实际解析出： {targets}",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_paths),
+                f"mcp wheel contract 测试读取的 {target} 未被 frontend filter "
+                "覆盖,Rust-only 改动会静默跳过该 node 门禁",
             )
 
     def test_script_read_derivation_covers_quote_and_shape_variants(self):
@@ -1578,13 +2177,12 @@ class CiGatePolicyTests(unittest.TestCase):
             "\n  team-relay-hub-test:", maxsplit=1
         )[1].split("\n  release-contract-test:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.team_relay_hub == 'true'", hub_job)
-        self.assertIn("postgres:16-alpine", hub_job)
+        self.assertRegex(hub_job, r"image: mirror\.gcr\.io/library/postgres@sha256:[a-f0-9]{64}")
         self.assertIn("TEAM_RELAY_TEST_DATABASE_URL", hub_job)
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
         self.assertIn(
-            "npm --prefix team-relay-hub audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix team-relay-hub",
             hub_job,
         )
 
@@ -1600,8 +2198,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn('node-version: ["20", "24"]', console_job)
         self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
         self.assertIn(
-            "npm --prefix update-release-console audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix update-release-console",
             console_job,
         )
         self.assertIn("bash scripts/ci-update-release-console-container.sh", console_job)
@@ -1610,7 +2207,9 @@ class CiGatePolicyTests(unittest.TestCase):
         script = (ROOT / "scripts/ci-update-release-console-container.sh").read_text(encoding="utf-8")
         for command in ("compose config --quiet", "compose up --detach --build", "compose down --volumes --remove-orphans"):
             self.assertIn(command, script)
-        self.assertIn("nginx:1.27-alpine nginx -t", script)
+        self.assertIn('docker build --build-arg NODE_IMAGE="$PINVOU_UPDATE_NODE_IMAGE" ', script)
+        self.assertIn("PINVOU_UPDATE_NODE_IMAGE: mirror.gcr.io/library/node@sha256:", console_job)
+        self.assertRegex(script, r"mirror\.gcr\.io/library/nginx@sha256:[a-f0-9]{64} nginx -t")
         self.assertIn("$base/healthz", script)
         self.assertIn("$base/api/status", script)
         self.assertNotIn("/var/www/pinvou3", script)
@@ -2031,30 +2630,42 @@ class CiGatePolicyTests(unittest.TestCase):
         )
 
     def test_deny_toml_bans_the_crypto_bigint_vulnerable_window(self):
-        # Round-22 review: the RUSTSEC-2026-0387 id ignore has no version
-        # dimension — a partial upgrade (age/p256 on the patched line while
-        # a new third-party dep re-introduces old elliptic-curve, leaving
-        # crypto-bigint 0.5.x in the graph) would stay silently green. The
-        # [bans] entry forbids the vulnerable window independently of the
-        # advisory database's classification; the current graph (0.5.5)
-        # sits outside it. Pin the executable line so dropping the
-        # tripwire while keeping the id ignore fails here.
-        deny_toml = (
-            ROOT / "pinvou3-app/src-tauri/deny.toml"
-        ).read_text(encoding="utf-8")
-        deny_code = "\n".join(
-            line
-            for line in deny_toml.splitlines()
-            if not line.lstrip().startswith("#")
+        # The retired exception must not leave 0.5.5 outside the independent
+        # ban: every affected version below the published fix stays denied.
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
         )
-        self.assertIn(
-            '{ name = "crypto-bigint", version = ">0.5.5, <0.7.6" },',
-            deny_code,
-            "deny.toml must keep the crypto-bigint vulnerable-window ban on "
-            "an executable line — without it a partially upgraded graph can "
-            "carry a still-vulnerable crypto-bigint while the id ignore "
-            "keeps advisories green",
+        bans = [
+            entry for entry in policy["bans"]["deny"]
+            if entry.get("name") == "crypto-bigint"
+        ]
+        self.assertEqual(
+            [entry.get("version") for entry in bans], ["<0.7.6"],
+            "the complete vulnerable range, including 0.5.5, must stay banned",
         )
+
+    def test_retired_crypto_exception_matches_all_reviewed_lock_graphs(self):
+        policy = tomllib.loads(
+            (ROOT / "pinvou3-app/src-tauri/deny.toml").read_text(encoding="utf-8")
+        )
+        ignored = [
+            item if isinstance(item, str) else item.get("id")
+            for item in policy["advisories"].get("ignore", [])
+        ]
+        self.assertNotIn("RUSTSEC-2026-0387", ignored)
+        self.assertEqual(policy["advisories"]["unused-ignored-advisory"], "deny")
+        for lock in (
+            "pinvou3-app/src-tauri/Cargo.lock",
+            "pinvou-cli/Cargo.lock",
+            "pinvou-knowledge/Cargo.lock",
+        ):
+            with self.subTest(lock=lock):
+                packages = tomllib.loads((ROOT / lock).read_text(encoding="utf-8"))["package"]
+                self.assertFalse(
+                    {"crypto-bigint", "hpke", "p256", "elliptic-curve"}
+                    & {package["name"] for package in packages},
+                    "reintroduction requires a fresh security assessment",
+                )
 
     def test_zip_lockfiles_sit_inside_the_assessed_advisory_window(self):
         # Round-20 review, re-baselined in round-22: deny.toml retired the
@@ -2403,6 +3014,17 @@ class CiGatePolicyTests(unittest.TestCase):
             "pet is exempted from rust_full like feedback/personas, so pet Rust "
             "changes must gate through the CLI suite too",
         )
+        # platform/prefs defines the SavedModel schema the CLI reads and
+        # writes (pinvou-cli path-depends on pinvou3-tauri and constructs
+        # SavedModel literals). Today the CLI legs fire transitively via
+        # rust_full for any src-tauri .rs change; the direct entry keeps the
+        # CLI suite gating schema changes even if rust_full ever gains a
+        # prefs exclusion like the leaf features above.
+        assert_extracted_entry(
+            "pinvou3-app/src-tauri/src/platform/prefs/**",
+            "prefs schema changes must gate through the CLI suite (the CLI "
+            "constructs SavedModel literals)",
+        )
         # Policy: the workflow file itself is deliberately excluded from
         # cli_rust — workflow edits must not link the full-app test suites
         # (this test enforces that). cli-test changes are instead validated
@@ -2485,7 +3107,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # lenient extractor and could hide a folded-scalar exclusion from this
         # sweep.
         bundle_chain_paths = re.split(
-            r"\n  [A-Za-z0-9_.-]+:", bundle_chain_paths, maxsplit=1
+            r"\n(?:  [A-Za-z0-9_.-]+:|      - (?:name|uses|id|run):)", bundle_chain_paths, maxsplit=1
         )[0]
         assert_group_paths_reachable(bundle_chain_paths, "bundle_chain")
 
@@ -2905,7 +3527,10 @@ class CiGatePolicyTests(unittest.TestCase):
         ]
         self.assertEqual([name for name in names if name in expected], expected)
         self.assertEqual(names.index("Set up zram and swap"), names.index(initial) + 1)
-        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
+        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 2)
+        preparation = _step_named(job, names[names.index(precache) + 1])
+        self.assertIn('run: node scripts/ci-network-node-options.cjs', preparation)
+        self.assertNotIn('continue-on-error:', preparation)
         self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
         self.assertEqual(
             names.index("cargo clippy (workspace, all targets)"),
@@ -2918,7 +3543,9 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in cache.splitlines() if line.strip()], [
             "- name: Cargo cache",
             "id: cli_lint_cache",
-            "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
+            "uses: ./.github/actions/linux-rust-cache",
+            "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}", "PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
+            "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
             "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
             "cache-on-failure: false", "save-if: ${{ github.ref == 'refs/heads/main' }}",
         ])
@@ -2942,6 +3569,8 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertEqual(uncommented.count("GITHUB_ENV"), 1)
         # Job/step env overrides GITHUB_ENV for the post condition. This job
         # currently has no env mapping; pin that fact, including quoted keys.
+        uncommented = uncommented.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}\n"
+                                          "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         self.assertNotRegex(uncommented, r"(?m)^\s*(?:env|['\"]env['\"])\s*:")
 
     def test_cli_lint_cache_guard_rejects_step_env_override(self):
@@ -3155,7 +3784,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # whole suite before this pin existed). The bare `[[ ]]` must stay
         # bare so a nonzero count fails the step.
         self.assertTrue(
-            required_gate.rstrip().endswith('[[ "$failed" -eq 0 ]]'),
+            _step_named(required_gate, "汇总所有适用检查").rstrip().endswith('[[ "$failed" -eq 0 ]]'),
             "required-gate must end in the bare failed-count verdict",
         )
         for suffix in (
@@ -3187,6 +3816,10 @@ class CiGatePolicyTests(unittest.TestCase):
         # header's prose and the "no continue-on-error" annotations on the
         # clippy gate do not count as settings.
         body = _without_yaml_comments(self.pr_workflow)
+        # The separate all-workflow network policy guard validates pairing,
+        # conditions and the exact helper. Keep this test's original product
+        # failure-policy assertions after removing only reviewed transport.
+        body = legacy_artifact_policy(body)
         job_level = []
         step_level = []
         for number, line in enumerate(body.splitlines(), start=1):
@@ -3201,23 +3834,403 @@ class CiGatePolicyTests(unittest.TestCase):
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # Exactly one legitimate use, and it is a STEP whose entire purpose is
-        # to print an analysis it must not be able to fail the job with.
+        # Reviewed diagnostics and the provisional frontend upload cannot
+        # suppress compiler, test or cleanup failures. The upload is accepted
+        # only with its exact retry and mandatory hard reducer below.
+        reviewed_diagnostics = (
+            "Upload frontend setup bundle",
+            "PR test success proof transport",
+            "Gate test resource lifecycle receipts",
+            "Windows 测试二进制导入诊断",
+            "Test resource lifecycle receipts",
+            "Browser shard resource lifecycle receipts",
+            "Financial group lifecycle receipts",
+            "Account test resource lifecycle receipts",
+            "Account closure resource lifecycle receipts",
+            "Preserve browser fixture exit receipts",
+            "Preserve ACP fixture exit receipt",
+            "上传 Windows runtime 资源收据",
+            "Windows atomic lifecycle receipts",
+            "Preserve Windows relay tools process receipt",
+            "Preserve Windows release contract process receipts",
+            "保留 Relay 进程作用域原始回执",
+        )
         self.assertEqual(
             len(step_level),
-            1,
-            "only the Windows PE import diagnostic may opt out of blocking; "
+            len(reviewed_diagnostics),
+            "only reviewed diagnostic or strictly recovered upload steps may be provisional; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
-        diagnostic_step = body.split(
-            "- name: Windows 测试二进制导入诊断", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
-        self.assertIn(
-            "continue-on-error: true",
-            diagnostic_step,
-            "the single permitted continue-on-error must be the Windows PE "
-            "import diagnostic step, not some other step that moved under it",
+        release_receipt = _step_named(_extract_job_block(body, 'release-contract-test'), 'Preserve Windows release contract process receipts')
+        self.assertEqual(release_receipt.rstrip(), '\n'.join([
+            '      - name: Preserve Windows release contract process receipts',
+            '        id: windows_release_contract_receipts',
+            "        if: ${{ always() && runner.os == 'Windows' }}",
+            '        timeout-minutes: 3',
+            '        continue-on-error: true',
+            '        uses: actions/upload-artifact@v7',
+            '        env:',
+            "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+            '          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}',
+            '        with:',
+            '          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}',
+            '          path: |',
+            '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '          if-no-files-found: warn',
+            '          retention-days: 7',
+        ]))
+
+        atomic_receipt = _step_named(
+            _extract_job_block(body, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        self.assertEqual(_step_named(_extract_job_block(body, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics').rstrip(), '\n'.join([
+                '      - name: Configure bounded Windows atomic upload diagnostics',
+                "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                '        working-directory: ${{ github.workspace }}',
+                '        run: node scripts/ci-artifact-node-options.cjs --diagnostics',
+            ]))
+        for name in reviewed_diagnostics:
+            diagnostic_step = body.split(
+                "- name: " + name + "\n", maxsplit=1
+            )[1].split("\n      - name:", maxsplit=1)[0]
+            self.assertIn(
+                "continue-on-error: true",
+                diagnostic_step,
+                "continue-on-error belongs only to the reviewed diagnostic "
+                "step, not another step that moved under it",
+            )
+        # This is recovery, not an unbounded advisory transport exception.
+        # The primary upload runs only on the github transport (the lan
+        # transport serves the bundle from its own cache), may fail exactly
+        # once and is then retried with overwrite; the mandatory reducer below
+        # accepts exactly github:success:skipped, github:failure:success and
+        # lan:skipped:skipped plus a nonempty bundle, so the artifact always
+        # ends up uploaded or lan-available and can never silently vanish.
+        frontend_setup = _extract_job_block(body, 'frontend-setup')
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
+            "      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle (retry)').rstrip(),
+            "      - name: Upload frontend setup bundle (retry)\n        id: frontend_setup_upload_retry\n        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1\n          overwrite: true",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Require frontend setup bundle upload').rstrip(),
+            '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            github:success:skipped|github:failure:success) ;;\n            lan:skipped:skipped) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
+        )
+        # All other COE occurrences retain the original exact diagnostic contracts.
+        gate_diagnostic = _step_named(_extract_job_block(body, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        self.assertEqual(gate_diagnostic.rstrip(), textwrap.indent(textwrap.dedent("""\
+            - name: Gate test resource lifecycle receipts
+              if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+              timeout-minutes: 3
+              continue-on-error: true
+              uses: actions/upload-artifact@v7
+              env:
+                NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+              with:
+                name: gate-resource-lifecycle-${{ github.run_attempt }}
+                path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                if-no-files-found: error
+                retention-days: 7
+        """).rstrip(), '      '))
+        diagnostic_job = _extract_job_block(body, 'windows-rust-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows 测试二进制导入诊断
+                  if: ${{ matrix.phase == 'regression' }}
+                  continue-on-error: true
+                  shell: pwsh
+                  run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
+            """).rstrip(), "      "),
+        )
+        runtime_receipt = _step_named(_extract_job_block(body, 'windows-runtime-test'), '上传 Windows runtime 资源收据')
+        for setting in ('if: always()', 'timeout-minutes: 3', 'uses: actions/upload-artifact@v7',
+                        'retention-days: 7', 'if-no-files-found: warn',
+                        'name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}',
+                        'path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/'):
+            self.assertIn(setting, runtime_receipt)
+        self.assertIn(ARTIFACT_TLS_ENV, runtime_receipt)
+        self.assertNotRegex(runtime_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
+        transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
+        self.assertIn('timeout-minutes: 3', transport)
+        self.assertIn('uses: actions/upload-artifact@v7', transport)
+        self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
+        self.assertIn(ARTIFACT_TLS_ENV, transport)
+        self.assertNotRegex(transport.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
+        diagnostic_job = _extract_job_block(body, 'windows-codex-runtime-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Preserve browser fixture exit receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed browser receipt step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Preserve browser fixture exit receipts
+                  if: always()
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+                  with:
+                    name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
+                    retention-days: 7
+                    if-no-files-found: warn
+                    path: |
+                      ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json
+                      ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'frontend-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Test resource lifecycle receipts
+                  id: frontend_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+                  with:
+                    name: frontend-resource-lifecycle-${{ github.run_attempt }}
+                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        closure_receipt = _step_named(_extract_job_block(body, 'account-closure-test'), 'Account closure resource lifecycle receipts')
+        self.assertIn('timeout-minutes: 3', closure_receipt)
+        self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
+        self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
+        self.assertIn(ARTIFACT_TLS_ENV, closure_receipt)
+        self.assertNotRegex(closure_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
+        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Account test resource lifecycle receipts
+                  id: account_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+                  with:
+                    name: account-resource-lifecycle-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/account-platform-deployment-contracts-*/resources/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+        diagnostic_job = _extract_job_block(body, 'account-financial-test')
+        matches = list(re.finditer(
+            r"(?ms)^      - name: Financial group lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
+        ))
+        self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
+        self.assertEqual(
+            matches[0].group(0).rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Financial group lifecycle receipts
+                  id: financial_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+                  with:
+                    name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/financial-parallel-*/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
+        self.assertEqual(
+            atomic_receipt.rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows atomic lifecycle receipts
+                  id: windows_atomic_receipts_upload
+                  if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  env:
+                    PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+                  with:
+                    name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
+    def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
+        original = self.pr_workflow
+        financial_start = "      - name: Financial group lifecycle receipts\n"
+        financial_step = original.split(financial_start, maxsplit=1)[1].split(
+            "\n      - name:", maxsplit=1
+        )[0]
+        without_upload_exemption = original.replace(
+            financial_step,
+            financial_step.replace("        continue-on-error: true\n", "", 1),
+            1,
+        )
+        business = "      - name: Test and vet all Account Platform Go modules\n"
+        mutations = {
+            "advisory whole job": original.replace(
+                "  account-platform-test:\n",
+                "  account-platform-test:\n    continue-on-error: true\n",
+                1,
+            ),
+            "extra advisory business step": original.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "move upload exemption to business with same total": without_upload_exemption.replace(
+                business, business + "        continue-on-error: true\n", 1
+            ),
+            "upload label on a run command": original.replace(
+                financial_step,
+                financial_step.replace("uses: actions/upload-artifact@v7", "run: echo not-an-upload", 1),
+                1,
+            ),
+        }
+        gate_upload = _step_named(_extract_job_block(original, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        gate_without_exemption = original.replace(gate_upload, gate_upload.replace('        continue-on-error: true\n', '', 1), 1)
+        mutations['move gate diagnostic exemption to full test discovery'] = gate_without_exemption.replace(
+            '      - name: Gate policy test suite (scripts/tests)\n',
+            '      - name: Gate policy test suite (scripts/tests)\n        continue-on-error: true\n', 1)
+        mutations['turn gate diagnostic upload into a command'] = original.replace(
+            gate_upload, gate_upload.replace('uses: actions/upload-artifact@v7', 'run: exit 37', 1), 1)
+        atomic = _step_named(
+            _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
+        )
+        atomic_config = _step_named(_extract_job_block(original, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics')
+        mutations['unreviewed atomic preload'] = original.replace(atomic_config,
+            atomic_config.replace('scripts/ci-artifact-node-options.cjs', 'scripts/unreviewed.cjs'), 1)
+        for label, old, new in (
+            ('atomic upload action', 'uses: actions/upload-artifact@v7', 'run: exit 37'),
+            ('atomic upload id', 'id: windows_atomic_receipts_upload', 'id: unreviewed_upload'),
+            ('atomic upload condition', "if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", 'if: always()'),
+            ('atomic upload timeout', '        timeout-minutes: 3\n', ''),
+            ('atomic upload path', '${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json', '${{ github.workspace }}/**/*'),
+            ('atomic upload retention', 'retention-days: 7', 'retention-days: 30'),
+            ('atomic upload name', 'name: Windows atomic lifecycle receipts', 'name: Unreviewed transport'),
+            ('atomic upload environment', '        uses: actions/upload-artifact@v7', '        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7'),
+        ):
+            mutations[label] = original.replace(atomic, atomic.replace(old, new, 1), 1)
+        mutations['duplicate atomic upload'] = original.replace(atomic, atomic + atomic, 1)
+        frontend = _step_named(
+            _extract_job_block(original, 'frontend-test'), 'Test resource lifecycle receipts'
+        )
+        mutations['atomic upload in another job'] = original.replace(atomic, '', 1).replace(
+            frontend, frontend + atomic, 1
+        )
+        atomic_without_exemption = atomic.replace('        continue-on-error: true\n', '', 1)
+        without_atomic_exemption = original.replace(atomic, atomic_without_exemption, 1)
+        for name in ('Windows 原子替换状态机回归', 'Confirm Windows atomic resource retirement'):
+            mandatory = _step_named(_extract_job_block(original, 'windows-rust-test'), name)
+            mutations['add atomic exemption to ' + name] = original.replace(
+                mandatory, mandatory.replace('      - name: ' + name + '\n',
+                    '      - name: ' + name + '\n        continue-on-error: true\n', 1), 1
+            )
+            mutations['move atomic exemption to ' + name] = without_atomic_exemption.replace(
+                mandatory, mandatory.replace('      - name: ' + name + '\n',
+                    '      - name: ' + name + '\n        continue-on-error: true\n', 1), 1
+            )
+        for first_line, remaining in (
+            ("run: exit 37", "        name: Required business command\n"),
+            ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
+            ("if: ${{ always() }}", "        run: exit 37\n"),
+            ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
+        ):
+            # Moving the exception must fail even when the next valid YAML
+            # step starts with run/id/if/env and the total count stays unchanged.
+            mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
+                "      - name: Stop owned temporary PostgreSQL services\n",
+                1,
+            )
+            mutations[f'move atomic exemption to {first_line} next step'] = without_atomic_exemption.replace(
+                atomic_without_exemption,
+                atomic_without_exemption + f'      - {first_line}\n{remaining}        continue-on-error: true\n',
+                1,
+            )
+        # 前端 setup 上传恢复并集的负例:传输门、重试触发或 Require 硬门
+        # (结局白名单含 lan 分支、空包兜底)任一弱化都必须让上方 pin 变红,
+        # 否则工件可能在 github 上传与 lan 缓存之外静默消失。
+        frontend_primary_gate = (
+            "        id: frontend_setup_upload\n"
+            "        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"
+            "        continue-on-error: true\n"
+        )
+        frontend_require_start = "      - name: Require frontend setup bundle upload\n"
+        frontend_require_block = frontend_require_start + original.split(
+            frontend_require_start, maxsplit=1
+        )[1].split("\n  frontend-test:", maxsplit=1)[0]
+        for label, old, new in (
+            ('frontend primary loses transport gate', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        continue-on-error: true\n"),
+            ('frontend primary loses continue-on-error', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"),
+            ('frontend retry trigger drifts to failure()',
+             "        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}",
+             '        if: failure()'),
+            ('frontend require gate deleted', frontend_require_block, ''),
+            ('frontend require gate weakened to success()',
+             frontend_require_start + "        if: ${{ always() && !cancelled() }}",
+             frontend_require_start + "        if: ${{ success() }}"),
+            ('frontend lan arm rejects lan availability', 'lan:skipped:skipped) ;;',
+             'lan:skipped:skipped) error ;;'),
+            ('frontend require gate accepts empty bundle',
+             'if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then',
+             'if [[ ! -e "$FRONTEND_SETUP_BUNDLE" ]]; then'),
+        ):
+            mutations[label] = original.replace(old, new, 1)
+        try:
+            self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+            for label, mutant in mutations.items():
+                with self.subTest(label=label):
+                    self.assertNotEqual(mutant, original, "the negative control must change the workflow")
+                    self.pr_workflow = mutant
+                    with self.assertRaises(AssertionError):
+                        self.test_no_job_level_continue_on_error_disarms_a_gate_job()
+        finally:
+            self.pr_workflow = original
 
     def test_gate_jobs_do_not_swallow_their_exit_status(self):
         # The companion fail-open vector to continue-on-error: appending
@@ -3379,7 +4392,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # success|skipped loop accepts it, and every routing pin above —
         # which asserts SUBSTRINGS of the condition — stays green. Pin the
         # exact full text of every gate job's job-level `if:` (extracted
-        # line-normalized, so pure re-indentation still matches but any
+        # whitespace-normalized for YAML folding, so re-indentation matches but any
         # content change does not): an appended `&& false`, a deleted
         # routing branch, or a flipped draft gate fails here.
         for job, expected in GATE_JOB_LEVEL_IFS.items():
@@ -3388,8 +4401,8 @@ class CiGatePolicyTests(unittest.TestCase):
                     _extract_job_block(self.pr_workflow, job)
                 )
                 self.assertEqual(
-                    actual,
-                    expected,
+                    re.findall(r"'(?:''|[^'])*'|[^\s]", actual),
+                    re.findall(r"'(?:''|[^'])*'|[^\s]", expected),
                     f"{job}'s job-level `if:` drifted from the pinned text; "
                     "an appended `&& false` (or a deleted routing branch) "
                     "silently skips the leg while required-gate accepts "
@@ -3432,6 +4445,7 @@ class CiGatePolicyTests(unittest.TestCase):
         for job, result_env in (
             ("rust-test", "RUST_RESULT"),
             ("frontend-test", "FRONTEND_RESULT"),
+            ("frontend-browser-test", "FRONTEND_BROWSER_RESULT"),
             ("relay-test", "RELAY_RESULT"),
             ("rust-lint", "RUST_LINT_RESULT"),
             ("macos-codex-runtime-test", "MACOS_CODEX_RESULT"),
@@ -3642,7 +4656,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --features benchmark-hooks --locked -- --test-threads=1",
             rust_test,
         )
         # 开源侧同口径：Linux lib 腿显式开启 benchmark-hooks，headless-bridge
@@ -3758,6 +4772,11 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
             job_name = job.strip().split(":", maxsplit=1)[0]
+            # runner-pool-guard 是唯一故意跑在托管 ubuntu-22.04 的元门禁:它
+            # 校验的对象正是池 vars,不能依赖它们(2026-11-16 调查的显式失败
+            # 化改造);纯 env 检查无重任务,无需 zram,按名豁免。
+            if job_name == "runner-pool-guard":
+                continue
             # Round-11 review: judge the contract on EXECUTABLE lines only —
             # a commented-out step otherwise satisfies every assertIn below
             # while the job actually runs on stock memory.
@@ -4083,9 +5102,7 @@ class CiGatePolicyTests(unittest.TestCase):
         job = _without_yaml_comments(
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
-        step = job.split(
-            "\n      - name: Windows 原子替换状态机回归\n", 1
-        )[1].split("\n      - name:", 1)[0]
+        step = _step_named(job, "Windows 原子替换状态机回归")
         loop = step.split("for filter in \\\n", 1)[1].split("; do", 1)[0]
         filters = re.findall(r"(?m)^\s*'([^']+)'(?:\s*\\)?\s*$", loop)
         for module in (
@@ -4094,9 +5111,9 @@ class CiGatePolicyTests(unittest.TestCase):
         ):
             with self.subTest(module=module):
                 self.assertEqual(filters.count(module), 1)
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', step)
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', step)
         self.assertIn(
-            "grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {",
+            "grep -qE 'running [1-9][0-9]* tests?' \"$report\" || {",
             step,
         )
         self.assertIn("exit 1", step.split("grep -qE", 1)[1])
@@ -4356,10 +5373,8 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn('"-outputresource:$($testExe.FullName);#1"', windows_rust_test)
         self.assertIn('"PINVOU3_TEST_EXE=$testExe" | Out-File', windows_rust_test)
         self.assertIn('test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"', windows_rust_test)
-        regression = windows_rust_test.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
+        regression = _step_named(windows_rust_test, "Windows 原子替换状态机回归")
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
             "'connector_introspection_guard_matches_complete_names_only'",
@@ -4386,9 +5401,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
+        regression = _step_named(windows_job, "Windows 原子替换状态机回归")
 
         def assert_reader_execution(block):
             loop = block.split("for filter in ", maxsplit=1)[1].split(
@@ -4399,7 +5412,8 @@ class CiGatePolicyTests(unittest.TestCase):
                 filters.count("'app::commands::remote_control::reader_resume_tests::'"),
                 1,
             )
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -4410,21 +5424,23 @@ class CiGatePolicyTests(unittest.TestCase):
         # cannot satisfy this wiring contract. These are not Wry runtime evidence.
         for old, new in (
             ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt', "echo bypass-supervisor --receipt"),
+            ('$ledger/atomic-$index.json', '$ledger/atomic-fixed.json'),
         ):
             with self.subTest(mutation=old):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_reader_execution(regression.replace(old, new))
+                    assert_reader_execution(mutant)
 
     def test_windows_a_resume_projection_executes_with_nonzero_product_filters(self):
         windows = _without_yaml_comments(
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
-        regression = windows.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
+        regression = _step_named(windows, "Windows 原子替换状态机回归")
         required = (
             "'features::remote_control::controller::controlling_service::resume_projection_tests::'",
             "'features::remote_control::controller::controlling::tests::'",
@@ -4436,7 +5452,8 @@ class CiGatePolicyTests(unittest.TestCase):
             filters, commands = loop.split("; do", maxsplit=1)
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -4448,14 +5465,16 @@ class CiGatePolicyTests(unittest.TestCase):
         mutations = [(prefix, change) for prefix in required
                      for change in ("", "'renamed_no_matching_tests'")]
         mutations += [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compiled-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compiled-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
         for old, new in mutations:
             with self.subTest(mutation=(old, new)):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_execution(regression.replace(old, new))
+                    assert_execution(mutant)
 
     def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
         windows_job = _without_yaml_comments(
@@ -4463,9 +5482,7 @@ class CiGatePolicyTests(unittest.TestCase):
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
+        regression = _step_named(windows_job, "Windows 原子替换状态机回归")
         required_filters = (
             "'features::remote_control::controller::controlling_inbound::tests::'",
             "'features::remote_control::controller::controlling_service::inbound_tests::'",
@@ -4478,7 +5495,8 @@ class CiGatePolicyTests(unittest.TestCase):
             filters, commands = loop.split("; do", maxsplit=1)
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -4492,14 +5510,16 @@ class CiGatePolicyTests(unittest.TestCase):
             for required in required_filters
             for replacement in ("", "'features::remote_control::'")
         ] + [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
         for old, new in mutations:
             with self.subTest(mutation=(old, new)):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_inbound_execution(regression.replace(old, new))
+                    assert_inbound_execution(mutant)
 
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:
@@ -4679,6 +5699,7 @@ class CiGatePolicyTests(unittest.TestCase):
             windows_codex_filter,
         )
         self.assertIn("browser_wrapper_lazy.test.mjs", windows_codex_filter)
+        self.assertIn("browser-wrapper-host-control.test.mjs", windows_codex_filter)
 
         windows_job = self.pr_workflow.split(
             "\n  windows-codex-runtime-test:", maxsplit=1
@@ -4687,7 +5708,9 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("Windows browser wrapper lifecycle regression", windows_job)
         self.assertIn(
-            "node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
+            "node --test --test-concurrency=1 "
+            "pinvou3-app/tests/browser-wrapper-host-control.test.mjs "
+            "pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
             windows_job,
         )
         self.assertIn(
@@ -4896,7 +5919,7 @@ class CiGatePolicyTests(unittest.TestCase):
         changes = _without_yaml_comments(_changes_block(self.pr_workflow))
         self.assertIn("bundle_chain:", changes)
         bundle_chain_paths = _extract_quoted_paths(
-            changes.split("            bundle_chain:", maxsplit=1)[1]
+            _dorny_filter_group(changes, "bundle_chain")
         )
         self.assertTrue(bundle_chain_paths, "bundle_chain parsed to an empty path list")
         for entry in (
@@ -4966,7 +5989,7 @@ class CiGatePolicyTests(unittest.TestCase):
             [], leaked_groups,
             "a new filter group after bundle_chain must re-bound this extraction",
         )
-        bundle_chain_paths = _extract_quoted_paths(bundle_tail)
+        bundle_chain_paths = _extract_quoted_paths(_dorny_filter_group(changes, "bundle_chain"))
         self.assertNotIn(
             "pinvou3-app/src/**",
             bundle_chain_paths,
@@ -5367,6 +6390,7 @@ class CiGatePolicyTests(unittest.TestCase):
             ("knowledge-rust", "\n  rust-lint:"),
             ("rust-lint", "\n  rust-test:"),
             ("cli-test", "\n  cli-lint:"),
+            ("rust-loongarch64-check", "\n  required-gate:"),
         ):
             job = self.pr_workflow.split(
                 f"\n  {job_name}:", maxsplit=1
@@ -5380,8 +6404,14 @@ class CiGatePolicyTests(unittest.TestCase):
                 if job_name == "rust-test"
                 else job
             )
+            cache_action = ("uses: ./.github/actions/linux-rust-cache"
+                            if job_name in (
+                                "rust-test", "knowledge-rust", "rust-lint", "cli-test",
+                                "rust-loongarch64-check",
+                            )
+                            else "uses: Swatinem/rust-cache@v2")
             cache_step = _without_yaml_comments(
-                job_scope.split("uses: Swatinem/rust-cache@v2", maxsplit=1)[1].split(
+                job_scope.split(cache_action, maxsplit=1)[1].split(
                     "\n      - name:", maxsplit=1
                 )[0]
             )
@@ -5392,7 +6422,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )[1].split("\n  cli-test:", maxsplit=1)[0]
         rust_test_cache = _without_yaml_comments(
             rust_test_job.split("- name: Cargo test cache", maxsplit=1)[1].split(
-                "uses: Swatinem/rust-cache@v2", maxsplit=1
+                "uses: ./.github/actions/linux-rust-cache", maxsplit=1
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("shared-key: rust-test-v2", rust_test_cache)
@@ -5401,18 +6431,26 @@ class CiGatePolicyTests(unittest.TestCase):
         # the decision record above mentions the old value historically.
         self.assertNotIn("cache-targets:", rust_test_cache)
 
+    def test_console_container_script_only_diff_selects_its_actual_job(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("            update_release_console:", 1)[1].split(
+                "            acp_runtime:", 1
+            )[0]
+        )
+        paths = _extract_quoted_paths(changes)
+        self.assertTrue(_matches_paths_filter("scripts/ci-update-release-console-container.sh", paths))
+        self.assertNotIn("scripts/**", paths)
+        console = _without_yaml_comments(_extract_job_block(self.pr_workflow, "update-release-console-test"))
+        self.assertEqual(
+            _extract_job_level_if(console),
+            _with_verified_reuse_guard("${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}", "update-release-console-test"),
+        )
+        self.assertRegex(console, r"(?m)^        run: bash scripts/ci-update-release-console-container\.sh$")
+
     def test_dev_profile_o0_guard_stays_on_all_three_heavy_legs(self):
-        # rust-test's codewhale-tui dev-O0 memory guard defuses the
-        # documented ~7 GB single-rustc dev thin-LTO OOM; the 2026-10 audit
-        # followups (PR #745) ported it to the 7 GB no-swap macOS runner
-        # beside the existing Windows twin. The override is a silent policy
-        # knob — dropping a leg's step or gutting the TOML section
-        # resurfaces the cold-run OOM with no runtime error — so pin the
-        # shared payload in every leg. Windows speaks pwsh (Add-Content
-        # here-string), the others a bash heredoc; the TOML section is the
-        # contract they share. Judged on comment-stripped text: commenting
-        # the TOML section out is inert in the written config.toml and must
-        # red this pin exactly like deletion (round-3 review of PR #745).
+        # Linux may reuse a runner with a persistent Cargo home. Keep O0 on
+        # each actual invocation, without writing administrator configuration.
+        # Windows/macOS retain their existing hosted-runner payloads.
         for job_name, end_marker in (
             ("rust-test", "\n  cli-test:"),
             ("windows-rust-test", "\n  macos-rust-check:"),
@@ -5423,26 +6461,22 @@ class CiGatePolicyTests(unittest.TestCase):
                     end_marker, maxsplit=1
                 )[0]
             )
-            self.assertIn("codewhale-tui O0", job, job_name)
-            self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
-            self.assertIn("opt-level = 0", job, job_name)
-        # Preserve the cargo-home location. Persistent runners must update
-        # the Linux override idempotently; cache exclusion alone cannot stop
-        # duplicate TOML tables from accumulating between jobs.
-        for job_name, end_marker in (
-            ("rust-test", "\n  cli-test:"),
-            ("macos-rust-check", "\n  windows-codex-runtime-test:"),
-        ):
-            job = _without_yaml_comments(
-                self.pr_workflow.split(f"\n  {job_name}:", maxsplit=1)[1].split(
-                    end_marker, maxsplit=1
-                )[0]
-            )
-            self.assertIn(
-                'config="${CARGO_HOME:-$HOME/.cargo}/config.toml"',
-                job,
-                job_name,
-            )
+            if job_name == "rust-test":
+                executable = re.findall(
+                    r"(?m)^ +(?:run: )?(?:/usr/bin/time -v )?cargo (.+)$", job
+                )
+                test_commands = [line for line in executable if re.search(r"(?:^| )test(?: |$)", line)]
+                self.assertEqual(len(test_commands), 4)
+                for command in test_commands:
+                    self.assertTrue(command.startswith("--config 'profile.dev.package.codewhale-tui.opt-level=0' test"), command)
+                self.assertNotIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
+                self.assertNotIn('cat >> "$config"', job)
+            else:
+                self.assertIn("codewhale-tui O0", job, job_name)
+                self.assertIn("[profile.dev.package.codewhale-tui]", job, job_name)
+                self.assertIn("opt-level = 0", job, job_name)
+                if job_name == "macos-rust-check":
+                    self.assertIn('config="${CARGO_HOME:-$HOME/.cargo}/config.toml"', job)
 
     def test_frontend_test_webui_smoke_reuses_the_prebuilt_dist(self):
         # frontend-test builds the web dist unconditionally (the web index
@@ -5524,7 +6558,7 @@ class CiGatePolicyTests(unittest.TestCase):
         knowledge_job = _extract_job_block(self.pr_workflow, "knowledge-rust")
         knowledge_cache = _without_yaml_comments(
             knowledge_job.split(
-                "uses: Swatinem/rust-cache@v2", maxsplit=1
+                "uses: ./.github/actions/linux-rust-cache", maxsplit=1
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("cache-targets: false", knowledge_cache)
@@ -5602,7 +6636,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("uses: dorny/paths-filter@v4", changes)
         self.assertIn("wrapper: ${{ steps.filter.outputs.wrapper }}", changes)
         self.assertIn("needs: changes", smoke)
-        self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' }}", smoke)
+        self.assertIn("if: ${{ needs.changes.outputs.wrapper == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke')) }}", smoke)
         self.assertIn("os: [macos-15, ubuntu-22.04, windows-latest]", smoke)
         # The 2026-10 concurrency fix: only PR runs cancel each other; queue
         # entries and main pushes must never cancel (queue entries carry the
@@ -6288,7 +7322,7 @@ exit 0
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["REPAIR_TEST_STATE"] = str(self.state)
-        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
+        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = self.updates.as_posix()
         env.pop("GITHUB_ACTIONS", None)
         # 行为夹具必须走 hosted 主路径:生产脚本在 RUNNER_ENVIRONMENT=self-hosted
         # 时于 repair/trap 安装前安全早退(保留管理员预置内存),该早退本身
@@ -6367,6 +7401,30 @@ exit 0
         calls = self._configure_calls()
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
+
+
+class FrontendCacheFixtureOwnershipTests(unittest.TestCase):
+    def test_cache_contracts_are_discovered_once_inside_the_owned_gate_scope(self):
+        job = _extract_job_block(PR_WORKFLOW.read_text(encoding='utf-8'), 'fast-gate')
+        step = _step_named(job, 'Gate policy test suite (scripts/tests)')
+        command = '\n'.join(_step_run_lines(step)).strip()
+        self.assertRegex(command, r'^python3 scripts/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER/gate-policy\.json" -- python3 -m unittest discover -s scripts/tests -p \'test_\*\.py\' -v$')
+        for name in ['test_ci_frontend_bundle.py', 'test_ci_frontend_cache_server.py',
+                     'test_ci_transfer_deadline.py', 'test_ci_frontend_checkout.py', 'test_ci_npm_audit.py']:
+            self.assertTrue((ROOT / 'scripts/tests' / name).is_file())
+            self.assertTrue(fnmatchcase(name, 'test_*.py'))
+        self.assertNotIn('Verified frontend bundle cache contracts', job, 'avoid a second unowned execution of the same fixtures')
+        initialize = _step_named(job, 'Initialize gate test resource ledger')
+        self.assertEqual('\n'.join(_step_run_lines(initialize)).strip(), 'python3 scripts/ci-resource-ledger.py --init')
+        self.assertLess(job.index(initialize), job.index(step))
+        retirement = _step_named(job, 'Confirm gate test resource retirement')
+        self.assertIn("always() && env.PINVOU_CI_RESOURCE_LEDGER != ''", retirement)
+        self.assertEqual('\n'.join(_step_run_lines(retirement)).strip(), 'python3 scripts/ci-resource-ledger.py --recover')
+        self.assertNotIn('continue-on-error', retirement)
+        upload = _step_named(job, 'Gate test resource lifecycle receipts')
+        self.assertIn('always()', upload)
+        self.assertIn('timeout-minutes: 3', upload)
+        self.assertIn('continue-on-error: true', upload)
 
 
 if __name__ == "__main__":

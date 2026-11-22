@@ -15,8 +15,9 @@ class RunnerPoolPolicyTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         expected = {
             'LIGHT': ['commit-message', 'version-consistency', 'changes', 'fast-gate', 'required-gate', 'backflow-portability'],
-            'MEDIUM': ['frontend-test', 'relay-test', 'team-relay-hub-test', 'update-release-console-test', 'release-contract-test'],
-            'HEAVY': ['knowledge-rust', 'rust-lint', 'rust-test', 'cli-test', 'cli-lint', 'rust-loongarch64-check'],
+            # setup 构建一次；逻辑测试及浏览器分片在具备隔离能力的 heavy 池消费产物。
+            'MEDIUM': ['frontend-setup', 'relay-test', 'team-relay-hub-test', 'update-release-console-test', 'release-contract-test'],
+            'HEAVY': ['frontend-test', 'frontend-browser-test', 'knowledge-rust', 'rust-lint', 'rust-test', 'cli-test', 'cli-lint', 'rust-loongarch64-check'],
         }
         jobs = dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow))
         for pool, names in expected.items():
@@ -59,7 +60,7 @@ export -f docker curl
             for run_id, status in [('1001', '0'), ('1002', '17')]:
                 with self.subTest(run_id=run_id, status=status):
                     log = Path(directory) / (run_id + '.log')
-                    env = dict(os.environ, RUNNER_TEMP=directory, GITHUB_RUN_ID=run_id, GITHUB_RUN_ATTEMPT='1', PINVOU_UPDATE_ADMIN_TOKEN='ci-fixture', COMMAND_LOG=str(log), UP_STATUS=status)
+                    env = dict(os.environ, RUNNER_TEMP=directory, GITHUB_RUN_ID=run_id, GITHUB_RUN_ATTEMPT='1', PINVOU_UPDATE_ADMIN_TOKEN='ci-fixture', COMMAND_LOG=str(log), UP_STATUS=status, PINVOU_UPDATE_NODE_IMAGE="ci-fixture-node-image")
                     result = subprocess.run(['bash', '-c', stub + '\nbash ' + shlex.quote(str(script))], env=env, cwd=ROOT, capture_output=True, text=True, timeout=30)
                     self.assertEqual(result.returncode, int(status), result.stderr)
                     commands = log.read_text()

@@ -1,0 +1,11 @@
+[
+  {"name":"live and trailing comment","text":"location /fixture { proxy_set_header X-Pinvou-Client-Source $remote_addr; # ignored ; }\n }","sources":["$remote_addr"]},
+  {"name":"comment is not directive or block","text":"# location /fixture { proxy_set_header X-Pinvou-Client-Source fake; }\nlocation /fixture { # proxy_set_header X-Pinvou-Client-Source $remote_addr;\n }","sources":[]},
+  {"name":"quoted hashes and braces remain data","text":"location /fixture { set $note \"# proxy_set_header X-Pinvou-Client-Source fake; }\"; proxy_set_header X-Pinvou-Client-Source '#value'; }","sources":["#value"]},
+  {"name":"escaped quote does not begin comment","text":"location /fixture { set $note \"quote\\\"# ; }\"; proxy_set_header X-Pinvou-Client-Source $remote_addr; }","sources":["$remote_addr"]},
+  {"name":"escaped hash retains nginx unknown escape","text":"location /fixture { proxy_set_header X-Pinvou-Client-Source \\#value; }","sources":["\\#value"]},
+  {"name":"unquoted embedded hash is data","text":"location /fixture { proxy_set_header X-Pinvou-Client-Source peer#suffix; }","sources":["peer#suffix"]},
+  {"name":"quoted empty and unsafe variable","text":"location /fixture { proxy_set_header X-Pinvou-Client-Source \"\"; proxy_set_header X-Pinvou-Client-Source $http_x_pinvou_client_source; }","sources":["","$http_x_pinvou_client_source"]},
+  {"name":"malformed quote fails","text":"location /fixture { set $note \"unterminated; }","error":true},
+  {"name":"malformed block fails","text":"location /fixture { proxy_set_header X-Pinvou-Client-Source $remote_addr;","error":true}
+]

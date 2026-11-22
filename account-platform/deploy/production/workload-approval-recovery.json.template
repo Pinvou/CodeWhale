@@ -1,0 +1,8 @@
+{
+  "issuer": "__VERIFIED_HTTPS_WORKLOAD_REALM_ISSUER__",
+  "audience": "pinvou-account-platform-internal",
+  "client_id": "__APPROVAL_RECOVERY_WORKLOAD_CLIENT_ID__",
+  "subject": "__APPROVAL_RECOVERY_WORKLOAD_SUBJECT__",
+  "client_secret_file": "/run/bootstrap/client-secret",
+  "token_file": "/run/projected/token"
+}

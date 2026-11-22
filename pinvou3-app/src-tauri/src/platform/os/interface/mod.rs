@@ -9,15 +9,19 @@ pub use clipboard::read_clipboard_image;
 // path (`super::interface::volume_fold_*`). macOS/Windows adapters consume
 // eq/prefix (no allowance needed there — a stopped consumer must resurface as
 // an unused-import tripwire); on the byte-exact platforms none of the aliases
-// is referenced, hence the cfg'd allowance. `volume_fold_spelling` is never
-// consumed through this re-export on any platform (its own module's eq/prefix
-// reach it directly; its İ-expansion behavior is pinned by a test in
-// `path.rs`), so it stays out of the list.
+// is referenced, hence the cfg'd allowance. `volume_fold_spelling` joined the
+// list when the archive import/export ledger became its first unconditional
+// cross-platform consumer (sessions/import.rs member-fold dedup: the ledger
+// must fold like the strictest target volume an archive may move to, not like
+// the local one, so it bypasses the host-adaptive path_component_* aliases);
+// its İ-expansion behavior stays pinned by a test in `path.rs`. The E0425
+// class is about a MISSING re-export, which stays impossible: the consumed
+// aliases are unconditional in the list.
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "windows")),
     allow(unused_imports)
 )]
-pub(crate) use path::{volume_fold_eq, volume_fold_prefix};
+pub(crate) use path::{volume_fold_eq, volume_fold_prefix, volume_fold_spelling};
 
 pub use path::{
     apply_user_npm_prefix, configure_onnxruntime_dylib, connector_cli_command,
@@ -34,14 +38,15 @@ pub use permission::{
 pub use system::bios_serial_number;
 pub use system::{
     archive_dependency_packages, archive_tool_exists, archive_tool_path, bundled_node,
-    command_exists, current_system_locale, email_dependency_packages, email_manual_hint,
-    email_tool_exists, libreoffice_missing_message, libreoffice_open_fallback_needed,
-    libreoffice_tool_path, make_private_dir, msg_converter_required, nvidia_smi_candidates,
-    ocr_dependency_packages, ocr_tessdata_dir, ocr_tool_exists, ocr_tool_path, open_target,
-    pandoc_dependency_packages, pandoc_missing_message, pandoc_tool_exists, pandoc_tool_path,
-    pdf_dependency_packages, pdf_ocr_missing_message, pdf_render_missing_message,
-    pdf_text_missing_message, pdf_tool_exists, pdf_tool_path, presentation_pdf_missing_message,
-    process_alive, reveal_target, show_archive_dependency_check, show_ocr_dependency_check,
-    show_pandoc_dependency_check, show_pdf_dependency_check, spawn_detached_and_reap,
-    startup_platform_env, system_default_open_supported, try_make_private_dir,
+    command_exists, current_system_locale, docker_candidates, email_dependency_packages,
+    email_manual_hint, email_tool_exists, libreoffice_missing_message,
+    libreoffice_open_fallback_needed, libreoffice_tool_path, make_private_dir,
+    msg_converter_required, nvidia_smi_candidates, ocr_dependency_packages, ocr_tessdata_dir,
+    ocr_tool_exists, ocr_tool_path, open_target, pandoc_dependency_packages,
+    pandoc_missing_message, pandoc_tool_exists, pandoc_tool_path, pdf_dependency_packages,
+    pdf_ocr_missing_message, pdf_render_missing_message, pdf_text_missing_message, pdf_tool_exists,
+    pdf_tool_path, presentation_pdf_missing_message, process_alive, reveal_target,
+    show_archive_dependency_check, show_ocr_dependency_check, show_pandoc_dependency_check,
+    show_pdf_dependency_check, spawn_detached_and_reap, startup_platform_env,
+    system_default_open_supported, try_make_private_dir,
 };

@@ -26,6 +26,10 @@ struct State {
     binding: u64,
     lease: Option<RuntimeValidationContext>,
     suspended: bool,
+    #[cfg(test)]
+    fail_prepare_write: bool,
+    #[cfg(test)]
+    failed_prepare_digest: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Default)]
@@ -132,6 +136,23 @@ mod business_authority_tests {
     }
 
     #[test]
+    fn physical_close_defers_only_the_retained_permission_lease() {
+        let (authority, expected) = fixture();
+        assert!(!authority.permission_dispatch_paused("generation-0001", 1, &expected));
+        drop(SharedSocket {
+            authority: authority.clone(),
+            epoch: 0,
+        });
+        assert!(authority.permission_dispatch_paused("generation-0001", 1, &expected));
+        assert!(!authority.permission_dispatch_paused("generation-0001", 2, &expected));
+        let mut foreign = expected.clone();
+        foreign.connection_id = "connection-0002".into();
+        assert!(!authority.permission_dispatch_paused("generation-0001", 1, &foreign));
+        authority.retire_owned("generation-0001", 1);
+        assert!(!authority.permission_dispatch_paused("generation-0001", 1, &expected));
+    }
+
+    #[test]
     fn retirement_cannot_cross_an_admitted_synchronous_mutation() {
         let (authority, expected) = fixture();
         let worker_authority = authority.clone();
@@ -165,9 +186,97 @@ pub(crate) struct ControllerOutboundScope {
     generation: String,
     binding: u64,
     business: bool,
+    prepare_deadline_b: Option<u64>,
 }
 
 impl SharedControllerAuthority {
+    #[cfg(test)]
+    pub(crate) fn arm_prepare_write_failure(&self) {
+        let mut state = self.0.lock();
+        state.fail_prepare_write = true;
+        state.failed_prepare_digest = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_prepare_write_failure(
+        &self,
+        scope: &ControllerOutboundScope,
+        digest: [u8; 32],
+    ) -> bool {
+        let mut state = self.0.lock();
+        if !state.fail_prepare_write || scope.prepare_deadline_b.is_none() {
+            return false;
+        }
+        state.fail_prepare_write = false;
+        state.failed_prepare_digest = Some(digest);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failed_prepare_digest(&self) -> Option<[u8; 32]> {
+        self.0.lock().failed_prepare_digest
+    }
+
+    /// Transport readiness only. The lifecycle owner must separately authorize
+    /// the still-Prepared candidate under its own lock and frozen deadline.
+    pub(crate) fn resume_socket_epoch(
+        &self,
+        generation: &str,
+        binding: u64,
+        lease: &LeaseContext,
+    ) -> Option<u64> {
+        let state = self.0.lock();
+        (state.connected
+            && state.suspended
+            && state.generation.as_deref() == Some(generation)
+            && state.binding == binding
+            && state
+                .lease
+                .as_ref()
+                .and_then(|runtime| runtime.lease.as_ref())
+                == Some(lease))
+        .then_some(state.epoch)
+    }
+
+    /// A newly constructed prepare targets one already-open controller socket.
+    /// This never changes the scope of a retained frame from another socket.
+    pub(crate) fn resume_prepare_scope(
+        &self,
+        frame: &Value,
+        generation: &str,
+        binding: u64,
+        epoch: u64,
+        deadline_b: u64,
+        now_b: u64,
+    ) -> Result<ControllerOutboundScope, ()> {
+        let state = self.0.lock();
+        let lease = state
+            .lease
+            .as_ref()
+            .and_then(|runtime| runtime.lease.as_ref())
+            .ok_or(())?;
+        if !state.connected
+            || !state.suspended
+            || state.epoch != epoch
+            || state.generation.as_deref() != Some(generation)
+            || state.binding != binding
+            || now_b >= deadline_b
+            || frame["type"].as_str() != Some("controller_resume_prepare")
+            || !resume_frame_matches_lease(lease, frame)
+            || validate_controller_message_json(&frame.to_string(), SenderRole::ControlledB)
+                .is_err()
+        {
+            return Err(());
+        }
+        Ok(ControllerOutboundScope {
+            epoch,
+            generation: generation.to_owned(),
+            binding,
+            business: false,
+            prepare_deadline_b: Some(deadline_b),
+        })
+    }
+
     pub(crate) fn open_socket(&self, controller_protocol: bool) -> Option<SharedSocket> {
         let mut state = self.0.lock();
         state.connected = false;
@@ -247,6 +356,25 @@ impl SharedControllerAuthority {
         }
         action();
         true
+    }
+
+    /// The socket revokes business authority before the manager sees its
+    /// disconnect event. Only the retained exact binding can wait for resume.
+    pub(crate) fn permission_dispatch_paused(
+        &self,
+        generation: &str,
+        binding: u64,
+        expected: &LeaseContext,
+    ) -> bool {
+        let state = self.0.lock();
+        (!state.connected || state.suspended)
+            && state.generation.as_deref() == Some(generation)
+            && state.binding == binding
+            && state
+                .lease
+                .as_ref()
+                .and_then(|runtime| runtime.lease.as_ref())
+                == Some(expected)
     }
 
     pub(crate) fn retire_owned(&self, generation: &str, binding: u64) {
@@ -385,16 +513,20 @@ impl SharedControllerAuthority {
             generation: generation.clone(),
             binding: state.binding,
             business,
+            prepare_deadline_b: None,
         }))
     }
 
-    pub(crate) fn frame_is_current(&self, scope: &ControllerOutboundScope) -> bool {
+    pub(crate) fn frame_is_current(&self, scope: &ControllerOutboundScope, now_b: u64) -> bool {
         let state = self.0.lock();
         state.connected
             && state.epoch == scope.epoch
             && state.generation.as_deref() == Some(scope.generation.as_str())
             && state.binding == scope.binding
             && (!scope.business || (!state.suspended && state.lease.is_some()))
+            && scope
+                .prepare_deadline_b
+                .is_none_or(|deadline| state.suspended && now_b < deadline)
     }
 }
 

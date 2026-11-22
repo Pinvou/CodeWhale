@@ -82,7 +82,7 @@ const SEPARATE_REASONING_FIELD: &str = "separate_field";
 // `include: ["reasoning.encrypted_content"]`; replay matches the captured
 // provider tag). Foundation side: CodeWhale PR #79, squash-merged into
 // pinvou3-clean as `3035a022e` and carried by the pinned head `0bc868ff0`.
-const RESPONSES_ROUTE_PROVIDER: &str = "pinvou_responses";
+pub(crate) const RESPONSES_ROUTE_PROVIDER: &str = "pinvou_responses";
 
 /// Canonical persisted `(model_provider, model_provider_id)` pair for the
 /// engine route `build_dt_config` resolved (its `cfg.provider`).
@@ -207,11 +207,29 @@ fn configure_provider(
     api_key: &str,
     model: &str,
     reasoning_stream_style: Option<&str>,
+    no_auth: bool,
 ) {
     config.base_url = Some(base_url.to_string());
     config.api_key = Some(api_key.to_string());
     config.model = Some(model.to_string());
     config.reasoning_stream_style = reasoning_stream_style.map(str::to_string);
+    // `auth_mode = "none"` is the saved model's explicit keyless-endpoint
+    // declaration: the engine then short-circuits key resolution and
+    // suppresses credential-shaped request headers
+    // (`auth_mode_disables_api_key` + `is_upstream_auth_header`). Written
+    // into the ACTIVE route's provider table — the same key on the root
+    // config would be broader: engine consumers consult it for the active
+    // provider as a fallback after the tables, so keeping it scoped to the
+    // table leaves the root untouched for any other consumer.
+    if no_auth {
+        config.auth_mode = Some("none".to_string());
+    } else {
+        // Round-7 review hardening: `DtConfig` starts fresh per build, so a
+        // stale `Some("none")` is unreachable today — the explicit clear
+        // keeps a future warm/incremental caller from silently carrying a
+        // previous route's declaration into a now-keyed one.
+        config.auth_mode = None;
+    }
 }
 
 fn is_official_deepseek_base_url(base_url: &str) -> bool {
@@ -564,6 +582,10 @@ impl crate::features::memory::MemoryReviewModel for Pinvou3Bridge {
 
     fn memory_api_key(&self) -> String {
         self.api_key()
+    }
+
+    fn memory_declares_no_auth(&self) -> bool {
+        self.effective_model_declares_no_auth()
     }
 
     fn memory_model_preset(&self) -> ModelPreset {
@@ -1001,6 +1023,23 @@ impl Pinvou3Bridge {
             && self.session_policy(session_id).exposes_browser_mcp()
     }
 
+    fn uses_work_mode_mcp_config(&self, session_id: &str) -> bool {
+        !crate::features::sessions::is_aux_session_id(session_id)
+            && self.exposes_browser_mcp(session_id)
+    }
+
+    pub(crate) fn resolve_work_mode_mcp_fallback(
+        &self,
+        session_id: &str,
+        config_path: &std::path::Path,
+    ) -> Result<Option<PathBuf>, &'static str> {
+        if !self.uses_work_mode_mcp_config(session_id) {
+            return Ok(None);
+        }
+        self.bundle
+            .resolve_work_mode_mcp_fallback(session_id, config_path)
+    }
+
     /// The session mode policy for this session: shared pipelines (send-op
     /// construction, tool shaping, session instructions) read from it instead
     /// of scattering `is_code_session` ifs (the unified D-2/D-3 entry point).
@@ -1282,7 +1321,16 @@ impl Pinvou3Bridge {
         b
     }
 
+    fn account_gateway_runtime(&self) -> bool {
+        self.runtime_model_credential
+            .as_ref()
+            .is_some_and(|credential| credential.request_idempotency_header().is_some())
+    }
+
     pub fn provider(&self) -> String {
+        if self.account_gateway_runtime() {
+            return "openai".into();
+        }
         if is_official_deepseek_base_url(&self.base_url()) {
             return "deepseek".to_string();
         }
@@ -1482,7 +1530,7 @@ impl Pinvou3Bridge {
     /// `wire = "responses"`) on a GPT×Responses hit. Consumed solely by
     /// `build_dt_config`; the divergence from `provider()` is declared here
     /// and in the [`Self::uses_responses_wire`] docs.
-    fn engine_route_provider(&self) -> String {
+    pub(crate) fn engine_route_provider(&self) -> String {
         if self.uses_responses_wire() {
             RESPONSES_ROUTE_PROVIDER.to_string()
         } else {
@@ -1603,6 +1651,50 @@ impl Pinvou3Bridge {
     /// [`Self::request_reasoning_effort`] 的档位推导主体；Tachyon 的
     /// high→medium 归一在公共入口统一收口，这里不做 provider 特判。
     fn request_reasoning_effort_for_provider(&self, provider: &str) -> Option<String> {
+        // Kimi K3.1 spellings (kimi-k3.1-pro[-highspeed] /
+        // k3.1-pro[-highspeed], vendor "kimi") are always-reasoning per the
+        // vendor contract: on the platform API lane the K3 series resolves
+        // depth through the top-level `reasoning_effort` ladder (low/high/
+        // max; the default for omitted effort is endpoint-specific — `high`
+        // on the Kimi Code coding-plan lane per its models table, `max` on
+        // the platform-API surface) and the K2.x `thinking` parameter is
+        // not part of the K3.1 request contract (models-overview:
+        // "参数约束也与 kimi-k3 完全一致"; api docs: K3 系列使用顶层
+        // reasoning_effort，不使用 thinking — the engine's separate Kimi
+        // Code k3/k3-256k shaper dialect wires a nested thinking shape and
+        // learns none of the K3.1 ids). The base's exact-K3 route shapers
+        // only learn bare k3 spellings, so
+        // any effort resolved here falls to the generic Moonshot arm and
+        // wires a `thinking` shape outside that documented contract — no
+        // `thinking` shape is known-valid for K3.1. Resolve to None so the
+        // field is omitted entirely — omission is the documented-valid form
+        // (the probe list mirrors this: image_capability's K3.1 spellings
+        // are deliberately outside the explicit-thinking injection list)
+        // and the vendor default applies (endpoint-specific — `high` on
+        // the Kimi Code coding-plan lane, `max` on the platform API).
+        // Covers both a stored value
+        // (already dropped by the prefs load normalization, bracket `[1m]`
+        // declaration forms included via prefs::is_moonshot_k31_route) and
+        // the `_ => Some("high")` default arm below, which re-introduced
+        // the parameter for fresh records (2026-11-04 review). The contract
+        // attaches via the kimi/moonshot vendor stamp or the vendor's own
+        // official route (legacy migrated records may carry an empty vendor
+        // or the moonshot alias there); unstamped custom relay endpoints
+        // keep their existing contract (mirrors prefs::is_moonshot_k31_route
+        // and the frontend isMoonshotK31ModelName tiers exit). The arm keys
+        // off that shared predicate alone — not the resolved provider
+        // (round-9 review): a route-attached record whose resolved provider
+        // is not "moonshot" (empty vendor + openai_compatible preset on an
+        // official platform host) must resolve None like every other
+        // attached record; the old provider gate let the `_ =>
+        // Some("high")` default arm contradict the resolve-to-None contract
+        // at the DtConfig level (wire-inert today — the engine writes no
+        // effort on the plain-openai dialect — but a latent drift).
+        if let Some(model) = self.effective_model() {
+            if prefs::is_moonshot_k31_route(&model.vendor, &model.base_url, &model.model) {
+                return None;
+            }
+        }
         // "Local route": the vllm/ollama/tachyon providers. When the openai
         // wire points at a local/private endpoint (LM Studio/generic server),
         // the engine treats reasoning_effort as a no-op, so knowledge-table
@@ -1687,6 +1779,15 @@ impl Pinvou3Bridge {
     /// `DtConfig.default_text_model` / `EngineConfig.model`).
     /// env var > settings.custom_model_name > vendor default.
     pub fn model(&self) -> String {
+        if self.account_gateway_runtime() {
+            // finalize_runtime_bridge always installs the prepared model with
+            // this credential. Its account route cannot inherit a cloud override.
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.model.clone())
+                .unwrap_or_default();
+        }
         let is_official_deepseek = is_official_deepseek_base_url(&self.base_url());
         if !self.runtime_route_is_locked() {
             if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
@@ -1725,6 +1826,13 @@ impl Pinvou3Bridge {
     /// `DtConfig.providers.*.base_url`).
     /// env var > settings.custom_base_url > vendor default.
     pub fn base_url(&self) -> String {
+        if self.account_gateway_runtime() {
+            return self
+                .session_model
+                .as_ref()
+                .map(|model| model.base_url.clone())
+                .unwrap_or_default();
+        }
         if !self.runtime_route_is_locked() {
             if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
                 return v;
@@ -1736,9 +1844,36 @@ impl Pinvou3Bridge {
         self.default_base_url_for_preset()
     }
 
+    /// Whether the saved model explicitly declares the endpoint keyless
+    /// (settings page 「此端点无需鉴权」→ `auth_mode = "none"`). Classification
+    /// reuses the foundation's `auth_mode_disables_api_key` so the app-side
+    /// gate and the engine-side key resolution can never drift apart.
+    fn model_declares_no_auth(model: &SavedModel) -> bool {
+        codewhale_config::auth_mode_disables_api_key(model.auth_mode.as_deref())
+    }
+
+    /// Whether the effective (active) model record declares the endpoint
+    /// keyless. The direct-HTTP feature paths that build their own requests
+    /// (voice postprocess, model review, memory organize) consult this before
+    /// attaching a bearer so a keyless declaration suppresses the
+    /// Authorization header there exactly like the engine route does —
+    /// otherwise those features would send an empty `Bearer ` against the
+    /// "no credentials are sent" contract the toggle's copy promises.
+    /// `pub` (round-5 review): the CLI's blocking voice mirror consumes the
+    /// same predicate, so the empty-bearer shape cannot survive on one
+    /// surface and not the other.
+    pub fn effective_model_declares_no_auth(&self) -> bool {
+        self.effective_model_owned()
+            .as_ref()
+            .map(Self::model_declares_no_auth)
+            .unwrap_or(false)
+    }
+
     /// Whether the user is required to configure an API Key. local_vllm and
     /// OpenAI-compatible services explicitly pointing at a local loopback
-    /// allow no auth; cloud/LAN addresses still require a Key by default.
+    /// allow no auth; cloud/LAN addresses still require a Key by default —
+    /// unless the model record explicitly declares the endpoint keyless
+    /// (`auth_mode = "none"`, see `Self::model_declares_no_auth`).
     pub fn api_key_required(&self) -> bool {
         // vLLM, Tachyon (驭光) and Ollama (including probed LAN Ollama) default
         // to no auth and the foundation also allows an empty key (Ollama
@@ -1746,6 +1881,9 @@ impl Pinvou3Bridge {
         // exempt.
         !matches!(self.provider().as_str(), "vllm" | "tachyon" | "ollama")
             && !base_url_uses_loopback(&self.base_url())
+            && !self
+                .effective_model()
+                .is_some_and(Self::model_declares_no_auth)
     }
 
     /// Default API base URL per vendor (the table lives in prefs
@@ -1766,6 +1904,16 @@ impl Pinvou3Bridge {
     }
 
     pub(crate) fn api_key_with_store(&self, store: &dyn CredentialStore) -> String {
+        let model = self.effective_model();
+        // auth_mode="none" is an endpoint contract: the foundation's key
+        // resolution drops every credential source for such routes (env
+        // included), so the app side must not materialize one either — check
+        // the declaration BEFORE the DEEPSEEK_API_KEY env read and skip the
+        // keyring/plaintext read entirely instead of materializing an inert
+        // secret.
+        if model.is_some_and(Self::model_declares_no_auth) {
+            return String::new();
+        }
         if let Some(credential) = &self.runtime_model_credential {
             return credential.expose_api_key().to_string();
         }
@@ -1777,7 +1925,7 @@ impl Pinvou3Bridge {
                 return v;
             }
         }
-        if let Some(m) = self.effective_model() {
+        if let Some(m) = model {
             if let Some(reference) = &m.credential_ref {
                 match store.get(reference) {
                     Ok(Some(key)) if !key.trim().is_empty() => return key,
@@ -1846,9 +1994,23 @@ impl Pinvou3Bridge {
     /// 不回落到全局 `DEEPSEEK_API_KEY` env(那是主模型的覆盖入口)。
     /// 本地 vLLM/loopback 无鉴权场景返回占位 key(底座要求非空)。
     fn api_key_for_saved_model(model: &SavedModel) -> String {
+        // auth_mode="none" 的视觉模型与主路由同口径:跳过凭据读取,不把
+        // 残留的明文/钥匙串凭据发给免鉴权端点(见 `api_key()` 的同类短路)。
+        if Self::model_declares_no_auth(model) {
+            return String::new();
+        }
         let local_endpoint =
             model.preset == ModelPreset::LocalVllm || base_url_uses_loopback(&model.base_url);
         Self::credential_for_model(model, local_endpoint, "vision model")
+    }
+
+    /// Shared with EnginePool's dependency snapshot: keep its reuse decision
+    /// aligned with the model the spawned image tool actually selects.
+    pub(crate) fn explicit_vision_model(&self, vision_id: &str) -> Option<&SavedModel> {
+        self.runtime_vision_model
+            .as_ref()
+            .filter(|model| model.id == vision_id)
+            .or_else(|| self.prefs.model_by_id(vision_id))
     }
 
     /// Vision tool (`image_analyze`) config resolution (design §9.3, phase E).
@@ -1880,7 +2042,7 @@ impl Pinvou3Bridge {
                 .runtime_vision_model
                 .as_ref()
                 .filter(|model| model.id == vision_id);
-            let Some(vision) = runtime_vision.or_else(|| self.prefs.model_by_id(vision_id)) else {
+            let Some(vision) = self.explicit_vision_model(vision_id) else {
                 eprintln!(
                     "[pinvou3-app] vision_model_id {vision_id} not found in saved_models; \
                      image_analyze disabled"
@@ -1903,8 +2065,32 @@ impl Pinvou3Bridge {
             // selector already verified it with the image-recognition probe
             // (only supported models can be selected). The override mark
             // (disabled) may be a leftover from a historical probe
-            // misjudgment; at runtime it is used per the fact that it was
-            // actually selected.
+            // misjudgment (e.g. kimi-for-coding was once backfilled after the
+            // probe pipeline returned 400); at runtime it is used per the fact
+            // that it was actually selected; a text model configured as a
+            // vision model is blocked by the frontend probe gate.
+            // Keyless (auth_mode="none") vision models are NOT registered into
+            // the Chat-only image_analyze tool: `VisionModelConfig` carries no
+            // auth semantics, and the tool's lane (CodeWhale tui
+            // vision/tools.rs) unconditionally attaches
+            // `Authorization: Bearer <key>`, so a keyless registration would
+            // ship a malformed empty Bearer on every real image call even
+            // though the capability probe (its own client, no auth header)
+            // succeeds. Explicitly unsupported here instead of silently
+            // borrowing the main lane's keyless filtering; the wire-level fix
+            // belongs in the CodeWhale base (an auth field on
+            // `VisionModelConfig` plus a header skip), tracked upstream
+            // (review zhuowp 2026-11-18 P2). Main-lane image input for the
+            // same model is unaffected: it follows the main protocol client.
+            if Self::model_declares_no_auth(vision) {
+                eprintln!(
+                    "[pinvou3-app] vision model {} is keyless (auth_mode=none); \
+                     the Chat-only image_analyze tool cannot express keyless auth yet, \
+                     image_analyze disabled",
+                    vision.id
+                );
+                return None;
+            }
             let api_key = runtime_vision
                 .and_then(|_| self.runtime_vision_credential.as_ref())
                 .map(|credential| credential.expose_api_key().to_owned())
@@ -2187,6 +2373,40 @@ impl Pinvou3Bridge {
         limits.has_known_limit().then_some(limits)
     }
 
+    /// The `max_tokens` the main turn puts on the wire for this route — the
+    /// route-effective request cap computed by the foundation
+    /// (`route_effective_max_output_tokens`: explicit overrides, compatibility
+    /// ceilings, route limits, and the route window intersected, with the wire
+    /// model normalized exactly as the transport does). Single source for
+    /// host-issued one-shot calls (the Pinvou review summon): they must carry
+    /// the same budget as the main conversation instead of hard-coding a
+    /// constant and drifting from the engine — the same rule
+    /// `context_input_budget_for_route` was published for on the input side.
+    /// Uncatalogued-id behavior: the compatibility ceiling falls back to
+    /// `Uncatalogued(8192)` — a **ceiling**, not a floor: with a declared
+    /// window the request cap is `(window/4).clamp(1, 8192)`, so an unknown
+    /// gateway model on a small-window route can land below 8192 (still far
+    /// above the old hard-coded 1600 in the common case); the foundation
+    /// floors the final value at 1.
+    ///
+    /// Limits provenance nuance (r5 review m9): the `route_limits_for_model`
+    /// declaration passed here is literally what lands in
+    /// `EngineConfig.active_route_limits` (compaction/preflight budgets), but
+    /// the main turn's wire clamp reads the client-frozen resolver candidate
+    /// limits instead; the two coincide on catalogued routes (k3 verified) and
+    /// this declaration is the more truthful fact where they differ
+    /// (operator-owned endpoints).
+    pub(crate) fn main_wire_max_output_tokens(&self, model: &str) -> u32 {
+        let config = self.build_dt_config();
+        let provider = config.api_provider();
+        deepseek_tui::core::engine::route_effective_max_output_tokens(
+            provider,
+            &self.base_url(),
+            model,
+            self.route_limits_for_model(model),
+        )
+    }
+
     /// Context window of the current active route (carried to the frontend by
     /// the chat:usage event as the denominator of the token progress bar).
     /// Same source as effective_context_window (min of SavedModel declaration
@@ -2319,6 +2539,7 @@ impl Pinvou3Bridge {
             //    in the new struct) ——
             model: _,
             workspace: _,
+            workspace_roots: _, // host exposes one execution root, not SDK attachments
             session_id: _,
             allow_shell: _,
             trust_mode: _,
@@ -2427,10 +2648,6 @@ impl Pinvou3Bridge {
             terminal_chrome_enabled,
             advisor_config,
             subagent_state_root,
-            // v0.9.12 workspace_roots foundation field: this stage only
-            // enumerates the default shape; the real per-session keychain is
-            // assigned in `build_engine_config_for_session_roots`.
-            workspace_roots: _,
         } = EngineConfig::default();
 
         // Hooks have two consumption paths: turn_loop runs ToolCallBefore
@@ -2460,13 +2677,26 @@ impl Pinvou3Bridge {
             // pinvou3 override
             model: self.model(),
             workspace: self.workspace.clone(),
-            // Compile-time convergence: empty set = primary root only (the
-            // single-root status quo); multi-root keychains are assigned per
-            // session in `build_engine_config_for_session_roots`.
+            // Input is EngineConfig::default(), not a caller-supplied root set.
+            // Empty attachments preserve the single execution-root contract;
+            // SessionRoots.ledger remains delegated-agent state, not tool authority.
+            // CodeWhale #54 多根授权基建：空集经底座 normalize 后等价单根
+            // （workspace 置于位置 0），保持既有行为。
             workspace_roots: Vec::new(),
             session_id: None,
             allow_shell: self.allow_shell(),
             trust_mode: true,
+            // The base NoteTool is stripped from parent sessions by the
+            // product allowlist (no "note" entry), so the parent can never
+            // write this file and no UI reads it. Subagent children inherit
+            // the ungated base registry and could still write it (the same
+            // parent/child asymmetry disclosed for `revert_turn` in
+            // `tool_policy.rs`). The field is a non-optional PathBuf
+            // upstream, so a path must be supplied; keep the stable product
+            // path and do not treat `~/.pinvou3/notes.md` as a live feature.
+            // Enabling the tool requires either an allowlist entry plus a UI
+            // consumer, or an upstream surface switch for NoteTool
+            // registration.
             notes_path: paths::notes_path(),
             // Work-mode gate: Browser MCP tools are exposed only to assistant Engine
             // sessions. Global mcp.json has no browser entry; this creates a session-specific
@@ -2798,12 +3028,6 @@ impl Pinvou3Bridge {
         cfg.workspace = roots.execution;
         cfg.session_id = Some(session_id.to_string());
         cfg.subagent_state_root = Some(roots.ledger);
-        if !is_aux {
-            cfg.instructions.push(InstructionSource::Inline {
-                name: "runtime:scheduled-request-origin".to_string(),
-                content: format!("Current session id: {session_id}. For app-automations keyed retries use this exact id as from_session and reuse the same idempotency_key only for the same operation. The claim is audit provenance, not authorization. Plan mode does not support this MCP family, including reads."),
-            });
-        }
         // Aux sessions skip the main instruction stack entirely: the aux
         // branch below replaces it with the minimal persona, while
         // session_instructions walks the AGENTS.md ancestors and writes the
@@ -2813,7 +3037,19 @@ impl Pinvou3Bridge {
         cfg.instructions = if is_aux {
             Vec::new()
         } else {
-            self.session_instructions(session_id)
+            // Scheduled-request origin: appended AFTER the stack assembly
+            // (docs/prompt-optimization-evaluation/README.md
+            // "Scheduled-origin follow-up"; content per
+            // docs/提示词优化-普通模式与代码模式.md §4.1) so the entry is
+            // not discarded by the wholesale replacement; the claim is
+            // audit provenance, not authorization, and aux sessions keep
+            // their minimal surface without it.
+            let mut instructions = self.session_instructions(session_id);
+            instructions.push(InstructionSource::Inline {
+                name: "runtime:scheduled-request-origin".to_string(),
+                content: format!("Current session id: {session_id}. For app-automations keyed retries use this exact id as from_session and reuse the same idempotency_key only for the same operation. The claim is audit provenance, not authorization. Plan mode does not support this MCP family, including reads."),
+            });
+            instructions
         };
         // Keychain snapshot (§6): the roots locked at creation; empty = single root
         // (base normalize reduces to [workspace]; the base dedups cwd-first). Aux sessions carry
@@ -3054,7 +3290,7 @@ impl Pinvou3Bridge {
         // even written for it.
         if let Some(path) = scoped_aux_mcp_path {
             cfg.mcp_config_path = path;
-        } else if is_aux || !self.exposes_browser_mcp(session_id) {
+        } else if !self.uses_work_mode_mcp_config(session_id) {
             cfg.mcp_config_path = crate::platform::paths::mcp_config_path();
         } else {
             // A Work-mode session uses its own browser-wrapper configuration, pinning the
@@ -3346,6 +3582,11 @@ impl Pinvou3Bridge {
     /// `DEEPSEEK_*` settings in run-dev.sh).
     pub fn build_dt_config(&self) -> DtConfig {
         let mut cfg = DtConfig::default();
+        cfg.request_idempotency_header = self
+            .runtime_model_credential
+            .as_ref()
+            .and_then(|credential| credential.request_idempotency_header())
+            .map(str::to_owned);
         // The engine landing (the RESPONSES_ROUTE_PROVIDER named-custom route
         // on a GPT×Responses hit) may diverge from the vendor-semantics
         // provider(); see `engine_route_provider`.
@@ -3356,6 +3597,9 @@ impl Pinvou3Bridge {
         let base_url = self.base_url();
         let model = self.model();
         let reasoning_stream_style = self.reasoning_stream_style(&provider);
+        let no_auth = self
+            .effective_model()
+            .is_some_and(Self::model_declares_no_auth);
         let providers = cfg.providers.get_or_insert_with(ProvidersConfig::default);
         if provider == RESPONSES_ROUTE_PROVIDER {
             // Named-custom table for the OpenAI Responses wire: kind + wire
@@ -3370,7 +3614,14 @@ impl Pinvou3Bridge {
                 .or_default();
             entry.kind = Some("openai-compatible".to_string());
             entry.wire = Some("responses".to_string());
-            configure_provider(entry, &base_url, &api_key, &model, reasoning_stream_style);
+            configure_provider(
+                entry,
+                &base_url,
+                &api_key,
+                &model,
+                reasoning_stream_style,
+                no_auth,
+            );
         } else {
             // Write base_url + api_key into the provider config matching the provider
             let provider_config = match provider.as_str() {
@@ -3405,6 +3656,7 @@ impl Pinvou3Bridge {
                 &api_key,
                 &model,
                 reasoning_stream_style,
+                no_auth,
             );
         }
         if is_opencode_gateway_base_url(&base_url) {
@@ -5466,11 +5718,11 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5522,11 +5774,11 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5586,11 +5838,11 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5899,13 +6151,13 @@ mod tests {
                 .check(codewhale_execpolicy::ExecPolicyContext {
                     command,
                     cwd: ".",
+                    workspace_roots: Vec::new(),
                     // The model-facing `bash` tool reaches the internal
                     // `exec_shell` policy identity before consulting rules.
                     tool: Some("exec_shell"),
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::Never,
                     sandbox_mode: None,
-                    workspace_roots: Vec::new(),
                 })
                 .unwrap()
         };
@@ -5977,6 +6229,7 @@ mod tests {
         api_key: &str,
     ) {
         bridge.prefs.advanced.saved_models = vec![SavedModel {
+            auth_mode: None,
             id: "test-model".to_string(),
             name: model.to_string(),
             alias: None,
@@ -5985,6 +6238,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: model.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: base_url.to_string(),
             provider_kind: None,
             vendor: None,
@@ -6004,6 +6265,7 @@ mod tests {
     /// directly, bypassing the system credential store.
     fn push_vision_model(bridge: &mut Pinvou3Bridge, id: &str, model: &str, api_key: &str) {
         bridge.prefs.advanced.saved_models.push(SavedModel {
+            auth_mode: None,
             id: id.to_string(),
             name: model.to_string(),
             alias: None,
@@ -6012,6 +6274,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: model.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.openai.com/v1".to_string(),
             provider_kind: None,
             vendor: None,
@@ -6270,7 +6540,7 @@ mod tests {
         unsafe { std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1") };
 
         let mut bridge = fixture_bridge();
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.id = "runtime-route".into();
         model.preset = ModelPreset::LocalVllm;
         model.model = "controller-model".into();
@@ -6459,6 +6729,34 @@ mod tests {
         push_vision_model(&mut no_key, "vision-no-key", "gpt-4o", "");
         no_key.prefs.advanced.saved_models[0].vision_model_id = Some("vision-no-key".to_string());
         assert!(no_key.resolve_vision_model_config().is_none());
+    }
+
+    /// auth_mode="none" 的视觉模型不注册进 Chat-only image_analyze 工具：
+    /// `VisionModelConfig` 不携带鉴权语义，工具链（CodeWhale tui
+    /// vision/tools.rs）无条件附加 `Authorization: Bearer <key>`，注册免鉴权
+    /// 视觉模型会在每次真实图像调用上发出空 Bearer（能力探测用的是无鉴权
+    /// 头的独立客户端，探测成功不等于真实调用可用；review zhuowp
+    /// 2026-11-18 P2）。即使记录残留明文 key 也按免鉴权口径读取为空 → 显式
+    /// 不支持并停用 image_analyze，而不是静默发出残缺头；wire 级修复属
+    /// CodeWhale 基座（VisionModelConfig 鉴权字段 + 头跳过），走上游。
+    #[test]
+    fn vision_config_gates_keyless_declared_model_out_of_the_chat_tool() {
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::Deepseek,
+            "deepseek-v4-pro",
+            "https://api.deepseek.com",
+            "sk-main",
+        );
+        push_vision_model(&mut bridge, "vision-keyless", "gpt-4o", "residual-key");
+        bridge.prefs.advanced.saved_models[0].vision_model_id = Some("vision-keyless".to_string());
+        bridge.prefs.advanced.saved_models[1].auth_mode = Some("none".to_string());
+
+        assert!(
+            bridge.resolve_vision_model_config().is_none(),
+            "免鉴权视觉模型不得注册进无法表达免鉴权的 image_analyze 工具"
+        );
     }
 
     /// §9.3 rule-1 vision-candidate capability caliber: a vision model's
@@ -6775,6 +7073,135 @@ mod tests {
         assert!(cloud_compatible.api_key_required());
     }
 
+    #[test]
+    fn effective_model_declares_no_auth_tracks_the_active_record() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        // 直连 HTTP 特性（voice/review/memory）的 bearer 抑制以激活记录的
+        // 免鉴权声明为准:无记录、或有记录但无声明时保持既有 bearer 行为。
+        let mut bridge = fixture_bridge();
+        assert!(
+            !bridge.effective_model_declares_no_auth(),
+            "无激活记录时不得声明免鉴权"
+        );
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "bearer-posture-model",
+            "https://bearer.example.com:9443/v1",
+            "typed-key",
+        );
+        assert!(!bridge.effective_model_declares_no_auth());
+        bridge.prefs.advanced.saved_models[0].auth_mode = Some("none".to_string());
+        assert!(
+            bridge.effective_model_declares_no_auth(),
+            "激活记录的免鉴权声明必须驱动直连 HTTP 特性的 bearer 抑制"
+        );
+    }
+
+    /// 「此端点无需鉴权」(auth_mode="none")：设置页的显式免鉴权声明必须
+    /// (a) 放开前端 gate（api_key_required→false）、(b) 跳过凭据读取
+    /// （api_key()→空串，即使记录上残留明文 key）、(c) 直通引擎路由表
+    /// （providers.<route>.auth_mode="none"，底座据此短路 key 解析并抑制
+    /// 鉴权头）。默认档（None）不得触碰路由表。
+    #[test]
+    fn keyless_declaration_relaxes_gate_and_writes_engine_auth_mode() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+
+        // 云端自定义网关（带自定义端口）+ 免鉴权：gate 放开、key 不读、
+        // auth_mode 进路由表。
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "keyless-gateway-model",
+            "https://gateway.example.com:8443/v1",
+            "residual-plaintext-key",
+        );
+        bridge.prefs.advanced.saved_models[0].auth_mode = Some("none".to_string());
+        assert!(
+            !bridge.api_key_required(),
+            "显式免鉴权声明必须放开 API Key gate"
+        );
+        // env 注入的 key 同样不得物化：免鉴权是端点契约（底座丢弃全部凭据
+        // 来源），应用侧短路必须先于 DEEPSEEK_API_KEY 的读取。
+        // SAFETY: ENV_LOCK 由上方 locked_env() 持有，env 写入已串行。
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "env-injected-key") };
+        assert!(
+            bridge.api_key().is_empty(),
+            "免鉴权路由不得读取/下发任何凭据（记录残留明文 key 或 env key 都不行）"
+        );
+        // SAFETY: ENV_LOCK 由 locked_env() 持有；后续断言回到无 env 基线。
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        let cfg = bridge.build_dt_config();
+        assert_eq!(cfg.provider.as_deref(), Some("openai"));
+        let providers = cfg.providers.as_ref().expect("providers table");
+        assert_eq!(
+            providers.openai.auth_mode,
+            Some("none".to_string()),
+            "auth_mode=\"none\" 必须写进激活路由的 provider 表"
+        );
+        assert_eq!(
+            providers.openai.base_url.as_deref(),
+            Some("https://gateway.example.com:8443/v1"),
+            "自定义端口必须随路由表原样下发（openai 路由）"
+        );
+
+        // 同端点、默认档：gate 保持要求 Key，路由表不得被写入 auth_mode。
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "authed-gateway-model",
+            "https://gateway.example.com/v1",
+            "",
+        );
+        assert!(bridge.api_key_required());
+        let cfg = bridge.build_dt_config();
+        assert_eq!(
+            cfg.providers
+                .as_ref()
+                .expect("providers table")
+                .openai
+                .auth_mode,
+            None,
+            "默认档不得触碰路由表 auth_mode"
+        );
+
+        // DeepSeek 预设指到自建反代（非官方 URL）+ 免鉴权：这正是此前
+        // "Custom endpoint credentials for deepseek" 报错的场景——声明后
+        // 路由表携带 auth_mode，底座短路 key 解析，不再逐轮报错。
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::Deepseek,
+            "deepseek-flash",
+            "http://192.168.1.10:8003/v1",
+            "",
+        );
+        bridge.prefs.advanced.saved_models[0].auth_mode = Some("none".to_string());
+        assert!(!bridge.api_key_required());
+        let cfg = bridge.build_dt_config();
+        assert_eq!(cfg.provider.as_deref(), Some("deepseek"));
+        let providers = cfg.providers.as_ref().expect("providers table");
+        assert_eq!(providers.deepseek.auth_mode, Some("none".to_string()));
+        assert_eq!(
+            providers.deepseek.base_url.as_deref(),
+            Some("http://192.168.1.10:8003/v1"),
+            "自定义端口/端点必须原样下发"
+        );
+        assert_eq!(cfg.api_key.as_deref(), Some(""));
+    }
+
     /// §11.8/§11.9: is_local_endpoint uses the same resolution caliber as the
     /// send path — the local_vllm preset or an effective base_url host that is
     /// loopback counts as local; cloud/LAN addresses must not be misjudged as
@@ -7000,6 +7427,73 @@ mod tests {
         assert_eq!(
             t_c, 105_722,
             "the 256K/65536 profile's Compact threshold must stay stable at 105722"
+        );
+    }
+
+    /// The Pinvou review summon must put the SAME max_tokens on the wire as
+    /// the main turn for the same route: `main_wire_max_output_tokens` →
+    /// foundation `route_effective_max_output_tokens` (the identical chain the
+    /// engine's client walks). Pin the k3/Kimi Coding Plan value so the two
+    /// paths cannot silently drift apart: the base catalogue documents k3's
+    /// default generation ceiling (131072), and `output_ceiling_source`
+    /// (route_budget.rs) reads the static k3 row as
+    /// OutputCeilingSource::Documented before the membership roster
+    /// (`RouteDeclaredUnknown`, which bare "k3" is also on) is ever consulted
+    /// → requested cap min(API_MAX 65536) = 65536, and the host route declares
+    /// no output cap. The review's old hard-coded budget was 1600 — consumed
+    /// entirely by k3 reasoning tokens (content empty, finish_reason=length,
+    /// 2026-11-06). If the foundation budget chain changes this value, update
+    /// the pin together with the main-turn wire.
+    #[test]
+    fn main_wire_max_output_tokens_matches_engine_budget_for_k3() {
+        let (_lock, _env) = locked_env(&[
+            "CODEWHALE_MAX_OUTPUT_TOKENS",
+            "DEEPSEEK_MAX_OUTPUT_TOKENS",
+            "DEEPSEEK_PROVIDER",
+            "PINVOU3_MAX_OUTPUT_TOKENS",
+        ]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::remove_var("CODEWHALE_MAX_OUTPUT_TOKENS") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::remove_var("DEEPSEEK_PROVIDER") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS") };
+
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "k3",
+            "https://api.kimi.com/coding/v1",
+            "k",
+        );
+        // 生产线材归一：coding-plan 端点被识别为 vendor kimi → provider()
+        // "moonshot"（prefs/model.rs identify_coding_plan_endpoint）→ 底座
+        // ApiProvider::Moonshot。fixture 必须走同一条 Moonshot 链，别钉在
+        // Openai 直通链上（两条链当前同值，但钉住生产线材才有防漂移意义）。
+        bridge.prefs.advanced.saved_models[0].provider_kind = Some("coding_plan".to_string());
+        bridge.prefs.advanced.saved_models[0].vendor = Some("kimi".to_string());
+        // 钉住链而不止钉值：vendor→moonshot 映射若断（回退 Openai/custom 直通链）
+        // 两条链当前同值、值钉仍绿——身份断言让映射漂移变红（r3 审 m-minor）。
+        assert_eq!(
+            bridge.provider(),
+            "moonshot",
+            "coding_plan×kimi 归一必须落 provider()==moonshot（引擎 Moonshot 身份链）"
+        );
+        // r6 审 NIT：预算包装实际消费的是 build_dt_config().api_provider()，
+        // 不是 provider() 字符串——把引擎侧解析结果一并钉住，parse 链漂移
+        // （如不可解析兜底改道）才可见。
+        assert_eq!(
+            bridge.build_dt_config().api_provider(),
+            ApiProvider::Moonshot,
+            "build_dt_config().api_provider() 必须落引擎 Moonshot 身份（预算包装的实际输入）"
+        );
+        assert_eq!(
+            bridge.main_wire_max_output_tokens(&bridge.model()),
+            65_536,
+            "k3 主对话线材预算=目录 documented 131072 min API_MAX 65536;审查必须发同一个值"
         );
     }
 
@@ -7968,6 +8462,123 @@ mod tests {
             "ordinary sessions keep subagents"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression pin (the prompt-optimization-evaluation README's
+    /// "Scheduled-origin follow-up"): the `runtime:scheduled-request-origin`
+    /// note used to be dropped wholesale six lines later when
+    /// `cfg.instructions` replaced the pushed engine config, never reaching
+    /// any engine. After the fix the entry must be appended AFTER the
+    /// session instruction stack is assembled: the stack head is still
+    /// `pinvou3:instructions` (the stack is not replaced), the origin note
+    /// is always the last entry and appears exactly once, carrying the
+    /// session id. Ordinary and scheduled sessions share this path.
+    #[test]
+    fn origin_note_appends_after_the_session_instruction_stack() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-origin-note-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held via locked_env; env
+        // writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+        let bridge = fixture_bridge();
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-origin-note-root-{}-{:p}",
+            std::process::id(),
+            &bridge
+        ));
+        let roots = |name: &str| SessionRoots {
+            execution: root.join(format!("{name}-exec")),
+            ledger: root.join(format!("{name}-ledger")),
+            bound: false,
+        };
+
+        for session_id in ["chat-origin1", "sched-origin2"] {
+            let cfg = bridge.build_engine_config_for_session_roots(session_id, roots(session_id));
+            assert!(
+                !cfg.instructions.is_empty(),
+                "non-aux sessions must keep a non-empty instruction stack"
+            );
+            match &cfg.instructions[0] {
+                InstructionSource::Inline { name, .. } => assert_eq!(
+                    name, "pinvou3:instructions",
+                    "the assembled session stack must precede the origin note, not be \
+                     replaced by it"
+                ),
+                InstructionSource::File(path) => {
+                    panic!("the composed session prompt must be inline, got file {path:?}")
+                }
+            }
+            let origin_entries = cfg
+                .instructions
+                .iter()
+                .filter(|source| {
+                    matches!(
+                        source,
+                        InstructionSource::Inline { name, .. }
+                            if name == "runtime:scheduled-request-origin"
+                    )
+                })
+                .count();
+            assert_eq!(
+                origin_entries, 1,
+                "the origin note must be appended exactly once"
+            );
+            match cfg.instructions.last() {
+                Some(InstructionSource::Inline { name, content }) => {
+                    assert_eq!(name, "runtime:scheduled-request-origin");
+                    assert!(
+                        content.contains(session_id),
+                        "the origin note must carry this session's id"
+                    );
+                    assert!(content.contains("from_session"));
+                    assert!(content.contains("idempotency_key"));
+                }
+                other => panic!("the origin note must be the trailing inline entry, got {other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Exclusion pin: aux sessions keep the minimal instruction surface;
+    /// the origin note (audit provenance) must not enter.
+    #[test]
+    fn aux_sessions_do_not_carry_the_origin_note() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-origin-aux-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held via locked_env; env
+        // writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+        let bridge = fixture_bridge();
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-origin-aux-root-{}-{:p}",
+            std::process::id(),
+            &bridge
+        ));
+        let roots = SessionRoots {
+            execution: root.join("aux-exec"),
+            ledger: root.join("aux-ledger"),
+            bound: false,
+        };
+        let aux_cfg = bridge.build_engine_config_for_session_roots("aux-origin", roots);
+        assert!(
+            aux_cfg.instructions.iter().all(|source| matches!(
+                source,
+                InstructionSource::Inline { name, .. }
+                    if name != "runtime:scheduled-request-origin"
+            )),
+            "aux sessions keep their minimal persona without the origin note"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -9289,6 +9900,41 @@ mod tests {
         );
     }
 
+    /// SDK attachments are not exposed by the current host. The execution
+    /// directory and delegated-agent ledger are separate authority domains.
+    #[test]
+    fn forkguard_engine_config_keeps_only_execution_root() {
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-single-execution-root-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create hermetic test home");
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        let bridge = fixture_bridge();
+        assert!(bridge.build_engine_config().workspace_roots.is_empty());
+
+        let execution = root.join("project");
+        let ledger = root.join("session-ledger");
+        let cfg = bridge.build_engine_config_for_session_roots(
+            "single-execution-root",
+            SessionRoots {
+                execution: execution.clone(),
+                ledger: ledger.clone(),
+                bound: true,
+            },
+        );
+        assert_eq!(cfg.workspace, execution);
+        assert_eq!(cfg.subagent_state_root.as_deref(), Some(ledger.as_path()));
+        assert!(
+            cfg.workspace_roots.is_empty(),
+            "ledger must not become a writable attachment"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Destructure the Op returned by build_send_message_op into
     /// (allow_shell, trust_mode); panics on failure (test helper).
     fn extract_shell_trust(op: Op) -> (bool, bool) {
@@ -9896,6 +10542,179 @@ mod tests {
         );
     }
 
+    /// Kimi K3.1 request contract (2026-11-04 review): the K3.1 spellings are
+    /// always-reasoning and the vendor rejects the K2.x-specific `thinking`
+    /// parameter outright, while the base's exact-K3 shapers only learn bare
+    /// k3. The chat request must therefore carry NO reasoning_effort — the
+    /// foundation's apply_reasoning_effort early-returns on None and omits
+    /// the thinking key, letting the vendor default apply (endpoint-
+    /// specific: `high` on the Kimi Code coding-plan lane, `max` on the
+    /// platform API). Both the
+    /// default arm (`_ => Some("high")`, which re-introduced the parameter
+    /// for fresh records) and a legacy stored value must resolve to None.
+    #[test]
+    fn kimi_k31_models_resolve_no_effort() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+
+        // A fresh K3.1 record (no stored effort): the default arm must not
+        // inject "high".
+        let mut b = fixture_bridge();
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3.1-pro",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(b.provider(), "moonshot");
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "a fresh K3.1 record must resolve to no effort (omits thinking on the wire)"
+        );
+        assert_eq!(
+            b.build_dt_config().reasoning_effort,
+            None,
+            "the engine config carries no effort for K3.1 (the generic Moonshot arm must not fire)"
+        );
+
+        // A legacy stored value (saved through the old generic off/high
+        // ladder) also resolves to None — the send path must not re-inject
+        // what the prefs load normalization dropped.
+        b.prefs.advanced.saved_models[0].reasoning_effort = Some("high".into());
+        assert_eq!(b.request_reasoning_effort(), None);
+        b.prefs.advanced.saved_models[0].reasoning_effort = Some("off".into());
+        assert_eq!(b.request_reasoning_effort(), None);
+
+        // The Kimi Code spelling rides the same contract.
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "k3.1-pro-highspeed",
+            "https://api.kimi.com/coding/v1",
+            "sk-kimi-code",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(b.request_reasoning_effort(), None);
+
+        // The documented `[1m]` declaration forms are the same K3.1 models
+        // (k3.1-pro[1m] is the ACP Kimi Code models1m datalist entry) — the
+        // bracket spelling must not fall through to the generic default arm
+        // (2026-11-04 review round 4).
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "k3.1-pro[1m]",
+            "https://api.kimi.com/coding/v1",
+            "sk-kimi-code",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "the [1m] declaration form resolves like its bare K3.1 spelling"
+        );
+
+        // Bracket forms of NON-K3.1 spellings keep their own contract:
+        // kimi-k3[1m] is bare kimi-k3's declaration form, not a K3.1
+        // spelling, so the default arm still applies.
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3[1m]",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(
+            b.request_reasoning_effort(),
+            Some("high".to_string()),
+            "kimi-k3[1m] stays on the bare-k3 contract, outside the K3.1 arm"
+        );
+
+        // A legacy migrated record with an EMPTY vendor on the official
+        // endpoint is still K3.1: the resolved route plus the model spelling
+        // is the contract, not the vendor stamp (2026-11-04 review round 3).
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3.1-pro-highspeed",
+            "https://api.moonshot.ai/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = None;
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "an empty-vendor record on the official endpoint is still K3.1"
+        );
+
+        // Bare kimi-k3 keeps the exact tiered route semantics (effort
+        // resolution is untouched for it — off clamps to low on the wire).
+        set_active_model(
+            &mut b,
+            ModelPreset::Kimi,
+            "kimi-k3",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = Some("kimi".into());
+        assert_eq!(
+            b.request_reasoning_effort(),
+            Some("high".to_string()),
+            "the K3 exact route keeps its ladder (default high)"
+        );
+
+        // The same id without the kimi vendor stamp (a free-text
+        // openai_compatible row) is outside the vendor contract and keeps
+        // the generic default.
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "kimi-k3.1-pro",
+            "https://relay.example/v1",
+            "sk-relay",
+        );
+        b.prefs.advanced.saved_models[0].vendor = None;
+        assert_eq!(
+            b.request_reasoning_effort(),
+            Some("high".to_string()),
+            "no kimi vendor stamp → outside the K3.1 contract"
+        );
+
+        // Round-9 review: the route arm must attach WITHOUT the resolved
+        // provider gate. An empty-vendor openai_compatible record on the
+        // official platform host resolves provider "openai", but the
+        // contract attaches via prefs::is_moonshot_k31_route's route arm —
+        // the old provider gate let the `_ => Some("high")` default arm
+        // contradict the resolve-to-None contract for exactly this shape
+        // (wire-inert today, latent drift).
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiCompatible,
+            "kimi-k3.1-pro",
+            "https://api.moonshot.cn/v1",
+            "sk-kimi",
+        );
+        b.prefs.advanced.saved_models[0].vendor = None;
+        assert_eq!(
+            b.provider(),
+            "openai",
+            "the resolved provider is openai — this shape is about the route arm"
+        );
+        assert_eq!(
+            b.request_reasoning_effort(),
+            None,
+            "route-attached K3.1 resolves None regardless of the resolved provider"
+        );
+    }
+
     /// OpenAI Responses wire routing (2026-09-29 #620 follow-up): catalog GPT
     /// ids on the OpenAI preset and the whole `openai_responses` preset ride
     /// the foundation's named-custom Responses route (`RESPONSES_ROUTE_PROVIDER`
@@ -10161,6 +10980,48 @@ mod tests {
             unsuppressed.engine_route_provider(),
             "openai",
             "gate and engine landing must agree under the pin"
+        );
+    }
+
+    /// The Responses named-custom table must carry the keyless declaration
+    /// too: `openai_responses` preset + auth_mode="none" →
+    /// `providers.<responses>.auth_mode = "none"` and an empty key (the
+    /// engine short-circuits key resolution; without the entry it would
+    /// still bail per-turn for unbound credentials on this wire).
+    #[test]
+    fn responses_named_table_carries_keyless_auth_mode() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut b = fixture_bridge();
+        set_active_model(
+            &mut b,
+            ModelPreset::OpenaiResponses,
+            "gpt-6-sol",
+            "https://gateway.example.test/v1",
+            "",
+        );
+        b.prefs.advanced.saved_models[0].auth_mode = Some("none".to_string());
+        assert!(!b.api_key_required(), "免鉴权声明必须放开 API Key gate");
+        let cfg = b.build_dt_config();
+        assert_eq!(cfg.provider.as_deref(), Some(RESPONSES_ROUTE_PROVIDER));
+        let table = cfg
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.custom.get(RESPONSES_ROUTE_PROVIDER))
+            .expect("named responses table must be populated");
+        assert_eq!(
+            table.auth_mode.as_deref(),
+            Some("none"),
+            "免鉴权声明必须写进 Responses 命名自定义表"
+        );
+        assert_eq!(
+            table.api_key.as_deref(),
+            Some(""),
+            "免鉴权路由不得下发任何凭据"
         );
     }
 
@@ -10835,6 +11696,63 @@ mod tests {
         assert_eq!(bridge.provider(), "env-provider");
         assert_eq!(bridge.base_url(), "http://env:8000/v1");
         assert_eq!(bridge.api_key(), "env-key");
+    }
+
+    #[test]
+    fn account_gateway_credentials_and_operation_header_stay_on_prepared_route() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        let mut account_model = SavedModel::builtin_account_platform();
+        account_model.base_url = "https://gateway.example.test/v1".into();
+        account_model.model = "prepared-account-model".into();
+        bridge.session_model = Some(account_model);
+        bridge.runtime_model_credential = Some(
+            RuntimeModelCredential::account_platform_access_token("isolated-account-access".into())
+                .unwrap(),
+        );
+        // SAFETY: shared test ENV_LOCK serializes mutation and restores all values.
+        unsafe {
+            std::env::set_var("DEEPSEEK_MODEL", "other-model");
+            std::env::set_var("DEEPSEEK_PROVIDER", "anthropic");
+            std::env::set_var(
+                "DEEPSEEK_BASE_URL",
+                "https://other-provider.example.test/v1",
+            );
+            std::env::set_var("DEEPSEEK_API_KEY", "other-key");
+        }
+        let config = bridge.build_dt_config();
+        assert_eq!(bridge.base_url(), "https://gateway.example.test/v1");
+        assert_eq!(bridge.model(), "prepared-account-model");
+        assert_eq!(bridge.provider(), "openai");
+        assert_eq!(
+            config.request_idempotency_header.as_deref(),
+            Some("Idempotency-Key")
+        );
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .unwrap()
+                .openai
+                .base_url
+                .as_deref(),
+            Some("https://gateway.example.test/v1")
+        );
+        assert!(
+            config.providers.as_ref().unwrap().openai.api_key.as_deref()
+                == Some("isolated-account-access")
+        );
+        bridge.runtime_model_credential = None;
+        let ordinary = bridge.build_dt_config();
+        assert!(ordinary.request_idempotency_header.is_none());
+        assert_eq!(bridge.base_url(), "https://other-provider.example.test/v1");
+        assert_eq!(bridge.provider(), "anthropic");
+        assert_eq!(bridge.model(), "other-model");
     }
 
     #[test]
@@ -12137,6 +13055,7 @@ mod tests {
 
         let ordinary = bridge.build_engine_config_for_session_roots("sched-run", roots.clone());
         assert_eq!(ordinary.workspace, automation);
+        assert!(ordinary.workspace_roots.is_empty());
         assert_eq!(
             ordinary.subagent_state_root.as_deref(),
             Some(automation.as_path()),
@@ -12147,6 +13066,7 @@ mod tests {
         let multi_agent =
             bridge.build_engine_config_for_multi_agent("sched-run", roots, &snapshot, true);
         assert_eq!(multi_agent.workspace, automation);
+        assert!(multi_agent.workspace_roots.is_empty());
         assert_eq!(
             multi_agent.subagent_state_root.as_deref(),
             Some(automation.as_path())

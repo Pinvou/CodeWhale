@@ -4,6 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { expectedWebBridgeApi } from './bridge_domain_contract.mjs';
+import { desktopSliceFields } from './bridge_slice_fields.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webBridgeRoot = path.join(root, 'src', 'platform', 'web');
@@ -27,6 +28,7 @@ const documentObject = {
   body: { appendChild() {} },
 };
 let invokeResponse = async () => null;
+const listeners = new Map();
 const windowObject = {
   PinvouPlatform: {
     kind: 'web',
@@ -37,13 +39,17 @@ const windowObject = {
   },
   __TAURI__: {
     core: { invoke: (...args) => invokeResponse(...args) },
-    event: { listen: async () => function () {} },
+    event: { listen: async (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name); } },
     dialog: { open: async () => null },
   },
   location: { search: '', href: 'https://example.test/pinvou3/remote/' },
   localStorage,
   crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000' },
   performance: { now: () => 0 },
+  // btoa/atob on window itself: the chunked uploader base64-encodes chunk
+  // payloads through its `root` (window) reference, not the context scope.
+  btoa,
+  atob,
   addEventListener() {},
   setTimeout,
   clearTimeout,
@@ -60,6 +66,10 @@ const context = vm.createContext({
   clearTimeout,
   setInterval,
   clearInterval,
+  // btoa/atob: the chunked uploader base64-encodes chunk payloads; the real
+  // browser window always has them, so the VM harness must too.
+  btoa,
+  atob,
   structuredClone(value) {
     deepCloneCalls += 1;
     return nativeStructuredClone(value);
@@ -106,6 +116,37 @@ for (const method of Object.keys(api.computerUse)) {
     api.computerUse[method](),
     /not supported on the web client/,
     `web computerUse.${method} stub must reject, never fake success`,
+  );
+}
+// Same for the device domain (round-3 review P2): the surface lock above would
+// not catch a device stub turning into a resolve(null) no-op, which the
+// domain-adapter comments call out as the "permanent skeleton" failure mode.
+for (const method of Object.keys(api.device)) {
+  await assert.rejects(
+    api.device[method](),
+    /not supported on the web client|MegaCube/,
+    `web device.${method} stub must reject, never fake success`,
+  );
+}
+// 桌面/双端 device 切片键集交叉锁定（round-5 review P3 → round-6 补严）：
+// 期望值不再手抄，直接解析桌面 bridge.js 的 STATE_SLICE_FIELDS.device——
+// 桌面加第 6 个字段而漏改 web 时切片缺键返回 undefined，此前硬编码数组是
+// 单向锁，恰好看不见这个方向的漂移（round-6 review P2）。
+assert.deepEqual(
+  Object.keys(api.state.get('device')).sort(),
+  desktopSliceFields().device.slice().sort(),
+  'web device slice keys must equal the desktop STATE_SLICE_FIELDS.device contract',
+);
+// seed 字面量亦须逐键有定义（round-36 review P3）：pick() 从共享注册表投影，
+// 上面的断言看不见初始 state——无 structuredClone 的引擎走 JSON 回退克隆时
+// undefined 键整个丢失，seed 漏一键 web 切片就比桌面少一键（externalModelsError
+// 曾漏）。对 bridge.js 源码做形状钉。
+const webBridgeSource = read('bridge.js');
+for (const key of desktopSliceFields().device) {
+  const keySeedPattern = new RegExp(`^ {4}${key}:`, 'm');
+  assert.ok(
+    keySeedPattern.test(webBridgeSource),
+    `web bridge seed must declare device key "${key}" explicitly`,
   );
 }
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
@@ -195,9 +236,59 @@ await api.attachments.addPasteImage('oversized.png', [1], () => {
 });
 const pasteLimitNotice = api.state.get('chat').chatItems.at(-1);
 assert.equal(pasteLimitNotice.type, 'system');
-assert.equal(pasteLimitNotice.text, '⚠️ oversized.png 超过附件 20 MB 上限');
+assert.equal(pasteLimitNotice.text, '⚠️ oversized.png 超过附件 50 MB 上限');
 assert.doesNotMatch(pasteLimitNotice.text, /attachment_file_too_large/);
 assert.equal(externalFormatterCalled, false, 'the Web bridge must reuse its own localized limit formatter');
+
+// ── Device-upload chips must store stable wire codes, never
+// language-dependent text. Every source pin for the mapping arms is
+// presence-only and stays green under a revert to {code: message}; this
+// behavioral leg through the real chunked uploader is the pin that actually
+// kills that regression. ──
+vm.runInContext(
+  fs.readFileSync(path.join(root, 'src', 'shared', 'chunked-file-upload.js'), 'utf8'),
+  context,
+  { filename: 'shared/chunked-file-upload.js' },
+);
+const makeUploadFile = (name, size) => ({
+  name,
+  size,
+  // crypto.subtle is absent in this VM → the uploader takes the disclosed
+  // unchecked-digest path and skips file.arrayBuffer; slices feed the chunk
+  // base64 payloads.
+  arrayBuffer: async () => new ArrayBuffer(size),
+  slice: (start, end) => ({
+    arrayBuffer: async () => new ArrayBuffer(Math.max(0, Math.min(end, size) - start)),
+  }),
+});
+const lastChip = () => api.state.get('chat').attachments.at(-1);
+const commitThrows = (code) => {
+  invokeResponse = async (command, payload) => {
+    if (command === 'web_access_upload_attachment_chunk' && payload && payload.commit) {
+      throw new Error(code);
+    }
+    return { handle: 'handle-1' };
+  };
+};
+
+commitThrows('web_attachment_digest_invalid');
+await api.attachments.uploadDeviceFiles([makeUploadFile('digest-failure.bin', 1024)]);
+assert.equal(lastChip().status, 'error');
+assert.equal(lastChip().error, 'web_attachment_digest_invalid',
+  'the digest-failure chip must store the stable wire code, not localized text');
+
+commitThrows('web_attachment_upload_cache_full');
+await api.attachments.uploadDeviceFiles([makeUploadFile('cache-full.bin', 1024)]);
+assert.equal(lastChip().error, 'web_attachment_upload_cache_full',
+  'the upload-buffer chip must store the stable wire code, not localized text');
+
+invokeResponse = async () => ({ handle: 'handle-1' });
+await api.attachments.uploadDeviceFiles([makeUploadFile('empty.bin', 0)]);
+assert.equal(lastChip().error, 'device_upload_empty',
+  'the empty-file chip must also store the stable wire code, not the localized sentence');
+const emptyNotice = api.state.get('chat').chatItems.at(-1);
+assert.match(emptyNotice.text, /是空文件，无法添加/,
+  'the system notice must still carry the localized empty-file copy');
 
 const flatReentrantFirst = [];
 const flatReentrantSecond = [];
@@ -403,6 +494,7 @@ const cyclic = { value: 'cycle' };
 cyclic.self = cyclic;
 invokeResponse = async command => command === 'web_access_ingest_file' ? cyclic : null;
 await assert.rejects(flat.addAttachmentByPath('/tmp/cyclic.txt'), /must not contain cycles/);
+api.attachments.removeAttachment(flat.getState().attachments.at(-1).id);
 
 // probeLocalServerKind 降级契约（PR #218 五审 P2）：web 桥层不得吞错伪造成
 // generic——命令失败（web 白名单不含该命令/老版本桌面）必须 reject，由消费方
@@ -434,7 +526,7 @@ assert.equal(
 );
 assert.deepEqual(
   webProbedArgs,
-  { baseUrl: 'http://127.0.0.1:11434/v1', apiKey: null, modelId: null },
+  { baseUrl: 'http://127.0.0.1:11434/v1', apiKey: null, modelId: null, noAuth: false },
   'web probeLocalServerKind must normalize absent credentials to null',
 );
 assert.equal(
@@ -444,8 +536,47 @@ assert.equal(
 );
 assert.deepEqual(
   webProbedArgs,
-  { baseUrl: 'http://127.0.0.1:11434/v1', apiKey: 'sk-form-key', modelId: 'model-1' },
+  { baseUrl: 'http://127.0.0.1:11434/v1', apiKey: 'sk-form-key', modelId: 'model-1', noAuth: false },
   'web probeLocalServerKind must forward apiKey/modelId for authenticated endpoints',
 );
+assert.equal(
+  await api.models.probeLocalServerKind('http://127.0.0.1:11434/v1', '', null, true),
+  'ollama',
+  'web probeLocalServerKind must accept the keyless posture argument',
+);
+assert.deepEqual(
+  webProbedArgs,
+  { baseUrl: 'http://127.0.0.1:11434/v1', apiKey: null, modelId: null, noAuth: true },
+  'web probeLocalServerKind must forward the keyless posture for credential-free probes',
+);
+
+// A route commit on the desktop host must refresh an already-connected Web UI.
+const accessPolicy = JSON.parse(read('access-policy.json'));
+assert.ok(accessPolicy.allowed_events.includes('models:changed'));
+assert.ok(listeners.has('models:changed'));
+let releaseFirstModels;
+let modelLoads = 0;
+const refreshCommands = [];
+invokeResponse = async command => {
+  refreshCommands.push(command);
+  if (command === 'list_models') {
+    modelLoads += 1;
+    if (modelLoads === 1) await new Promise(resolve => { releaseFirstModels = resolve; });
+    return { models: [{ id: 'stable-store-id', model: modelLoads === 1 ? 'old-wire-id' : 'new-wire-id' }], active_model_id: 'stable-store-id' };
+  }
+  if (command === 'get_settings') return { default_model: 'stable-store-id' };
+  if (command === 'get_effective_model_config') return { model: 'new-wire-id' };
+  return null;
+};
+const firstRefresh = listeners.get('models:changed')({ payload: {} });
+const pendingRefresh = listeners.get('models:changed')({ payload: {} });
+releaseFirstModels();
+await Promise.all([firstRefresh, pendingRefresh]);
+assert.equal(modelLoads, 2, 'events during refresh must trigger a final fresh snapshot');
+assert.equal(flat.getState().savedModels[0].model, 'new-wire-id');
+assert.equal(flat.getState().effectiveModelConfig.model, 'new-wire-id');
+assert.ok(refreshCommands.includes('get_settings'));
+assert.ok(!refreshCommands.some(command => /set_active_model|set_session_model|save_model/.test(command)),
+  'host route refresh must preserve user selection');
 
 console.log('web bridge domain contract passed');

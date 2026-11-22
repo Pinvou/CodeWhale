@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
+    "20ba5b032e06ad7dd8902da538f6570d36059c568622c7ea73c9e1e7d89cde19";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -174,11 +174,14 @@ pub(crate) const CONTROLLER_PAYLOAD_TYPES: &[&str] = &[
 /// Command name transported over the controller lane. The unshipped legacy
 /// permission/transfer/artifact payloads were replaced by this single pair.
 pub(crate) const REMOTE_ACTION_OPERATIONS: &[&str] = &[
+    "user_input_list",
+    "user_input_respond",
     "permission_list",
     "permission_decide",
     "attachment_begin",
     "attachment_chunk",
     "attachment_abort",
+    "attachment_abort_confirmed",
     "artifact_index",
     "artifact_preview",
     "artifact_download_begin",
@@ -598,6 +601,8 @@ const NESTED_SCHEMAS: &[(&str, Schema)] = &[
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
             ],
             optional: &[],
@@ -1433,6 +1438,98 @@ pub(crate) fn validate_controller_message_json(
     validate_controller_message_json_in_context(input, sender_role, None)
 }
 
+/// A size-bounded, duplicate-key-rejecting parse. Routing may inspect its shape,
+/// but only the validated view is an admitted controller message.
+pub(crate) struct ParsedControllerMessage {
+    value: Value,
+    wire_bytes: usize,
+}
+
+// 本文件被 controller-crypto-harness 经 #[path] 复用；显式指定路径使
+// 生产与 harness 两种解析上下文都指向 protocol/parsed_message_tests.rs。
+#[cfg(test)]
+#[path = "protocol/parsed_message_tests.rs"]
+mod parsed_message_tests;
+
+pub(crate) struct ValidatedControllerMessage<'a> {
+    value: &'a Value,
+}
+
+impl ValidatedControllerMessage<'_> {
+    pub(crate) fn value(&self) -> &Value {
+        self.value
+    }
+}
+
+impl ParsedControllerMessage {
+    pub(crate) fn parse(input: &str) -> Result<Self> {
+        if input.len() > MAX_ENCRYPTED_WIRE_BYTES {
+            return Err(ControllerProtocolError::new("message_too_large", "json"));
+        }
+        Ok(Self {
+            value: parse_unique_json(input)?,
+            wire_bytes: input.len(),
+        })
+    }
+
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub(crate) fn validate(
+        &self,
+        sender_role: SenderRole,
+        expected_context: Option<&LeaseContext>,
+    ) -> Result<ValidatedControllerMessage<'_>> {
+        let object = as_object(&self.value, "message")?;
+        let kind = message_kind(object, "message")?;
+        let schema = message_schema(kind)
+            .ok_or_else(|| ControllerProtocolError::new("unknown_message_type", "message.type"))?;
+        if kind != "encrypted_frame" && self.wire_bytes > MAX_CONTROL_MESSAGE_BYTES {
+            return Err(ControllerProtocolError::new("message_too_large", "json"));
+        }
+        validate_object(object, kind, &schema, sender_role, "message")?;
+        if kind == "desktop_pairing_register"
+            && object.get("code_wrap_public_key_b64") == object.get("handshake_public_key_b64")
+        {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "message.key_purpose_reuse",
+            ));
+        }
+        if kind == "controller_pairing_reserved" {
+            validate_reserved_transcript(object)?;
+        }
+        if matches!(
+            kind,
+            "controller_liveness_attestation_a" | "controller_liveness_attestation_b"
+        ) {
+            validate_uint(
+                required_value(object, "observed_age_ms", "message")?,
+                "observed_age_ms",
+                30_000,
+            )?;
+            validate_uint(
+                required_value(object, "remaining_ttl_ms", "message")?,
+                "remaining_ttl_ms",
+                30_000,
+            )?;
+        }
+        enforce_expected_context(object, expected_context)?;
+        Ok(ValidatedControllerMessage { value: &self.value })
+    }
+
+    pub(crate) fn validate_runtime(
+        &self,
+        sender_role: SenderRole,
+        lease: Option<&LeaseContext>,
+        capabilities: &[String],
+    ) -> Result<ValidatedControllerMessage<'_>> {
+        validate_runtime_capabilities(capabilities)?;
+        validate_runtime_parsed_contents(self, sender_role, lease, capabilities)
+    }
+}
+
 /// A/B 在线上报文里的角色字面量（`sender_role` / `receiver_role`）。
 pub(crate) const ROLE_A: &str = "A";
 pub(crate) const ROLE_B: &str = "B";
@@ -1458,46 +1555,9 @@ pub(crate) fn validate_controller_message_json_in_context(
     sender_role: SenderRole,
     expected_context: Option<&LeaseContext>,
 ) -> Result<Value> {
-    if input.len() > MAX_ENCRYPTED_WIRE_BYTES {
-        return Err(ControllerProtocolError::new("message_too_large", "json"));
-    }
-    let value = parse_unique_json(input)?;
-    let object = as_object(&value, "message")?;
-    let kind = message_kind(object, "message")?;
-    let schema = message_schema(kind)
-        .ok_or_else(|| ControllerProtocolError::new("unknown_message_type", "message.type"))?;
-    if kind != "encrypted_frame" && input.len() > MAX_CONTROL_MESSAGE_BYTES {
-        return Err(ControllerProtocolError::new("message_too_large", "json"));
-    }
-    validate_object(object, kind, &schema, sender_role, "message")?;
-    if kind == "desktop_pairing_register"
-        && object.get("code_wrap_public_key_b64") == object.get("handshake_public_key_b64")
-    {
-        return Err(ControllerProtocolError::new(
-            "invalid_field",
-            "message.key_purpose_reuse",
-        ));
-    }
-    if kind == "controller_pairing_reserved" {
-        validate_reserved_transcript(object)?;
-    }
-    if matches!(
-        kind,
-        "controller_liveness_attestation_a" | "controller_liveness_attestation_b"
-    ) {
-        validate_uint(
-            required_value(object, "observed_age_ms", "message")?,
-            "observed_age_ms",
-            30_000,
-        )?;
-        validate_uint(
-            required_value(object, "remaining_ttl_ms", "message")?,
-            "remaining_ttl_ms",
-            30_000,
-        )?;
-    }
-    enforce_expected_context(object, expected_context)?;
-    Ok(value)
+    let parsed = ParsedControllerMessage::parse(input)?;
+    parsed.validate(sender_role, expected_context)?;
+    Ok(parsed.value)
 }
 
 pub(crate) fn validate_controller_payload_json(
@@ -1656,6 +1716,14 @@ impl LeaseInstallValidationContext {
     // 上下文来构造握手绑定。这里只暴露握手与协商所需的最小集合，不泄露签名材料。
     pub(crate) fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    /// A stable claim retry can change only the outer transport request ID.
+    /// Compare every authenticated install field, including future additions;
+    /// this is replay recognition, never authorization for a new admission.
+    pub(crate) fn same_pairing_reservation(&self, mut candidate: Self) -> bool {
+        candidate.request_id.clone_from(&self.request_id);
+        self == &candidate
     }
 
     pub(crate) fn pairing_id(&self) -> &str {
@@ -2008,8 +2076,26 @@ pub(crate) fn validate_controller_runtime_message_json(
         ControllerProtocolError::new("unsupported_capability", "negotiated_capabilities")
     })?;
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
-    let shape = validate_controller_message_json(input, sender_role)?;
-    let kind = message_kind(as_object(&shape, "message")?, "message")?;
+    let parsed = ParsedControllerMessage::parse(input)?;
+    validate_runtime_parsed_contents(
+        &parsed,
+        sender_role,
+        context.lease.as_ref(),
+        &context.negotiated_capabilities,
+    )?;
+    Ok(parsed.value)
+}
+
+// Callers validate capabilities first, preserving the JSON API's error order.
+fn validate_runtime_parsed_contents<'a>(
+    parsed: &'a ParsedControllerMessage,
+    sender_role: SenderRole,
+    lease: Option<&LeaseContext>,
+    capabilities: &[String],
+) -> Result<ValidatedControllerMessage<'a>> {
+    let validated = parsed.validate(sender_role, None)?;
+    let object = as_object(validated.value(), "message")?;
+    let kind = message_kind(object, "message")?;
     if LEASE_INSTALL_MESSAGE_TYPES.contains(&kind) {
         return Err(ControllerProtocolError::new(
             "missing_field",
@@ -2021,34 +2107,27 @@ pub(crate) fn validate_controller_runtime_message_json(
         .required
         .contains(&"controller_lease_id")
     {
-        Some(require_runtime_lease(context)?)
+        Some(lease.ok_or_else(|| {
+            ControllerProtocolError::new("missing_field", "runtime_context.lease")
+        })?)
     } else {
-        context.lease.as_ref()
+        lease
     };
-    let value = if lease.is_some() {
-        validate_controller_message_json_in_context(input, sender_role, lease)?
-    } else {
-        shape
-    };
-    let kind = message_kind(as_object(&value, "message")?, "message")?;
+    enforce_expected_context(object, lease)?;
     if kind != "controller_capabilities" && kind != "error" {
         for required in outer_message_capabilities(kind) {
-            if !context
-                .negotiated_capabilities
-                .iter()
-                .any(|value| value == required)
-            {
+            if !capabilities.iter().any(|value| value == required) {
                 return Err(ControllerProtocolError::new("unsupported_capability", kind));
             }
         }
     }
     if kind == "encrypted_frame" {
         enforce_negotiated_payload(
-            object_string(as_object(&value, "message")?, "payload_kind", "message")?,
-            &context.negotiated_capabilities,
+            object_string(object, "payload_kind", "message")?,
+            capabilities,
         )?;
     }
-    Ok(value)
+    Ok(validated)
 }
 
 pub(crate) fn validate_controller_runtime_payload_json(
@@ -2067,13 +2146,14 @@ pub(crate) fn validate_controller_runtime_payload_json(
     let value = validate_controller_payload_json_in_context(input, sender_role, Some(lease))?;
     if matches!(kind, "remote_action_request" | "remote_action_result") {
         let operation = object_string(as_object(&value, "payload")?, "operation", "payload")?;
-        let required = if operation.starts_with("permission_") {
-            "permission_v1"
-        } else if operation.starts_with("attachment_") {
-            "attachment_v1"
-        } else {
-            "artifact_v1"
-        };
+        let required =
+            if operation.starts_with("permission_") || operation.starts_with("user_input_") {
+                "permission_v1"
+            } else if operation.starts_with("attachment_") {
+                "attachment_v1"
+            } else {
+                "artifact_v1"
+            };
         if !context
             .negotiated_capabilities
             .iter()
@@ -2888,6 +2968,8 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
 fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<()> {
     let operation = object_string(payload, "operation", "payload")?;
     let (required, optional): (&[&str], &[&str]) = match (result, operation) {
+        (false, "user_input_list") => (&["task_id"], &[]),
+        (false, "user_input_respond") => (&["task_id", "input_id", "cancel", "answers"], &[]),
         (false, "permission_list") => (&["task_id"], &[]),
         (false, "permission_decide") => (&["task_id", "permission_request_id", "decision"], &[]),
         (false, "attachment_begin") => (
@@ -2904,7 +2986,9 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
             ],
             &[],
         ),
-        (false, "attachment_abort") => (&["task_id", "transfer_id"], &[]),
+        (false, "attachment_abort" | "attachment_abort_confirmed") => {
+            (&["task_id", "transfer_id"], &[])
+        }
         (false, "artifact_index") => (&[], &[]),
         (false, "artifact_preview") => (&["artifact_id"], &[]),
         (false, "artifact_download_begin") => (&["task_id", "artifact_id"], &[]),
@@ -2930,10 +3014,13 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
             (&[], &[])
         }
         (true, "permission_list") => (&["permissions"], &[]),
+        (true, "user_input_list") => (&["requests"], &[]),
+        (true, "user_input_respond") => (&["state"], &[]),
         (true, "permission_decide") => (&["state"], &[]),
         (true, "attachment_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
         (true, "attachment_chunk") => (&["state", "received_bytes"], &["sha256"]),
         (true, "attachment_abort") => (&["aborted"], &[]),
+        (true, "attachment_abort_confirmed") => (&["transfer_id", "cleanup_confirmed"], &[]),
         (true, "artifact_index") => (&["artifacts"], &[]),
         (true, "artifact_preview") => (&["artifact_id", "preview_kind", "truncated"], &["text"]),
         (true, "artifact_download_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
@@ -2966,7 +3053,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
     for field in required.iter().chain(optional.iter()) {
         if let Some(value) = body.get(*field) {
             match *field {
-                "aborted" | "completed" | "truncated" => {
+                "aborted" | "completed" | "truncated" | "cleanup_confirmed" | "cancel" => {
                     if !value.is_boolean() {
                         return Err(ControllerProtocolError::new(
                             "invalid_field",
@@ -2975,6 +3062,31 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
                     }
                 }
                 "permissions" => validate_remote_action_permissions(value)?,
+                "requests" => {
+                    let requests: Vec<super::user_input::InputRequest> =
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            ControllerProtocolError::new("invalid_field", "body.requests")
+                        })?;
+                    if !super::user_input::valid_requests(&requests) {
+                        return Err(ControllerProtocolError::new(
+                            "invalid_field",
+                            "body.requests",
+                        ));
+                    }
+                }
+                "answers" => {
+                    let answers: Vec<super::user_input::InputAnswer> =
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            ControllerProtocolError::new("invalid_field", "body.answers")
+                        })?;
+                    if !super::user_input::valid_answer_shape(&answers) {
+                        return Err(ControllerProtocolError::new(
+                            "invalid_field",
+                            "body.answers",
+                        ));
+                    }
+                }
+                "input_id" => validate_identifier(value, "body.input_id")?,
                 "artifacts" => validate_remote_action_artifacts(value)?,
                 "preview_kind" => validate_enum(
                     value,
@@ -3105,7 +3217,13 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         binding_schema.optional,
         "temporary_model_package.binding",
     )?;
-    for field in ["connection_id", "controller_lease_id", "task_id"] {
+    for field in [
+        "connection_id",
+        "controller_lease_id",
+        "relay_epoch",
+        "remote_control_generation",
+        "task_id",
+    ] {
         validate_identifier(
             required_value(binding, field, "temporary_model_package.binding")?,
             &format!("temporary_model_package.binding.{field}"),
@@ -3120,6 +3238,8 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         "connection_id",
         "controller_lease_id",
         "lease_epoch",
+        "relay_epoch",
+        "remote_control_generation",
         "task_id",
     ] {
         if binding.get(field) != task.get(field) {
@@ -4392,6 +4512,10 @@ mod tests {
         json!({
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
             "subprotocol": CONTROLLER_SUBPROTOCOL,
+            "remote_action_operations": REMOTE_ACTION_OPERATIONS,
+            "user_input_limits": {"pending":super::super::user_input::MAX_REQUESTS,
+                "questions":super::super::user_input::MAX_QUESTIONS,"custom_chars":super::super::user_input::MAX_CUSTOM_CHARS,
+                "view_bytes":super::super::user_input::MAX_VIEW_BYTES},
             "integer_wire_format": "canonical-u64-decimal-string",
             "json_object_keys": "unique-after-unescape",
             "limits": {
@@ -5656,6 +5780,18 @@ mod tests {
         let lease = context();
         for (operation, request_body, response_body, fine) in [
             (
+                "user_input_list",
+                json!({"task_id":"task-1"}),
+                json!({"requests":[]}),
+                "permission_v1",
+            ),
+            (
+                "user_input_respond",
+                json!({"task_id":"task-1","input_id":"input-1","cancel":true,"answers":[]}),
+                json!({"state":"accepted"}),
+                "permission_v1",
+            ),
+            (
                 "permission_list",
                 json!({"task_id":"task-1"}),
                 json!({"permissions":[]}),
@@ -5665,6 +5801,12 @@ mod tests {
                 "attachment_abort",
                 json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
                 json!({"aborted":true}),
+                "attachment_v1",
+            ),
+            (
+                "attachment_abort_confirmed",
+                json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
+                json!({"transfer_id":"ctr-up-1","cleanup_confirmed":true}),
                 "attachment_v1",
             ),
             (
@@ -5703,6 +5845,71 @@ mod tests {
                 validate_controller_runtime_payload_json(&raw, role, Some(&runtime(&capabilities)))
                     .unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn remote_user_input_shared_vectors_use_the_actual_runtime_parser() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-user-input.json"
+        ))
+        .unwrap();
+        let lease = context();
+        let packet = |body: Value, result: bool| {
+            let mut value = json!({"v":1,"type":if result {"remote_action_result"} else {"remote_action_request"},
+                "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
+                "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
+                "remote_control_generation":lease.remote_control_generation,
+                "request_id":"request-input-1","session_id":"session-ref-1",
+                "operation":if result {"user_input_list"} else {"user_input_respond"},"body":body});
+            if result {
+                value["ok"] = json!(true);
+            }
+            validate_controller_runtime_payload_json(
+                &value.to_string(),
+                if result { B } else { A },
+                Some(&runtime(&["permission_v1", "task_v1"])),
+            )
+        };
+        packet(json!({"requests":fixture["requests"]}), true).unwrap();
+        packet(json!({"requests":fixture["mixed_requests"]}), true).unwrap();
+        for mutation in fixture["invalid_request_mutations"].as_array().unwrap() {
+            let mut requests = fixture["requests"].clone();
+            *requests
+                .pointer_mut(mutation["path"].as_str().unwrap())
+                .unwrap() = mutation["value"].clone();
+            assert!(
+                packet(json!({"requests":requests}), true).is_err(),
+                "{mutation}"
+            );
+        }
+        for (key, valid) in [("valid_answers", true), ("invalid_answers", false)] {
+            for answers in fixture[key].as_array().unwrap() {
+                let result = packet(
+                    json!({"task_id":"task-1","input_id":"input-fixture-1","cancel":false,"answers":answers}),
+                    false,
+                );
+                assert_eq!(result.is_ok(), valid, "{key}: {answers}");
+            }
+        }
+        let mut requests = fixture["requests"].clone();
+        requests[0]["questions"][0]["header"] = json!("🙂".repeat(64));
+        packet(json!({"requests":requests}), true).unwrap();
+        let mut requests = fixture["requests"].clone();
+        requests[0]["questions"][0]["header"] = json!("🙂".repeat(65));
+        assert!(packet(json!({"requests":requests}), true).is_err());
+        let mut requests = fixture["requests"].clone();
+        requests[0]["questions"][0]["extra"] = json!(true);
+        assert!(packet(json!({"requests":requests}), true).is_err());
+        for text in ["x".repeat(4097), "\u{85}".into()] {
+            assert!(
+                packet(
+                    json!({"task_id":"task-1","input_id":"input-fixture-1","cancel":false,
+                "answers":[{"question_id":"0","option_ids":[],"custom_text":text}]}),
+                    false
+                )
+                .is_err()
+            );
         }
     }
 

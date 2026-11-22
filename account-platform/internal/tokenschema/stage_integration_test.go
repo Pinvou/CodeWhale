@@ -1,0 +1,751 @@
+package tokenschema
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
+	"github.com/jackc/pgx/v5/pgconn"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+func TestManagementPublicMigrationInstallation(t *testing.T) {
+	t.Run("fresh", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 0, false) })
+	t.Run("legacy-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, true, 0, false) })
+	t.Run("installed-29-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 29, false) })
+	t.Run("installed-30-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 30, false) })
+	t.Run("installed-f05-34-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, false) })
+	t.Run("retained-management-lifecycle-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 34, true) })
+	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
+	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
+	t.Run("installed-pre-cleanup-39-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 39, false) })
+	t.Run("installed-pre-governance-index-40-upgrade", func(t *testing.T) {
+		testManagementPublicMigrationInstallation(t, false, 40, false, historicalIndexFixture{head: 900009, governanceOnly: true})
+	})
+	t.Run("installed-governance-before-dispatch-40-upgrade", func(t *testing.T) {
+		testManagementPublicMigrationInstallation(t, false, 40, false, historicalIndexFixture{head: 900009})
+	})
+	t.Run("installed-pre-dispatch-index-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
+	t.Run("installed-pre-publication-41-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 41, false) })
+	t.Run("installed-published-42-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 42, false) })
+	t.Run("installed-pre-emergency-retry-40-upgrade", func(t *testing.T) {
+		testManagementPublicMigrationInstallation(t, false, 40, false, historicalIndexFixture{retryOnly: true})
+	})
+}
+
+type historicalIndexFixture struct {
+	head           int64
+	governanceOnly bool
+	retryOnly      bool
+}
+
+func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool, indexFixtures ...historicalIndexFixture) {
+	dsn := os.Getenv("PINVOU_TEST_TOKEN_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("PINVOU_TEST_TOKEN_DATABASE_URL is not configured")
+	}
+	retryOnly := len(indexFixtures) > 0 && indexFixtures[0].retryOnly
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	admin, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(context.Background())
+	roles := []string{"token_gateway", "token_cap_policy_deployer", "token_schema_owner", "token_migrator", "token_policy_operator"}
+	var existing int
+	if err = admin.QueryRow(ctx, `SELECT count(*) FROM pg_roles WHERE rolname=ANY($1)`, roles).Scan(&existing); err != nil || existing != 0 {
+		t.Fatalf("isolated role absence guard: count=%d err=%v", existing, err)
+	}
+	created := []string{}
+	database := "f04_token_management_" + uuid.New().String()[:8] + fmt.Sprintf("%d", time.Now().UnixNano())
+	var fixtureDatabase *cifixture.Database
+	databaseCreated := false
+	defer func() {
+		cleanupCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		if databaseCreated {
+			if _, err := cifixture.DropDatabase(cleanupCtx, admin, fixtureDatabase, admin.Config().User); err != nil {
+				t.Error("owned database cleanup failed; roles retained")
+				return
+			}
+		}
+		for i := len(created) - 1; i >= 0; i-- {
+			if _, err := admin.Exec(cleanupCtx, "DROP ROLE "+pgx.Identifier{created[i]}.Sanitize()); err != nil {
+				t.Errorf("owned test role cleanup refused: %s", created[i])
+			}
+		}
+	}()
+	for _, role := range roles {
+		options := " NOLOGIN NOINHERIT"
+		if role != "token_schema_owner" && role != "token_cap_policy_deployer" {
+			options = " LOGIN NOINHERIT"
+		}
+		if _, err = admin.Exec(ctx, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+options); err != nil {
+			t.Fatal(err)
+		}
+		created = append(created, role)
+	}
+	if _, err = admin.Exec(ctx, `GRANT token_gateway,token_schema_owner,token_cap_policy_deployer TO token_migrator`); err != nil {
+		t.Fatal(err)
+	}
+	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, database, "CREATE DATABASE "+pgx.Identifier{database}.Sanitize())
+	fixtureDatabase = fixtureDatabaseCreated
+	if err := creationError; err != nil {
+		t.Fatal(err)
+	}
+	databaseCreated = true
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Database = database
+	owner, err := connectManagementFixture(t, ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap, err := os.ReadFile("../../deploy/production/token-database-bootstrap.sql")
+	if err != nil {
+		owner.Close(context.Background())
+		t.Fatal(err)
+	}
+	t.Run("runtime-cannot-bootstrap", func(t *testing.T) {
+		if _, err := owner.Exec(ctx, `SET ROLE token_gateway`); err != nil {
+			t.Fatal(err)
+		}
+		_, err := owner.Exec(ctx, string(bootstrap))
+		if err == nil || !strings.Contains(err.Error(), "independently controlled database operator") {
+			t.Fatalf("runtime bootstrap must be refused: %v", err)
+		}
+		if _, err := owner.Exec(ctx, `ROLLBACK; RESET ROLE`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// Execute the actual shipped operator artifact before migration. No fixture
+	// adds an extension or grants outside that production bootstrap entry point.
+	if _, err = owner.Exec(ctx, string(bootstrap)); err != nil {
+		owner.Close(context.Background())
+		t.Fatal(err)
+	}
+	owner.Close(context.Background())
+	config.User = "token_migrator"
+	config.Password = ""
+	connection, err := connectManagementFixture(t, ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close(context.Background())
+	defer migrations.Unlock(context.Background(), connection)
+	if _, err = connection.Exec(ctx, `SET ROLE token_gateway`); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := migrations.Load("../../migrations/token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retainedHistory string
+	var retainedVersions []int64
+	var previousAccountFacts string
+	var previousRuntimeCapabilityFacts string
+	var previousOutboxFacts string
+	var previousRetryHistory, retryPrefixLedger string
+	if previousStage > 0 {
+		previous := []migrations.Migration{}
+		for _, m := range loaded {
+			if previousStage == 39 || previousStage == 40 {
+				// These fixtures are the real predecessors, excluding any later
+				// recovery or index work from the package under test.
+				if m.Version <= 900005 || (previousStage == 40 && m.Version == 900006) {
+					previous = append(previous, m)
+				}
+				continue
+			}
+			if previousStage == 42 {
+				if m.Version <= 900009 {
+					previous = append(previous, m)
+				}
+				continue
+			}
+			if previousStage == 41 {
+				// This is the published 41-migration predecessor, before the
+				// later governance index and publication additions.
+				if m.Version <= 900008 {
+					previous = append(previous, m)
+				}
+				continue
+			}
+			if m.Version >= 900005 {
+				continue // Waiver intents and later cleanup indexes are not part of the retained predecessor.
+			}
+			if m.Version != 35 && (previousStage == 37 || (m.Version != 900004 && (previousStage == 36 || (m.Version != 8 && m.Version != 9 && (previousStage == 34 || ((m.Version < 900002 || (previousStage == 30 && m.Version == 900002)) && m.Version != 16 && m.Version != 17 && m.Version != 34)))))) {
+				previous = append(previous, m)
+			}
+		}
+		if err = migrations.UpWithHooks(ctx, connection, previous, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+			t.Fatal("installed previous stage fixture", err)
+		}
+		migrations.Unlock(ctx, connection)
+		verified, e := migrations.VerifyApplied(ctx, connection, previous)
+		if e != nil || verified.AppliedCount != previousStage {
+			t.Fatal("installed previous stage fixture verification", verified, e)
+		}
+		if previousStage == 42 || retryOnly {
+			if e = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`).Scan(&previousRetryHistory); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if previousStage == 41 || previousStage == 42 || retryOnly {
+			if _, e = connection.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at)
+ VALUES('11111111-1111-4111-8111-111111111117','token.manual-review.created.v1','11111111-1111-4111-8111-111111111118',1,'{"case_type":"ROUTE_PROVISIONING"}','retained-publication','2026-01-01')`); e != nil {
+				t.Fatal(e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT to_jsonb(o)::text FROM outbox_events o`).Scan(&previousOutboxFacts); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if previousStage == 36 {
+			if _, e = connection.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES('11111111-1111-4111-8111-111111111111','USER','22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','retained closure account','ACTIVE',100,'22222222-2222-4222-8222-222222222222','2026-01-01','2026-01-01','PLATFORM')`); e != nil {
+				t.Fatal("preclosure runtime account fixture", e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&previousAccountFacts); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if previousStage == 37 {
+			if _, e := connection.Exec(ctx, `INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,upstream_model_ref_digest,created_by,created_at)
+VALUES('11111111-1111-4111-8111-111111111115','RETAINED','fixture-v1','retained-model',encode(digest('retained-model','sha256'),'hex'),'22222222-2222-4222-8222-222222222222','2026-01-01');
+INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at)
+VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111115',1,'00000000-0000-7000-8200-000000000000',4096,1024,'["text"]','retained-tokenizer','22222222-2222-4222-8222-222222222222','2026-01-01')`); e != nil {
+				t.Fatal("pre-runtime retained capability", e)
+			}
+			if e := connection.QueryRow(ctx, `SELECT to_jsonb(capability)::text FROM model_capability_versions capability WHERE id='11111111-1111-4111-8111-111111111116'`).Scan(&previousRuntimeCapabilityFacts); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if retainedManagement {
+			for _, migration := range previous {
+				retainedVersions = append(retainedVersions, migration.Version)
+			}
+			if err = connection.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(history) ORDER BY version),'[]'::jsonb)::text FROM schema_migrations history`).Scan(&retainedHistory); err != nil {
+				t.Fatal(err)
+			}
+			testRetainedLifecycleMigrationRollback(t, ctx, connection, loaded)
+		}
+	}
+	if legacy {
+		operatorConfig := config.Copy()
+		operatorConfig.User = admin.Config().User
+		op, e := connectManagementFixture(t, ctx, operatorConfig)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer op.Close(context.Background())
+		if _, e = op.Exec(ctx, `REVOKE token_gateway FROM token_schema_owner`); e != nil {
+			t.Fatal(e)
+		}
+		old := []migrations.Migration{}
+		for _, m := range loaded {
+			if m.Version < 900001 && m.Version != 8 && m.Version != 9 && m.Version != 16 && m.Version != 17 && m.Version != 34 && m.Version != 35 {
+				old = append(old, m)
+			}
+		}
+		if e = migrations.UpWithHooks(ctx, connection, old, migrations.UpHooks{BeforeApply: lendPinnedMigrationDDL, AfterApply: revokePinnedMigrationDDL}); e != nil {
+			t.Fatal("legacy installation", e)
+		}
+		migrations.Unlock(ctx, connection)
+		if e = Up(ctx, connection, loaded); e == nil {
+			t.Fatal("unprovisioned legacy upgrade accepted")
+		}
+		migrations.Unlock(ctx, connection)
+		var count int
+		var marker bool
+		if e = connection.QueryRow(ctx, `SELECT (SELECT count(*) FROM schema_migrations),to_regclass('public.token_runtime_hardening') IS NOT NULL`).Scan(&count, &marker); e != nil || count != 28 || count != len(old) || marker {
+			t.Fatal("failed upgrade changed history", count, marker, e)
+		}
+		artifact, e := os.ReadFile("../../deploy/production/token-storage-hardening-bootstrap.sql")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = connection.Exec(ctx, string(artifact)); e == nil {
+			t.Fatal("migrator accepted independent operator bootstrap")
+		}
+		if _, e = connection.Exec(ctx, `ROLLBACK;SET ROLE token_gateway`); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = op.Exec(ctx, string(artifact)); e != nil {
+			t.Fatal("legacy operator provisioning", e)
+		}
+
+		t.Run("failed-organization-DDL-rolls-back-temporary-create", func(t *testing.T) {
+			tx, e := connection.Begin(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tx.Rollback(context.Background())
+			var selected migrations.Migration
+			for _, m := range loaded {
+				if m.Version == 8 {
+					selected = m
+				}
+			}
+			if e = lendPinnedMigrationDDL(ctx, tx, selected); e != nil {
+				t.Fatal(e)
+			}
+			var allowed bool
+			if e = tx.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&allowed); e != nil || !allowed {
+				t.Fatal("temporary DDL privilege missing", e)
+			}
+			if _, e = tx.Exec(ctx, `SELECT public.controlled_missing_organization_ddl_function()`); e == nil {
+				t.Fatal("controlled migration failure expected")
+			}
+			if e = tx.Rollback(ctx); e != nil {
+				t.Fatal(e)
+			}
+			if e = connection.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&allowed); e != nil || allowed {
+				t.Fatal("failed migration leaked schema CREATE", e)
+			}
+			var absent bool
+			if e = connection.QueryRow(ctx, `SELECT to_regclass('public.organization_lifecycle_states') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=8)`).Scan(&absent); e != nil || !absent {
+				t.Fatal("failed migration changed organization history", e)
+			}
+		})
+	}
+	if previousStage == 42 || retryOnly {
+		t.Run("retry-forward-only-public-prefix", func(t *testing.T) {
+			retryPrefixLedger = testEmergencyRetryHistoricalFence(t, ctx, connection, admin.Config(), config, loaded, previousStage, previousRetryHistory)
+		})
+		if retryPrefixLedger == "" {
+			t.Fatal("public retry forward-only boundary did not execute")
+		}
+	}
+	if previousStage == 40 && !retryOnly {
+		// Validate the complete current carrier before selecting the real
+		// historical SQL. Pending later migrations remain in the CLI package.
+		orderedCarrier, e := Ordered(loaded)
+		if e != nil {
+			t.Fatal(e)
+		}
+		indexFixture := historicalIndexFixture{head: 900008}
+		if len(indexFixtures) > 0 {
+			indexFixture = indexFixtures[0]
+		}
+		var indexRelease []migrations.Migration
+		for _, migration := range orderedCarrier {
+			if migration.Version <= indexFixture.head {
+				indexRelease = append(indexRelease, migration)
+			}
+		}
+		if e = migrations.UpWithHooks(ctx, connection, indexRelease, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); e != nil {
+			t.Fatal("install frozen dispatch-index historical release", e)
+		}
+		migrations.Unlock(ctx, connection)
+		verified, e := migrations.VerifyApplied(ctx, connection, indexRelease)
+		if e != nil || verified.AppliedCount != len(indexRelease) {
+			t.Fatalf("dispatch-index historical carrier: %+v err=%v", verified, e)
+		}
+		if indexFixture.governanceOnly {
+			if !t.Run("governance-index-public-cli-rollback", func(t *testing.T) { testGovernanceIndexPublicRollback(t, ctx, connection, config.Copy(), loaded) }) {
+				return
+			}
+		} else if !t.Run("dispatch-index-public-cli-round-trip", func(t *testing.T) { testDispatchIndexPublicRollback(t, ctx, connection, config, loaded) }) {
+			return
+		}
+	}
+	if err = Up(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
+	if retryPrefixLedger != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<=900010`).Scan(&current); err != nil || current != retryPrefixLedger {
+			t.Fatal("complete publication upgrade changed the exact retry-prefix ledger", err)
+		}
+		assertPublishedTokenInventory(t, ctx, admin.Config(), config, 900012)
+	}
+	if previousOutboxFacts != "" {
+		var current string
+		var generation int64
+		if err = connection.QueryRow(ctx, `SELECT (to_jsonb(o)-'publication_generation')::text,publication_generation FROM outbox_events o`).Scan(&current, &generation); err != nil || current != previousOutboxFacts || generation != 0 {
+			t.Fatal("publication upgrade changed original outbox facts", generation, err)
+		}
+		for _, migration := range loaded {
+			if migration.Version != 900011 {
+				continue
+			}
+			tx, err := connection.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = tx.Exec(ctx, migration.DownSQL)
+			var failure *pgconn.PgError
+			refused := errors.As(err, &failure) && failure.Code == "55000"
+			if err := tx.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if !refused {
+				t.Fatal("publication fence Down was not explicitly refused")
+			}
+			if err := connection.QueryRow(ctx, `SELECT (to_jsonb(o)-'publication_generation')::text,publication_generation FROM outbox_events o`).Scan(&current, &generation); err != nil || current != previousOutboxFacts || generation != 0 {
+				t.Fatal("refused Down changed retained publication", err)
+			}
+		}
+	}
+	if previousAccountFacts != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT to_jsonb(account)::text FROM token_accounts account WHERE id='11111111-1111-4111-8111-111111111111'`).Scan(&current); err != nil || current != previousAccountFacts {
+			t.Fatal("closure upgrade changed existing account facts", err)
+		}
+	}
+	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
+	if err != nil || verification.AppliedCount != len(installed) {
+		t.Fatalf("public migration verification: %+v err=%v", verification, err)
+	}
+	for name, columns := range map[string]string{"usage_governance_account_credential_idx": "token_account_id, credential_id", "usage_governance_model_idx": "model_id"} {
+		var definition, owner string
+		var ready bool
+		if err := connection.QueryRow(ctx, `SELECT pg_get_indexdef(i.indexrelid),pg_get_userbyid(c.relowner),i.indisvalid AND i.indisready FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indexrelid=to_regclass($1)`, "public."+name).Scan(&definition, &owner, &ready); err != nil || !ready || owner != "token_schema_owner" || !strings.Contains(definition, "USING btree ("+columns+")") || !strings.Contains(definition, "WHERE (execution_status") {
+			t.Fatal("governance resource index shape or owner differs", name, definition, owner, ready, err)
+		}
+		for _, state := range []string{"RECEIVED", "HOLD_RESERVING", "HOLD_RESERVED", "DISPATCH_INTENT_PERSISTED", "UPSTREAM_DISPATCHING", "STREAMING", "SETTLEMENT_PENDING"} {
+			if !strings.Contains(definition, "'"+state+"'") {
+				t.Fatal("governance index omits an active state", name, state)
+			}
+		}
+	}
+	var dispatchIndex bool
+	if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
+  AND i.indrelid='public.usage_cancellation_evidence'::regclass AND i.indisvalid AND i.indisready AND i.indnatts=1
+  AND pg_get_userbyid(c.relowner)='token_schema_owner' AND pg_get_indexdef(i.indexrelid,1,false)='usage_request_id'
+  AND pg_get_expr(i.indpred,i.indrelid)='((adapter_version = ''hold-expiry-v1''::text) AND (evidence_type = ''CANCEL_REQUESTED''::text))')`).Scan(&dispatchIndex); err != nil || !dispatchIndex {
+		t.Fatal("dispatch fence index predicate or hardened owner did not match", err)
+	}
+	if retainedManagement {
+		var history string
+		if err = connection.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(history) ORDER BY version),'[]'::jsonb)::text FROM schema_migrations history WHERE version=ANY($1)`, retainedVersions).Scan(&history); err != nil || history != retainedHistory {
+			t.Fatalf("retained ledger rows changed: equal=%v err=%v", history == retainedHistory, err)
+		}
+	}
+	var runtimeCanCreate bool
+	if err = connection.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&runtimeCanCreate); err != nil || runtimeCanCreate {
+		t.Fatalf("overview migration must not retain runtime schema CREATE: %v err=%v", runtimeCanCreate, err)
+	}
+	// Each Up acquires one session advisory lock; release the first installation
+	// before testing a second independent invocation on this same connection.
+	migrations.Unlock(ctx, connection)
+	probeConfig := config.Copy()
+	probeConfig.User = admin.Config().User
+	probe, err := connectManagementFixture(t, ctx, probeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unlocked bool
+	err = probe.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('pinvou_account_platform_migrations'))`).Scan(&unlocked)
+	if unlocked {
+		migrations.Unlock(ctx, probe)
+	}
+	probe.Close(context.Background())
+	if err != nil || !unlocked {
+		t.Fatalf("one Up followed by one Unlock retained the migration lock: acquired=%v err=%v", unlocked, err)
+	}
+	var completeRetryFacts string
+	if retryPrefixLedger != "" {
+		if err = connection.QueryRow(ctx, `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(h) ORDER BY version) FROM schema_migrations h),'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY event_id) FROM outbox_events o))::text`).Scan(&completeRetryFacts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = Up(ctx, connection, loaded); err != nil {
+		t.Fatalf("exact installed migration replay: %v", err)
+	}
+	if retryPrefixLedger != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(h) ORDER BY version) FROM schema_migrations h),'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY event_id) FROM outbox_events o))::text`).Scan(&current); err != nil || current != completeRetryFacts {
+			t.Fatal("exact full-current replay changed retry/publication ledger or facts", err)
+		}
+	}
+
+	if previousStage == 37 {
+		var retainedFacts, profile string
+		if err := connection.QueryRow(ctx, `SELECT (to_jsonb(capability)-'runtime_protocol')::text,runtime_protocol FROM model_capability_versions capability WHERE id='11111111-1111-4111-8111-111111111116'`).Scan(&retainedFacts, &profile); err != nil || retainedFacts != previousRuntimeCapabilityFacts || profile != "" {
+			t.Fatalf("runtime protocol upgrade rewrote or guessed old capability: profile=%q err=%v", profile, err)
+		}
+	}
+	var activation string
+	if err = connection.QueryRow(ctx, `SELECT state FROM public.token_command_governance_activation WHERE singleton`).Scan(&activation); err != nil || activation != "PRE_ACTIVATION" {
+		t.Fatalf("migration must not fabricate runtime authority: %q err=%v", activation, err)
+	}
+	var readiness, usageHistory, organization, units, replayFence, futureStorage bool
+	if err = connection.QueryRow(ctx, `SELECT to_regclass('client_readiness_attestations') IS NOT NULL,to_regclass('usage_history_groups') IS NOT NULL,to_regclass('organization_lifecycle_states') IS NOT NULL,to_regclass('organization_unit_governance_blockers') IS NOT NULL AND to_regclass('organization_unit_lifecycle_states') IS NOT NULL,to_regclass('usage_replay_anonymized_users') IS NOT NULL,to_regclass('usage_request_anonymization_commands') IS NOT NULL`).Scan(&readiness, &usageHistory, &organization, &units, &replayFence, &futureStorage); err != nil || !readiness || !usageHistory || !organization || !units || !replayFence || futureStorage {
+		t.Fatalf("installed lifecycle/replay storage mismatch: readiness=%v usage=%v org=%v unit=%v replay=%v future=%v err=%v", readiness, usageHistory, organization, units, replayFence, futureStorage, err)
+	}
+	migrations.Unlock(ctx, connection)
+	config.User = admin.Config().User
+	operator, err := connectManagementFixture(t, ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer operator.Close(context.Background())
+	t.Run("installed-history-cannot-regrant-runtime-create", func(t *testing.T) {
+		_, err := operator.Exec(ctx, string(bootstrap))
+		if err == nil || !strings.Contains(err.Error(), "cannot reset an installed or partial migration history") {
+			t.Fatalf("installed bootstrap must be refused: %v", err)
+		}
+		if _, err := operator.Exec(ctx, `ROLLBACK`); err != nil {
+			t.Fatal(err)
+		}
+		var canCreate bool
+		if err := operator.QueryRow(ctx, `SELECT has_schema_privilege('token_gateway','public','CREATE')`).Scan(&canCreate); err != nil || canCreate {
+			t.Fatalf("failed bootstrap lent schema authority: %v err=%v", canCreate, err)
+		}
+	})
+	t.Run("runtime-storage-and-ledger-authority", func(t *testing.T) {
+		defer connection.Exec(context.Background(), `SET ROLE token_gateway`)
+		runtimeConfig := config.Copy()
+		runtimeConfig.User = "token_gateway"
+		runtimeConfig.Password = ""
+		runtime, err := connectManagementFixture(t, ctx, runtimeConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Close(context.Background())
+		assertTokenRuntimeStorage(t, ctx, runtime)
+		assertTokenHistoryAuthority(t, ctx, runtime)
+		verified, e := migrations.VerifyApplied(ctx, runtime, loaded)
+		if e != nil || verified.AppliedCount != len(installed) {
+			t.Fatal("independent runtime migration verification", verified, e)
+		}
+		var unguarded int
+		if err = operator.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner) IN ('token_gateway','token_schema_owner','token_cap_policy_deployer') AND NOT EXISTS(SELECT 1 FROM pg_trigger trigger WHERE trigger.tgrelid=c.oid AND NOT trigger.tgisinternal AND (trigger.tgtype & 32)=32 AND (trigger.tgtype & 1)=0)`).Scan(&unguarded); err != nil || unguarded != 0 {
+			t.Fatal("missing statement guard", unguarded, err)
+		}
+		if _, err = runtime.Exec(ctx, `INSERT INTO token_audit_logs(id,actor_user_id,action,resource_type,resource_id,summary,occurred_at) VALUES($1,$2,'CONTROLLED_REVIEW','FIXTURE',$3,'{}',clock_timestamp())`, uuid.New(), uuid.New(), uuid.New()); err != nil {
+			t.Fatal("runtime audit append broken", err)
+		}
+		for _, statement := range []string{`TRUNCATE token_audit_logs`, `UPDATE token_audit_logs SET action='REWRITTEN'`, `DELETE FROM token_audit_logs`, `ALTER TABLE token_audit_logs DISABLE TRIGGER ALL`, `DROP TRIGGER token_audit_logs_immutable ON token_audit_logs`, `CREATE TABLE public.unapproved_runtime_ddl(id integer)`, `INSERT INTO schema_migrations(version,name,checksum) VALUES(999,'forged','forged')`, `SET ROLE token_schema_owner`, `SET ROLE token_cap_policy_deployer`, `SELECT public.harden_token_runtime_objects()`} {
+			if _, err = runtime.Exec(ctx, statement); err == nil {
+				t.Fatal("runtime authority leaked", statement)
+			}
+		}
+		// Owner still cannot accidentally truncate even an empty immutable table;
+		// this proves the statement trigger rather than only runtime's narrow ACL.
+		for _, entry := range []struct{ role, table string }{{"token_schema_owner", "usage_convergence_evidence"}, {"token_cap_policy_deployer", "token_account_owner_cap_policy_revisions"}} {
+			if _, err = connection.Exec(ctx, "SET ROLE "+pgx.Identifier{entry.role}.Sanitize()); err != nil {
+				t.Fatal(err)
+			}
+			_, err = connection.Exec(ctx, "TRUNCATE "+pgx.Identifier{"public", entry.table}.Sanitize()+" CASCADE")
+			var pgerr *pgconn.PgError
+			if !errors.As(err, &pgerr) || pgerr.Code != "55000" {
+				t.Fatal("statement protection not enforced", entry, err)
+			}
+		}
+		if _, err = connection.Exec(ctx, `SET ROLE token_gateway`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("history-projection-authority", func(t *testing.T) {
+		assertTokenHistoryAuthority(t, ctx, connection)
+		tx, e := connection.Begin(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer tx.Rollback(context.Background())
+		if _, e = tx.Exec(ctx, `SET ROLE token_schema_owner; SELECT public.harden_token_runtime_objects(); SET ROLE token_gateway`); e != nil {
+			t.Fatal("approved definers rejected by forward hardener", e)
+		}
+		if e = tx.Commit(ctx); e != nil {
+			t.Fatal(e)
+		}
+		assertTokenHistoryAuthority(t, ctx, connection)
+	})
+	t.Run("reject-unreviewed-history-definers", func(t *testing.T) {
+		for _, mutation := range []string{
+			`CREATE FUNCTION public.unreviewed_projection() RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN RETURN; END $$`,
+			`ALTER FUNCTION public.project_usage_history_request(uuid,uuid,uuid,jsonb,timestamptz) SET search_path=public`,
+			`CREATE OR REPLACE FUNCTION public.project_usage_history_request(projected_id uuid,projected_user_id uuid,projected_organization_id uuid,projected_request_snapshot jsonb,projected_started_at timestamptz) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN RETURN; END $$`,
+		} {
+			tx, e := connection.Begin(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			func() {
+				defer tx.Rollback(context.Background())
+				if _, e = tx.Exec(ctx, `SET ROLE token_schema_owner; `+mutation+`; SET ROLE token_gateway`); e != nil {
+					t.Fatal(e)
+				}
+				if strings.Contains(mutation, "unreviewed_projection") {
+					_, e = tx.Exec(ctx, `SET ROLE token_schema_owner; SELECT public.harden_token_runtime_objects()`)
+				} else {
+					e = prepareTokenMigration(ctx, tx, migrations.Migration{Version: 36})
+				}
+				if e == nil {
+					t.Fatal("unreviewed definer accepted", mutation)
+				}
+			}()
+		}
+		assertTokenHistoryAuthority(t, ctx, connection)
+	})
+	t.Run("subsequent-low-version-migration-rehardens-storage", func(t *testing.T) {
+		// The generic migration engine is exercised with a synthetic next-stage DDL;
+		// Ordered still rejects this unsupported version after the F06 stage union.
+		next := migrations.Migration{Version: 36, Name: "controlled_future_storage", UpSQL: `CREATE TABLE public.controlled_future_storage(id UUID PRIMARY KEY); CREATE INDEX controlled_future_usage_idx ON usage_requests(id); SET ROLE token_schema_owner; GRANT CREATE ON SCHEMA public TO token_cap_policy_deployer; SET ROLE token_cap_policy_deployer; CREATE TABLE public.controlled_future_policy(id UUID PRIMARY KEY); SET ROLE token_schema_owner; REVOKE CREATE ON SCHEMA public FROM token_cap_policy_deployer; SET ROLE token_gateway;`}
+		if err := migrations.UpWithHooks(ctx, connection, []migrations.Migration{next}, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+			t.Fatal(err)
+		}
+		var owner, ledgerOwner string
+		if err := connection.QueryRow(ctx, `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='public.controlled_future_storage'::regclass`).Scan(&owner); err != nil || owner != "token_schema_owner" {
+			t.Fatal("future owner not recovered", owner, err)
+		}
+		if err := connection.QueryRow(ctx, `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='public.schema_migrations'::regclass`).Scan(&ledgerOwner); err != nil || ledgerOwner != "token_schema_owner" {
+			t.Fatal("ledger ownership regressed", ledgerOwner, err)
+		}
+		var ledgerRow bool
+		if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=36 AND name='controlled_future_storage')`).Scan(&ledgerRow); err != nil || !ledgerRow {
+			t.Fatal("owner ledger pin failed", ledgerRow, err)
+		}
+		var policyGuard bool
+		if err := connection.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.controlled_future_policy'::regclass AND tgname='token_no_truncate' AND (tgtype & 32)=32 AND (tgtype & 1)=0)`).Scan(&policyGuard); err != nil || !policyGuard {
+			t.Fatal("future policy missing guard", policyGuard, err)
+		}
+		runtimeConfig := config.Copy()
+		runtimeConfig.User = "token_gateway"
+		runtimeConfig.Password = ""
+		runtime, err := connectManagementFixture(t, ctx, runtimeConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Close(context.Background())
+		assertTokenRuntimeStorage(t, ctx, runtime)
+		assertTokenHistoryAuthority(t, ctx, runtime)
+		for _, statement := range []string{`UPDATE token_audit_logs SET action='REWRITTEN'`, `DELETE FROM token_audit_logs`, `TRUNCATE controlled_future_storage`, `TRUNCATE controlled_future_policy`, `CREATE TABLE public.future_leaked_ddl(id integer)`, `INSERT INTO schema_migrations(version,name,checksum) VALUES(998,'forged','forged')`} {
+			if _, err = runtime.Exec(ctx, statement); err == nil {
+				t.Fatal("future hardening authority leaked", statement)
+			}
+		}
+	})
+
+}
+
+func assertTokenRuntimeStorage(t *testing.T, ctx context.Context, c *pgx.Conn) {
+	t.Helper()
+	var current string
+	var super, unsafeMembership, create bool
+	var owned int
+	if err := c.QueryRow(ctx, `SELECT current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user),pg_has_role(current_user,'token_schema_owner','MEMBER') OR pg_has_role(current_user,'token_cap_policy_deployer','MEMBER'),has_schema_privilege(current_user,'public','CREATE'),(SELECT count(*) FROM pg_class object JOIN pg_namespace n ON n.oid=object.relnamespace WHERE n.nspname='public' AND pg_get_userbyid(object.relowner)=current_user)`).Scan(&current, &super, &unsafeMembership, &create, &owned); err != nil || current != "token_gateway" || super || unsafeMembership || create || owned != 0 {
+		t.Fatal("runtime is not independently restricted", current, super, unsafeMembership, create, owned, err)
+	}
+}
+
+func assertTokenHistoryAuthority(t *testing.T, ctx context.Context, c *pgx.Conn) {
+	t.Helper()
+	for _, table := range []string{"usage_history_projection_state", "usage_history_members", "usage_history_groups"} {
+		var read, write bool
+		if e := c.QueryRow(ctx, `SELECT has_table_privilege('token_gateway',$1,'SELECT'),has_table_privilege('token_gateway',$1,'INSERT,UPDATE,DELETE')`, "public."+table).Scan(&read, &write); e != nil || !read || write {
+			t.Fatal("history authority", table, read, write, e)
+		}
+	}
+	for _, expected := range historyDefiners {
+		var definer, execute bool
+		var owner string
+		if e := c.QueryRow(ctx, `SELECT p.prosecdef,pg_get_userbyid(p.proowner),has_function_privilege('token_gateway',p.oid,'EXECUTE') FROM pg_proc p WHERE p.oid=to_regprocedure($1)`, expected.signature).Scan(&definer, &owner, &execute); e != nil || !definer || owner != "token_schema_owner" || execute != strings.Contains(expected.signature, "backfill_") {
+			t.Fatal("history definer authority", expected.signature, definer, owner, execute, e)
+		}
+	}
+	var processed int
+	var complete bool
+	if e := c.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&processed, &complete); e != nil || processed != 0 || !complete {
+		t.Fatal("bounded history worker authority", processed, complete, e)
+	}
+}
+
+// Fixture-only timings distinguish an exhausted prior DDL budget from a slow
+// connection. They expose no endpoint, credential or persisted business data.
+func connectManagementFixture(t *testing.T, ctx context.Context, config *pgx.ConnConfig) (*pgx.Conn, error) {
+	t.Helper()
+	deadline, bounded := ctx.Deadline()
+	if bounded {
+		t.Logf("fixture connection budget remaining: %s", time.Until(deadline).Round(time.Millisecond))
+	}
+	started := time.Now()
+	c, err := pgx.ConnectConfig(ctx, config)
+	t.Logf("fixture connection elapsed: %s", time.Since(started).Round(time.Millisecond))
+	return c, err
+}
+
+// Exercise the real historical maximum before publication 900011 is installed.
+// No installed higher identity is removed and no public CLI can select a version.
+func testEmergencyRetryHistoricalFence(t *testing.T, ctx context.Context, connection *pgx.Conn, admin, config *pgx.ConnConfig, loaded []migrations.Migration, previousStage int, previousHistory string) string {
+	t.Helper()
+	ordered, err := Ordered(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := func(highest int64) []migrations.Migration {
+		var selected []migrations.Migration
+		for _, m := range ordered {
+			if m.Version <= highest {
+				selected = append(selected, m)
+			}
+		}
+		return selected
+	}
+	if err = migrations.UpWithHooks(ctx, connection, prefix(900009), migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection)
+	assertPublishedTokenInventory(t, ctx, admin, config, 900009)
+	var publishedLedger string
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`).Scan(&publishedLedger); err != nil {
+		t.Fatal(err)
+	}
+	if previousStage == 42 && publishedLedger != previousHistory {
+		t.Fatal("published 42-item ledger changed before appended retry upgrade")
+	}
+	if err = migrations.UpWithHooks(ctx, connection, prefix(900010), migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection)
+	var highest int64
+	if err = connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != 900010 {
+		t.Fatal("retry forward-only check requires its exact installed public boundary", highest, err)
+	}
+	var kept, allPublished string
+	var columns, hardened bool
+	query := `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900010`
+	if previousStage == 40 {
+		query += ` AND version NOT IN (900008,900009)`
+	}
+	if err = connection.QueryRow(ctx, query).Scan(&kept); err != nil || kept != previousHistory {
+		t.Fatal("emergency retry upgrade changed original predecessor ledger", err)
+	}
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900010`).Scan(&allPublished); err != nil || allPublished != publishedLedger {
+		t.Fatal("emergency retry upgrade changed published 42-item ledger", err)
+	}
+	if err = connection.QueryRow(ctx, `SELECT
+ (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public' AND table_name='model_emergency_cancellations' AND column_name IN ('retry_attempts','next_attempt_at')),
+ (SELECT pg_get_userbyid(relowner)='token_schema_owner' FROM pg_class WHERE oid='public.model_emergency_cancellations'::regclass)
+ AND NOT pg_has_role('token_gateway','token_schema_owner','MEMBER')
+ AND NOT has_table_privilege('token_gateway','public.model_emergency_cancellations','TRUNCATE')`).Scan(&columns, &hardened); err != nil || !columns || !hardened {
+		t.Fatal("emergency retry upgrade lost columns or runtime fence", columns, hardened, err)
+	}
+	const snapshot = `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`
+	var before, after string
+	if err = connection.QueryRow(ctx, snapshot).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	err = migrations.DownOne(ctx, connection, loaded)
+	var denied *pgconn.PgError
+	if err == nil || !strings.Contains(err.Error(), "emergency cancellation retry and review history is forward-only") || !errors.As(err, &denied) || denied.Code != "P0001" || denied.Message != "emergency cancellation retry and review history is forward-only" {
+		t.Fatalf("rollback did not reach the exact retry history guard: %v", err)
+	}
+	migrations.Unlock(ctx, connection)
+	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil || before != after {
+		t.Fatal("refused retry rollback changed an installed ledger row", err)
+	}
+	return after
+}

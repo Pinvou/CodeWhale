@@ -1,0 +1,59 @@
+name: Portable Linux Rust cache
+description: Reuse compatible archives without sharing writable runner homes
+inputs:
+  workspaces:
+    description: Cargo workspaces and target directories
+    default: '.'
+  shared-key:
+    description: Existing compatible job namespace
+    required: true
+  save-if:
+    description: Retain the caller's main-only publication policy
+    default: 'false'
+  cache-on-failure:
+    description: Retain the caller's failure publication policy
+    default: 'false'
+  cache-targets:
+    description: Whether compiled targets are included
+    default: 'true'
+  lookup-only:
+    description: Probe without restoring bytes
+    default: 'false'
+outputs:
+  cache-hit:
+    description: Exact compatible cache match
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        CACHE_WORKSPACES: ${{ inputs.workspaces }}
+        CACHE_TARGETS: ${{ inputs.cache-targets }}
+      run: node "$GITHUB_ACTION_PATH/../../../scripts/ci-rust-cache-paths.cjs"
+    - id: cache
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3; retain reviewed CLI post-save policy
+      env:
+        CARGO_HOME: ${{ steps.paths.outputs.cargo-home }}
+        # Transport endpoints and absolute instance homes do not affect Rust ABI.
+        RUSTUP_HOME: ${{ steps.paths.outputs.rustup-home }}
+        RUSTUP_DIST_SERVER: https://static.rust-lang.org
+        RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+        PINVOU_CI_CACHE_LAYOUT: ${{ steps.paths.outputs.layout }}
+        RUSTC_WRAPPER: ${{ steps.paths.outputs.rustc-wrapper }}
+        PINVOU_CI_RUST_WRAPPER_SHA256: ${{ steps.paths.outputs.wrapper-sha256 }}
+        PINVOU_CI_CARGO_CONFIG_SHA256: ${{ steps.paths.outputs.config-sha256 }}
+      with:
+        prefix-key: v0-rust
+        shared-key: ${{ inputs.shared-key }}
+        workspaces: ${{ inputs.workspaces }}
+        env-vars: PINVOU_CI_CARGO_SOURCE PINVOU_CI_CACHE_LAYOUT PINVOU_CI_RUST_WRAPPER_SHA256 PINVOU_CI_CARGO_CONFIG_SHA256
+        cmd-format: ${{ steps.paths.outputs.cmd-format }}
+        cache-targets: 'false'
+        cache-directories: ${{ steps.paths.outputs.targets }}
+        cache-bin: 'false'
+        lookup-only: ${{ inputs.lookup-only }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+        save-if: ${{ inputs.save-if }}

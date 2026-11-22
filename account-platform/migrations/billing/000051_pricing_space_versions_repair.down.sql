@@ -1,0 +1,2 @@
+-- The repaired pricing-space rows are authoritative concurrency facts and may
+-- be referenced immediately after migration. A rollback must not delete them.

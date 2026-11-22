@@ -1,0 +1,458 @@
+{
+  "child_a": "01a16ca4-df45-7e9d-be05-b82487bb0a4e",
+  "cross_id": "01a16ca4-df2e-767c-9884-988f976be258",
+  "mixed": {
+    "context": {
+      "user_id": "01a16ca4-df27-702e-ae3c-31968bba28a4",
+      "session_id": "b21e427e-50e1-46ad-8385-5600d2b73dca",
+      "context_type": "ORGANIZATION",
+      "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+      "membership_version": 2,
+      "organization_membership_version": 2,
+      "context_version": 2,
+      "authorization_version": 5,
+      "personal_authorization_version": 2,
+      "platform_authorization_version": 1,
+      "organization_authorization_version": 5,
+      "unit_ids": [
+        "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+      ],
+      "ancestor_unit_ids": [
+        "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+        "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+      ],
+      "roles": [
+        "AUDITOR",
+        "MEMBER"
+      ],
+      "permissions": [
+        "org.members.read",
+        "org.model.invoke",
+        "org.models.read",
+        "org.profile.read",
+        "org.quota.read.all",
+        "org.quota.read.self",
+        "org.roles.read",
+        "org.units.read",
+        "org.usage.read.all",
+        "org.usage.read.self",
+        "org.wallet.read"
+      ],
+      "unit_authorization_bindings": [
+        {
+          "unit_id": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+          "role": "UNIT_ADMIN",
+          "permissions": [
+            "org.members.manage",
+            "org.members.read",
+            "org.model.invoke",
+            "org.models.read",
+            "org.quota.read.self",
+            "org.units.manage",
+            "org.units.read",
+            "org.usage.read.self"
+          ]
+        },
+        {
+          "unit_id": "01a16ca4-df48-7e79-9e55-ff57bd709826",
+          "role": "UNIT_ADMIN",
+          "permissions": [
+            "org.members.manage",
+            "org.members.read",
+            "org.model.invoke",
+            "org.models.read",
+            "org.quota.read.self",
+            "org.units.manage",
+            "org.units.read",
+            "org.usage.read.self"
+          ]
+        }
+      ],
+      "personal_roles": [
+        "PERSONAL_USER"
+      ],
+      "personal_permissions": [
+        "personal.account.close.read",
+        "personal.account.close.request",
+        "personal.billing.read",
+        "personal.context.switch",
+        "personal.invitations.accept",
+        "personal.invitations.read",
+        "personal.model.invoke",
+        "personal.models.read",
+        "personal.profile.read",
+        "personal.profile.update",
+        "personal.recharge.create",
+        "personal.recharge.manage",
+        "personal.security.manage",
+        "personal.session.login",
+        "personal.usage.cancel",
+        "personal.usage.read"
+      ],
+      "platform_roles": [],
+      "platform_permissions": [],
+      "mobile_verified": false
+    },
+    "me": {
+      "user_id": "01a16ca4-df27-702e-ae3c-31968bba28a4",
+      "user_code": "USR-NB0T-A5YH-DGJE-5R22-FK",
+      "status": "ACTIVE",
+      "username": "scope3e916c4098e844",
+      "display_name": null,
+      "mobile_verified": false,
+      "commerce_customer_status": "NOT_CONFIGURED",
+      "active_context": {
+        "context_type": "ORGANIZATION",
+        "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+        "membership_version": 2,
+        "context_version": 2,
+        "authorization_version": 5,
+        "personal_authorization_version": 2,
+        "platform_authorization_version": 1,
+        "organization_authorization_version": 5,
+        "permissions": [
+          "org.members.read",
+          "org.model.invoke",
+          "org.models.read",
+          "org.profile.read",
+          "org.quota.read.all",
+          "org.quota.read.self",
+          "org.roles.read",
+          "org.units.read",
+          "org.usage.read.all",
+          "org.usage.read.self",
+          "org.wallet.read"
+        ]
+      },
+      "personal_permissions": [
+        "personal.account.close.read",
+        "personal.account.close.request",
+        "personal.billing.read",
+        "personal.context.switch",
+        "personal.invitations.accept",
+        "personal.invitations.read",
+        "personal.model.invoke",
+        "personal.models.read",
+        "personal.profile.read",
+        "personal.profile.update",
+        "personal.recharge.create",
+        "personal.recharge.manage",
+        "personal.security.manage",
+        "personal.session.login",
+        "personal.usage.cancel",
+        "personal.usage.read"
+      ],
+      "platform_permissions": []
+    },
+    "members_a": {
+      "items": [
+        {
+          "user_id": "01a16ca4-df22-7535-a62b-a8eaa9c2881f",
+          "user_code": "USR3D4CY2WV147ZPATYV7",
+          "display_name": null,
+          "email": null,
+          "status": "ACTIVE",
+          "version": 2,
+          "roles": [
+            "MEMBER",
+            "UNIT_ADMIN"
+          ],
+          "unit_ids": [
+            "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+          ],
+          "unit_admin_unit_ids": [
+            "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+            "01a16ca4-df48-7e79-9e55-ff57bd709826"
+          ],
+          "joined_at": "2026-10-24T14:41:46.829691+08:00",
+          "membership_id": "01a16ca4-df4d-7a8b-b9d9-b60e78a65564"
+        },
+        {
+          "user_id": "01a16ca4-df27-702e-ae3c-31968bba28a4",
+          "user_code": "USRNB0TA5YHDGJE5R22FK",
+          "display_name": null,
+          "email": null,
+          "status": "ACTIVE",
+          "version": 2,
+          "roles": [
+            "AUDITOR",
+            "MEMBER",
+            "UNIT_ADMIN"
+          ],
+          "unit_ids": [
+            "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+          ],
+          "unit_admin_unit_ids": [
+            "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+            "01a16ca4-df48-7e79-9e55-ff57bd709826"
+          ],
+          "joined_at": "2026-10-24T14:41:46.847229+08:00",
+          "membership_id": "01a16ca4-df5f-7382-a91c-9b3a4f51b1bd"
+        },
+        {
+          "user_id": "01a16ca4-df2a-7af2-a022-cf537268a74a",
+          "user_code": "USRHDBMRQ63V89TEV2RZN",
+          "display_name": null,
+          "email": null,
+          "status": "ACTIVE",
+          "version": 2,
+          "roles": [
+            "MEMBER"
+          ],
+          "unit_ids": [
+            "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+          ],
+          "unit_admin_unit_ids": [],
+          "joined_at": "2026-10-24T14:41:46.852612+08:00",
+          "membership_id": "01a16ca4-df64-7957-9d60-a1f776c1d30f"
+        }
+      ],
+      "next_cursor": null
+    },
+    "tree_a": {
+      "items": [
+        {
+          "unit_id": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+          "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+          "parent_id": null,
+          "name": "Scope A",
+          "status": "ACTIVE",
+          "version": 1
+        },
+        {
+          "unit_id": "01a16ca4-df45-7e9d-be05-b82487bb0a4e",
+          "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+          "parent_id": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+          "name": "A child",
+          "status": "ACTIVE",
+          "version": 1
+        }
+      ],
+      "structure_version": 5
+    }
+  },
+  "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+  "outside_b": "01a16ca4-df47-7c18-9a74-902e82f29228",
+  "root_a": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+  "root_c": "01a16ca4-df48-7e79-9e55-ff57bd709826",
+  "target_id": "01a16ca4-df2a-7af2-a022-cf537268a74a",
+  "unit": {
+    "context": {
+      "user_id": "01a16ca4-df22-7535-a62b-a8eaa9c2881f",
+      "session_id": "d97af0cd-5104-4e46-879e-eba9c6025ecc",
+      "context_type": "ORGANIZATION",
+      "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+      "membership_version": 2,
+      "organization_membership_version": 2,
+      "context_version": 2,
+      "authorization_version": 4,
+      "personal_authorization_version": 2,
+      "platform_authorization_version": 1,
+      "organization_authorization_version": 4,
+      "unit_ids": [
+        "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+      ],
+      "ancestor_unit_ids": [
+        "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+        "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+      ],
+      "roles": [
+        "MEMBER"
+      ],
+      "permissions": [
+        "org.model.invoke",
+        "org.models.read",
+        "org.profile.read",
+        "org.quota.read.self",
+        "org.roles.read",
+        "org.usage.read.self"
+      ],
+      "unit_authorization_bindings": [
+        {
+          "unit_id": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+          "role": "UNIT_ADMIN",
+          "permissions": [
+            "org.members.manage",
+            "org.members.read",
+            "org.model.invoke",
+            "org.models.read",
+            "org.quota.read.self",
+            "org.units.manage",
+            "org.units.read",
+            "org.usage.read.self"
+          ]
+        },
+        {
+          "unit_id": "01a16ca4-df48-7e79-9e55-ff57bd709826",
+          "role": "UNIT_ADMIN",
+          "permissions": [
+            "org.members.manage",
+            "org.members.read",
+            "org.model.invoke",
+            "org.models.read",
+            "org.quota.read.self",
+            "org.units.manage",
+            "org.units.read",
+            "org.usage.read.self"
+          ]
+        }
+      ],
+      "personal_roles": [
+        "PERSONAL_USER"
+      ],
+      "personal_permissions": [
+        "personal.account.close.read",
+        "personal.account.close.request",
+        "personal.billing.read",
+        "personal.context.switch",
+        "personal.invitations.accept",
+        "personal.invitations.read",
+        "personal.model.invoke",
+        "personal.models.read",
+        "personal.profile.read",
+        "personal.profile.update",
+        "personal.recharge.create",
+        "personal.recharge.manage",
+        "personal.security.manage",
+        "personal.session.login",
+        "personal.usage.cancel",
+        "personal.usage.read"
+      ],
+      "platform_roles": [],
+      "platform_permissions": [],
+      "mobile_verified": false
+    },
+    "me": {
+      "user_id": "01a16ca4-df22-7535-a62b-a8eaa9c2881f",
+      "user_code": "USR-3D4C-Y2WV-147Z-PATY-V7",
+      "status": "ACTIVE",
+      "username": "scope989d0cab96f14c",
+      "display_name": null,
+      "mobile_verified": false,
+      "commerce_customer_status": "NOT_CONFIGURED",
+      "active_context": {
+        "context_type": "ORGANIZATION",
+        "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+        "membership_version": 2,
+        "context_version": 2,
+        "authorization_version": 4,
+        "personal_authorization_version": 2,
+        "platform_authorization_version": 1,
+        "organization_authorization_version": 4,
+        "permissions": [
+          "org.model.invoke",
+          "org.models.read",
+          "org.profile.read",
+          "org.quota.read.self",
+          "org.roles.read",
+          "org.usage.read.self"
+        ]
+      },
+      "personal_permissions": [
+        "personal.account.close.read",
+        "personal.account.close.request",
+        "personal.billing.read",
+        "personal.context.switch",
+        "personal.invitations.accept",
+        "personal.invitations.read",
+        "personal.model.invoke",
+        "personal.models.read",
+        "personal.profile.read",
+        "personal.profile.update",
+        "personal.recharge.create",
+        "personal.recharge.manage",
+        "personal.security.manage",
+        "personal.session.login",
+        "personal.usage.cancel",
+        "personal.usage.read"
+      ],
+      "platform_permissions": []
+    },
+    "members_a": {
+      "items": [
+        {
+          "user_id": "01a16ca4-df22-7535-a62b-a8eaa9c2881f",
+          "user_code": "USR3D4CY2WV147ZPATYV7",
+          "display_name": null,
+          "email": null,
+          "status": "ACTIVE",
+          "version": 2,
+          "roles": [
+            "MEMBER",
+            "UNIT_ADMIN"
+          ],
+          "unit_ids": [
+            "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+          ],
+          "unit_admin_unit_ids": [
+            "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+            "01a16ca4-df48-7e79-9e55-ff57bd709826"
+          ],
+          "joined_at": "2026-10-24T14:41:46.829691+08:00",
+          "membership_id": "01a16ca4-df4d-7a8b-b9d9-b60e78a65564"
+        },
+        {
+          "user_id": "01a16ca4-df27-702e-ae3c-31968bba28a4",
+          "user_code": "USRNB0TA5YHDGJE5R22FK",
+          "display_name": null,
+          "email": null,
+          "status": "ACTIVE",
+          "version": 2,
+          "roles": [
+            "AUDITOR",
+            "MEMBER",
+            "UNIT_ADMIN"
+          ],
+          "unit_ids": [
+            "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+          ],
+          "unit_admin_unit_ids": [
+            "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+            "01a16ca4-df48-7e79-9e55-ff57bd709826"
+          ],
+          "joined_at": "2026-10-24T14:41:46.847229+08:00",
+          "membership_id": "01a16ca4-df5f-7382-a91c-9b3a4f51b1bd"
+        },
+        {
+          "user_id": "01a16ca4-df2a-7af2-a022-cf537268a74a",
+          "user_code": "USRHDBMRQ63V89TEV2RZN",
+          "display_name": null,
+          "email": null,
+          "status": "ACTIVE",
+          "version": 2,
+          "roles": [
+            "MEMBER"
+          ],
+          "unit_ids": [
+            "01a16ca4-df45-7e9d-be05-b82487bb0a4e"
+          ],
+          "unit_admin_unit_ids": [],
+          "joined_at": "2026-10-24T14:41:46.852612+08:00",
+          "membership_id": "01a16ca4-df64-7957-9d60-a1f776c1d30f"
+        }
+      ],
+      "next_cursor": null
+    },
+    "tree_a": {
+      "items": [
+        {
+          "unit_id": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+          "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+          "parent_id": null,
+          "name": "Scope A",
+          "status": "ACTIVE",
+          "version": 1
+        },
+        {
+          "unit_id": "01a16ca4-df45-7e9d-be05-b82487bb0a4e",
+          "organization_id": "01a16ca4-df35-7882-a8d1-a8169621ce1c",
+          "parent_id": "01a16ca4-df40-79b3-ac19-252fbdbee74c",
+          "name": "A child",
+          "status": "ACTIVE",
+          "version": 1
+        }
+      ],
+      "structure_version": 5
+    }
+  }
+}

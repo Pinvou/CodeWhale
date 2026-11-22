@@ -11,7 +11,7 @@ import { ControllerResumeHooks } from "../controller-resume.js";
 import { RelayStateStore } from "../relay-state-store.js";
 import { PairingStore } from "../pairing-store.js";
 import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
-import { validateControllerMessage } from "../protocol-controller.js";
+import { validateControllerMessage, RegistrationValidationContext, validateControllerRegistrationMessage } from "../protocol-controller.js";
 
 function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"], realLeaseHooks = false, pairingRegistrationHandler } = {}) {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
@@ -26,6 +26,7 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     transcript: Object.freeze({ endpoint_id: "endpoint-0001" }),
   });
   const activeLease = Object.freeze({
+    endpoint_id: "endpoint-0001",
     connection_id: "connection-0001",
     controller_lease_id: "controller-lease-0001",
     lease_epoch: "1",
@@ -60,6 +61,7 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     abortHandshakesBySocket: async () => 0,
     verifyResumeToken: () => { throw new Error("unexpected prepare in heartbeat regression"); },
     completeResume: () => { throw new Error("unexpected resume commit in heartbeat regression"); },
+    reportResumeDelivery: () => {},
     isPendingHandshake: () => true,
     abortBySocket: async (input) => {
       leaseAlive = false;
@@ -133,6 +135,126 @@ async function joined(value) {
     await value.router.handle({ socketIdentity, message: { v: 1, type, request_id: `request-${type}-${socketIdentity}` } });
   }
 }
+
+test("an unsuccessful claim releases only its own role admission", async () => {
+  const value = fixture();
+  let rejectClaim;
+  const attempt = new Promise((_resolve, reject) => { rejectClaim = reject; });
+  value.leases.claimForDelivery = () => attempt;
+  const pending = value.router.handle({
+    socketIdentity: "socket-A",
+    message: { type: "controller_pairing_claim", request_id: "request-role-failure" },
+  });
+  assert.equal(value.router.reserveControlledRegistration("socket-A", "endpoint-0002"), null);
+  const rejected = assert.rejects(pending, /claim rejected/u);
+  rejectClaim(new Error("claim rejected"));
+  await rejected;
+
+  const release = value.router.reserveControlledRegistration("socket-A", "endpoint-0002");
+  assert.equal(typeof release, "function");
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-A", message: {
+    type: "controller_resume_prepare", request_id: "request-role-resume", sender_role: "B",
+  } }), { code: "controller_role_invalid" });
+  value.router.authenticateControlled({ socketIdentity: "socket-A", endpointId: "endpoint-0002" });
+  release();
+  assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0002"), { socketIdentity: "socket-A" });
+  assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0001"), { socketIdentity: "socket-B" });
+});
+
+test("an active controller cannot use another recovery lease to replace its business link", async () => {
+  const value = fixture();
+  await connectController(value.router);
+  const otherLease = Object.freeze({ ...value.activeLease,
+    controller_lease_id: "controller-lease-other", endpoint_id: "endpoint-other",
+  });
+  const findLease = value.leases.lease;
+  value.leases.lease = (id) => id === otherLease.controller_lease_id ? otherLease : findLease(id);
+  let handled = 0;
+  value.resume.handle = async () => {
+    handled += 1;
+    return { peer_updates: [{ role: "A", socket_identity: "socket-A",
+      controller_lease_id: otherLease.controller_lease_id }] };
+  };
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-A", message: {
+    type: "controller_resume_prepare", sender_role: "A", request_id: "request-resume-other-lease",
+    controller_lease_id: otherLease.controller_lease_id,
+  } }), { code: "controller_role_invalid" });
+  assert.equal(handled, 0);
+  const business = encryptedFrame("A", "capability_snapshot_request");
+  await value.router.handle({ socketIdentity: "socket-A", message: business });
+  assert.deepEqual(value.sent.get("socket-B").at(-1), business);
+});
+
+test("resume updates publish no links after the controlled socket is replaced", async () => {
+  const value = fixture();
+  let finishHook;
+  value.resume.handle = () => new Promise((resolve) => { finishHook = resolve; });
+  value.leases.terminateLease = async (input) => { value.terminated.push(input); return false; };
+  const pending = value.router.handle({ socketIdentity: "socket-B", message: {
+    type: "controller_resume_prepare", sender_role: "B", request_id: "request-resume-old-reader",
+    controller_lease_id: value.activeLease.controller_lease_id,
+  } });
+  const rejected = assert.rejects(pending, { code: "controller_role_invalid" });
+  value.router.addSocket({ socketIdentity: "socket-B-successor", source: "198.51.100.3", socket: "socket-B-successor" });
+  value.router.authenticateControlled({ socketIdentity: "socket-B-successor", endpointId: "endpoint-0001" });
+  finishHook({ peer_updates: [
+    { role: "A", socket_identity: "socket-A", counterpart: "socket-B", controller_lease_id: value.activeLease.controller_lease_id },
+    { role: "B", socket_identity: "socket-B", counterpart: "socket-A", controller_lease_id: value.activeLease.controller_lease_id },
+  ] });
+  await rejected;
+  assert.equal(value.terminated.length, 1);
+  assert.equal(value.terminated[0].expectedLease, value.activeLease);
+  assert.deepEqual(value.router.resolveControlledEndpoint("endpoint-0001"), { socketIdentity: "socket-B-successor" });
+  const release = value.router.reserveControlledRegistration("socket-A", "endpoint-0002");
+  assert.equal(typeof release, "function", "the other peer did not receive a partial A binding");
+  release();
+});
+
+test("one socket cannot prepare two different leases while its first resume is pending", async () => {
+  const value = fixture();
+  const otherLease = Object.freeze({ ...value.activeLease, controller_lease_id: "controller-lease-other" });
+  const findLease = value.leases.lease;
+  value.leases.lease = (id) => id === otherLease.controller_lease_id ? otherLease : findLease(id);
+  let finish;
+  let handled = 0;
+  const hook = new Promise((resolve) => { finish = resolve; });
+  value.resume.handle = () => { handled += 1; return hook; };
+  const prepare = (lease, requestId) => value.router.handle({ socketIdentity: "socket-A", message: {
+    type: "controller_resume_prepare", sender_role: "A", request_id: requestId,
+    controller_lease_id: lease.controller_lease_id,
+  } });
+  const first = prepare(value.activeLease, "request-resume-original");
+  const rejected = assert.rejects(prepare(otherLease, "request-resume-concurrent"), { code: "controller_role_invalid" });
+  finish({ deliveries: [] });
+  await Promise.all([first, rejected]);
+  assert.equal(handled, 1);
+});
+
+test("a claim returning after its socket closes cannot publish or abort a replacement", async () => {
+  const value = fixture();
+  const originalClaim = value.leases.claimForDelivery;
+  let resolveClaim;
+  const claim = new Promise((resolve) => { resolveClaim = resolve; });
+  value.leases.claimForDelivery = () => claim;
+  const cleanups = [];
+  value.leases.abortHandshakesBySocket = async (input) => { cleanups.push(input); return 0; };
+  const pending = value.router.handle({
+    socketIdentity: "socket-A",
+    message: { type: "controller_pairing_claim", request_id: "request-role-close" },
+  });
+  await value.router.removeSocket("socket-A");
+  value.router.addSocket({ socketIdentity: "socket-next-A", source: "198.51.100.3", socket: "socket-A" });
+  const rejected = assert.rejects(pending, { code: "endpoint_offline" });
+  resolveClaim(await originalClaim());
+  await rejected;
+  assert.deepEqual(cleanups, [{ socketIdentity: "socket-A", reservationId: "reservation-0001", reason: "handshake_failed" }]);
+  assert.deepEqual(value.sent.get("socket-B"), []);
+  value.leases.claimForDelivery = originalClaim;
+  await value.router.handle({ socketIdentity: "socket-next-A", message: {
+    type: "controller_pairing_claim", request_id: "request-role-replacement",
+  } });
+  assert.equal(value.sent.get("socket-B").at(-1)?.type, "controller_pairing_reserved");
+});
 
 test("real close hooks snapshot evidence before deleting it and freeze only the first close", async () => {
   let clock = 1_000;
@@ -405,6 +527,59 @@ test("persistent registration replay preserves outcomes and exposes only the res
   assert.equal(recovered.relay_epoch, "relay-restart-0002");
 });
 
+test("real persisted registration quota survives restart and routes bounded authenticated rejections", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pinvou-registration-quota-"));
+  const options = { statePath: join(directory, "controller", "state.json"), legacyStatePath: join(directory, "legacy.json"),
+    // Actual files/lock/CAS; the existing Windows test seam does not prove ACLs.
+    ...(process.platform === "win32" ? { protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {} } : {}) };
+  let state;
+  t.after(async () => { await state?.close(); await rm(directory, { recursive: true, force: true }); });
+  const digestKeyring = { activeKeyId: "quota-test-key", keys: [{ keyId: "quota-test-key", key: crypto.randomBytes(32).toString("hex") }] };
+  const publicKey = () => crypto.generateKeyPairSync("x25519").publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("base64");
+  const request = (sequence, endpoint = "endpoint-0001") => ({ v: 1, type: "desktop_pairing_register",
+    request_id: `quota-transport-${sequence}`, registration_request_id: `quota-registration-${sequence}`,
+    endpoint_id: endpoint, remote_control_generation: `quota-generation-${sequence}`,
+    code_wrap_public_key_b64: publicKey(), handshake_public_key_b64: publicKey(), key_algorithm: "x25519", capabilities: ["pairing_v1"] });
+  const registrationBudget = { maxPerEndpointRecords: 2, maxGlobalRecords: 4, windowMs: 1000,
+    maxPerEndpointWindow: 1, maxGlobalWindow: 2 };
+  const routed = (pairingStore, relayEpoch) => fixture({ pairingRegistrationHandler: new PairingRegistrationHandler({ pairingStore, relayEpoch,
+    authorizeEndpoint: async ({ endpointId, context }) => {
+      if (context.endpointId !== endpointId) throw new Error("not the authenticated endpoint");
+    } }) });
+  state = await RelayStateStore.open(options);
+  let pairing = await PairingStore.open({ stateStore: state, digestKeyring, clock: () => 1000, registrationBudget });
+  let value = routed(pairing, "epoch-quota-first");
+  const first = request(1);
+  await value.router.handle({ socketIdentity: "socket-B", message: first });
+  const initial = value.sent.get("socket-B").at(-1);
+  assert.equal(initial.type, "desktop_pairing_registered");
+  const before = state.readNamespace("desktop_pairing").namespace_revision;
+  const limited = request(2);
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: limited }), { code: "controller_busy" });
+  const busy = value.sent.get("socket-B").at(-1);
+  assert.equal(validateControllerMessage(busy, "relay").code, "controller_busy");
+  assert.equal(validateControllerRegistrationMessage(busy, "relay", new RegistrationValidationContext(limited)).code, "controller_busy");
+  assert.deepEqual(Object.keys(busy).sort(), ["code", "message", "registration_request_id", "remote_control_generation", "request_id", "type", "v"]);
+  assert.ok(!JSON.stringify(busy).includes("secret"));
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: request(3, "endpoint-forged") }), { code: "pairing_endpoint_unauthorized" });
+  assert.equal(state.readNamespace("desktop_pairing").namespace_revision, before);
+  await value.router.handle({ socketIdentity: "socket-B", message: { ...first, request_id: "quota-retry" } });
+  assert.equal(value.sent.get("socket-B").at(-1).sealed_code_b64, initial.sealed_code_b64);
+  assert.equal(state.readNamespace("desktop_pairing").namespace_revision, before);
+  await state.close();
+  state = await RelayStateStore.open(options);
+  pairing = await PairingStore.open({ stateStore: state, digestKeyring, clock: () => 1500, registrationBudget });
+  assert.equal(await pairing.invalidateForRelayRestart(), 1);
+  value = routed(pairing, "epoch-quota-restarted");
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: request(4) }), { code: "controller_busy" });
+  value.sent.set("socket-C", []);
+  value.router.addSocket({ socketIdentity: "socket-C", source: "198.51.100.3", socket: "socket-C" });
+  value.router.authenticateControlled({ socketIdentity: "socket-C", endpointId: "endpoint-0002", authenticatedContext: { endpointId: "endpoint-0002" } });
+  await value.router.handle({ socketIdentity: "socket-C", message: request(5, "endpoint-0002") });
+  assert.equal(value.sent.get("socket-C").at(-1).type, "desktop_pairing_registered");
+  assert.equal(state.readNamespace("desktop_pairing").value.registrations.length, 2);
+});
+
 test("registration routing continues to collapse unrelated internal errors", async () => {
   const { router, sent } = fixture({ pairingRegistrationHandler: { register: async () => {
     throw Object.assign(new Error("internal registration details"), { code: "internal_registration_failure" });
@@ -525,6 +700,7 @@ function leaseManagerStub() {
     setTerminationObserver: () => {},
     verifyResumeToken: () => false,
     completeResume: () => { throw new Error("no fixture lease"); },
+    reportResumeDelivery: () => {},
     acceptCommitment: () => null,
     forwardFinished: () => null,
     acceptReceipt: async () => null,

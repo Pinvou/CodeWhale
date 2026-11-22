@@ -23,7 +23,9 @@ use deepseek_tui::session_manager::{
 };
 use parking_lot::{Mutex, RwLock};
 
+use super::ReplacementBranchLineage;
 use crate::platform::paths;
+use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef};
 
 use super::scheduled::ChatEngineState;
 use super::transcript::{looks_like_truncating_overwrite, transcript_revision};
@@ -46,6 +48,40 @@ static POST_RECORD_DELETE_FAULTS: LazyLock<Mutex<HashMap<String, ErrorKind>>> =
 #[cfg(test)]
 static PRE_RECORD_DELETE_FAULTS: LazyLock<Mutex<HashMap<String, ErrorKind>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Test-only candidate queue for wiring pins: when non-empty,
+/// `generate_unused_session_id_with` draws candidates from here instead of
+/// the caller's generator, so tests can drive the collision/exhaustion path
+/// through every wired call site (create_new / replacement branches via the convenience
+/// wrapper, sched- via its prefixed closure). Same `#[cfg(test)]`-hook
+/// idiom as `PRE_RECORD_DELETE_FAULTS`; the queue is a process global, so
+/// every test whose store can allocate ids must hold
+/// `platform::paths::tests::ENV_LOCK` for its whole run (see the wiring
+/// pins in features/sessions/tests.rs).
+#[cfg(test)]
+static TEST_GENERATED_ID_QUEUE: LazyLock<Mutex<Vec<String>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Queue candidates for the next `generate_unused_session_id_with` calls;
+/// draw order is preserved.
+#[cfg(test)]
+pub(crate) fn push_generated_id_candidates_for_test(candidates: &[&str]) {
+    TEST_GENERATED_ID_QUEUE
+        .lock()
+        .extend(candidates.iter().map(|candidate| (*candidate).to_string()));
+}
+
+#[cfg(test)]
+fn take_generated_id_queue_for_test() -> std::collections::VecDeque<String> {
+    std::mem::take(&mut *TEST_GENERATED_ID_QUEUE.lock()).into()
+}
+
+/// Panic-safety drain for wiring-pin tests: leftovers would poison the next
+/// queued allocation, so tests drop a guard that clears the queue.
+#[cfg(test)]
+pub(crate) fn clear_generated_id_queue_for_test() {
+    TEST_GENERATED_ID_QUEUE.lock().clear();
+}
 
 /// Cap on the number of ordinary chat sessions retained on disk before the
 /// oldest is evicted by [`super::retention::SessionStore::enforce_session_retention_locked`].
@@ -502,6 +538,54 @@ impl SessionStore {
     ) -> Result<deepseek_tui::session_export::SessionArchiveSummary> {
         validate_session_id(id)?;
         let session = self.load(id)?;
+        // 闭合导出→导入循环：导入侧对成员名 fail-closed（`:` 分量挡
+        // Windows 盘符/ADS，`\` 归一化防改名），exporter 本身不校验
+        // 文件名——凡导入必拒/必改名的文件在此处先行失败并指名，归档
+        // 永不产出「导出成功、导入必拒」的产物。目录不存在（Ok(None)）
+        // 即无可扫描，直接放行。记录本体字节计入同一张账本（导入侧
+        // 把 session.json 也计入总量并受单成员上限）。预扫描对
+        // `include_artifacts=false` 的精简导出同样生效（记录本体在两种
+        // 模式下都进档案，r7 minor 5）；记录 stat 失败如实失败（load 刚
+        // 成功，紧随其后的 stat 故障是异常态，折叠成 0 会低估账本）。
+        // 账本口径（r8 M3）：按**档案实际携带的字节**记账——exporter 把
+        // journal 长齐后的内存会话 `to_string_pretty` 成 session.json，而
+        // on-disk 记录可能是无 journal 的裸导入产物：归档时 session.json
+        // ≈ 消息+journal、container.json ≈ journal，实际 ≈ 3× on-disk 而
+        // 账本只记 2× on-disk → 「导出成功、导入必拒」。与底座
+        // `session_json`（crate 私有）同为 `to_string_pretty(&SavedSession)`
+        // 确定性序列化，长度逐字节一致；stat 保留为响度检查（stat 故障即
+        // 异常态，如实失败）。标题等无界字符串随记录本体的序列化长度
+        // 入账；manifest.json 里的第二份元数据副本另行显式记账（见下方
+        // ensure_artifacts_exportable 调用处的 manifest_metadata_bytes）。
+        let record_path = self.manager.sessions_dir().join(format!("{id}.json"));
+        std::fs::metadata(&record_path)
+            .with_context(|| format!("stat session record {}", record_path.display()))?;
+        let record_bytes = serde_json::to_string_pretty(&session)
+            .map(|serialized| serialized.len() as u64)
+            .map_err(|error| {
+                anyhow::anyhow!("serialize session record for the export ledger: {error}")
+            })?;
+        let artifacts_dir = if include_artifacts {
+            deepseek_tui::session_export::session_artifacts_dir(self.manager.sessions_dir(), id)?
+        } else {
+            None
+        };
+        // manifest.json 内嵌整份 SessionMetadata（底座 ArchiveManifest 的
+        // session 字段克隆）：标题等无界字符串在**这份副本**里的字节不随
+        // record_bytes 入账（container ≤ record 只覆盖 journal 投影）——
+        // 上方「标题随序列化长度自动入账」只对记录本体成立。按同一
+        // to_string_pretty 确定性序列化显式记账，>64 KiB 标题的近上限归档
+        // 不再「导出成功、导入必拒」（r9 minor）。
+        let manifest_metadata_bytes = serde_json::to_string_pretty(&session.metadata)
+            .map(|serialized| serialized.len() as u64)
+            .map_err(|error| {
+                anyhow::anyhow!("serialize session metadata for the export ledger: {error}")
+            })?;
+        super::import::ensure_artifacts_exportable(
+            artifacts_dir.as_deref(),
+            record_bytes,
+            manifest_metadata_bytes,
+        )?;
         // write_session_archive takes the session-store ROOT since the
         // engine-side confinement rework: it derives, validates and confines
         // the artifacts dir itself (invalid ids and links under the store are
@@ -544,6 +628,13 @@ impl SessionStore {
             return self.persist_then_reconcile(session, "committed save");
         }
         self.persist_then_reconcile(session, "session save")
+    }
+
+    /// 会话存储根目录（`~/.pinvou3/sessions/`）。供 archive 导入这类
+    /// 兄弟模块按 id 探测记录/artifacts 目录使用；字段 `manager` 保持
+    /// store.rs 私有。
+    pub(crate) fn sessions_dir(&self) -> PathBuf {
+        self.manager.sessions_dir().to_path_buf()
     }
 
     /// Deleting races with the read-modify-write persist paths
@@ -664,10 +755,20 @@ impl SessionStore {
     /// fail-closed: an invalid id or an unreadable path is never interpreted as
     /// a committed deletion.
     pub(crate) fn delete_session_record(&self, id: &str) -> (bool, std::io::Result<()>) {
-        let result = self.invoke_session_manager_delete(id);
+        let mut result = self.invoke_session_manager_delete(id);
         let committed = result.is_ok() || self.durable_session_record_is_absent(id);
         if committed {
             self.notify_session_deleted(id);
+            // Lineage belongs to the deleted record, including partial cleanup failures.
+            let lineage = self
+                .manager
+                .sessions_dir()
+                .join(format!("{id}.account-platform-branch.json"));
+            if let Err(error) = std::fs::remove_file(lineage) {
+                if error.kind() != ErrorKind::NotFound && result.is_ok() {
+                    result = Err(error);
+                }
+            }
         }
         (committed, result)
     }
@@ -692,6 +793,77 @@ impl SessionStore {
         matches!(
             std::fs::metadata(record),
             Err(error) if error.kind() == ErrorKind::NotFound
+        )
+    }
+
+    /// Wall-clock-derived candidates to probe before refusing loudly. Eight
+    /// covers any realistic transient collision; on a genuinely frozen clock
+    /// the candidates repeat and the allocation fails loudly by design (the
+    /// scheduled-run executor records the run as failed and retryable).
+    const GENERATED_ID_ATTEMPTS: usize = 8;
+
+    /// Occupancy probe for a new session id: [`generate_session_id`] derives
+    /// from wall-clock nanos, so a backward clock step (or a coarse-clock VM)
+    /// can collide with an existing id, and persisting by id is an atomic
+    /// replace — a collision silently swaps a live record. Availability is
+    /// confirmed through the real NotFound verdict of
+    /// [`Self::durable_session_record_is_absent`]: occupancy (collision) and
+    /// metadata faults (EACCES/EIO) both move on to the next candidate, and
+    /// exhaustion fails loudly — an unconfirmed id is never persisted.
+    pub(crate) fn generate_unused_session_id(&self) -> Result<String> {
+        self.generate_unused_session_id_with(generate_session_id)
+    }
+
+    /// Injectable variant of [`Self::generate_unused_session_id`]: tests
+    /// drive the collision/retry path with fixed candidates, and prefixed
+    /// namespaces such as `sched-` reuse the same probe discipline behind
+    /// their prefix. The candidate queue hooks this variant rather than the
+    /// convenience wrapper (R2 SHOULD-1): create_new / replacement branches enter through
+    /// the wrapper, the sched site through its own prefixed closure — all
+    /// three wired sites consume the queue, so reverting any site to bare
+    /// generation turns its wiring pin red (a sched revert previously left
+    /// the whole suite byte-identically green, no signal at all).
+    pub(crate) fn generate_unused_session_id_with<G: FnMut() -> String>(
+        &self,
+        generate: G,
+    ) -> Result<String> {
+        #[cfg(test)]
+        {
+            let queued = take_generated_id_queue_for_test();
+            if !queued.is_empty() {
+                // `mut` is needed only in the test build (the closure takes
+                // the generator by &mut); in the lib build `generate` flows
+                // straight through to inner, and a `mut` on the parameter
+                // would be rejected by -D unused-mut (same cfg-gating
+                // lesson as the R1 wave).
+                let mut generate = generate;
+                let mut candidates = queued.into_iter();
+                return self.generate_unused_session_id_with_inner(move || {
+                    candidates.next().unwrap_or_else(&mut generate)
+                });
+            }
+        }
+        self.generate_unused_session_id_with_inner(generate)
+    }
+
+    /// Collision/retry loop body (no test hook): each candidate passes the
+    /// occupancy probe; exhaustion fails loudly — an unconfirmed id is
+    /// never persisted.
+    fn generate_unused_session_id_with_inner<G: FnMut() -> String>(
+        &self,
+        mut generate: G,
+    ) -> Result<String> {
+        for _ in 0..Self::GENERATED_ID_ATTEMPTS {
+            let candidate = generate();
+            if self.durable_session_record_is_absent(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        bail!(
+            "could not allocate an unused session id after {} attempts; \
+             clock-derived ids keep colliding with existing records or the \
+             sessions directory metadata is unreadable",
+            Self::GENERATED_ID_ATTEMPTS
         )
     }
 
@@ -1040,7 +1212,28 @@ impl SessionStore {
         model_id: Option<String>,
         workspace: PathBuf,
     ) -> Result<SavedSession> {
-        let id = generate_session_id();
+        self.create_new_inheriting_default(model, model_id, workspace, None)
+    }
+
+    pub(crate) fn create_new_inheriting_default(
+        &self,
+        model: String,
+        model_id: Option<String>,
+        workspace: PathBuf,
+        inherited_default_revision: Option<String>,
+    ) -> Result<SavedSession> {
+        // Probe→persist is not one atomic step here: `save` re-takes the
+        // non-reentrant scheduled_mutation, so the lock cannot simply span
+        // both. Two concurrent create_new calls landing on the same clock
+        // tick (coarse-clock VM) can both probe absent and the later atomic
+        // replace still wins — the same disclosed residual window as
+        // create_aux_session ("closing that window needs a foundation-level
+        // exclusive-create"). The sched- namespace holds the lock across
+        // probe+persist and has no such window in-process
+        // (scheduled_mutation is process-local; the cross-process
+        // probe→rename TOCTOU stays under the repo's disclosed no-flock
+        // stance).
+        let id = self.generate_unused_session_id()?;
         let mut session = create_saved_session_with_id_and_mode(
             id.clone(),
             &[],
@@ -1056,7 +1249,16 @@ impl SessionStore {
         // appears created successfully yet falls back to another model after
         // restart.
         if let Some(mid) = model_id {
-            self.set_session_model_id(&id, Some(mid))?;
+            let selection = if mid == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID {
+                ModelSelectionRef::account_platform(model.clone())
+            } else {
+                ModelSelectionRef::local(mid)
+            };
+            if let Some(revision) = inherited_default_revision {
+                self.set_inherited_session_model_ref(&id, selection, revision)?;
+            } else {
+                self.set_session_model_ref(&id, Some(selection))?;
+            }
         }
         if let Err(error) = self.save(&session) {
             return Err(self.rollback_created_session(
@@ -1066,6 +1268,91 @@ impl SessionStore {
             ));
         }
         Ok(session)
+    }
+
+    /// Creates an explicit, traceable branch when a historical platform model
+    /// can no longer continue. The source transcript is never rewritten.
+    pub fn create_replacement_branch(
+        &self,
+        source_id: &str,
+        source_message_count: usize,
+        source_turn_id: String,
+        replacement_model_ref: String,
+        replacement_title_suffix: String,
+        default_chat_title: String,
+    ) -> Result<(SavedSession, ReplacementBranchLineage)> {
+        anyhow::ensure!(
+            [&replacement_title_suffix, &default_chat_title]
+                .iter()
+                .all(|value| !value.trim().is_empty() && !value.chars().any(char::is_control)),
+            "replacement branch title copy is invalid"
+        );
+        validate_session_id(source_id)?;
+        let source = self
+            .manager
+            .load_session_snapshot(source_id)
+            .with_context(|| format!("load source session {source_id}"))?;
+        let source_message_count = if source_message_count == 0 {
+            source.messages.len()
+        } else {
+            source_message_count
+        };
+        anyhow::ensure!(
+            source_message_count > 0 && source_message_count <= source.messages.len(),
+            "source turn is outside the committed transcript"
+        );
+        let id = self.generate_unused_session_id()?;
+        let mut branch = create_saved_session_with_id_and_mode(
+            id.clone(),
+            &source.messages[..source_message_count],
+            &replacement_model_ref,
+            &source.metadata.workspace,
+            0,
+            None,
+            None,
+        );
+        // Only the existing bare new-chat markers are localized. User titles,
+        // including titles that resemble a branch suffix, remain verbatim.
+        let source_title = if matches!(
+            source.metadata.title.as_str(),
+            NEW_CHAT_TITLE | "New chat" | "新しいチャット"
+        ) {
+            &default_chat_title
+        } else {
+            &source.metadata.title
+        };
+        branch.metadata.title = format!("{source_title} · {replacement_title_suffix}");
+        branch.metadata.parent_session_id = Some(source_id.to_string());
+        branch.metadata.forked_from_message_count = Some(source_message_count);
+        self.set_session_model_ref(
+            &id,
+            Some(ModelSelectionRef::account_platform(
+                replacement_model_ref.clone(),
+            )),
+        )?;
+        if let Err(error) = self.save(&branch) {
+            let _ = self.delete(&id);
+            return Err(error);
+        }
+        let lineage = ReplacementBranchLineage {
+            source_conversation_id: source_id.to_string(),
+            source_turn_id,
+            original_model_ref: source.metadata.model,
+            replacement_model_ref,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let lineage_path = self
+            .manager
+            .sessions_dir()
+            .join(format!("{id}.account-platform-branch.json"));
+        let payload = serde_json::to_vec_pretty(&lineage)?;
+        if let Err(error) = deepseek_tui::utils::write_atomic(&lineage_path, &payload) {
+            let _ = self.delete(&id);
+            return Err(anyhow::anyhow!(
+                "persist replacement branch lineage: {error}"
+            ));
+        }
+        Ok((branch, lineage))
     }
 
     /// The aux session id of a main session, derived as `aux-{parent_id}`
@@ -1174,8 +1461,8 @@ impl SessionStore {
             }
             Err(_) => {}
         }
-        if let Some(model_id) = self.session_model_override(parent_id) {
-            self.set_session_model_id(&id, Some(model_id))?;
+        if let Some(selection) = self.session_model_ref_override(parent_id) {
+            self.set_session_model_ref(&id, Some(selection))?;
         }
         if let Err(error) = self.save(&session) {
             return Err(self.rollback_created_session(
@@ -1473,7 +1760,12 @@ impl SessionStore {
         // three per-language sentinels to the current UI language.
         session.metadata.title = NEW_CHAT_TITLE.to_string();
         if let Some(model_id) = model_id {
-            self.set_session_model_id(&id, Some(model_id))?;
+            let selection = if model_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID {
+                ModelSelectionRef::account_platform(model.clone())
+            } else {
+                ModelSelectionRef::local(model_id)
+            };
+            self.set_session_model_ref(&id, Some(selection))?;
         }
         if let Err(error) = self.save(&session) {
             return Err(self.rollback_created_session(

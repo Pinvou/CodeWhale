@@ -11,17 +11,19 @@ pptx 工具(make_pptx)测试用例 —— 覆盖本次 PR 的可确定性核心�
   2. make_pptx 基本:生成合法 .pptx、可被 python-pptx 打开、页数对
   3. 落盘位置:写进会话产物目录(PINVOU3_SESSION_ARTIFACTS),绝不写进程当前目录
   4. 9 套主题全部能渲染
-  5. 封面缩略图注入:.pptx(zip)里有 docProps/thumbnail.jpeg(产物卡封面靠它)
+  5. 封面缩略图:画得出真封面 → 注入且不得是模板纯白占位图;画不出 → 剥离占位(产物卡封面靠它)
   6. 10 种 layout 全渲染、页数对、文件合法
   7. slides 传成 JSON 字符串也兼容(模型有时这么传)
   8. 回归:不再产生调试落盘文件 ~/_make_pptx_debug.json
   9. MCP 协议冒烟(子进程):initialize / tools/list / tools/call(make_pptx)
   10. malformed-JSON salvage / fully empty loud error
-  11. slides inputSchema.items structure pinned (arrays must carry concretely typed items)
+  11. slides inputSchema per-layout anyOf pinned (branch type:object / per-branch required / layout enum partition / typed nested arrays)
   12. explicit-null optional fields are safe (DeepSeek strict mode rewrites every property required+nullable)
   13. kpi numeric 0 / agenda dict items (allowed by the schema anyOf) render as data, not swallowed by `or`
   14. null array elements (salvage path bypasses the schema) fall back instead of leaking str(None) or error pages
   15. non-string salvage elements are dropped (reprs never render, no phantom ordinals)
+  16. 无封面时剥离模板占位缩略图(monkeypatch 强制 None,.rels 无悬空关系、包 XML 良构、pptx 仍可打开)
+  17. 封面绘制异常兜底返回 None(broken theme dict),剥离路不被异常绕过
 
 注意:测试把 PINVOU3_SESSION_ARTIFACTS 指向临时目录,不污染 ~/.pinvou3。
 """
@@ -29,8 +31,10 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import zipfile
+from unittest.mock import patch
 
 # ── 所有产物落到临时目录,别污染真实 ~/.pinvou3 ──────────────────────────
 _TMP = tempfile.mkdtemp(prefix="pptx_test_")
@@ -124,6 +128,102 @@ def test_output_location():
     assert "target" not in p and "Program Files" not in p, "不应落进构建/安装目录: %s" % p
 
 
+@case("3b. 已配置的产物目录不可用时报告失败")
+def test_configured_output_directory_unavailable():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        blocked = os.path.join(root, "artifacts")
+        with open(blocked, "w", encoding="utf-8") as f:
+            f.write("already a file")
+        with patch.object(server, "_session_artifacts_dir", blocked):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "位置测试"}])
+        assert result.get("ok") is False, result
+        assert "产物目录" in result.get("error", ""), result
+        assert os.listdir(root) == ["artifacts"], "不得改写到会话之外"
+
+
+@case("3c. 渲染写入部分文件后失败，不登记半成品")
+def test_partial_scoped_output_is_not_published():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        destination = os.path.join(root, "sessions", "controlled-session", "artifacts")
+        deck = [{"layout": "cover", "title": "位置测试"}]
+
+        def render_then_fail(_spec, path):
+            with open(path, "wb") as f:
+                f.write(b"incomplete PPT package")
+            assert all(os.path.isdir(os.path.join(destination, name))
+                       for name in os.listdir(destination))
+            raise OSError("fixture write failure after partial output")
+
+        with patch.object(server, "_session_artifacts_dir", destination):
+            with patch.object(server, "render", side_effect=render_then_fail):
+                failed = server.make_pptx(slides=deck, filename="result")
+            assert not failed["ok"] and os.listdir(destination) == [], failed
+            recovered = server.make_pptx(slides=deck, filename="result")
+        assert recovered["ok"], recovered
+        assert os.listdir(destination) == ["result.pptx"]
+        assert len(Presentation(recovered["path"]).slides) == 1
+
+
+def _directory_redirect(path, target):
+    if os.name == "nt":
+        # A directory junction exercises the reparse-point check without
+        # requiring the Windows symbolic-link privilege on the test runner.
+        import _winapi
+
+        _winapi.CreateJunction(target, path)
+    else:
+        os.symlink(target, path, target_is_directory=True)
+
+
+@case("3d. 拒绝重定向的会话目录")
+def test_redirected_session_directory_is_rejected():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "other-session")
+        session = os.path.join(root, "sessions", "controlled-session")
+        os.mkdir(target)
+        os.makedirs(os.path.dirname(session))
+        _directory_redirect(session, target)
+        destination = os.path.join(session, "artifacts")
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "会话目录"}])
+        assert result.get("ok") is False and "产物目录" in result.get("error", ""), result
+        assert os.listdir(target) == [], "不得在重定向目标下创建产物目录"
+
+
+@case("3e. 拒绝重定向的产物目录")
+def test_redirected_artifact_directory_is_rejected():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "other-artifacts")
+        session = os.path.join(root, "sessions", "controlled-session")
+        os.mkdir(target)
+        os.makedirs(session)
+        destination = os.path.join(session, "artifacts")
+        _directory_redirect(destination, target)
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "产物目录"}])
+        assert result.get("ok") is False and "产物目录" in result.get("error", ""), result
+        assert os.listdir(target) == [], "不得写入重定向的产物目录"
+
+
+@case("3f. 允许重定位整个会话根目录")
+def test_relocated_sessions_root_is_supported():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "relocated-sessions")
+        sessions = os.path.join(root, "sessions")
+        os.mkdir(target)
+        _directory_redirect(sessions, target)
+        destination = os.path.join(sessions, "controlled-session", "artifacts")
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(
+                slides=[{"layout": "cover", "title": "会话根目录"}],
+                filename="relocated",
+            )
+        assert result.get("ok") is True, result
+        assert result["path"] == os.path.join(destination, "relocated.pptx"), result
+        stored = os.path.join(target, "controlled-session", "artifacts", "relocated.pptx")
+        assert len(Presentation(stored).slides) == 1
+
+
 # ── 4. 9 套主题全渲染 ────────────────────────────────────────────────────
 @case("4. 9 套主题全部能渲染")
 def test_all_themes():
@@ -135,15 +235,54 @@ def test_all_themes():
         assert r.get("theme") == theme, "主题应为 %s,实际 %r" % (theme, r.get("theme"))
 
 
-# ── 5. 封面缩略图注入(产物卡封面靠它)──────────────────────────────────
-@case("5. 封面缩略图 docProps/thumbnail.jpeg 注入")
+# ── 5. 封面缩略图(产物卡封面靠它)────────────────────────────────────
+# 画得出真封面 → 注入且不得是 python-pptx 默认模板那张纯白占位图
+# (占位图曾让产物卡渲染出一大块空白封面);画不出 → 剥离占位图,
+# 包里必须没有 docProps/thumbnail.jpeg(前端读不到即回退紧凑图标态)。
+def _template_placeholder_bytes():
+    """python-pptx 默认模板自带的纯白占位缩略图 bytes(256x192 全白)。"""
+    import pptx
+    tpl = os.path.join(os.path.dirname(pptx.__file__), "templates", "default.pptx")
+    with zipfile.ZipFile(tpl) as z:
+        return z.read("docProps/thumbnail.jpeg")
+
+
+def _thumbnail_uniform_colors(jpeg_bytes, cap=256):
+    """缩略图去重后的颜色数(封顶 cap;返回 None = PIL 解不开)。"""
+    try:
+        from PIL import Image
+        from io import BytesIO
+        im = Image.open(BytesIO(jpeg_bytes)).convert("RGB")
+        colors = im.getcolors(maxcolors=cap)
+    except Exception:
+        return None
+    return None if colors is None else len(colors)
+
+
+@case("5. 封面缩略图:注入真封面或剥离占位,绝不留模板白图")
 def test_cover_thumbnail():
-    r = server.make_pptx(theme="navy-gold",
-                         slides=[{"layout": "cover", "title": "封面缩略图测试", "subtitle": "x"}],
-                         filename="test_thumb")
+    deck = [{"layout": "cover", "title": "封面缩略图测试", "subtitle": "x"}]
+    r = server.make_pptx(theme="navy-gold", slides=deck, filename="test_thumb")
+    cover = server._cover_thumbnail({"slides": deck, "theme": "navy-gold"},
+                                    server.THEMES["navy-gold"])
     with zipfile.ZipFile(r["path"]) as z:
         names = z.namelist()
-    assert "docProps/thumbnail.jpeg" in names, "pptx 里应有 docProps/thumbnail.jpeg,实际: %s" % names
+        rels = z.read("_rels/.rels").decode("utf-8")
+    if cover:
+        assert "docProps/thumbnail.jpeg" in names, \
+            "画得出封面就应注入 docProps/thumbnail.jpeg,实际: %s" % names
+        with zipfile.ZipFile(r["path"]) as z:
+            got = z.read("docProps/thumbnail.jpeg")
+        assert got != _template_placeholder_bytes(), \
+            "注入的必须是真封面,不得原样保留模板纯白占位图(len=%d)" % len(got)
+        n_colors = _thumbnail_uniform_colors(got)
+        assert n_colors is None or n_colors > 1, \
+            "注入的封面缩略图不得是纯色图(去重颜色数=%r)" % n_colors
+        assert 'Target="docProps/thumbnail.jpeg"' in rels, "注入后 .rels 应带 thumbnail 关系"
+    else:
+        assert "docProps/thumbnail.jpeg" not in names, \
+            "画不出封面必须剥离模板占位缩略图,实际: %s" % names
+        assert "thumbnail" not in rels, "剥离后 .rels 不得残留 thumbnail 关系: %s" % rels
 
 
 # ── 6. 10 种 layout 全渲染 ──────────────────────────────────────────────
@@ -236,6 +375,35 @@ def test_mcp_protocol():
         "tools/call(make_pptx) 应生成文件,实际 %r" % payload
 
 
+@case("9b. MCP 子进程按会话路径生成同名 PPT")
+def test_mcp_session_output():
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "make_pptx", "arguments": {"filename": "same-output", "slides": [
+            {"layout": "cover", "title": "MCP 测试"}
+        ]},
+    }}
+    runner = os.path.abspath(os.path.join(_HERE, "..", "..", "..", "src-tauri",
+        "resources", "common", "bundle", "mcp-servers", "python_dependency_runner.py"))
+    command = [sys.executable, "-I", "-S", "-B", runner,
+               sysconfig.get_path("purelib"), os.path.join(_HERE, "server.py")]
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        outputs = []
+        for session in ("session-a", "session-b"):
+            destination = os.path.join(root, "sessions-${literal}", session, "artifacts")
+            proc = subprocess.run(
+                [*command, "--session-artifacts-dir=" + destination],
+                input=(json.dumps(request) + "\n").encode("utf-8"),
+                capture_output=True, check=True, timeout=60,
+            )
+            payload = json.loads(json.loads(proc.stdout)["result"]["content"][0]["text"])
+            assert payload["ok"], payload
+            assert payload["path"] == os.path.join(destination, "same-output.pptx")
+            assert len(Presentation(payload["path"]).slides) == 1
+            outputs.append(payload["path"])
+        assert len(set(outputs)) == 2
+        assert not os.path.lexists(os.path.join(_TMP, "same-output.pptx"))
+
+
 # ── 10. 非法 JSON 抢救 + 彻底空报错(本次修复:模型大纲一长常生成坏 JSON)──
 @case("10. 非法 JSON 抢救 / 空则 ok:False")
 def test_malformed_json_salvage():
@@ -262,34 +430,97 @@ def test_malformed_json_salvage():
             "空/无法解析的 slides 应返回 ok:False+error,实际 %r(输入 %r)" % (r2, empty)
 
 
-# ── 11. slides schema must carry structured items (regression: k3 once completed an itemless array to []) ──
-@case("11. slides inputSchema.items structure pinned (arrays must carry concretely typed items)")
+# ── 11. slides schema must be a per-layout anyOf (regression pin: the flat
+#        single-object items only required layout, so constrained decoding
+#        channels dropped every optional content field; the per-branch
+#        required is the mitigation) ──
+@case("11. slides inputSchema per-layout anyOf pinned (branch type/required/enum partition)")
 def test_slides_schema_items_pin():
     schema = server.TOOL_DEFS[0]["inputSchema"]["properties"]["slides"]
     assert schema.get("type") == "array", "slides must be an array, got %r" % schema.get("type")
     items = schema.get("items")
     assert isinstance(items, dict) and items, "slides must carry non-empty items (Kimi-channel decoders complete an itemless array to []), got %r" % items
-    assert items.get("type") == "object", "items must be an object, got %r" % items.get("type")
-    assert items.get("required") == ["layout"], "items.required must be ['layout'], got %r" % items.get("required")
-    # The layout enum must match the LAYOUTS render table exactly (a new
-    # layout added without updating the enum must turn red here).
-    props = items.get("properties") or {}
-    assert set(props.get("layout", {}).get("enum") or []) == set(server.LAYOUTS), \
-        "layout.enum must match LAYOUTS exactly, got %r vs %r" % (props.get("layout", {}).get("enum"), sorted(server.LAYOUTS))
+    # The items node must be an anyOf union with no type sibling (MFJS:
+    # type must not sit on the same level as anyOf).
+    assert "type" not in items, "anyOf must not share its level with type, got keys %r" % sorted(items)
+    branches = items.get("anyOf")
+    assert isinstance(branches, list) and branches, "items must be an anyOf union, got %r" % branches
+    # One branch per layout. The count is the layout set, NOT a budget
+    # boundary on the TARGET face: the constrained-route resource budgets
+    # are aligned to the walle conf.go source defaults since 2026-11-05
+    # (anyOf ≤ 500 branches, ≤ 3000 properties, depth ≤ 30), but that is
+    # the T11 target budget. The currently pinned pre-T11 engine still
+    # caps anyOf at 10, so these 10 branches sit exactly AT the shipped
+    # limit — adding a layout before the close-out re-pin hits the
+    # 10-branch cap, and the pinned engine's sanitizer then omits the
+    # make_pptx tool from that request with a warning (the build keeps the
+    # remaining tools and fails outright only when an explicit tool_choice
+    # forces the omitted tool).
+    assert len(branches) == len(server.LAYOUTS), \
+        "one branch per layout (%d), got %d" % (len(server.LAYOUTS), len(branches))
+    # Per-branch required = exactly the fields the renderer reads and draws
+    # a blank body without; pure-decoration fields stay optional (the probe's
+    # all-fields-required control produced blank values + enum guessing).
+    # 2026-11-05 required final ruling: a field may be required only when
+    # leaving it blank is a business error. agenda/end render semantically
+    # complete fallback pages (table of contents / thank you) for a blank
+    # title, so title left those branches' required; the other 8 branches
+    # are unchanged.
+    expected_required = {
+        "cover": ["layout", "title"],
+        "agenda": ["layout", "items"],
+        "section": ["layout", "title"],
+        "bullets": ["layout", "title", "bullets"],
+        "two_col": ["layout", "title", "left", "right"],
+        "kpi": ["layout", "title", "items"],
+        "chart": ["layout", "title", "categories", "series"],
+        "table": ["layout", "title", "headers", "rows"],
+        "image": ["layout", "title"],
+        "end": ["layout"],
+    }
+    seen = []
+    for i, branch in enumerate(branches):
+        assert branch.get("type") == "object", \
+            "branch %d must be an explicit type:object, got %r" % (i, branch.get("type"))
+        props = branch.get("properties")
+        assert isinstance(props, dict) and props, "branch %d must declare properties" % i
+        required = branch.get("required")
+        assert isinstance(required, list) and required, "branch %d must declare required" % i
+        assert required[0] == "layout", "branch %d required must start with layout, got %r" % (i, required)
+        assert set(required) <= set(props), \
+            "branch %d required must name declared properties, diff %r" % (i, set(required) - set(props))
+        enum = props.get("layout", {}).get("enum")
+        assert isinstance(enum, list) and len(enum) == 1, \
+            "branch %d layout enum must be a single value, got %r" % (i, enum)
+        layout = enum[0]
+        assert layout in server.LAYOUTS, "branch %d names unknown layout %r" % (i, layout)
+        assert required == expected_required[layout], \
+            "layout %s required must be %r, got %r" % (layout, expected_required[layout], required)
+        seen.append(layout)
+    assert sorted(seen) == sorted(server.LAYOUTS), \
+        "branch layout enums must partition LAYOUTS exactly, diff %r" % (set(seen) ^ set(server.LAYOUTS))
+    def _branch_of(layout):
+        return next(b for b in branches if b["properties"]["layout"]["enum"] == [layout])
     # The chartType enum must match the _CHART_TYPES render table exactly.
-    assert set(props.get("chartType", {}).get("enum") or []) == set(server._CHART_TYPES), \
-        "chartType.enum must match _CHART_TYPES exactly, got %r vs %r" % (props.get("chartType", {}).get("enum"), sorted(server._CHART_TYPES))
-    # Property-name set pinned: a dropped field (the model loses that field's
-    # guidance) and an unregistered extra field must both turn red.
+    chart = _branch_of("chart")
+    assert set(chart["properties"]["chartType"].get("enum") or []) == set(server._CHART_TYPES), \
+        "chartType.enum must match _CHART_TYPES exactly, got %r vs %r" % (
+            chart["properties"]["chartType"].get("enum"), sorted(server._CHART_TYPES))
+    # Field inventory: the union of branch properties must be exactly the 17
+    # declared fields (a dropped field = the model loses that field's
+    # guidance; an unregistered extra field = drift).
+    union = set()
+    for branch in branches:
+        union |= set(branch["properties"])
     expected = {"layout", "title", "subtitle", "date", "items", "bullets", "leftTitle", "left",
                 "rightTitle", "right", "chartType", "categories", "series", "headers", "rows",
                 "caption", "image"}
-    assert set(props) == expected, \
-        "slides.items.properties must be exactly the %d declared fields, diff %r" % (len(expected), set(props) ^ expected)
+    assert union == expected, \
+        "branch properties must cover exactly the %d declared fields, diff %r" % (len(expected), union ^ expected)
     # Every nested array must carry concretely typed items (guard class:
     # reintroducing an itemless array must turn red here).
     def _assert_typed(node, path):
-        if node.get("type") != "array":
+        if not isinstance(node, dict) or node.get("type") != "array":
             return
         sub = node.get("items")
         assert isinstance(sub, dict) and sub, "%s is missing items" % path
@@ -301,22 +532,27 @@ def test_slides_schema_items_pin():
                 assert br.get("type"), "%s.anyOf[%d] lacks a concrete type" % (path, i)
         else:
             assert False, "%s.items lacks a concrete type: %r" % (path, sub.get("type"))
-    for key in ("bullets", "left", "right", "categories", "headers", "rows", "items", "series"):
-        _assert_typed(props[key], "slides.items.properties.%s" % key)
+    for branch in branches:
+        layout = branch["properties"]["layout"]["enum"][0]
+        for key, sub in branch["properties"].items():
+            _assert_typed(sub, "branch(%s).properties.%s" % (layout, key))
     # series.data's numeric array and rows' 2-D array are the two deepest
     # spots; pin their shapes separately. name stays optional: single-series
     # charts hide the legend, so a forced invented name is friction, and the
     # renderer falls back to "" either way.
-    series_items = props["series"]["items"]
+    series_items = chart["properties"]["series"]["items"]
     assert series_items.get("required") == ["data"], "series items.required must be ['data'], got %r" % series_items.get("required")
     assert series_items["properties"]["data"]["items"] == {"type": "number"}, "series.data items must be number"
-    assert props["rows"]["items"]["type"] == "array" and props["rows"]["items"]["items"] == {"type": "string"}, \
-        "rows must be a 2-D string array, got %r" % props["rows"]
+    rows = _branch_of("table")["properties"]["rows"]
+    assert rows["items"]["type"] == "array" and rows["items"]["items"] == {"type": "string"}, \
+        "rows must be a 2-D string array, got %r" % rows
     # The items anyOf dict branch must not require num: agenda pages draw
     # their own ordinals, so a label-only dict is a legal entry.
-    items_anyof = props["items"]["items"]["anyOf"]
-    dict_branch = next(br for br in items_anyof if br.get("type") == "object")
-    assert "required" not in dict_branch, "items dict branch must not require num, got %r" % dict_branch.get("required")
+    for layout in ("agenda", "kpi"):
+        items_anyof = _branch_of(layout)["properties"]["items"]["items"]["anyOf"]
+        dict_branch = next(br for br in items_anyof if br.get("type") == "object")
+        assert "required" not in dict_branch, \
+            "%s items dict branch must not require num, got %r" % (layout, dict_branch.get("required"))
 
 
 # ── 12. explicit-null optional-field safety (DeepSeek strict rewrites every
@@ -477,6 +713,44 @@ def test_non_string_salvage_elements_are_dropped():
     got_values = [float(v) for v in plot.series[0].values]
     assert got_values == [10.0, 30.0], \
         "series values must drop the dropped label positions, got %r" % got_values
+
+
+# ── 16. 画不出封面时的剥离回归(monkeypatch 强制 None,与机器字体无关):
+#         模板纯白占位缩略图必须被剥掉且 .rels 无悬空关系,
+#         包 XML 仍然良构、python-pptx 仍能打开(产物卡回退紧凑态靠它)。 ──
+@case("16. 无封面时剥离模板占位缩略图,.rels 无悬空关系,包仍合法")
+def test_strip_placeholder_when_no_cover():
+    original = server._cover_thumbnail
+    server._cover_thumbnail = lambda spec, th: None  # 模拟无字体/无 Pillow
+    try:
+        r = server.make_pptx(theme="business-blue",
+                             slides=[{"layout": "cover", "title": "剥离回归"}],
+                             filename="test_strip_thumb")
+    finally:
+        server._cover_thumbnail = original
+    assert r.get("ok") is True, "剥离路径不得影响主产物: %r" % r
+    with zipfile.ZipFile(r["path"]) as z:
+        names = z.namelist()
+        rels_bytes = z.read("_rels/.rels")
+        ct_bytes = z.read("[Content_Types].xml")
+    assert "docProps/thumbnail.jpeg" not in names, \
+        "无封面时包里不得残留 docProps/thumbnail.jpeg,实际: %s" % names
+    # 包内 XML 必须良构(剥离用正则删关系,坏包会让 PowerPoint 打不开)。
+    import xml.etree.ElementTree as ET
+    ET.fromstring(rels_bytes)
+    ET.fromstring(ct_bytes)
+    assert b"thumbnail" not in rels_bytes, \
+        ".rels 不得残留悬空的 thumbnail 关系: %s" % rels_bytes
+    prs = Presentation(r["path"])  # 能打开 = 剥离后的包仍是合法 pptx
+    assert len(prs.slides) == 1, "剥离后页数应为 1,实际 %d" % len(prs.slides)
+
+
+# ── 17. 封面绘制失败必须兜底返回 None(而非抛异常):render() 只认 None 才走
+#         占位剥离,绘制中途抛上去会绕过剥离、让模板白图复活。 ──
+@case("17. 封面绘制异常兜底返回 None,剥离路不被绕过")
+def test_cover_thumbnail_draw_failure_returns_none():
+    # th 缺全部颜色键 → 绘制第一步 KeyError;兜底后必须返回 None 而不是抛上去
+    assert server._cover_thumbnail({"slides": [{"layout": "cover", "title": "x"}]}, {}) is None
 
 
 # ── 跑全部 ───────────────────────────────────────────────────────────────

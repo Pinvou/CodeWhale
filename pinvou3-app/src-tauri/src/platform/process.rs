@@ -1178,6 +1178,11 @@ pub(crate) mod tests {
     const DESCENDANT_TIMEOUT_AFTER_STARTUP: Duration = Duration::from_secs(3);
     static PROCESS_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(windows)]
+    mod retention_fixture {
+        include!("process/retention_fixture.rs");
+    }
+
     fn lock_process_fixture() -> std::sync::MutexGuard<'static, ()> {
         PROCESS_FIXTURE_LOCK
             .lock()
@@ -1331,6 +1336,14 @@ pub(crate) mod tests {
     #[test]
     fn command_output_fixture() {
         match std::env::var(OUTPUT_FIXTURE_ENV).as_deref() {
+            #[cfg(windows)]
+            Ok("retained_launcher") => retention_fixture::launch(false).unwrap(),
+            #[cfg(windows)]
+            Ok("retained_writer_launcher") => retention_fixture::launch(true).unwrap(),
+            #[cfg(windows)]
+            Ok("retained_child") => retention_fixture::child(false).unwrap(),
+            #[cfg(windows)]
+            Ok("retained_writer_child") => retention_fixture::child(true).unwrap(),
             Ok("flood") => {
                 let payload = vec![b'x'; 256 * 1024];
                 std::io::stdout().write_all(&payload).unwrap();
@@ -1458,7 +1471,7 @@ pub(crate) mod tests {
             }
             #[cfg(windows)]
             Ok("root_timeout") => {
-                let _child = output_fixture_command("descendant_timeout")
+                let _child = output_fixture_command("root_timeout_descendant")
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -1506,6 +1519,21 @@ pub(crate) mod tests {
                 if let Some(finished) = fixture_marker("finished") {
                     std::fs::write(finished, b"finished").unwrap();
                 }
+            }
+            #[cfg(windows)]
+            Ok("root_timeout_descendant") => {
+                std::fs::write(
+                    fixture_marker("pid").unwrap(),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+                std::fs::write(fixture_marker("running").unwrap(), b"running").unwrap();
+                // Only the ordinary-timeout fixture exits cooperatively. Its
+                // parent first observes this exact process alive after timeout.
+                assert!(wait_for_fixture_marker(
+                    "cooperative-exit",
+                    Duration::from_secs(60)
+                ));
             }
             Ok("descendant_timeout") => {
                 if let Some(pid) = fixture_marker("pid") {
@@ -1894,6 +1922,50 @@ pub(crate) mod tests {
     }
 
     #[cfg(windows)]
+    struct RootTimeoutFixtureCleanup {
+        identity: WindowsProcessHandle,
+        cooperative_exit: std::path::PathBuf,
+        completed: bool,
+    }
+
+    #[cfg(windows)]
+    impl RootTimeoutFixtureCleanup {
+        fn finish(&mut self) {
+            std::fs::write(&self.cooperative_exit, b"exit")
+                .expect("request cooperative timeout-fixture exit");
+            assert_windows_process_exited(&self.identity, Duration::from_secs(3));
+            self.completed = true;
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for RootTimeoutFixtureCleanup {
+        fn drop(&mut self) {
+            if self.completed {
+                return;
+            }
+            // A failed assertion must still clean up only the pinned fixture.
+            // TerminateProcess is asynchronous; this fallback retains its own
+            // bounded exit wait and never turns a cleanup failure into success.
+            let termination = terminate_windows_fixture_process(&self.identity);
+            // SAFETY: the cleanup guard still owns this bound process handle.
+            let wait = unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    self.identity.handle,
+                    3_000,
+                )
+            };
+            eprintln!(
+                "timeout fixture {} fallback: terminate={termination:?}, wait={wait}",
+                self.identity.pid
+            );
+            if !std::thread::panicking() {
+                panic!("timeout fixture cleanup did not complete cooperatively");
+            }
+        }
+    }
+
+    #[cfg(windows)]
     #[test]
     fn ordinary_timeout_does_not_terminate_managed_descendants() {
         use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
@@ -1902,6 +1974,7 @@ pub(crate) mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("root-only-timeout");
         let pid_file = marker.with_extension("pid");
+        let cooperative_exit = marker.with_extension("cooperative-exit");
         let mut command = output_fixture_command("root_timeout");
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         let (root_finished, root_result) = std::sync::mpsc::channel();
@@ -1913,12 +1986,18 @@ pub(crate) mod tests {
                 .parse()
                 .unwrap();
             let identity = WindowsProcessHandle::open(pid).unwrap().unwrap();
+            let mut cleanup = RootTimeoutFixtureCleanup {
+                identity,
+                cooperative_exit,
+                completed: false,
+            };
             root_result.recv_timeout(Duration::from_secs(35)).unwrap();
             // SAFETY: identity pins the exact descendant; zero wait only probes liveness.
-            let survived = unsafe { WaitForSingleObject(identity.handle, 0) } == WAIT_TIMEOUT;
-            terminate_windows_fixture_process(&identity)
-                .expect("terminate the deliberately surviving timeout fixture");
-            assert_windows_process_exited(&identity, Duration::from_secs(3));
+            let survived =
+                unsafe { WaitForSingleObject(cleanup.identity.handle, 0) } == WAIT_TIMEOUT;
+            // Observe the contract before cleanup. This test does not require
+            // asynchronous forced termination to complete within a wall-clock budget.
+            cleanup.finish();
             survived
         });
         let result = output_with_timeout(
@@ -2225,27 +2304,39 @@ pub(crate) mod tests {
         let _fixture_lock = lock_process_fixture();
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("descendant-marker");
+        #[cfg(not(windows))]
         let running = marker.with_extension("running");
-        let finished = marker.with_extension("finished");
-        let mut command = output_fixture_command("descendant");
+        #[cfg(windows)]
+        let mut retention =
+            retention_fixture::Fixture::new(temporary, marker.clone(), Duration::from_secs(7));
+        let mut command = output_fixture_command(if cfg!(windows) {
+            "retained_launcher"
+        } else {
+            "descendant"
+        });
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         // Starting another copy of the large test binary can take several
-        // seconds on a cold Windows machine. Measure from the descendant's
-        // own running marker so startup time cannot masquerade as waiting
-        // for the inherited capture handles to close.
-        let (marker_sender, marker_receiver) = std::sync::mpsc::sync_channel(1);
-        let marker_waiter = std::thread::spawn(move || {
-            // The launcher's own handshake starts after ITS startup, so this
-            // waiter's deadline must be strictly larger or a slow start
-            // lands in the gap: the launcher succeeds, but the channel
-            // already holds a miss and the expect below fails spuriously.
-            let deadline = DESCENDANT_STARTUP_HANDSHAKE + Duration::from_secs(15);
-            let started = Instant::now();
-            while !running.exists() && started.elapsed() < deadline {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            let _ = marker_sender.send(running.exists().then(Instant::now));
-        });
+        // seconds on a cold Windows machine. Windows observes the running
+        // descendant and binds it before acknowledging launcher exit. The
+        // live-object assertion below independently rejects waiting for its
+        // capture handles to close; other platforms retain the marker probe.
+        #[cfg(not(windows))]
+        let (marker_receiver, marker_waiter) = {
+            let (marker_sender, marker_receiver) = std::sync::mpsc::sync_channel(1);
+            let marker_waiter = std::thread::spawn(move || {
+                // The launcher's own handshake starts after ITS startup, so this
+                // waiter's deadline must be strictly larger or a slow start
+                // lands in the gap: the launcher succeeds, but the channel
+                // already holds a miss and the expect below fails spuriously.
+                let deadline = DESCENDANT_STARTUP_HANDSHAKE + Duration::from_secs(15);
+                let started = Instant::now();
+                while !running.exists() && started.elapsed() < deadline {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                let _ = marker_sender.send(running.exists().then(Instant::now));
+            });
+            (marker_receiver, marker_waiter)
+        };
         // The outer launcher and the descendant are separate copies of the
         // large test binary. Give their explicit startup handshake enough
         // room (M3: 90s — the single budget covers both re-execs and the
@@ -2255,11 +2346,24 @@ pub(crate) mod tests {
         // Upper-bounds the waiter thread's remaining wait (its deadline is
         // launcher handshake + 15s, and the call itself gives the launcher
         // 90s), so the recv cannot expire before the thread reports.
+        #[cfg(not(windows))]
         let marker_seen_at = marker_receiver
             .recv_timeout(Duration::from_secs(20))
             .unwrap()
             .expect("descendant did not start before launcher exit");
+        #[cfg(not(windows))]
         marker_waiter.join().unwrap();
+        #[cfg(windows)]
+        let marker_seen_at = {
+            let observation = retention
+                .observe()
+                .expect("retention identity handoff failed");
+            assert!(
+                observation.alive,
+                "capture returned after the retained descendant exited"
+            );
+            observation.running_seen
+        };
 
         assert!(
             output.status.success(),
@@ -2270,14 +2374,22 @@ pub(crate) mod tests {
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("descendant-started"));
         assert!(marker_seen_at.elapsed() < Duration::from_secs(3));
-        let wait_started = Instant::now();
-        while !finished.exists() && wait_started.elapsed() < Duration::from_secs(7) {
-            std::thread::sleep(Duration::from_millis(50));
+        #[cfg(windows)]
+        retention
+            .finish()
+            .expect("descendant fixture did not exit naturally");
+        #[cfg(not(windows))]
+        {
+            let finished = marker.with_extension("finished");
+            let wait_started = Instant::now();
+            while !finished.exists() && wait_started.elapsed() < Duration::from_secs(7) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                finished.exists(),
+                "descendant fixture did not exit naturally"
+            );
         }
-        assert!(
-            finished.exists(),
-            "descendant fixture did not exit naturally"
-        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -2298,11 +2410,27 @@ pub(crate) mod tests {
         let _fixture_lock = lock_process_fixture();
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("writer-marker");
-        let mut command = output_fixture_command("writer_launcher");
+        #[cfg(windows)]
+        let mut retention =
+            retention_fixture::Fixture::new(temporary, marker.clone(), Duration::from_secs(8));
+        let mut command = output_fixture_command(if cfg!(windows) {
+            "retained_writer_launcher"
+        } else {
+            "writer_launcher"
+        });
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
         // M3 budget: the launcher re-exec plus the descendant's up-to-20s
         // startup handshake all run inside the engine's single budget.
         let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(90)).unwrap();
+
+        #[cfg(windows)]
+        assert!(
+            retention
+                .observe()
+                .expect("writer identity handoff failed")
+                .alive,
+            "capture returned after the retained writer exited"
+        );
 
         assert!(
             output.status.success(),
@@ -2319,16 +2447,23 @@ pub(crate) mod tests {
             stdout.contains("late-write"),
             "the writing descendant's lines must be captured: {stdout}"
         );
-        // Hygiene: the writer descendant exits on its own after ~5s.
-        let finished = marker.with_extension("finished");
-        let started = Instant::now();
-        while !finished.exists() && started.elapsed() < Duration::from_secs(8) {
-            std::thread::sleep(Duration::from_millis(50));
+        #[cfg(windows)]
+        retention
+            .finish()
+            .expect("writer descendant did not exit naturally");
+        #[cfg(not(windows))]
+        {
+            // The original non-Windows fixture exits on its own after ~5s.
+            let finished = marker.with_extension("finished");
+            let started = Instant::now();
+            while !finished.exists() && started.elapsed() < Duration::from_secs(8) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                finished.exists(),
+                "writer descendant did not exit naturally"
+            );
         }
-        assert!(
-            finished.exists(),
-            "writer descendant did not exit naturally"
-        );
         std::thread::sleep(Duration::from_millis(100));
     }
 

@@ -1,10 +1,19 @@
 # Codex ACP 运行环境与首次使用设计
 
-> 文档状态：待评审
+> 文档状态：已归档（2026-07-23 设计记录；分支 `feat/codex-acp` 已删除，历史经公开备份引用 `backup/feat-codex-acp-before-history-restore-e298ab34` 保留）
 >
-> 记录日期：2026-07-23
+> 落地情况（2026-11 归档注记）：Bridge 打包、事件合同、权限模式与工作区模型的思路已落地；
+> §1、§5–§9、§11、§14、§15、§17 中描述的托管 Codex 下载、`CodexRuntime*` 状态机
+> （含 §9 `RuntimeFailureKind` 失败分类）与 `codex-runtime://status` 事件**未被采纳**，
+> 现行实现为 `CodexAcpStatus` 布尔状态契约 + `acp:install-progress` 事件（§10 的 `CodexRuntimeGate`
+> 全量门控 UI 同样未被采纳，现行仅保留轻量运行时提示）；§6.1 的 Node 22.x / codex-acp
+> 1.1.5 基线已过时（现行 Bridge 钉扎 Node 24.22.1、codex-acp 适配器 2.2.2（claude-agent-acp 另钉 0.95.0））；§11 的 `prepare_codex_acp` /
+> `login_codex_acp` 未落库（现行命令为 `install_acp_agent` / `login_acp_agent` /
+> `submit_acp_agent_login_code` / `open_acp_agent_login_url`）；§13 的**托管 Codex 下载**供应链
+> （签名发布索引 / CDN 托管产物）未被采纳——本地构建的 staging / manifest 校验已随现行
+> `pinvou3-app/scripts/prepare-codex-bridge-runtime.sh` 落地，现行 Bridge 运行时由该脚本下载并校验。
 >
-> 对应分支：`feat/codex-acp`
+> 运行时现状以 [`codex-acp.md`](./codex-acp.md) 与 [`multi-agent-acp.md`](./multi-agent-acp.md) 为准。
 >
 > 上位决策：[`Codex-ACP-整体架构决策.md`](./Codex-ACP-整体架构决策.md)
 
@@ -13,10 +22,14 @@
 正式版 Pinvou 不要求用户预先安装 Node、npm、Codex CLI 或 `codex-acp`，但会优先检测
 并复用设备上已经安装且兼容的 Codex。设备没有 Codex，或系统版本与当前
 `codex-acp` 不兼容时，Pinvou 再按需下载固定版本的托管 Codex。
+（⚠️ 2026-11-20 订正：现行选取序并非「系统优先」——在随 adapter 托管安装的
+Codex（legacy）与系统安装之间择版本最新的兼容者，旧系统版会被
+`MIN_CODEX_VERSION` 过滤让位于新候选（`runtime.rs` `select_newest_eligible`，见 §2 注）；
+「按需下载固定版本的托管 Codex」属未被采纳的托管下载设计，见文首 banner。）
 
 Pinvou 安装包只携带体积较小的 **ACP Bridge Runtime**（私有 Node +
-`codex-acp`，不携带大体积 Codex 平台二进制），从而保证 ACP Host 自身不依赖系统
-Node/npm。用户只负责完成 ChatGPT 登录或显式提供 API Key。
+`codex-acp` / `claude-agent-acp` 等适配器，不携带大体积 Codex 平台二进制），从而保证
+ACP Host 自身不依赖系统 Node/npm。用户只负责完成 ChatGPT 登录或显式提供 API Key。
 
 运行组件和用户配置采用以下边界：
 
@@ -27,6 +40,8 @@ Pinvou 安装包管理
     └── codex-acp
 
 系统已有，兼容时优先使用
+（⚠️ 2026-11-20 订正：现行非固定「系统优先」序——与随 adapter 托管安装的
+Codex（legacy）择版本最新的兼容者，见 §2 注；本组与下组「按需下载」树均为设计口径）
 └── <resolved-from-PATH>/codex
 
 Pinvou 按需下载，仅在系统 Codex 缺失或不兼容时存在
@@ -45,7 +60,7 @@ Pinvou 按需下载，仅在系统 Codex 缺失或不兼容时存在
 Pinvou 不全局安装 npm 包、不修改系统 `PATH`、不使用 `sudo`，也不静默改写
 `~/.codex`。下载组件损坏时只修复 `~/.pinvou3/runtimes/codex/`；Bridge 损坏时提示
 修复或重新安装 Pinvou。两者都不得删除用户的 Codex 登录、配置、skill、MCP 或会话
-数据。
+数据。（⚠️ 2026-11 注：「不全局安装 npm 包」为写档时点边界——现行 `install_action_for` 提供用户显式触发的全局 CLI 安装/升级（`npm_upgrade`/`brew_upgrade`），见 §12.2 注；本段其余边界（PATH/sudo/静默改写）现行仍成立。）
 
 ## 2. 背景和当前问题
 
@@ -57,7 +72,7 @@ Pinvou 不全局安装 npm 包、不修改系统 `PATH`、不使用 `sudo`，也
   用户全局安装 Codex CLI。
 - 优先使用环境变量指定、应用内置、Pinvou 私有目录中的 adapter，最后才回退到系统
   `PATH`。
-- 调用 `codex-acp login` 发起登录。
+- 调用 `codex-acp login` 发起登录。（2026-11-18 注：本句系设计稿口径——现存备份史首个实现即经 `codex login` 登录，「codex-acp login」无已录码态佐证；现行行为见下方 2026-11 注。）
 - 复用用户默认 `HOME` 下的 `~/.codex`，因此已登录用户可以继续使用自己的 Codex
   配置、skills 和 MCP。
 
@@ -76,9 +91,24 @@ Pinvou 不全局安装 npm 包、不修改系统 `PATH`、不使用 `sudo`，也
    UI 只能区分 Node 缺失、adapter 缺失、未登录和普通错误，不能准确区分下载失败、
    组件损坏、登录过期、Codex 配置错误、网络错误和平台不支持。
 
+> 注（2026-11 归档）：本节为快照时点状态，多处「当前」已不成立——现行已带私有
+> Node Bridge（`pinvou3-app/scripts/prepare-codex-bridge-runtime.sh` 下载并 sha256 校验 Node
+> 24.22.1，`install.rs` 含随包 bridge 候选），缺口 1 已解决；bridge 构建会剪除
+> `@openai/codex` 与 `@anthropic-ai/claude-agent-sdk` 平台二进制，Codex CLI 由用户自行安装（`install.rs` 按
+> `PINVOU3_CODEX_ACP_BIN`/随包/私有目录/`PATH` 顺序解析的是 **adapter**；Codex CLI
+> 本体经 `resolve_codex_cli` 官方脚本→`PATH` 解析，Codex 二进制经
+> `PINVOU3_CODEX_PATH`→ 系统/legacy 随包**择新可兼容者**解析（`select_newest_eligible`
+> 按版本比较，旧系统 CLI 会被 `MIN_CODEX_VERSION` 过滤让位于新 legacy，并非固定
+> 「系统优先」序），见 `runtime.rs`）；登录走 codex CLI
+> （`login.rs` 路由至 `codex_acp::platform` 层的 `codex_login_command`，见 `platform/linux.rs` 等各平台实现）而非 `codex-acp login`；认证判断现为三个 env 变量 + `~/.codex/config.toml`
+> relay key + 真实 `codex login status` 复检。其余缺口以现行
+> [`codex-acp.md`](./codex-acp.md) 为准。
+
 ## 3. 目标与非目标
 
 ### 3.1 目标
+
+> ⚠️ 快照口径（2026-11 注）：本节目标条目按 2026-07-23 设计稿原文保留。其中「真实 ACP `initialize + session/new` 判断可用性」「下载、安装、登录、检查、修复均有明确状态、进度和可恢复操作」「Bridge 和托管 Codex 版本固定、可审计、可校验、可回滚」对应的 ACP 握手就绪判定、`CodexRuntime*` 状态机与托管下载均未采纳（见文首 banner 与 §4 注，§10 同由文首 banner 覆盖）——现行就绪判定为版本兼容探测（npm 安装走快路径读 package.json，布局不符才回退 spawn `codex --version` 为权威） + 登录态复查，Codex 由用户自行安装/升级，应用仅提供 brew/npm/官方脚本动作。
 
 - 系统已有兼容 Codex 时直接复用，不重复下载大体积 Codex 平台二进制。
 - 全新 Linux 设备没有 Node、npm、Codex CLI 时，用户仍可从 Pinvou 内完成首次启用。
@@ -99,7 +129,7 @@ Pinvou 不全局安装 npm 包、不修改系统 `PATH`、不使用 `sudo`，也
 - 不接管 Codex system prompt、tools、tool loop、skills、MCP 和上下文管理。
 - 不要求应用启动时就安装 Codex Runtime；只有进入“代码”模式或用户显式启用时才检查。
 - 不将托管 Codex 的更新与 Pinvou 主程序 OTA 强制绑定；Bridge 与 Pinvou 主程序一起
-  发布。
+  发布。（⚠️ 快照口径：托管 Codex 下载/更新链路未被采纳，见文首失效清单；「Bridge 与 Pinvou 主程序一起发布」现行仍成立。）
 - 不在本阶段建设通用 ACP Agent Runtime 市场。
 
 ## 4. 参考 AionUI 后的取舍
@@ -121,11 +151,11 @@ Pinvou 采用以下组合方案：
 | 能力 | 采用方案 |
 |---|---|
 | 私有 Node / ACP Tool | 随 Pinvou 内置小型 Bridge Runtime |
-| Codex 原生二进制 | 系统兼容版本优先；缺失或不兼容时按需下载 |
+| Codex 原生二进制 | 系统兼容版本优先；缺失或不兼容时按需下载（⚠️ 快照口径：现行不设「系统优先」固定序——`PINVOU3_CODEX_PATH` 覆盖优先，否则在 legacy 内置与系统 CLI 之间择新兼容者（`runtime.rs` 的 `select_newest_eligible`，见 §2 注）；亦无按需下载，Codex 由用户自行安装/升级，应用仅提供安装指引与 brew/npm/官方脚本动作） |
 | 认证和配置目录 | 复用 Codex 默认 `~/.codex` |
 | ChatGPT 登录 | Pinvou 内发起，授权页面仍由官方 Codex 流程处理 |
 | API Key | 高级备选，不作为默认首次使用路径 |
-| 健康检查 | 真实 ACP 握手，不以文件存在为结论 |
+| 健康检查 | 真实 ACP 握手，不以文件存在为结论（⚠️ 设计口径：现行就绪判定为版本兼容探测（npm 快路径 / `codex --version` 权威回退） + 登录态复查，无独立 ACP initialize 握手探针；「不以文件存在为结论」部分仍成立，见 §2 注） |
 | 后端实现 | 保持 Tauri/Rust 直连，不引入 AionCore 或额外 HTTP 服务层 |
 
 ## 5. 总体架构
@@ -170,6 +200,8 @@ flowchart TB
 
 #### `CodexRuntimeManager`
 
+（⚠️ 快照口径：`CodexRuntimeManager`/`CodexBinaryResolver`/`RuntimeInstaller`/`CodexHealthProbe` 四个组件均未被采纳、代码零匹配，仅设计稿留档；见文首失效清单。）
+
 - Codex Runtime 的唯一后端入口。
 - 串行化安装、修复、登录和健康检查，避免重复任务。
 - 将底层错误转换为稳定的产品状态。
@@ -177,6 +209,8 @@ flowchart TB
 - 不负责正常会话 timeline；Runtime 就绪后仍由现有 `AcpPool` 托管会话。
 
 #### `CodexBinaryResolver`
+
+> （⚠️ 快照口径：下列解析序未被采纳——现行 `select_newest_eligible` 在系统/legacy 候选中择新可兼容者，见 §2 注与 §4 表注。）
 
 Bridge Runtime 始终使用 Pinvou 固定版本，不从系统查找 Node 或 `codex-acp`。Bridge
 通过 `CODEX_PATH` 选择实际 Codex 二进制，按以下优先级解析：
@@ -206,7 +240,7 @@ Bridge Runtime 始终使用 Pinvou 固定版本，不从系统查找 Node 或 `c
 
 #### `CodexAuthCoordinator`
 
-- 启动私有 Runtime 中的 `codex-acp login`。
+- 启动私有 Runtime 中的 `codex-acp login`。（⚠️ 快照口径：现行登录经 Codex CLI 自身（`login.rs` 路由的 `codex login`，argv 由 platform 层构造），见 §2 注。）
 - 允许 adapter 调用系统浏览器完成官方授权。
 - 登录进程结束后不直接宣告成功，而是触发 `CodexHealthProbe`。
 - 不读取、不展示、不记录 OAuth token。
@@ -241,6 +275,11 @@ codex:           0.x.y
 platform:        linux-x64 / linux-arm64
 ```
 
+> 注（归档时现状）：现行 Bridge 实际钉扎 Node 24.22.1、codex-acp 适配器 2.2.2
+> （`pinvou3-app/scripts/prepare-codex-bridge-runtime.sh`（Node、codex-acp、claude-agent-acp、claude-agent-sdk 四个版本均钉于该脚本），适配器另钉于 `features/codex_acp/mod.rs`）；
+> 运行目录名 `codex-acp-1.1.5` 不代表适配器版本，见 `docs/codex-acp.md`。托管 Codex Runtime
+> 下载未采纳，Codex 由用户自行安装（脚本/brew/npm，应用内引导）。
+
 Bridge 不能只固定顶层 `codex-acp` 而允许每次构建重新解析不同的传递依赖，必须使用
 锁文件。构建 Bridge 时不携带 `@openai/codex-*` 平台二进制，并验证设置
 `CODEX_PATH` 后 adapter 不会尝试解析内置 Codex。
@@ -250,6 +289,8 @@ Bridge 不能只固定顶层 `codex-acp` 而允许每次构建重新解析不同
 系统版本。
 
 ### 6.2 目录布局
+
+> 注（2026-11 归档）：快照布局——现行 bridge 另含 `claude-agent-acp` 适配器与随包 npm（`node/lib/node_modules/npm`），见 `prepare-codex-bridge-runtime.sh`。
 
 ```text
 <app-resources>/codex-bridge/
@@ -279,6 +320,10 @@ CODEX_PATH=<system-codex-or-managed-codex>
 
 ### 6.3 Manifest
 
+> （⚠️ 快照口径：本节为未被采纳的托管下载设计中的 manifest 草图（`schema_version 1`），
+> 现行代码无此 manifest；现行落地为 `prepare-codex-bridge-runtime.sh` 构建并校验的
+> Bridge manifest（`schema_version 3`），见 §13 注与文首 banner。）
+
 最小 manifest 字段：
 
 ```json
@@ -304,7 +349,7 @@ CODEX_PATH=<system-codex-or-managed-codex>
 
 ### 6.4 安装策略
 
-采用“**系统 Codex 优先 + 托管 Codex 按需下载**”：
+采用“**系统 Codex 优先 + 托管 Codex 按需下载**”（⚠️ 快照口径：现行按 `select_newest_eligible` 择新可兼容者，见 §2 注与文首 banner）：
 
 - Linux 正式安装包只内置固定 Bridge Runtime，不内置大体积 Codex 平台二进制。
 - 进入“代码”模式时先检测系统 Codex 路径、版本并执行真实 ACP 探测。
@@ -332,7 +377,7 @@ Pinvou 默认不设置独立 `CODEX_HOME`，继续继承用户 `HOME`：
 
 Pinvou 不应：
 
-- 自动创建或改写 `~/.codex/config.toml`。
+- 自动创建或改写 `~/.codex/config.toml`。（⚠️ 快照口径收窄：现行 relay provider 显式配置时仍会写入，见 §12.2 注；「不应」仅指默认/隐式路径不写。）
 - 复制、迁移、解析或上传 `auth.json`。
 - 因 Runtime 修复而删除 `~/.codex`。
 - 把 Pinvou 的 system prompt、skill 或 MCP 默认写入 Codex 用户目录。
@@ -344,17 +389,21 @@ Pinvou 不应：
 首次未登录时：
 
 1. 用户点击“使用 ChatGPT 登录”。
-2. Pinvou 启动私有 Runtime 的 `codex-acp login`。
+2. Pinvou 启动私有 Runtime 的 `codex-acp login`。（现行经 Codex CLI 登录，见 §2 注）
 3. 官方流程打开浏览器，用户完成授权。
 4. Pinvou 显示“等待浏览器授权”，支持取消和重新打开。
 5. 登录命令结束后自动执行真实 ACP 健康检查。
 6. 探测成功才进入 `ready`；仍是认证错误则继续显示“重新登录”。
+   （⚠️ 2026-11 注：步 5-6 的真实 ACP 握手健康检查未采纳——现行登录结束后仅经
+   `codex login status` 复查认证态，见 §3.1 与 §4 注。）
 
 登录过程中不得在普通日志、timeline 或前端事件中传递凭证。
 
 ### 7.3 API Key
 
 API Key 是高级备选，不是默认首次使用路径：
+
+（⚠️ 快照口径收窄（2026-11 注）：应用内录入已落地（relay provider）；凭据经操作系统凭据存储以 `CredentialReference` 保存（配置 JSON 不存明文 key，见 `providers/mod.rs` 注释）；Provider「导出」可读回含明文 key 的 JSON（UI 附警告）；凭据下发已按 Agent 泛化（Codex 注入子进程 env；Claude/Kimi 经各自 provider 配置写入），不再「只注入 Codex」；「不提供读取原值能力」不再成立。存储半边符合本节要求，读回与注入两条按现行为准。）
 
 - 优先允许用户自己通过系统环境提供 `OPENAI_API_KEY`。
 - 如果后续增加应用内录入，必须使用操作系统凭据存储；不得明文写入
@@ -366,6 +415,8 @@ Linux 若目标发行版没有可用的 Secret Service，则第一阶段宁可�
 不应退化成明文保存。
 
 ## 8. Runtime 状态机
+
+> ⚠️ 快照口径：本节 `CodexRuntime*` 状态机未被采纳，仅设计稿留档，见文首失效清单。
 
 ### 8.1 稳定状态
 
@@ -437,6 +488,8 @@ stateDiagram-v2
 
 ## 9. 错误分类
 
+> ⚠️ 快照口径：本节 `RuntimeFailureKind` 失败分类未被采纳，仅设计稿留档，见文首失效清单。
+
 `RuntimeFailureKind` 至少覆盖：
 
 | 类型 | 含义 | UI 操作 |
@@ -459,6 +512,8 @@ stateDiagram-v2
 包含 API Key、Authorization header、OAuth token 或 `auth.json` 内容。
 
 ## 10. 首次使用 UI
+
+> ⚠️ 快照口径：本节 `CodexRuntimeGate` 门 UI 未被采纳，仅设计稿留档，见文首失效清单。
 
 Codex Runtime Gate 位于主页“代码”模式。Runtime 未就绪时，不跳转到设置页，也不把
 错误塞进对话 timeline，而是在内容区显示 `CodexRuntimeGate`；左侧统一会话列表仍可
@@ -566,6 +621,8 @@ codex-runtime://status
 
 现有 `prepare_codex_acp`、`login_codex_acp` 可在迁移期作为兼容入口调用新的
 `CodexRuntimeManager`，前端切换完成后再删除旧命令。
+（归档注记：这两个命令最终未落库；现行命令为 `install_acp_agent` / `login_acp_agent` /
+`submit_acp_agent_login_code` / `open_acp_agent_login_url`（以上及状态读取 `get_acp_agent_status`、账号切换 `switch_acp_agent_account` 均在 `app/commands/codex.rs`）；卸载 `uninstall_acp_agent` 在 `acp_providers.rs`。）
 
 ## 12. 与现有功能的隔离
 
@@ -576,14 +633,15 @@ codex-runtime://status
 - 不修改全局 `PATH`、`HOME`、Node 环境或 DeepSeek-TUI Engine 配置。
 - Codex 子进程的环境变量仅作用于该子进程。
 - Codex Runtime 失败不发布 `chat:*` 事件，也不进入 DeepSeek 会话状态。
-- Runtime 文件只位于 `~/.pinvou3/runtimes/codex/`。
+- Runtime 文件只位于 `~/.pinvou3/runtimes/codex/`。（2026-11 注：现行 managed runtime 目录为 `~/.pinvou3/runtimes/codex-acp-1.1.5/`，目录名沿用旧版、不随适配器版本变化，见 §6.1 注。）
 
 ### 12.2 不破坏用户 Codex
 
-- 默认复用但不写入 `~/.codex`。
-- “重新下载/删除托管 Codex”只处理 `~/.pinvou3/runtimes/codex/`；Bridge 损坏通过
+- 默认复用但不写入 `~/.codex`。（⚠️ 快照口径收窄：现行 relay provider 显式配置时会写入 `~/.codex/config.toml` 及 `~/.codex` 下的托管 catalog（`features/codex_acp/providers/codex.rs`），默认路径仍不写入。）
+- “重新下载/删除托管 Codex”只处理 `~/.pinvou3/runtimes/codex/`（⚠️ 快照口径：现行
+  目录为 `~/.pinvou3/runtimes/codex-acp-1.1.5/`，见 §12.1 注）；Bridge 损坏通过
   修复或重新安装 Pinvou 处理。
-- 用户全局安装的 Codex CLI 不被升级、删除或覆盖。
+- 用户全局安装的 Codex CLI 不被升级、删除或覆盖。（⚠️ 快照口径：现行应用提供用户显式触发的全局 CLI 安装/升级动作——`install_acp_agent` 的 `brew_upgrade`（`brew upgrade --cask codex`）/`npm_upgrade`（`npm install -g @openai/codex@latest`）/`official_script`（`install.rs` 的 `install_action_for`），会升级或覆盖用户全局 CLI；现行 `uninstall_acp_agent` 亦提供用户显式触发的卸载动作（`providers/lifecycle.rs` 的 `uninstall_command` 按安装来源执行 `brew uninstall`/`npm uninstall -g` 或删除官方脚本路径；opt-in `cleanup=true` 时额外删除该 Agent 的配置目录——Codex 即 `~/.codex` 整目录，前端复选框默认不勾选，故仍无后台静默删除）；「不被升级/删除/覆盖」仅指无后台静默升级、删除或覆盖。）
 - 开发覆盖变量只影响当前 Pinvou 进程。
 
 ### 12.3 会话兼容
@@ -592,6 +650,8 @@ codex-runtime://status
 版本改变而迁移。Runtime Release 是进程实现版本，不是 Pinvou 会话 schema 版本。
 
 ## 13. 发布与供应链
+
+> ⚠️ 快照口径：本节为设计稿留档。其中「托管 Codex 下载」供应链（§13.1 步骤 6-8 的托管产物构建/manifest/上传可信下载源、§13.2 的托管版本切换）未被采纳（见文首失效清单 §13）；staging 与 manifest 校验部分已随现行构建脚本落地。现行安装/升级/卸载链路按来源分流，见 §12.2 注。
 
 ### 13.1 构建流水线
 
@@ -621,6 +681,8 @@ codex-runtime://status
 
 ## 14. 分阶段实施
 
+> ⚠️ 快照口径：本节分阶段实施计划未被采纳，仅设计稿留档，见文首失效清单。
+
 ### 阶段 A：状态模型与真实健康检查
 
 - 引入单一 `CodexRuntimeStatus` 和错误分类。
@@ -644,7 +706,7 @@ codex-runtime://status
 
 验收：
 
-- 已安装兼容 Codex 的设备不下载托管 Codex即可进入登录或会话阶段。
+- 已安装兼容 Codex 的设备不下载托管 Codex 即可进入登录或会话阶段。
 - 没有系统 Node/npm，但存在原生 Codex 时仍可正常运行 ACP。
 - 系统 Codex 未登录时提示登录，不误触发托管下载。
 
@@ -658,7 +720,7 @@ codex-runtime://status
 
 - 干净设备没有 `node`、`npm`、`codex`、`codex-acp` 时，下载托管 Codex 后可进入
   登录阶段。
-- 下载过程不调用 npm；Linux MVP 从 OpenAI 官方 npm registry 读取固定平台归档。
+- 下载过程不调用 npm；Linux MVP 从 npm 官方 registry 读取 `@openai/codex` 固定平台归档。
 - 下载失败不影响 Pinvou 和 DeepSeek-TUI。
 - 托管 Codex 损坏可以重新下载，且系统 Codex 与 `~/.codex` 完全不变。
 
@@ -684,6 +746,8 @@ codex-runtime://status
 - 平台差异只进入 Runtime 构建和进程启动层，不分叉上层 UI 与会话逻辑。
 
 ## 15. 测试与验收矩阵
+
+> ⚠️ 快照口径：本节验收矩阵针对未被采纳的 Runtime 状态机，仅留档，见文首失效清单。
 
 | 场景 | 预期结果 |
 |---|---|
@@ -743,7 +807,9 @@ pinvou3-app/src/features/codex/
     └── RuntimeRepairCard.jsx
 ```
 
-构建脚本建议替换当前仅 npm 安装的脚本：
+（⚠️ 快照口径：除 `CodexAcpView.jsx`——已采纳，演化为现行主视图——外，上列前端组件均未采纳；现行运行时提示为 `src/features/codex/AcpRuntimeNotices.jsx` 轻提示。）
+
+构建脚本建议替换当时仅 npm 安装的脚本（2026-11 注：现行 `pinvou3-app/scripts/prepare-codex-bridge-runtime.sh` 已是该类下载＋校验脚本；本节**构建脚本清单**为设计稿残留）：
 
 ```text
 pinvou3-app/scripts/codex-runtime/
@@ -760,12 +826,14 @@ pinvou3-app/scripts/codex-runtime/
 
 本文当前收敛为以下四项：
 
-1. **系统 Codex 优先**：检测路径和版本，兼容时直接使用，不重复下载大体积二进制。
+1. **系统 Codex 优先**：检测路径和版本，兼容时直接使用，不重复下载大体积二进制。（⚠️ 现行按 `select_newest_eligible` 择新可兼容者，非固定系统优先，见 §2 注）
 2. **缺失或不兼容时下载**：Pinvou 提供固定托管版本的一键下载，不要求用户安装
-   Node/npm。
-3. **默认共享用户 `~/.codex`**：Pinvou 不创建隔离配置目录，也不静默修改用户配置。
+   Node/npm。（⚠️ 快照口径：托管下载未被采纳——现行由用户显式自装/自升级，见 §6.4 注与文首失效清单。）
+3. **默认共享用户 `~/.codex`**：Pinvou 不创建隔离配置目录，也不静默修改用户配置。（2026-11 注：现行仍不静默改写 `~/.codex`，仅在用户显式配置时经 relay 写入，见 §7.1 注。）
 4. **ChatGPT 登录为默认路径**：API Key 是高级备选；没有安全凭据存储前不在 Pinvou
-   配置文件中保存 Key。
+   配置文件中保存 Key。（2026-11 注：现行登录经 Codex CLI 自身完成，见 §2 注。）
 
 实施顺序为阶段 A → B → C → D：先改善判断和 UI，再接私有 Bridge 和系统 Codex
 检测，然后完成托管 Codex 按需下载，最后完成不打开终端的首次登录闭环。
+（⚠️ 快照口径：本句为写档时的四阶段实施顺序；其中「托管 Codex 按需下载」未采纳，
+见文首 banner。）

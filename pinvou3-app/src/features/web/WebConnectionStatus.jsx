@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { isWeb, platform } from '../../shared/platform.js';
 
 const BLOCKING = new Set(['credentials_missing', 'denied', 'revoked', 'replaced', 'incompatible_desktop']);
@@ -11,7 +11,7 @@ export function WebConnectionStatus({ theme, t }) {
   ));
 
   useEffect(() => {
-    if (!isWeb || typeof platform.onConnectionChange !== 'function') return undefined;
+    if (!isWeb || typeof platform.onConnectionChange !== 'function') return;
     return platform.onConnectionChange(setConnection);
   }, []);
 
@@ -19,7 +19,7 @@ export function WebConnectionStatus({ theme, t }) {
 
   const copy = t.uiWebConnection;
   const [title, fallback] = copy[connection.status] || copy.error;
-  // 已知状态始终使用当前语言；未知状态才保留诊断信息。
+  // 桌面端的已知状态可能携带旧版固定中文文案；界面统一使用当前语言字典。
   const message = copy[connection.status] ? fallback : (connection.message || fallback);
   const dark = theme === 'dark';
   const card = (

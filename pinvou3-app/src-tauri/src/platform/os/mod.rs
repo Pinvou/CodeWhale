@@ -35,9 +35,9 @@ pub(crate) use windows as platform;
 pub use interface::{
     apply_user_npm_prefix, archive_dependency_packages, archive_tool_exists, archive_tool_path,
     bundled_node, command_exists, configure_onnxruntime_dylib, connector_cli_command,
-    current_system_locale, disable_super_permission, email_dependency_packages, email_manual_hint,
-    email_tool_exists, enable_super_permission, external_application_path, file_url_from_path,
-    filesystem_path_identity_key, kill_pid_tree, libreoffice_missing_message,
+    current_system_locale, disable_super_permission, docker_candidates, email_dependency_packages,
+    email_manual_hint, email_tool_exists, enable_super_permission, external_application_path,
+    file_url_from_path, filesystem_path_identity_key, kill_pid_tree, libreoffice_missing_message,
     libreoffice_open_fallback_needed, libreoffice_tool_path, make_private_dir,
     msg_converter_required, null_device, nvidia_smi_candidates, obsidian_config_path,
     ocr_dependency_packages, ocr_tessdata_dir, ocr_tool_exists, ocr_tool_path, open_target,
@@ -54,4 +54,12 @@ pub use interface::{
 };
 
 #[cfg(target_os = "windows")]
+// Retain the OS interface for compatibility with inactive legacy source.
+#[allow(unused_imports)]
 pub use interface::bios_serial_number;
+// The raw volume fold (not one of the host-adaptive path_component_*
+// aliases): the archive import/export member ledger in features/sessions
+// folds unconditionally like the strictest target volume an archive may move
+// to (NTFS/APFS), so it consumes the primitive directly instead of the
+// host-adaptive surface.
+pub(crate) use interface::volume_fold_spelling;

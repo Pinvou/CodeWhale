@@ -84,6 +84,8 @@ pub(crate) fn build_task_package(
             connection_id: live.connection_id.clone(),
             controller_lease_id: live.controller_lease_id.clone(),
             lease_epoch: epoch,
+            relay_epoch: live.relay_epoch.clone(),
+            remote_control_generation: live.remote_control_generation.clone(),
             task_id: task_id.to_owned(),
         },
         primary: project_saved_model(primary)?,
@@ -285,6 +287,7 @@ mod tests {
 
     fn model(id: &str) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.into(),
             name: "DeepSeek".into(),
             alias: None,
@@ -293,6 +296,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "deepseek-chat".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.deepseek.com/v1".into(),
             provider_kind: Some("official_api".into()),
             vendor: Some("deepseek".into()),
@@ -531,6 +542,54 @@ mod tests {
     }
 
     #[test]
+    fn legacy_builtin_snapshot_is_read_only_and_never_exportable() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let path = crate::platform::paths::settings_path();
+        let mut prefs = UserPrefs::default();
+        let mut legacy = SavedModel::builtin_account_platform();
+        legacy.id = crate::platform::prefs::LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string();
+        legacy.model = "legacy-selected-model".into();
+        prefs.advanced.saved_models = vec![legacy];
+        prefs.advanced.active_model_id =
+            Some(crate::platform::prefs::LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string());
+        prefs.advanced.account_platform_default_model = None;
+        let original = serde_json::to_vec(&prefs).unwrap();
+        std::fs::write(&path, &original).unwrap();
+
+        let snapshot = UserPrefs::load_read_only_model_snapshot().unwrap();
+        assert!(
+            snapshot
+                .model_by_id(crate::platform::prefs::LEGACY_BUILTIN_LLMAPI_MODEL_ID)
+                .is_none()
+        );
+        let builtin = snapshot
+            .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .unwrap();
+        assert_eq!(builtin.model, "legacy-selected-model");
+        let descriptor = project_descriptor(builtin);
+        assert!(!descriptor.exportable);
+        assert_eq!(
+            descriptor.reason.as_deref(),
+            Some("model_not_exportable_builtin")
+        );
+        let credentials = ReadOnlyCredentials::new();
+        let error = prepare_active_task_package_with_store(
+            &lease(),
+            "task-legacy",
+            &credentials,
+            "package-legacy",
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "model_not_exportable_builtin");
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
     fn active_prepare_rejects_legacy_plaintext_before_credential_access() {
         let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
@@ -571,7 +630,7 @@ mod tests {
 
     #[test]
     fn descriptor_reports_the_reason_for_non_exportable_models() {
-        let mut builtin = model(crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID);
+        let mut builtin = model(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
         builtin.name = "内置模型".into();
         let descriptor = project_descriptor(&builtin);
         assert!(!descriptor.exportable);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CONTROLLER_PROTOCOL_VERSION,
   validateControllerMessage,
@@ -91,12 +92,13 @@ function errorMessage(code) {
 }
 
 export class ControllerRouter {
-  #registration; #leases; #send; #peers = new Map(); #controlled = new Map(); #audit; #hooks; #livenessHooks;
+  #registration; #leases; #send; #socketAvailable; #peers = new Map(); #controlled = new Map(); #audit; #hooks; #livenessHooks;
 
   constructor({
     pairingRegistrationHandler,
     leaseManager,
     send,
+    socketAvailable = () => true,
     audit = () => {},
     livenessHooks = new ControllerLivenessHooks({ leaseManager }),
     resumeHooks = new ControllerResumeHooks({ leaseManager }),
@@ -113,7 +115,7 @@ export class ControllerRouter {
       || typeof leaseManager.lease !== "function"
       || typeof leaseManager.terminateLease !== "function"
       || typeof leaseManager.setTerminationObserver !== "function"
-      || typeof send !== "function" || typeof audit !== "function") {
+      || typeof send !== "function" || typeof socketAvailable !== "function" || typeof audit !== "function") {
       fail("controller_router_config_invalid");
     }
     if (!Array.isArray(additionalHooks)) fail("controller_router_config_invalid");
@@ -128,6 +130,7 @@ export class ControllerRouter {
     this.#registration = pairingRegistrationHandler;
     this.#leases = leaseManager;
     this.#send = send;
+    this.#socketAvailable = socketAvailable;
     this.#audit = audit;
     this.#livenessHooks = livenessHooks;
     this.#hooks = Object.freeze(hooksList);
@@ -158,35 +161,118 @@ export class ControllerRouter {
     this.#peers.set(socketIdentity, {
       socketIdentity, source, socket, role: "unknown", endpointId: null,
       authenticatedContext: null, counterpart: null, controllerLeaseId: null,
-      pendingReservationId: null,
+      pendingReservationId: null, roleAdmission: null, closing: false,
     });
+  }
+
+  #isLivePeer(peer) {
+    return peer && this.#peers.get(peer.socketIdentity) === peer
+      && !peer.closing && this.#socketAvailable(peer.socket);
+  }
+
+  #canAdmitRole(peer, role) {
+    return (peer.role === "unknown" || peer.role === role)
+      && (!peer.roleAdmission || peer.roleAdmission.role === role);
+  }
+
+  #isControlledOwner(peer, endpointId) {
+    return peer.role === "B" && peer.endpointId === endpointId
+      && this.#controlled.get(endpointId) === peer.socketIdentity;
+  }
+
+  #assertDeliveryPeer(peer, role, lease) {
+    if (!this.#isLivePeer(peer) || peer.role !== role
+      || (role === "B" && !this.#isControlledOwner(peer, lease.endpoint_id))) {
+      fail("endpoint_offline");
+    }
+  }
+
+  #reserveRole(peer, role, kind, operationId = null) {
+    if (!this.#isLivePeer(peer)) fail("endpoint_offline");
+    if (!this.#canAdmitRole(peer, role) || (peer.roleAdmission
+      && (peer.roleAdmission.kind !== kind || peer.roleAdmission.operationId !== operationId))) {
+      fail("controller_role_invalid");
+    }
+    // Same-role claim retries keep sharing the lease manager's existing flight.
+    const admission = peer.roleAdmission ??= { role, kind, operationId, count: 0 };
+    admission.count += 1;
+    return () => {
+      admission.count -= 1;
+      if (admission.count === 0) peer.roleAdmission = null;
+    };
+  }
+
+  reserveControlledRegistration(socketIdentity, endpointId) {
+    const peer = this.#peers.get(id(socketIdentity, "socket_identity"));
+    if (!this.#isLivePeer(peer) || peer.role !== "unknown" || peer.roleAdmission) return null;
+    endpointId = endpointIdentifier(endpointId);
+    const release = this.#reserveRole(peer, "B", "registration");
+    const admission = peer.roleAdmission;
+    admission.endpointId = endpointId;
+    admission.ready = new Promise((resolve) => { admission.finishRegistration = resolve; });
+    return () => {
+      release();
+      admission.finishRegistration(this.#isLivePeer(peer) && peer.role === "B"
+        && peer.endpointId === endpointId && this.#controlled.get(endpointId) === socketIdentity);
+    };
+  }
+
+  async #waitForControlledRegistration(admission, message, lease) {
+    if (lease?.endpoint_id !== admission.endpointId) fail("controller_role_invalid");
+    const validated = validateControllerMessage(message, "B", lease);
+    const digest = createHash("sha256")
+      .update(JSON.stringify(validated, Object.keys(validated).sort())).digest("hex");
+    // Native B can send prepare right after register without waiting for the
+    // ACK. Keep one exact prepare across that wait and coalesce its retransmit.
+    if (admission.resumeDigest === digest) return false;
+    if (admission.resumeDigest) fail("controller_busy");
+    admission.resumeDigest = digest;
+    if (!await admission.ready) fail("endpoint_offline");
+    return true;
+  }
+
+  #assertResumePeer(peer, role, lease) {
+    if (!this.#isLivePeer(peer)) fail("endpoint_offline");
+    if (!lease) fail("controller_lease_not_found");
+    const admission = peer.roleAdmission;
+    if (!this.#canAdmitRole(peer, role) || peer.pendingReservationId
+      || (admission && (admission.kind !== "resume" || admission.operationId !== lease.controller_lease_id))
+      || (peer.controllerLeaseId && peer.controllerLeaseId !== lease.controller_lease_id)
+      || (role === "B" && !this.#isControlledOwner(peer, lease.endpoint_id))) {
+      fail("controller_role_invalid");
+    }
   }
 
   authenticateControlled({ socketIdentity, endpointId, authenticatedContext } = {}) {
     socketIdentity = id(socketIdentity, "socket_identity");
     endpointId = endpointIdentifier(endpointId);
     const peer = this.#peers.get(socketIdentity);
-    if (!peer || (peer.role !== "unknown" && peer.role !== "B")) fail("controller_socket_invalid");
+    if (!this.#isLivePeer(peer) || !this.#canAdmitRole(peer, "B")) fail("controller_socket_invalid");
     const previous = this.#controlled.get(endpointId);
-    if (previous && previous !== socketIdentity) {
-      const stale = this.#peers.get(previous);
-      if (stale) {
-        stale.role = "unknown";
-        stale.endpointId = null;
-        stale.authenticatedContext = null;
-      }
+    const stale = previous && previous !== socketIdentity ? this.#peers.get(previous) : null;
+    const displacedLease = stale?.controllerLeaseId ? this.#leases.lease(stale.controllerLeaseId) : null;
+    if (stale) {
+      stale.role = "unknown";
+      stale.endpointId = null;
+      stale.authenticatedContext = null;
     }
     peer.role = "B";
     peer.endpointId = endpointId;
     peer.authenticatedContext = authenticatedContext;
     this.#controlled.set(endpointId, socketIdentity);
+    if (displacedLease && displacedLease.sockets.B === previous) {
+      // The replacement is authoritative now. Start the old peer's close
+      // hooks before registration can release the successor's queued prepare.
+      // The eventual physical close shares the same one-shot retirement.
+      void this.removeSocket(previous).catch(() => this.#emit("resume_rejected"));
+    }
   }
 
   resolveControlledEndpoint(endpointId) {
     endpointId = endpointIdentifier(endpointId);
     const socketIdentity = this.#controlled.get(endpointId);
     const peer = socketIdentity ? this.#peers.get(socketIdentity) : null;
-    return peer?.role === "B" ? Object.freeze({ socketIdentity }) : null;
+    return peer?.role === "B" && this.#isLivePeer(peer) ? Object.freeze({ socketIdentity }) : null;
   }
 
   async handle({ socketIdentity, message } = {}) {
@@ -197,6 +283,7 @@ export class ControllerRouter {
       ? message.request_id : "request-invalid";
     let deliveryReservationId = null;
     let createdLease = null;
+    let releaseRole;
     try {
       if (message?.type === "desktop_pairing_register") {
         if (peer.role !== "B") fail("controller_role_invalid");
@@ -206,7 +293,7 @@ export class ControllerRouter {
         return response;
       }
       if (message?.type === "controller_pairing_claim") {
-        if (peer.role !== "unknown" && peer.role !== "A") fail("controller_role_invalid");
+        releaseRole = this.#reserveRole(peer, "A", "claim");
         if (peer.controllerLeaseId && this.#leases.lease(peer.controllerLeaseId)) fail("controller_busy");
         const delivery = await this.#leases.claimForDelivery({
           message, socketIdentity, source: peer.source,
@@ -215,10 +302,12 @@ export class ControllerRouter {
         deliveryReservationId = delivery.owns_initial_delivery ? reserved.reservation_id : null;
         const controlledIdentity = this.#controlled.get(reserved.transcript.endpoint_id);
         const controlled = controlledIdentity ? this.#peers.get(controlledIdentity) : null;
-        if (this.#peers.get(socketIdentity) !== peer || !controlled || controlled.role !== "B"
+        if (!this.#isLivePeer(peer) || !this.#isLivePeer(controlled) || controlled === peer || controlled.role !== "B"
           || !this.#leases.isPendingHandshake({ reservationId: reserved.reservation_id,
             socketIdentity, controlledSocketIdentity: controlledIdentity })) fail("endpoint_offline");
-        if ((peer.pendingReservationId && peer.pendingReservationId !== reserved.reservation_id)
+        if (!this.#canAdmitRole(peer, "A")) fail("controller_role_invalid");
+        if ((peer.controllerLeaseId && this.#leases.lease(peer.controllerLeaseId))
+          || (peer.pendingReservationId && peer.pendingReservationId !== reserved.reservation_id)
           || (controlled.pendingReservationId && controlled.pendingReservationId !== reserved.reservation_id)
           || (controlled.controllerLeaseId && this.#leases.lease(controlled.controllerLeaseId))) fail("controller_busy");
         peer.role = "A";
@@ -251,21 +340,37 @@ export class ControllerRouter {
           this.#deliver(this.#counterpart(peer), routed.message);
           return routed.message;
         }
+        const role = peer.role;
+        const reservationId = peer.pendingReservationId;
         const committed = await this.#leases.acceptReceipt({
-          message, role: peer.role, socketIdentity,
+          message, role, socketIdentity,
         });
         if (!committed) return null;
+        deliveryReservationId = reservationId;
         createdLease = committed.lease;
         const counterpart = this.#counterpart(peer);
-        const peerMessage = committed.messages[peer.role];
-        const counterpartMessage = committed.messages[counterpart.role];
+        const counterpartRole = role === "A" ? "B" : "A";
+        const assertJoinedPair = () => {
+          if (this.#leases.lease(createdLease.controller_lease_id) !== createdLease
+            || createdLease.sockets[role] !== socketIdentity
+            || createdLease.sockets[counterpartRole] !== counterpart.socketIdentity
+            || this.#counterpart(peer) !== counterpart) fail("endpoint_offline");
+          this.#assertDeliveryPeer(peer, role, createdLease);
+          this.#assertDeliveryPeer(counterpart, counterpartRole, createdLease);
+        };
+        assertJoinedPair();
+        if (!reservationId || peer.pendingReservationId !== reservationId
+          || counterpart.pendingReservationId !== reservationId) fail("endpoint_offline");
         peer.controllerLeaseId = committed.lease.controller_lease_id;
         counterpart.controllerLeaseId = committed.lease.controller_lease_id;
         peer.pendingReservationId = null;
         counterpart.pendingReservationId = null;
         await Promise.all(this.#hooks.map((hooks) => hooks.onLeaseCreated(committed.lease)));
-        this.#deliver(peer, peerMessage);
-        this.#deliver(counterpart, counterpartMessage);
+        assertJoinedPair();
+        if (peer.controllerLeaseId !== createdLease.controller_lease_id
+          || counterpart.controllerLeaseId !== createdLease.controller_lease_id) fail("endpoint_offline");
+        this.#deliver(peer, committed.messages[role]);
+        this.#deliver(counterpart, committed.messages[counterpartRole]);
         this.#emit("controller_joined");
         return committed;
       }
@@ -331,8 +436,17 @@ export class ControllerRouter {
       }
       const hooks = this.#hooks.find((candidate) => candidate.handles(message?.type));
       if (hooks) {
-        const lease = typeof message?.controller_lease_id === "string"
+        let lease = typeof message?.controller_lease_id === "string"
           ? this.#leases.lease(message.controller_lease_id) : null;
+        if (message.type === "controller_resume_prepare" && ["A", "B"].includes(message.sender_role)) {
+          const registration = peer.roleAdmission;
+          if (message.sender_role === "B" && registration?.kind === "registration") {
+            if (!await this.#waitForControlledRegistration(registration, message, lease)) return undefined;
+            lease = this.#leases.lease(message.controller_lease_id);
+          }
+          this.#assertResumePeer(peer, message.sender_role, lease);
+          releaseRole = this.#reserveRole(peer, message.sender_role, "resume", lease.controller_lease_id);
+        }
         // A heartbeat for the frozen lease's current liveness epoch can be in flight when its
         // counterpart closes. During recovery it is neither new evidence nor
         // a fatal error: returning an error can abort A's recovery worker.
@@ -353,20 +467,29 @@ export class ControllerRouter {
           }
           return null;
         }
+        const role = peer.role;
         const result = await hooks.handle(Object.freeze({
-          message, socket_identity: socketIdentity, role: peer.role, lease,
+          message, socket_identity: socketIdentity, role, lease,
         }));
         let committed = null;
         try {
           this.#applyPeerUpdates(result?.peer_updates, lease);
-          for (const delivery of result?.deliveries || []) {
-            const target = delivery.role === peer.role ? peer : this.#counterpart(peer);
-            this.#deliver(target, delivery.message);
-          }
+          const deliveries = result?.deliveries ?? [];
+          const deliveryRole = message.type === "controller_resume_prepare" ? message.sender_role : role;
+          const isResume = RESUME_TYPES.has(message.type);
+          let routes = isResume ? this.#resumeDeliveryRoutes(peer, deliveryRole, lease, deliveries)
+            : deliveries.map((delivery) => ({
+              target: delivery.role === deliveryRole ? peer : this.#counterpart(peer),
+              message: delivery.message,
+            }));
           if (result?.commit) committed = await result.commit();
           if (committed?.lease) {
+            this.#resumeDeliveryRoutes(peer, deliveryRole, committed.lease, deliveries, true);
             await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
+            routes = this.#resumeDeliveryRoutes(peer, deliveryRole, committed.lease, deliveries, true);
           }
+          result?.beforeDelivery?.();
+          for (const route of routes) this.#deliver(route.target, route.message);
           result?.finalize?.();
           if (LIVENESS_TYPES.has(message?.type)) this.#emit("liveness_forwarded");
           if (RESUME_TYPES.has(message?.type)) this.#emit("resume_forwarded");
@@ -404,11 +527,19 @@ export class ControllerRouter {
         request_id: requestId,
         code,
         message: errorMessage(code),
+        ...(message?.type === "desktop_pairing_register" && peer.role === "B"
+          && ["controller_busy", "pairing_registration_stale_relay_epoch"].includes(code)
+          && isControllerIdentifier(message.registration_request_id)
+          && isControllerIdentifier(message.remote_control_generation) ? {
+            registration_request_id: message.registration_request_id,
+            remote_control_generation: message.remote_control_generation,
+          } : {}),
       }); } catch { /* Error delivery cannot broaden or skip precise cleanup. */ }
       if (createdLease) {
         await this.#leases.terminateLease({ controllerLeaseId: createdLease.controller_lease_id,
           expectedLease: createdLease, reason: "handshake_failed" }).catch(() => {});
         this.#clearLeaseLinks(peer, createdLease.controller_lease_id);
+        if (deliveryReservationId) this.#clearPendingLinks(peer, deliveryReservationId);
       } else if (deliveryReservationId) {
         // Only a successfully accepted operation whose delivery/binding failed
         // owns cleanup. Rejected retries/replays have no cleanup authority.
@@ -418,6 +549,8 @@ export class ControllerRouter {
         this.#clearPendingLinks(peer, deliveryReservationId);
       }
       throw error;
+    } finally {
+      releaseRole?.();
     }
   }
 
@@ -427,29 +560,51 @@ export class ControllerRouter {
     return counterpart;
   }
 
+  #resumeDeliveryRoutes(peer, role, lease, deliveries, committed = false) {
+    if (!deliveries.length) return [];
+    if (!lease || this.#leases.lease(lease.controller_lease_id) !== lease) {
+      fail("controller_lease_not_found");
+    }
+    const assertOwner = (target, targetRole) => {
+      this.#assertDeliveryPeer(target, targetRole, lease);
+      if (target.controllerLeaseId !== lease.controller_lease_id
+        || (committed && lease.sockets[targetRole] !== target.socketIdentity)) {
+        fail("controller_lease_not_found");
+      }
+    };
+    assertOwner(peer, role);
+    return deliveries.map((delivery) => {
+      const target = delivery.role === role ? peer : this.#counterpart(peer);
+      assertOwner(target, delivery.role);
+      return { target, message: delivery.message };
+    });
+  }
+
   #applyPeerUpdates(updates, lease) {
     if (!updates) return;
-    if (!Array.isArray(updates)) fail("controller_peer_updates_invalid");
+    if (!Array.isArray(updates) || !lease || this.#leases.lease(lease.controller_lease_id) !== lease) {
+      fail("controller_peer_updates_invalid");
+    }
+    const bindings = new Map();
     for (const update of updates) {
       if (!update || !new Set(["A", "B"]).has(update.role)
         || update.controller_lease_id !== lease.controller_lease_id
-        || !isControllerIdentifier(update.socket_identity)) {
+        || !isControllerIdentifier(update.socket_identity) || bindings.has(update.socket_identity)) {
         fail("controller_peer_updates_invalid");
       }
       const peer = this.#peers.get(update.socket_identity);
-      if (!peer) fail("endpoint_offline");
-      if (peer.role !== "unknown" && peer.role !== update.role) fail("controller_role_invalid");
+      this.#assertResumePeer(peer, update.role, lease);
+      bindings.set(update.socket_identity, { peer, update });
+    }
+    for (const { peer, update } of bindings.values()) {
+      if (update.counterpart && bindings.get(update.counterpart)?.update.counterpart !== peer.socketIdentity) {
+        fail("controller_peer_updates_invalid");
+      }
+    }
+    for (const { peer, update } of bindings.values()) {
       peer.role = update.role;
       peer.controllerLeaseId = lease.controller_lease_id;
       peer.counterpart = update.counterpart ?? null;
-    }
-    for (const update of updates) {
-      if (!update.counterpart) continue;
-      const peer = this.#peers.get(update.socket_identity);
-      const counterpart = this.#peers.get(update.counterpart);
-      if (!peer || !counterpart || counterpart.counterpart !== peer.socketIdentity) {
-        fail("controller_peer_updates_invalid");
-      }
     }
   }
 
@@ -491,15 +646,20 @@ export class ControllerRouter {
   async removeSocket(socketIdentity) {
     socketIdentity = id(socketIdentity, "socket_identity");
     const peer = this.#peers.get(socketIdentity);
-    if (!peer) return Object.freeze({ handshakes: 0, leases: 0 });
+    if (!peer || peer.closing) return Object.freeze({ handshakes: 0, leases: 0 });
+    peer.closing = true;
+    peer.roleAdmission?.finishRegistration?.(false);
     const lease = peer.controllerLeaseId ? this.#leases.lease(peer.controllerLeaseId) : null;
+    // Replacing the endpoint revokes current B admission immediately, while
+    // its late close still belongs to the exact previously committed socket.
+    const leaseRole = lease?.sockets?.B === socketIdentity ? "B" : peer.role;
     // Both hooks run asynchronously and liveness removes its state on close.
     // Capture authenticated evidence once, before dispatching either hook.
     let evidenceDeadline = null;
     try { evidenceDeadline = this.#livenessHooks.resumeDeadline?.(lease) ?? null; }
     catch { /* Missing/invalid evidence must not prevent disconnect cleanup. */ }
     const hookOutcomes = await Promise.allSettled(this.#hooks.map((hooks) => hooks.onSocketClosed(Object.freeze({
-      socket_identity: socketIdentity, role: peer.role, lease, evidence_deadline_ms: evidenceDeadline,
+      socket_identity: socketIdentity, role: leaseRole, lease, evidence_deadline_ms: evidenceDeadline,
     }))));
     const hookResults = hookOutcomes
       .filter((result) => result.status === "fulfilled")

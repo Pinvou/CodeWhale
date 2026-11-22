@@ -6,7 +6,10 @@
 // 维护约定:en/ja 覆盖 zh 的全部叶子 key(parity 断言在 ui_language_coverage;en/ja
 // 比 zh 多出的 settings 相关键是历史遗留);ja 以 en 兜底(i18n/ja.js 内 spread);
 // settings 详情文案已并入各语言文件(原 settings-i18n.js)。
-export { CHAT_RECOVERY_COPY } from './i18n/chat-recovery.js';
+export { CHAT_RECOVERY_COPY, PPTX_PROFILE_UNAVAILABLE_COPY } from './i18n/chat-recovery.js';
+export { accountCenterCopy } from './account-center-i18n.js';
+export { modelAccessCopy } from './model-access-i18n.js';
+export { accountStatusCopy } from './account-status-i18n.js';
 
 // Startup-budget (round-41 merge with #586): zh joins en/ja behind the
 // dynamic loaders — the eager 152 kB dictionary pushed the main entry
@@ -129,3 +132,34 @@ export async function ensureLanguageWithZhFallback(lang) {
 }
 
 export { dict, LANG_TO_TAG, TAG_TO_LANG, languageFromLocaleTags, initialSystemLanguage, SEARCH_KEY_PROVIDERS };
+
+export { accountPlatformCopy } from './account-platform-i18n.js';
+export { accountLayoutCopy, adminLayoutCopy } from './account-layout-i18n.js';
+export { accountAuthCopy } from './account-auth-i18n.js';
+export { adminPlatformCopy } from './admin-platform-i18n.js';
+export { financeCopy } from './finance-i18n.js';
+export { accountDesktopCopy } from './account-desktop-i18n.js';
+export { ledgerRepairCopy } from './ledger-repair-i18n.js';
+export { reconciliationCopy } from './reconciliation-i18n.js';
+export { organizationCopy } from './organization-i18n.js';
+
+export { tokenManagementCopy } from './token-management-i18n.js';
+export { modelUsageCopy } from './model-usage-i18n.js';
+export { accountClosureCopy } from './account-closure-i18n.js';
+export { entitlementCorrectionCopy } from './entitlement-correction-i18n.js';
+export { accountClosedGrantCopy } from './account-closed-grants-i18n.js';
+
+export { auditWorkspaceCopy } from './audit-i18n.js';
+
+export { platformRoleCopy } from './platform-role-i18n.js';
+export { adminRolePresentationCopy } from './admin-role-presentation-i18n.js';
+
+export { registrationRepairCopy } from './registration-repair-i18n.js';
+export { productAdmissionCopy } from './product-admission-i18n.js';
+
+export { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from './admin-audit-presentation-i18n.js';
+
+export { smsStatusCopy, smsTemplateCopy } from './admin-sms-presentation-i18n.js';
+
+export { adminLanguagePreferenceCopy } from './admin-language-preference-i18n.js';
+export { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from './admin-approval-read-i18n.js';

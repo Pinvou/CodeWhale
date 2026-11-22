@@ -135,7 +135,7 @@ impl BehaviorEvent {
         self
     }
     pub(crate) fn diagnostic_error(mut self, error: &str, site: &'static str) -> Self {
-        let (code, http) = classify(error);
+        let (code, http) = classify(error, false);
         self.diagnostic_hint = Some(DiagnosticHint {
             code: code.into(),
             http,
@@ -289,6 +289,8 @@ struct Context {
     #[serde(default)]
     last_used: u64,
     turn: Option<String>,
+    #[serde(default)]
+    attempt: Option<String>,
     steps: Vec<Value>,
     code: Option<String>,
     site: String,
@@ -564,7 +566,7 @@ fn failure(event: &BehaviorEvent) -> bool {
             && field(event, "feedback_action") == Some("set"))
 }
 /// All outputs are registered constants. Never retain an error or its hash.
-pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
+pub(super) fn classify(error: &str, model_source: bool) -> (&'static str, Option<u16>) {
     let lower = error
         .chars()
         .take(8192)
@@ -583,6 +585,12 @@ pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
         ("permission_changed", "permission_changed"),
         ("capability_snapshot", "capability_stale"),
     ] {
+        // Shell syntax and file/data parsers also report unexpected EOF.
+        // A collection site is not provenance: assistant/ACP settlement also
+        // receives local failures. Require the actual producer's source fact.
+        if code == "stream_unexpected_eof" && !model_source {
+            continue;
+        }
         if lower.contains(needle) {
             return (code, None);
         }
@@ -627,11 +635,35 @@ pub(super) fn classify(error: &str) -> (&'static str, Option<u16>) {
         None,
     )
 }
+#[derive(Clone, Copy)]
+pub(crate) enum FailureSource {
+    AssistantRuntime,
+    Model,
+    AcpRuntime,
+    AcpPrompt,
+}
+
+impl FailureSource {
+    pub(super) fn classify(self, error: &str) -> (&'static str, Option<u16>) {
+        classify(error, self.model_source())
+    }
+    fn site(self) -> &'static str {
+        match self {
+            Self::AssistantRuntime | Self::Model => "assistant_error",
+            Self::AcpRuntime | Self::AcpPrompt => "acp_error",
+        }
+    }
+    fn model_source(self) -> bool {
+        matches!(self, Self::Model | Self::AcpPrompt)
+    }
+}
+
 pub(crate) fn capture_failure_context(
     app: &tauri::AppHandle,
     session: &str,
+    turn: &str,
     error: &str,
-    acp: bool,
+    source: FailureSource,
 ) {
     if session.starts_with(VOICE_CONTEXT_PREFIX) {
         return;
@@ -639,19 +671,54 @@ pub(crate) fn capture_failure_context(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
-    let Ok(mut state) = telemetry.diagnostics.lock() else {
-        return;
-    };
-    let Some(context) = state.contexts.get_mut(session) else {
-        return;
-    };
-    if !telemetry.lease_is_current(&context.lease) {
-        return;
+    telemetry.capture_failure_context(session, turn, error, source);
+}
+
+impl BehaviorTelemetry {
+    pub(super) fn capture_failure_context(
+        &self,
+        session: &str,
+        turn: &str,
+        error: &str,
+        source: FailureSource,
+    ) {
+        // Keep authoritative task ownership stable through the diagnostic
+        // write. Task lifecycle writers release this lock before enrichment;
+        // the lock order here is tasks -> diagnostics, with no await.
+        let Ok(tasks) = self.tasks.lock() else {
+            return;
+        };
+        let Some(attempt) = tasks.get(session) else {
+            return;
+        };
+        if turn.is_empty()
+            || attempt.admitted_at.is_none()
+            || attempt.turn_id.as_deref() != Some(turn)
+            || !self.lease_is_current(&attempt.lease())
+        {
+            return;
+        }
+        let Ok(mut state) = self.diagnostics.lock() else {
+            return;
+        };
+        let Some(context) = state.contexts.get_mut(session) else {
+            return;
+        };
+        // UI observations can carry old turns. Only the admitted task record
+        // and its exact submission context can authorize a terminal source.
+        if context.attempt.as_deref() != Some(attempt.attempt_id.as_str())
+            || context.lease != attempt.lease()
+            || context.turn.as_deref() != Some(turn)
+            || !self.lease_is_current(&context.lease)
+        {
+            return;
+        }
+        let site = source.site();
+        let (code, http) = source.classify(error);
+        context.code = Some(code.into());
+        context.http = http;
+        context.site = site.into();
     }
-    let (code, http) = classify(error);
-    context.code = Some(code.into());
-    context.http = http;
-    context.site = if acp { "acp_error" } else { "assistant_error" }.into();
 }
 // Per-thread, one-shot observation points let tests fix the actual lock ordering
 // without replacing authorization, publication or persistence decisions.
@@ -790,6 +857,9 @@ pub(super) fn enrich(
                 started: event.occurred_at,
                 last_used: event.occurred_at,
                 turn: None,
+                attempt: matches!(event.event_name, "task_submitted" | "task_admitted")
+                    .then(|| field(event, "attempt_id").map(str::to_owned))
+                    .flatten(),
                 steps: Vec::new(),
                 code: None,
                 site: "lifecycle".into(),
@@ -813,10 +883,23 @@ pub(super) fn enrich(
     sanitize_environment(&mut context.environment);
     context.last_used = context.last_used.max(event.occurred_at);
     if let Some(turn) = field(event, "turn_id") {
-        if context.turn.as_deref().is_some_and(|t| t != turn) {
-            return;
+        if let Some(attempt) = context.attempt.as_deref() {
+            if event.event_name == "task_admitted" {
+                if field(event, "attempt_id") != Some(attempt) {
+                    return;
+                }
+                // Admission for this exact submission is authoritative;
+                // an earlier UI observation cannot choose its turn.
+                context.turn = Some(turn.to_owned());
+            } else if context.turn.as_deref() != Some(turn) {
+                return;
+            }
+        } else {
+            if context.turn.as_deref().is_some_and(|t| t != turn) {
+                return;
+            }
+            context.turn = Some(turn.to_owned());
         }
-        context.turn = Some(turn.to_owned());
     }
     let stage = event_stage(event);
     if let Some((trace, controlled)) = &event.diagnostic_remote {
@@ -1597,16 +1680,16 @@ mod tests {
     #[test]
     fn classification_and_redaction_never_retain_raw_errors() {
         assert_eq!(
-            classify("HTTP 429 user-secret"),
+            classify("HTTP 429 user-secret", true),
             ("rate_limited", Some(429))
         );
         assert_eq!(
-            classify("context_length_exceeded private prompt"),
+            classify("context_length_exceeded private prompt", true),
             ("context_length_exceeded", None)
         );
-        assert_eq!(classify("status 5001 fixture"), ("unknown", None));
+        assert_eq!(classify("status 5001 fixture", true), ("unknown", None));
         assert_eq!(
-            classify("HTTP 500 fixture"),
+            classify("HTTP 500 fixture", true),
             ("provider_unavailable", Some(500))
         );
         let cleaned = super::super::diagnostic_redaction::Redactor::new("test-only-scope").redact(

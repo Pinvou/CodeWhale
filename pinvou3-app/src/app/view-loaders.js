@@ -14,15 +14,17 @@ export const VIEW_LOADERS = {
   knowledge: () => import('../features/knowledge/KnowledgeView.jsx'),
   modelStore: () => import('../features/model-store/ModelStoreView.jsx'),
   monitor: () => import('../features/monitor/MonitorView.jsx'),
+  deviceManager: () => import('../features/device-manager/DeviceManagerView.jsx'),
   search: () => import('../features/search/SearchView.jsx'),
   teamRelay: () => import('../features/team-relay/TeamRelayView.jsx'),
+  accountPlatformPopover: () => import('../features/account-platform/AccountPlatformPopover.jsx'),
   searchOverlay: () => import('../features/search/SearchOverlay.jsx'),
   moveToProjectDialog: () => import('../features/projects/MoveToProjectDialog.jsx'),
   rebindFolderDialog: () => import('../features/projects/RebindFolderDialog.jsx'),
   pinvouSummon: () => import('../features/tools/PinvouSummonCard.jsx'),
   updateNotice: () => import('../features/updater/UpdateNoticeButton.jsx'),
   savedPersonaConfirmDialog: () => import('../features/personas/SavedPersonaConfirmDialog.jsx'),
-  apiKeyGateDialog: () => import('../features/settings/ApiKeyGateDialog.jsx'),
+  modelAccessGate: () => import('../features/settings/ModelAccessGate.jsx'),
   archiveConfirmDialog: () => import('../components/ArchiveConfirmDialog.jsx'),
   // chat is not here: the main window renders ChatView at startup and imports
   // it statically in main.jsx; a dynamic import would not produce a separate

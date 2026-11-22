@@ -1,0 +1,3 @@
+DROP TRIGGER client_readiness_attestations_immutable ON client_readiness_attestations;
+DROP FUNCTION protect_client_readiness_attestations();
+DROP TABLE client_readiness_attestations;

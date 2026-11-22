@@ -19,6 +19,10 @@
 (function (root) {
   "use strict";
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
+  // A renderer-lifetime cache coalesces duplicates across bridge replacement.
+  // Native action ownership additionally survives a full WebView reload.
+  var actionLedger = root.__PINVOU_REMOTE_ACTION_LEDGER__ = root.__PINVOU_REMOTE_ACTION_LEDGER__
+    || { entries: Object.create(null), size: 0, lease: "" };
   registry["desktop-remote-control"] = function (context) {
     var state = context.state;
     var notify = context.notify;
@@ -38,9 +42,12 @@
     var capabilityFlights = Object.create(null);
     var capabilityRenewalTimer = null;
     var modelListIntent = 0;
+    var permissionMirrorIntent = 0;
+    var permissionMirrorOwner = "";
     var capabilityReadIntent = 0;
     var capabilityReadFlight = null;
     var controlledTerminalSequence = 0;
+    var controlledRegistrationFailureIntent = null;
     var controllerTerminalSequence = 0;
     var proxyListIntent = 0;
     var proxyReadIntents = Object.create(null);
@@ -49,8 +56,6 @@
     var proxyOpenIntent = 0;
     var proxyRefreshTimer = null;
     var remoteActionSequence = 0;
-    var uncertainActionRequests = Object.create(null);
-    var uncertainActionOrder = [];
     var CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000;
     var CAPABILITY_MAX_ATTEMPTS = 3;
     var CAPABILITY_RENEWAL_LEAD_MS = 5_000;
@@ -235,6 +240,9 @@
     }
 
     function stop() {
+      ++permissionMirrorIntent;
+      permissionMirrorOwner = "";
+      controlledRegistrationFailureIntent = null;
       subscriptionOwner = null;
       channelRegistrations = Object.create(null);
       var retiredUnlisten = unlisten.splice(0);
@@ -247,8 +255,6 @@
       proxyReadIntents = Object.create(null);
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
       capabilityRenewalTimer = null;
-      uncertainActionRequests = Object.create(null);
-      uncertainActionOrder = [];
       Object.keys(retiredWaiters).forEach(function (requestId) {
         clearTimeout(retiredWaiters[requestId].timer);
       });
@@ -270,6 +276,7 @@
     }
 
     function controlledIntent(openNewGeneration) {
+      controlledRegistrationFailureIntent = null;
       var next = logic.beginControlledIntent(current(), openNewGeneration);
       publish(next);
       return next.intents.controlled;
@@ -328,6 +335,7 @@
     function controlledStart(deviceName, workspaces) {
       ensureAvailable();
       subscribe();
+      var owner = subscriptionOwner;
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_start", {
         deviceName: deviceName || null,
@@ -344,16 +352,47 @@
           });
         }
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
+      }).catch(function (failure) { return failedControlledOpen(intent, failure, owner); }).finally(function () { settleControlledIntent(intent); });
     }
 
     function controlledRefresh() {
       ensureAvailable();
       subscribe();
+      var owner = subscriptionOwner;
       var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result, true);
-      }).catch(function (failure) { throw asBoundedError(failure); }).finally(function () { settleControlledIntent(intent); });
+      }).catch(function (failure) { return failedControlledOpen(intent, failure, owner); }).finally(function () { settleControlledIntent(intent); });
+    }
+
+    function reconcileRegistrationFailure(intent, result) {
+      var previous = current();
+      var next = logic.reconcileControlledRegistrationFailure(previous, intent, controlledStatusPayload(result));
+      if (next !== previous) {
+        controlledRegistrationFailureIntent = null;
+        publish(next);
+      } else if (previous.intents.controlled === intent && previous.controlledDevice.status === "error"
+        && previous.controlledDevice.generation === (result && result.generation)) {
+        controlledRegistrationFailureIntent = null;
+      }
+      return result;
+    }
+
+    function failedControlledOpen(intent, failure, owner) {
+      var error = asBoundedError(failure);
+      if (!owner || subscriptionOwner !== owner || error.code !== "pairing_registration_failed"
+        || current().intents.controlled !== intent) throw error;
+      controlledRegistrationFailureIntent = intent;
+      var observedDevice = current().controlledDevice;
+      var terminalSequence = controlledTerminalSequence;
+      return invoke("desktop_remote_controlled_status", {}).then(function (authoritative) {
+        if (current().controlledDevice !== observedDevice || terminalSequence !== controlledTerminalSequence
+          || controlledRegistrationFailureIntent !== intent) return;
+        reconcileRegistrationFailure(intent, authoritative);
+      }, function () {
+        // Keep the exact failed intent for a later controlledSync (including
+        // reopening the panel). A failed read is not a new terminal outcome.
+      }).then(function () { throw error; });
     }
 
     function controlledStop() {
@@ -377,7 +416,15 @@
       subscribe();
       var intent = current().intents.controlled;
       var revision = current().revision;
+      var failureIntent = controlledRegistrationFailureIntent;
+      var observedDevice = current().controlledDevice;
+      var terminalSequence = controlledTerminalSequence;
       return invoke("desktop_remote_controlled_status", {}).then(function (result) {
+        if (failureIntent === intent) {
+          if (controlledRegistrationFailureIntent !== failureIntent || current().controlledDevice !== observedDevice
+            || terminalSequence !== controlledTerminalSequence) return result;
+          return reconcileRegistrationFailure(intent, result);
+        }
         if (current().revision !== revision) return result;
         return applyControlled(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });
@@ -462,6 +509,8 @@
       var text = String(raw || "desktop_remote_control_failed");
       var error = new Error(text);
       error.code = text;
+      if (failure && failure.authoritative === true) error.authoritative = true;
+      if (failure && typeof failure.requestId === "string") error.requestId = failure.requestId;
       return error;
     }
 
@@ -1023,6 +1072,26 @@
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
+    function recoverRemoteProxyFile(quarantineConfirmed) {
+      ensureAvailable();
+      const selected = current().remoteProxyHistory;
+      return invoke("desktop_remote_proxy_recover", { quarantineConfirmed: quarantineConfirmed === true })
+        .then(function (location) {
+          if (location !== null && (typeof location !== "string" || location.length === 0)) {
+            throw asBoundedError("remote_proxy_recovery_failed");
+          }
+          ++proxyListIntent;
+          ++proxyReadEpoch;
+          proxyReadIntents = Object.create(null);
+          if (location !== null && selected && !selected.archived
+            && current().remoteProxyHistory === selected) {
+            publish(logic.hideRemoteProxyHistory(current(), selected.localSessionId));
+          }
+          listRemoteProxyHistory().catch(function () {});
+          return location;
+        }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
     function listRemoteProxyArchiveCandidates() {
       ensureAvailable();
       return invoke("desktop_remote_proxy_archive_candidates", {})
@@ -1226,27 +1295,24 @@
     }
 
     function remoteActionKey(localSessionId, remoteRef, intent) {
-      return [
-        localSessionId, remoteRef, intent.operation, intent.taskId, intent.transferId,
-        intent.chunkIndex, intent.chunkBytes, intent.permissionRequestId, intent.decision,
-        intent.artifactId, intent.fileName, intent.mimeType, intent.totalBytes, intent.sha256,
-      ].map(function (value) { return value == null ? "" : String(value); }).join("\u001f");
+      return JSON.stringify([attachmentLeaseKey(), localSessionId, remoteRef, intent]);
     }
 
-    function rememberUncertainAction(key, requestId) {
-      if (!uncertainActionRequests[key]) uncertainActionOrder.push(key);
-      uncertainActionRequests[key] = requestId;
-      while (uncertainActionOrder.length > 128) {
-        var expired = uncertainActionOrder.shift();
-        delete uncertainActionRequests[expired];
-      }
+    function forgetAction(key, entry) {
+      if (actionLedger.entries[key] !== entry) return;
+      delete actionLedger.entries[key];
+      actionLedger.size -= 1;
     }
 
-    function forgetUncertainAction(key) {
-      delete uncertainActionRequests[key];
+    function attachmentLeaseKey() {
+      var connection = current().controllerConnection || {};
+      var parts = [connection.connectionId, connection.controllerLeaseId, connection.leaseEpoch,
+        connection.relayEpoch, connection.generation];
+      return parts.every(function (part) { return typeof part === "string" && part.length > 0; })
+        ? JSON.stringify(parts) : "";
     }
 
-    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId) {
+    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId, retryUncertain, independentRead) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef)) {
         return Promise.reject(invalidTaskIntent());
@@ -1255,34 +1321,104 @@
         return Promise.reject(invalidTaskIntent());
       }
       var key = remoteActionKey(localSessionId, remoteRef, intent);
-      var requestId = suppliedRequestId || uncertainActionRequests[key] || newRemoteActionRequestId();
-      function attempt(retryUncertain) {
-        return invoke("desktop_remote_action_a", {
+      // A refresh after a decision must not inherit an earlier read's snapshot.
+      if ((intent.operation === "permission_list" || intent.operation === "user_input_list") && independentRead) key += "|read:" + independentRead;
+      var actionLease = attachmentLeaseKey();
+      if (actionLease && actionLedger.lease && actionLease !== actionLedger.lease) {
+        actionLedger.entries = Object.create(null);
+        actionLedger.size = 0;
+      }
+      if (actionLease) actionLedger.lease = actionLease;
+      var entry = actionLedger.entries[key];
+      if (entry && suppliedRequestId && suppliedRequestId !== entry.requestId) {
+        return Promise.reject(asBoundedError("remote_action_invalid"));
+      }
+      if (entry && entry.promise) return entry.promise;
+      if (entry && retryUncertain === false && intent.operation !== "attachment_abort") {
+        return Promise.reject(asBoundedError("result_unknown"));
+      }
+      if (!entry) {
+        if (actionLedger.size >= 128) return Promise.reject(asBoundedError("remote_action_capacity"));
+        entry = { requestId: suppliedRequestId || newRemoteActionRequestId(), unknown: false, promise: null };
+        actionLedger.entries[key] = entry;
+        actionLedger.size += 1;
+      }
+      function attempt(mayRetry) {
+        return new Promise(function (resolve) {
+          if (actionLease !== attachmentLeaseKey() || actionLedger.entries[key] !== entry) {
+            throw asBoundedError("result_unknown");
+          }
+          resolve(invoke("desktop_remote_action_a", {
           localSessionId: localSessionId, remoteRef: remoteRef,
-          requestId: requestId, intent: intent,
-        }).then(function (body) {
-          forgetUncertainAction(key);
+          requestId: entry.requestId, intent: intent,
+        })); }).then(function (body) {
+          forgetAction(key, entry);
           return body;
         }).catch(function (failure) {
           var error = asBoundedError(failure);
-          error.requestId = requestId;
+          if (error.requestId) entry.requestId = error.requestId;
+          else error.requestId = entry.requestId;
           if (error.code === "result_unknown") {
-            rememberUncertainAction(key, requestId);
-            if (retryUncertain) return attempt(false);
-          } else {
-            forgetUncertainAction(key);
+            entry.unknown = true;
+            if (mayRetry && actionLease === attachmentLeaseKey() && actionLedger.entries[key] === entry) return attempt(false);
+          } else if (error.authoritative || !entry.unknown) {
+            forgetAction(key, entry);
           }
+          // A read has no mutation receipt to retain, including an uncertain
+          // first attempt followed by a different, non-authoritative failure.
+          if ((intent.operation === "permission_list" || intent.operation === "user_input_list") && independentRead) forgetAction(key, entry);
+          if (intent.operation === "user_input_respond" && entry.unknown && !error.authoritative) error.resultUnknown = true;
           throw error;
         });
       }
-      return attempt(true);
+      var resolveFlight;
+      var rejectFlight;
+      var flight = new Promise(function (resolve, reject) { resolveFlight = resolve; rejectFlight = reject; });
+      entry.promise = flight.finally(function () { entry.promise = null; });
+      attempt(retryUncertain !== false).then(resolveFlight, rejectFlight);
+      return entry.promise;
+    }
+
+    var userInputReadSequence = 0;
+    function sameQuestionView(before, after) {
+      var left = before.controllerConnection || {};
+      var right = after.controllerConnection || {};
+      return before.intents.controller === after.intents.controller
+        && ["status", "localSessionId", "sessionRef", "connectionId", "controllerLeaseId", "leaseEpoch", "relayEpoch", "generation"]
+          .every(function (field) { return left[field] === right[field]; });
+    }
+    function userInputList(localSessionId, remoteRef, taskId) {
+      if (!requiredOpaqueId(taskId) || userInputReadSequence >= Number.MAX_SAFE_INTEGER) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "user_input_list", taskId: taskId,
+      }, null, false, ++userInputReadSequence).then(function (body) {
+        if (terminal !== controllerTerminalSequence || !sameQuestionView(before, current())) return [];
+        return body && Array.isArray(body.requests) ? body.requests : [];
+      });
+    }
+
+    function userInputRespond(localSessionId, remoteRef, taskId, inputId, cancel, answers) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(inputId) || typeof cancel !== "boolean" || !Array.isArray(answers)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "user_input_respond", taskId: taskId, inputId: inputId, cancel: cancel, answers: answers,
+      });
     }
 
     function permissionList(localSessionId, remoteRef, taskId) {
       if (!requiredOpaqueId(taskId)) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      var intent = ++permissionMirrorIntent;
+      permissionMirrorOwner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_list", taskId: taskId,
-      }).then(function (body) {
+      }, null, undefined, intent).then(function (body) {
+        if (intent !== permissionMirrorIntent || terminal !== controllerTerminalSequence
+          || !sameControllerView(before, current())) return [];
         var permissions = body && body.permissions;
         var next = shallow(current());
         next.remotePermissions = Array.isArray(permissions)
@@ -1306,13 +1442,21 @@
     function permissionDecide(localSessionId, remoteRef, taskId, permissionRequestId, decision) {
       if (!requiredOpaqueId(taskId) || !requiredOpaqueId(permissionRequestId)
         || ["allow", "deny"].indexOf(decision) < 0) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      var owner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_decide", taskId: taskId,
         permissionRequestId: permissionRequestId, decision: decision,
       }).then(function (result) {
+        if (owner !== permissionMirrorOwner || terminal !== controllerTerminalSequence
+          || !sameControllerView(before, current())) return result;
+        // A read started before this acknowledgement must not restore the old
+        // pending card after its successful decision removed it.
+        ++permissionMirrorIntent;
         var next = shallow(current());
         next.remotePermissions = (next.remotePermissions || []).filter(function (entry) {
-          return entry.permissionRequestId !== permissionRequestId;
+          return entry.taskId !== taskId || entry.permissionRequestId !== permissionRequestId;
         });
         publish(next);
         return result;
@@ -1333,15 +1477,22 @@
     }
 
     function attachmentBegin(localSessionId, remoteRef, taskId, fileName, mimeType, totalBytes, sha256) {
+      var maxFileBytes = root.PinvouChunkedFileUpload && root.PinvouChunkedFileUpload.MAX_FILE_BYTES;
+      if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes <= 0) {
+        return Promise.reject(asBoundedError("remote_attachment_size_invalid"));
+      }
+      if (Number.isSafeInteger(totalBytes) && totalBytes > maxFileBytes) {
+        return Promise.reject(asBoundedError("remote_attachment_size_invalid"));
+      }
       if (!requiredOpaqueId(taskId) || typeof fileName !== "string" || typeof mimeType !== "string"
         || !fileName.trim() || Array.from(fileName).length > 200
         || !mimeType || mimeType.length > 120
-        || !Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > 32 * 1024 * 1024
+        || !Number.isSafeInteger(totalBytes) || totalBytes <= 0
         || !/^[a-f0-9]{64}$/.test(sha256 || "")) return Promise.reject(invalidTaskIntent());
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "attachment_begin", taskId: taskId, fileName: fileName,
         mimeType: mimeType, totalBytes: totalBytes, sha256: sha256,
-      }).then(function (body) { return {
+      }, undefined, false).then(function (body) { return {
         transferId: body.transfer_id, chunkBytes: Number(body.chunk_bytes), totalBytes: Number(body.total_bytes),
       }; });
     }
@@ -1356,7 +1507,7 @@
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "attachment_chunk", taskId: taskId, transferId: transferId,
         chunkIndex: chunkIndex, chunkB64: chunkB64, chunkBytes: chunkBytes,
-      }).then(function (body) { return {
+      }, undefined, false).then(function (body) { return {
         state: body.state, receivedBytes: Number(body.received_bytes), sha256: body.sha256 || null,
       }; });
     }
@@ -1365,7 +1516,14 @@
       if (!requiredOpaqueId(taskId) || !requiredOpaqueId(transferId)) return Promise.reject(invalidTaskIntent());
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "attachment_abort", taskId: taskId, transferId: transferId,
-      });
+      }, undefined, false);
+    }
+
+    function attachmentAbortConfirmed(localSessionId, remoteRef, taskId, transferId) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(transferId)) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "attachment_abort_confirmed", taskId: taskId, transferId: transferId,
+      }, undefined, false);
     }
 
     function artifactIndex(localSessionId, remoteRef) {
@@ -1473,17 +1631,21 @@
       listRemoteProxyArchives: listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: listRemoteProxyArchiveCandidates,
       getRemoteProxyLoadStatus: getRemoteProxyLoadStatus,
+      recoverRemoteProxyFile: recoverRemoteProxyFile,
       reserveRemoteTask: reserveRemoteTask,
       commitRemoteTask: commitRemoteTask,
       cancelRemoteTask: cancelRemoteTask,
       abandonRemoteTask: abandonRemoteTask,
       permissionList: permissionList,
+      userInputList: userInputList,
+      userInputRespond: userInputRespond,
       controlledPermissionList: controlledPermissionList,
       permissionDecide: permissionDecide,
       permissionDenyTask: permissionDenyTask,
       attachmentBegin: attachmentBegin,
       attachmentChunk: attachmentChunk,
       attachmentAbort: attachmentAbort,
+      attachmentAbortConfirmed: attachmentAbortConfirmed,
       artifactIndex: artifactIndex,
       artifactPreview: artifactPreview,
       artifactDownloadBegin: artifactDownloadBegin,

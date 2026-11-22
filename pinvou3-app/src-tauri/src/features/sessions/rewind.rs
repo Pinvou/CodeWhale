@@ -1,8 +1,10 @@
 //! 代码模式「改动随对话回退」的对话侧：把 transcript 截断到第 N 个用户 turn 末尾。
 //!
 //! 设计文档 `docs/code-mode-改动随对话回退-设计.md` §4：
-//! - 定位口径与 `code_checkpoints::count_user_turns`、底座 `EditLastTurn` 同一谓词
-//!   [`deepseek_tui::is_user_turn_prompt`]：tool_result 与运行时内部信封同样以
+//! - 定位口径与 `code_checkpoints::count_user_turns`、底座 `EditLastTurn` 同源，
+//!   都读底座 era 列表 [`deepseek_tui::user_turn_prompt_indices`]（该列表的
+//!   Editable 分类曾以单消息谓词 [`deepseek_tui::is_user_turn_prompt`] 表述，
+//!   现以 era 列表为准）：tool_result 与运行时内部信封同样以
 //!   `role = "user"` 落盘，按 role 定位会切在工具往返中间。
 //! - 被截段落写入 sidecar `_rewound_turns.json`（纯数据备份，UI 不暴露 redo）。
 //! - 本方法是 [`super::transcript::looks_like_truncating_overwrite`] 守卫的显式
@@ -199,12 +201,8 @@ fn load_rewound_turns_map_with(
             // 损坏的 sidecar 不得全局锁死 rewind/undo：改名隔离（保留现场供人工
             // 恢复）后按空 map 继续——代价是存量备份记录对该会话不再可见（undo
             // 入口消失），胜过整个功能报错卡死。
-            let quarantine =
-                path.with_extension(format!("corrupt-{}", Utc::now().format("%Y%m%d%H%M%S")));
             match mode {
-                RewindLoadMode::CallerHoldsLock => {
-                    quarantine_and_continue(&path, &quarantine, parse_error)
-                }
+                RewindLoadMode::CallerHoldsLock => quarantine_and_continue(&path, parse_error),
                 RewindLoadMode::TryLockAndRecheck => {
                     match try_lock_rewound_turns_file() {
                         Some(_lock) => {
@@ -225,9 +223,7 @@ fn load_rewound_turns_map_with(
                                     );
                                     Ok(fresh_map)
                                 }
-                                Err(_still_corrupt) => {
-                                    quarantine_and_continue(&path, &quarantine, parse_error)
-                                }
+                                Err(_still_corrupt) => quarantine_and_continue(&path, parse_error),
                             }
                         }
                         None => {
@@ -258,15 +254,23 @@ fn load_rewound_turns_map_with(
 /// cross-process flock during the rename.
 fn quarantine_and_continue(
     path: &std::path::Path,
-    quarantine: &std::path::Path,
     parse_error: serde_json::Error,
 ) -> Result<HashMap<String, Vec<RewoundTurnsRecord>>> {
-    eprintln!(
-        "[sessions] 回退备份损坏，隔离为 {} 后按空继续: {parse_error:#}",
-        quarantine.display()
-    );
-    if let Err(error) = std::fs::rename(path, quarantine) {
-        eprintln!("[sessions] 隔离损坏的回退备份失败: {error:#}");
+    // platform's nanosecond unique-name quarantine primitive
+    // (`stem.corrupt-<timestamp>.<nanos>`): a same-second second corruption
+    // would overwrite the first forensic copy (rename silently replaces the
+    // existing target) — same shape as code_checkpoints' corruption
+    // isolation.
+    match crate::platform::filesystem::quarantine_corrupt_file(path) {
+        Ok(quarantine) => {
+            eprintln!(
+                "[sessions] corrupt rewind backup quarantined as {}; continuing empty: {parse_error:#}",
+                quarantine.display()
+            );
+        }
+        Err(error) => {
+            eprintln!("[sessions] failed to quarantine the corrupt rewind backup: {error:#}");
+        }
     }
     Ok(HashMap::new())
 }
@@ -314,15 +318,13 @@ impl SessionStore {
             .load_session_snapshot(id)
             .with_context(|| format!("load_session({id}) for turn rewind"))?;
 
-        // 与 code_checkpoints::count_user_turns 同一谓词，保证「第 N 轮」在快照、
-        // 截断、UI 三处口径一致。
-        let turn_prompt_indices: Vec<usize> = session
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| deepseek_tui::is_user_turn_prompt(message))
-            .map(|(index, _)| index)
-            .collect();
+        // 与 code_checkpoints::count_user_turns 同一口径（其内部同为底座 era
+        // 形 user_turn_prompt_indices），保证「第 N 轮」在快照、截断、UI 三处
+        // 口径一致。era 口径比单消息 is_user_turn_prompt 多计入 post-provenance
+        // 历史里粘贴的压缩摘要头 turn——底座文档明确 host turn 编号应统一读
+        // 这一个列表（fork 分叉同一口径）。
+        let turn_prompt_indices: Vec<usize> =
+            deepseek_tui::user_turn_prompt_indices(&session.messages);
         let total_turns = turn_prompt_indices.len() as u32;
         if keep_turns >= total_turns {
             bail!("会话当前只有 {total_turns} 轮，无法回退到第 {keep_turns} 轮末尾（无可截内容）");
@@ -423,11 +425,7 @@ impl SessionStore {
             .manager
             .load_session_snapshot(id)
             .with_context(|| format!("load_session({id}) for rewind undo"))?;
-        let current_turns = session
-            .messages
-            .iter()
-            .filter(|message| deepseek_tui::is_user_turn_prompt(message))
-            .count() as u32;
+        let current_turns = deepseek_tui::user_turn_prompt_indices(&session.messages).len() as u32;
         if current_turns != record.kept_turns {
             bail!(
                 "回退后已产生新轮次（当前 {current_turns} 轮，回退时为 {} 轮），不可反悔",

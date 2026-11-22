@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * Scheduled tasks UI smoke test.
  *
@@ -9,7 +10,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./helpers/puppeteer-fixture.cjs');
 const { startUiTestServer } = require('./ui_test_server');
 const CHROME = process.env.CHROME ||
   [
@@ -1378,7 +1379,7 @@ async function openScheduledNav(page) {
       customCreationClicked, customCreationBeforeSubmit, customCreationState, openChatClicked, preSend,
       chatAutoCreateState, weeklyMultiSelectState, sevenDayState, lastDayGuardState, rruleRoundTripState, intervalDisplayBefore, intervalDisplayAfter, intervalEditState, explicitAnchorState, errors
     }, null, 2));
-    process.exit(1);
+    finishFixtures(1);
   }
   console.log('PASS scheduled tasks UI');
 })();

@@ -1,0 +1,54 @@
+# Explicit overlay for an isolated Linux acceptance deployment of the
+# production-derived personal/finance or models composition. No daemon setup,
+# site credentials, or production activation is supplied by this file.
+name: pinvou-product-admission-acceptance
+x-validator-socket: &validator-socket
+  type: bind
+  source: ${PRODUCT_ADMISSION_ACCEPTANCE_SOCKET_DIRECTORY:?set an isolated worker-owned tmpfs directory}
+  target: /run/pinvou/admission-validator
+  bind: {create_host_path: false}
+services:
+  billing-service:
+    group_add: ["65533"]
+    networks: [backend, kms]
+    environment:
+      BILLING_PRODUCT_ADMISSION_MATERIALS_ENABLED: "true"
+      BILLING_PRODUCT_ADMISSION_VALIDATOR_SOCKET: /run/pinvou/admission-validator/validator.sock
+      BILLING_PRODUCT_ADMISSION_VALIDATOR_UID: "65533"
+      BILLING_PRODUCT_ADMISSION_KEY_ID: ${PRODUCT_ADMISSION_ACCEPTANCE_TRANSIT_KEY:?set the dedicated original-document key name}
+      BILLING_PRODUCT_ADMISSION_TRANSIT_URL: ${PRODUCT_ADMISSION_ACCEPTANCE_TRANSIT_URL:?set the verified HTTPS Transit origin}
+      BILLING_PRODUCT_ADMISSION_TRANSIT_TOKEN_FILE: /run/pinvou/admission-transit/token
+      BILLING_PRODUCT_ADMISSION_TRANSIT_CA_FILE: /run/pinvou/trust/ca.crt
+    volumes:
+      - <<: *validator-socket
+        read_only: true
+      - type: bind
+        source: ${PRODUCT_ADMISSION_ACCEPTANCE_TRANSIT_TOKEN_DIRECTORY:?set the Billing originals-only Transit sink directory}
+        target: /run/pinvou/admission-transit
+        read_only: true
+        bind: {create_host_path: false}
+  product-admission-validator:
+    image: ${PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_IMAGE:?set the verified immutable Linux PDF validator image}
+    pull_policy: never
+    user: "65533:65533"
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    mem_limit: ${PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_MEMORY:?set the measured validator memory limit}
+    memswap_limit: ${PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_MEMORY:?set the measured validator memory limit}
+    cpus: ${PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_CPUS:?set the measured validator CPU limit}
+    pids_limit: ${PRODUCT_ADMISSION_ACCEPTANCE_VALIDATOR_PIDS:?set the measured validator process limit}
+    ulimits: {core: {soft: 0, hard: 0}}
+    environment:
+      EVIDENCE_IMAGE_VALIDATOR_ENABLED: "true"
+      EVIDENCE_IMAGE_VALIDATOR_SOCKET: /run/pinvou/admission-validator/validator.sock
+      EVIDENCE_IMAGE_VALIDATOR_ALLOWED_UID: "65532"
+      EVIDENCE_PDF_CANDIDATE_ENABLED: "true"
+    volumes:
+      - *validator-socket
+networks:
+  kms:
+    external: true
+    name: ${OPENBAO_NETWORK:?set separately provisioned isolated transit network}

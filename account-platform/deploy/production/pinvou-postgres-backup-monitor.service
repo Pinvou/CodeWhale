@@ -1,0 +1,19 @@
+[Unit]
+Description=Pinvou PostgreSQL backup checks (local status only)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/pinvou-postgres-backup/account-platform-postgres-backup-job.py monitor
+UMask=0077
+LimitCORE=0
+TimeoutStartSec=240
+MemoryMax=256M
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/pinvou-postgres-backup/state
+RestrictAddressFamilies=AF_UNIX

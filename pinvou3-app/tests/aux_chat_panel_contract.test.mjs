@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
+// Normalize checkout line endings before line-based comment stripping.
+const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 // Same strip mechanism ui_language_coverage uses: shape pins must not match
 // text inside comments (a commented-out guard would otherwise still satisfy
 // every anchor). Negative pins run against the RAW text.
@@ -221,7 +222,7 @@ test('aux timeline scroll mirrors the main conversation autoScrollRef pattern (r
   assert.match(auxChatPanel, /transitionConversationScrollState\(\{/);
   assert.match(auxChatPanel, /autoScrollRef\.current = transition\.following;/);
   assert.match(auxChatPanel, /autoScrollRef\.current = true;\s*\}, \[view\.auxId\]\);/);
-  assert.match(auxChatPanel, /if \(el && autoScrollRef\.current\) el\.scrollTop = el\.scrollHeight;\s*\}, \[view\.auxId, view\.snapshot\]\);/);
+  assert.match(auxChatPanel, /if \(el && autoScrollRef\.current && !hasRichTextSelection\(el\)\) el\.scrollTop = el\.scrollHeight;\s*\}, \[view\.auxId, view\.snapshot\]\);/);
 });
 
 test('the scroll-follow listener is keyed on view.auxId so it attaches once the dock portal exists (round-28 B2)', () => {

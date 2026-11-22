@@ -1,0 +1,219 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Billing Token wallet command receipts",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/internal/v1/token-account-wallet-provisioning-receipts": {
+      "post": {
+        "summary": "Provision a wallet bound to the original Token account command",
+        "security": [
+          {
+            "workloadJWT": []
+          }
+        ],
+        "x-required-permission": "internal.billing.token-account-wallet-provision.execute",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "command_reference",
+                  "owner_type",
+                  "owner_id",
+                  "request_digest"
+                ],
+                "properties": {
+                  "command_reference": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "owner_type": {
+                    "type": "string",
+                    "enum": [
+                      "PERSONAL",
+                      "ORGANIZATION",
+                      "ORG_UNIT"
+                    ]
+                  },
+                  "owner_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "request_digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Original immutable command receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletReceipt"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Original immutable command receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletReceipt"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Original command reference changed owner or digest"
+          },
+          "422": {
+            "description": "Invalid original command identity"
+          },
+          "503": {
+            "description": "Wallet unavailable or outcome cannot yet be read"
+          }
+        }
+      }
+    },
+    "/internal/v1/token-account-wallet-provisioning-receipts/{command_reference}": {
+      "get": {
+        "summary": "Read the original immutable result without provisioning again",
+        "security": [
+          {
+            "workloadJWT": []
+          }
+        ],
+        "x-required-permission": "internal.billing.token-account-wallet-provision.read",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "command_reference",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original immutable command receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletReceipt"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No committed original receipt"
+          },
+          "422": {
+            "description": "Invalid command reference"
+          },
+          "503": {
+            "description": "Result authority unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "workloadJWT": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "WalletReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_reference",
+          "owner_type",
+          "owner_id",
+          "request_digest",
+          "status",
+          "wallet_id",
+          "stable_error_code",
+          "attempt_count",
+          "created_at",
+          "completed_at"
+        ],
+        "properties": {
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owner_type": {
+            "type": "string",
+            "enum": [
+              "PERSONAL",
+              "ORGANIZATION",
+              "ORG_UNIT"
+            ]
+          },
+          "owner_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "request_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "SUCCEEDED",
+              "FAILED",
+              "UNKNOWN"
+            ]
+          },
+          "wallet_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "stable_error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attempt_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

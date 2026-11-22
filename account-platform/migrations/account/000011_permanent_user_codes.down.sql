@@ -1,0 +1,17 @@
+DROP TRIGGER user_code_registry_no_truncate ON user_code_registry;
+DROP TRIGGER user_code_registry_immutable ON user_code_registry;
+DROP FUNCTION protect_user_code_registry();
+DROP TABLE user_code_lookup_attempts;
+DROP TRIGGER users_register_permanent_code ON users;
+DROP FUNCTION register_permanent_user_code();
+DROP TRIGGER users_permanent_identifiers_no_truncate ON users;
+DROP TRIGGER users_permanent_identifiers ON users;
+DROP FUNCTION protect_permanent_user_identifiers();
+DROP TABLE user_code_registry;
+ALTER TABLE users DROP CONSTRAINT users_user_code_format_check;
+ALTER TABLE users DROP CONSTRAINT users_user_code_unique;
+ALTER TABLE users DROP COLUMN user_code;
+DROP FUNCTION generate_unique_user_code();
+DROP FUNCTION generate_user_code_candidate();
+DROP FUNCTION valid_user_code(TEXT);
+DROP FUNCTION user_code_checksum(TEXT);

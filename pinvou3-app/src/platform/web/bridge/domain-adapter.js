@@ -127,7 +127,7 @@
     return Promise.reject(new Error("computer use is not supported on the web client"));
   }
   const computerUseStubs = {};
-  ["refreshStatus", "grant", "revoke", "stop", "confirm", "deny", "setEnabled", "requestPermissions", "permissionStatus"]
+  ["refreshStatus", "grant", "revoke", "stop", "confirm", "deny", "setEnabled", "setVirtualDisplayPreference", "requestPermissions", "permissionStatus"]
     .forEach(function (name) { computerUseStubs[name] = computerUseUnsupported; });
 
   window.TauriBridge = {
@@ -143,20 +143,33 @@
       reset: "auxChatReset",
     }),
     voice: domain(["startVoiceInput", "installVoiceAsr", "cancelVoiceAsrSetup", "closeVoiceAsrSetup", "cancelVoiceInput", "clearVoiceInput", "abandonVoiceResult", "appendVoiceText", "getVoiceOperationId", "beginVoiceSubmission", "completeVoiceSubmission", "dismissVoiceInput", "hasVoiceSubmissionPending"]),
-    knowledge: domain(["downloadKbModel", "mountCollection", "setCollectionEnabled", "removeCollection", "unmountCollection", "listCollections", "kbModelStatus"]),
+    knowledge: domain(["downloadKbModel", "mountCollection", "setCollectionEnabled", "removeCollection", "unmountCollection", "listCollections", "kbModelStatus", "cancelKbModel"]),
     scheduled: domain(["loadScheduledTasks", "readScheduledTask", "loadScheduledTaskRuns", "loadScheduledTaskRecentRuns", "selectScheduledTask", "refreshScheduledTaskData", "clearScheduledTaskSelection", "dismissScheduledTaskError", "createScheduledTask", "updateScheduledTask", "pauseScheduledTask", "resumeScheduledTask", "toggleScheduledTaskPinned", "deleteScheduledTask", "runScheduledTaskNow", "startScheduledTaskChat", "openScheduledRunChat", "exitScheduledRunChat"]),
     sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession", "onSessionDeleted", "getSessionWorkspaceBinding"]),
     monitor: domain(["startMonitorPolling", "stopMonitorPolling", "clearMonitorStats"]),
+    // MegaCube 设备管理桌面专属；Web 恒无 MegaCube（megacubeDevice 恒 false，
+    // 共享 UI 不会在 Web 上真正调用），方法面以**拒绝式**桩保持双端域面一致。
+    // 与 computerUse 的桩同一取舍：仓库公约要求不支持的能力显式 unsupported，
+    // resolve(null) 会让门控一旦回归时变成"永久 skeleton + 读取中"而不是清晰报错。
+    device: (function () {
+      function deviceUnsupported() {
+        return Promise.reject(new Error("device management is only available on the MegaCube desktop app"));
+      }
+      var stubs = {};
+      ["startDevicePolling", "stopDevicePolling", "pollDeviceServices", "fetchExternalModels",
+        "registerExternalModel", "removeExternalModel", "buildDoctorPrompt"]
+        .forEach(function (name) { stubs[name] = deviceUnsupported; });
+      return stubs;
+    })(),
     settings: domain(["loadBehaviorTelemetryStatus", "setBehaviorTelemetryEnabled", "setSelectedPet", "saveSettings", "saveSettingsAndRestart", "saveSearchSettings", "saveSearchSettingsAndRestart", "testSearchProvider", "listBuiltinFeatures"]),
     feedback: Object.assign(domain(["submitFeedback"]), Object.fromEntries(
       ["listFailureDiagnostics", "previewFailureDiagnostic", "submitFailureDiagnostic", "pickDiagnosticFiles"].map(function (name) {
         return [name, function () { return Promise.reject(new Error("diagnostic_platform_unsupported")); }];
       })
     )),
-    llmapi: {},
     vllm: domain(["discoverLocalVllm"]),
-    models: domain(["loadModels", "saveModel", "revealModelApiKey", "deleteModel", "setActiveModel", "loadSessionModel", "switchModel", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeLocalServerKind"]),
-    interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn"]),
+    models: domain(["getEffectiveModelConfig", "loadEffectiveModelConfig", "loadModels", "saveModel", "reloadSavedModels", "revealModelApiKey", "deleteModel", "deleteModelIfStoreLink", "deleteModelIfMatches", "setActiveModel", "loadSessionModel", "switchModel", "switchModelRef", "testModelConnection", "getImageInputCapability", "testImageInputCapability", "probeEndpointModels", "probeLocalServerKind"]),
+    interaction: domain(["toggleSuperPerm", "acceptPlan", "discardPlan", "exitPlanToYolo", "setPlanModeNext", "setDraftMode", "setModeLane", "refreshModeDefaults", "getCodePermissionPrefs", "confirmCodeYolo", "syncModeState", "planStuckReplan", "planStuckGo", "submitUserInput", "cancelUserInput", "summonPinvou", "inspectPinvou", "resolvePinvouReview", "dismissPinvouReview", "editLastTurn", "compactNow"]),
     rendering: domain(["renderMarkdown"]),
     remoteControl: domain(["getWebRelaySettings", "setWebRelayAddress"], {
       startRemoteControl: "enableWebAccess",

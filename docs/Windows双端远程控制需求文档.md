@@ -449,7 +449,7 @@ React UI / ChatView
 - 正常成功、失败和取消收尾按精确回合 owner 回收远程引擎条目；私有快照由 Bridge/Engine 的 Arc 所有权保持，最后一个所有者释放后回收，不写回或恢复 B 的共享技能目录。旧 worker、旧 owner 或重复收尾不得修改新回合；远程取消及终态等待绑定原预留 generation，不能取消后继预留的 shell scope 或用新本地回合活动延长旧任务的终态等待。
 - A 远程附件由绑定完整租约、Session、任务的 B 上传 receipt 消费，不能混同 B 本地附件描述符；取消映射校验遵循会话意图锁在连接 owner 锁之前的顺序。B 的远控只读视图和凭据门控只作用于当前受控 Session，不作用于其他本地会话。
 
-当前实现边界：私有快照不使用共享技能冻结或恢复协议。未发布的冷启动资源由 custody 保持，已发布快照由实际 Bridge/Engine 所有权保持；这不等于 OS 只读权限、真实 provider/core 已停止或异常清理有界的证明。捕获 panic、证明停止及精确 owner 有界收尾仍由 #1400 跟进；底座自主继发轮的子代理级联取消仍有 #254 所述边界，此段不宣称该边界、异常恢复或真实双 Windows 发布验收已完成。
+当前实现边界：私有快照不使用共享技能冻结或恢复协议。未发布的冷启动资源由 custody 保持，已发布快照由实际 Bridge/Engine 所有权保持；这不等于 OS 只读权限、真实 provider/core 已停止或异常清理有界的证明。捕获 panic、证明停止及精确 owner 有界收尾仍由 #1400 跟进；底座自主继发轮的子代理级联取消仍有 [Pinvou/pinvou-agent#254](https://github.com/Pinvou/pinvou-agent/issues/254) 所述边界，此段不宣称该边界、异常恢复或真实双 Windows 发布验收已完成。
 
 ### 7.6 模型选择与临时凭证
 
@@ -653,6 +653,12 @@ created → submitting → admitted → running
 - A 的“发送中”不等同于 B 已接纳。
 - 任务只能产生一个终态；重复终态按 `task_id` 和事件序号去重。
 - 临时模型凭证必须在所有终态路径和异常中清理。
+  B 的临时模型内存仓库同时接入受控连接的 generation 终态清理；任务账本写入失败
+  时也释放该 generation 的仓库材料，不把释放误报成已持久化的任务终态。
+  合法 Reconnecting 保留材料，重复及迟到清理不得删除替换 generation 的材料。
+  任务退休先设置进程内的任务实例围栏；即使账本终态写入失败，也取消原实例并释放其临时资源，
+  已发出的旧票据不得在存储恢复后重新派发。执行器已经取得的副本沿原精确 owner 引擎回收链退出。
+  该围栏随既有任务记录回收，不新增持久化或 wire 字段；物理退出不能冒充已持久化的任务终态。
 
 ### 8.3 配对记录所有权与原子转换
 
@@ -1009,11 +1015,26 @@ A 禁止持久化：
 | 用户长期保存并重试旧 7 位字符串 | UI 提示该字符串在隔离期后可能属于新的 pairing，拒绝把它当作旧设备身份；要求查看 B 当前码 |
 | 权限审批超时 | B 拒绝操作，任务按工具策略继续或失败 |
 | B 查看权限请求 | 只提供查看、停止任务和断开，不提供 Allow；A 是唯一审批权威 |
-| A 的审批决定重复/冲突/迟到 | 首个有效决定保持不变；同值重试幂等，冲突或迟到决定返回终态错误且不执行 |
+| A 的审批决定重复/冲突/迟到 | 首个有效决定保持不变；已提交的同值重试只查询原回执，冲突或首次迟到的决定拒绝且不执行 |
 | B 用户立即断开、停止或刷新 | 终止租约、取消远程来源的在途任务、拒绝待审批并清理凭证 |
 | 事件缺口超出 journal | A 丢弃增量并通过权威快照恢复 |
 | 成果已被 B 删除 | A 保留历史元数据并标记远端成果不可用 |
 | A 本地历史写入失败 | 不影响 B 权威任务，A 显示历史未保存警告 |
+
+远程 Code 回合在退出轮询时，以及按原任务准入身份拒绝剩余待批后，读取本回合已登记审批的权威结果并补齐 Journal。
+同一个不可复用审批 ID 的已决事实只投影一次，不依赖 ACP pending 集合继续保留，也不等待下一个 200ms 轮询。
+未提交 dispatch 的 Allow 不作为最终 allowed 投影；取消、超时和执行失败保留原错误，历史决议不等于工具执行已确认。
+这些记录仍受原任务 sequence、会话、完整租约和 Journal owner 的发布围栏约束；任务已终态或旧 generation 已退休后，不允许迟到回调写入后继任务或 Journal。
+回合退出轮询后的首次补写仍是代码工件发布的前置条件：即使执行本身成功，补写失败也会使回合失败并跳过本轮远程工件发布。保持原准入身份的任务已进入终态时返回 `permission_task_terminal`；任务 sequence、会话或租约不匹配仍返回 `permission_binding_stale`，已有执行错误保持优先。不为补写调整工件发布顺序，也不承诺撤销已发生的工具副作用。
+从未登记到本回合 Journal 的待批提示不补造 `denied` 记录；它们仍按既有终态清退规则拒绝，不产生缺少前置 `pending` 的历史事件。
+不新增 wire 或持久化字段。
+
+审批回执查询仍要求当前业务连接、完整 lease、原会话、任务准入 sequence 和不可复用审批 ID
+精确匹配；允许原任务已进入终态，但不再派发 ACP、不续期、不绑定新 owner。
+B 在生成审批 ID 时即固定原会话和任务准入 sequence；尚无 A 决定的拒绝或过期审批也不能被后继任务认领。
+缺少已提交回执的终态任务不能借重试获得新 Allow；不同决定、替换任务或旧连接继续拒绝。
+首次 ACP 依赖错误保留原错误语义，后续同值请求仅能读取已提交权威状态，不自动重做操作。
+回执随既有有界审批记录回收，不新增 wire 或持久化字段，回收后沿用既有未找到错误。
 
 ## 14. 非功能要求
 
@@ -1438,3 +1459,14 @@ python scripts/architecture-guard.py
 9. 官方与自托管生产环境均启用正式 desktop endpoint enrollment/allowlist，未 enrolled 首次注册和生产 TOFU 被验证为失败关闭。
 10. 既有 endpoint 迁移、旧 Web 链接、安全回滚下限、tombstone 多 key 轮换、Finished receipt 固定向量、A→B 加密 liveness、保守 30 秒公式、角色隔离、provisional/pending-liveness resume 和 B 黑洞 watchdog 均通过确定性故障注入与真实客户端 fixture 验收。
 11. 普通本地、ACP 与远程会话通过统一 ChatView 和薄用例编排完成验收，分别使用 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl`；A 远程任务不进入 A 本机 EnginePool/AcpPool，B 保持唯一权威 Session；未发布旧正文 UI、Command/Bridge、独立历史存储与状态别名均已删除，不实施兼容代理、旧格式迁移、双写或保留窗口，已发布 Web v2 回归和安全迁移不变。
+# ACP 审批状态投影
+
+同一远程代码回合可以先后产生多个待处理 callback。同时到达的 callback 按现有单任务一个 active 审批的限制等待处理，不因第二项到达而退休回合。一个审批结束后，只要该精确任务 owner 仍有未完成 callback，任务保持 `WaitingPermission`；全部完成后才恢复 `Running`。迟到结果不得跨任务接纳序号、会话或完整租约更新状态，也不得恢复已取消或结束的任务。
+
+尚未生成审批的排队 callback 被请求级取消后，若本 owner 先前登记的审批均已完成终态投影，后续轮询仍须恢复 `Running`，不能只依赖当轮新增投影事件。未投递的 Allow、未完成的审批或空的审批记录不构成恢复依据；精确 owner 和剩余 callback 检查保持不变。
+
+A 端审批卡按实际状态显示允许、拒绝和过期的三语文案；未知状态不提供决定按钮。当前 B 列表只返回 active 项，已结束项的展示回归用于验证消费者的状态合同，不表示正常列表会返回历史审批。列表及决定回执须与发起时的控制端身份匹配，成功决定还要使较早的待批列表失效。
+
+成功决定及同租约的能力续约会为当前任务重新读取审批列表；新读取独立发起，避免复用决定前的快照。换任务、换租约或卸载后的旧决定不触发新 owner 的刷新。排队重试仅适用于 `task_cleanup_busy`、`permission_task_busy` 和 `remote_permission_callback_gone`；全局 active 容量或留存容量不足仍按既有失败关闭语义终止回合，不扩大准入容量或改变留存保证。
+
+`remote_permission_state_smoke.mjs` 挂载真实 ChatView 并使用实际桌面桥接。CI 的完整前端 smoke 集合包含本回归，默认输入为真实 Rust 产物固化的 JSON，应用测试逐字段验证它与当前生产者一致，仅归一化不可复用的审批 ID。专项跨端验证时，将应用测试 `actual_authority_and_controller_wire_projection_preserve_each_state` 输出的 `PERMISSION_PROJECTION_JSON` JSON 保存到文件，并以 `PINVOU_PERMISSION_PROJECTION_FILE` 指定该文件，直接消费此次原生产物；浏览器使用隔离夹具及 `CHROME` 指定的测试浏览器。该测试控制宿主调用及 provider 响应，不代表真实模型或网络双端验收。

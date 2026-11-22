@@ -1,0 +1,44 @@
+{{- if eq .Values.tokenGateway.secretProvider "vault-transit" }}
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: {{ include "pinvou.fullname" . }}-kms-agent }
+data:
+  agent.hcl: |
+    pid_file = "/tmp/bao-agent.pid"
+    log_level = "warn"
+    vault {
+      address = {{ .Values.nativeKms.endpoint | toJson }}
+      ca_cert = "/bao/trust/ca.crt"
+    }
+    auto_auth {
+      method "approle" {
+        mount_path = "auth/approle"
+        config = {
+          role_id_file_path = "/bao/bootstrap/role-id"
+          secret_id_file_path = "/bao/bootstrap/secret-id"
+          remove_secret_id_file_after_reading = false
+        }
+      }
+      sink "file" {
+        config = {
+          path = "/bao/token/token"
+          mode = 384
+        }
+      }
+    }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-native-kms }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [token-gateway{{ if .Values.tokenCredentialPortal.enabled }}, token-credential-portal{{ end }}] }
+  policyTypes: [Egress]
+  egress:
+    {{- range .Values.nativeKms.cidrs }}
+    - to: [{ ipBlock: { cidr: {{ . | quote }} } }]
+      ports: [{ protocol: TCP, port: {{ $.Values.nativeKms.port }} }]
+    {{- end }}
+{{- end }}

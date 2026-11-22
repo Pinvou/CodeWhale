@@ -1,8 +1,10 @@
 use super::prelude::*;
+use crate::features::account_platform::runtime_model::model_credential_mode;
+use crate::features::assistant::runtime_model::ModelCredentialMode;
 use crate::platform::credential_store::{
     CREDENTIAL_STORE_UNAVAILABLE_ERROR, CredentialReference, CredentialStore,
 };
-use crate::platform::prefs::MODEL_API_KEY_ENV_OVERRIDE;
+use crate::platform::prefs::{MODEL_API_KEY_ENV_OVERRIDE, ModelSelectionRef};
 
 /// Round-51 review: the settings transaction holds the cross-process
 /// settings.json.lock across keychain I/O (the CLI's models family writes
@@ -36,7 +38,7 @@ fn prepare_prefs_for_save(
     mut prefs: UserPrefs,
     store: &dyn CredentialStore,
 ) -> Result<(UserPrefs, Vec<CredentialReference>), String> {
-    prefs.ensure_builtin_llmapi_model();
+    prefs.ensure_builtin_account_platform_model();
     prefs.normalize_saved_model_metadata();
     let migration = prefs.migrate_plaintext_api_keys_with_store(store);
     if migration.has_failures() {
@@ -104,40 +106,66 @@ pub(super) fn apply_model_credential(
     // inside the transaction would leave the model configured-but-secretless
     // when the save then fails — the same defect class `delete_model` fixed.
     let mut deferred_delete: Option<CredentialReference> = None;
-    match action {
-        CredentialEditAction::KeepExisting => {
-            if let Some(old) = old {
-                model.credential_ref = old.credential_ref.clone();
-                model.credential_state = old.credential_state;
-                model.has_secret = old.has_secret;
-            } else if model.api_key.trim().is_empty() {
-                model.mark_missing();
-            } else {
-                let reference = model.credential_reference();
-                store
-                    .set(&reference, model.api_key.trim())
-                    .map_err(|e| e.user_message())?;
-                model.mark_configured(reference);
-            }
+    // Defense in depth: a keyless declaration is the endpoint's contract —
+    // no credential may be materialized for the record, whatever the client
+    // action says. The GUI scopes its delete/replace to the same posture,
+    // so this only fires for a legacy or alternate writer that sends
+    // keep_existing (or a typed key) while declaring `auth_mode = "none"`:
+    // the dual state the read-side ladder already neutralizes must not be
+    // able to persist. Removal rides the same post-commit deferral as the
+    // explicit Delete arm; a record with no live credential and no typed
+    // key just stays missing (the GUI's clean keyless save keeps its shape —
+    // no keyring touch at all).
+    if model.declares_keyless_auth() {
+        let live_reference = model
+            .credential_ref
+            .clone()
+            .or_else(|| old.and_then(|m| m.credential_ref.clone()));
+        let typed_key = !model.api_key.trim().is_empty();
+        model.mark_missing();
+        if live_reference.is_some() || typed_key {
+            // Even with no recorded reference, the deterministic model
+            // reference is where a legacy writer's store.set would have
+            // landed — attempt the removal (a benign miss downgrades to the
+            // post-commit warning).
+            deferred_delete = Some(live_reference.unwrap_or_else(|| model.credential_reference()));
         }
-        CredentialEditAction::Replace => {
-            let key = model.api_key.trim().to_string();
-            if key.is_empty() {
-                model.mark_missing();
-            } else {
-                let reference = model.credential_reference();
-                store.set(&reference, &key).map_err(|e| e.user_message())?;
-                model.mark_configured(reference);
+    } else {
+        match action {
+            CredentialEditAction::KeepExisting => {
+                if let Some(old) = old {
+                    model.credential_ref = old.credential_ref.clone();
+                    model.credential_state = old.credential_state;
+                    model.has_secret = old.has_secret;
+                } else if model.api_key.trim().is_empty() {
+                    model.mark_missing();
+                } else {
+                    let reference = model.credential_reference();
+                    store
+                        .set(&reference, model.api_key.trim())
+                        .map_err(|e| e.user_message())?;
+                    model.mark_configured(reference);
+                }
             }
-        }
-        CredentialEditAction::Delete => {
-            let reference = model
-                .credential_ref
-                .clone()
-                .or_else(|| old.and_then(|m| m.credential_ref.clone()))
-                .unwrap_or_else(|| model.credential_reference());
-            model.mark_missing();
-            deferred_delete = Some(reference);
+            CredentialEditAction::Replace => {
+                let key = model.api_key.trim().to_string();
+                if key.is_empty() {
+                    model.mark_missing();
+                } else {
+                    let reference = model.credential_reference();
+                    store.set(&reference, &key).map_err(|e| e.user_message())?;
+                    model.mark_configured(reference);
+                }
+            }
+            CredentialEditAction::Delete => {
+                let reference = model
+                    .credential_ref
+                    .clone()
+                    .or_else(|| old.and_then(|m| m.credential_ref.clone()))
+                    .unwrap_or_else(|| model.credential_reference());
+                model.mark_missing();
+                deferred_delete = Some(reference);
+            }
         }
     }
     model.clear_plaintext_key();
@@ -163,7 +191,29 @@ fn saved_model_for_probe<'a>(
 /// read. Each caller maps the read failure to its own result shape (the
 /// local-kind probe swallows it and continues credential-less; the
 /// connection/image probes surface a typed error).
-fn resolve_probe_key(api_key: &str, model_id: Option<&str>) -> Result<Option<String>, String> {
+///
+/// `no_auth` is the form's keyless posture (the "no API key needed"
+/// declaration active in the modal). It short-circuits the whole ladder:
+/// neither the typed key nor the record's saved credential may ride the
+/// probe — the test must exercise the same posture the form will save
+/// (mirrors `bridge::api_key`'s declaration-before-env/keyring ordering;
+/// the frontend already sends an empty key, this closes the saved-credential
+/// fallback it cannot see).
+///
+/// Boundary (round-5 review): the declaration short-circuit lives in the
+/// `no_auth` FLAG, which only form-flow callers send. A legacy caller that
+/// passes a typed key with `no_auth = false` on a declared record sends that
+/// typed credential — deliberate: the saved-credential leg (the only leg a
+/// record posture can govern) IS server-guarded below, and a caller asking
+/// to probe WITH a key is overriding the posture explicitly.
+fn resolve_probe_key(
+    api_key: &str,
+    model_id: Option<&str>,
+    no_auth: bool,
+) -> Result<Option<String>, String> {
+    if no_auth {
+        return Ok(None);
+    }
     let provided = api_key.trim();
     if !provided.is_empty() {
         return Ok(Some(provided.to_string()));
@@ -172,16 +222,33 @@ fn resolve_probe_key(api_key: &str, model_id: Option<&str>) -> Result<Option<Str
 }
 
 fn resolve_saved_model_key(model_id: Option<&str>) -> Result<Option<String>, String> {
+    resolve_saved_model_key_with(&SystemCredentialStore::new(), model_id)
+}
+
+fn resolve_saved_model_key_with(
+    store: &dyn CredentialStore,
+    model_id: Option<&str>,
+) -> Result<Option<String>, String> {
     let prefs = UserPrefs::load();
     let Some(model) = saved_model_for_probe(&prefs, model_id) else {
         return Ok(None);
     };
+    // Server-side backstop: a record that itself declares the endpoint keyless
+    // must never surface a stored credential through this ladder, regardless
+    // of which caller (or client version) is asking. The frontend posture flag
+    // covers the form flow, but a hand-edited settings.json can carry both
+    // `auth_mode = "none"` and a live `credential_ref` (normalization clears
+    // the declaration only for local/managed records, never the credential),
+    // and the vision-model picker probes a *different* saved record whose
+    // posture the edited form cannot know. Mirrors `bridge::api_key`'s
+    // declaration-before-keyring ordering.
+    if codewhale_config::auth_mode_disables_api_key(model.auth_mode.as_deref()) {
+        return Ok(None);
+    }
     let Some(reference) = &model.credential_ref else {
         return Ok(None);
     };
-    SystemCredentialStore::new()
-        .get(reference)
-        .map_err(|e| e.user_message())
+    store.get(reference).map_err(|e| e.user_message())
 }
 
 #[tauri::command]
@@ -208,9 +275,87 @@ pub struct EffectiveModelConfig {
     pub vendor: Option<String>,
     pub endpoint_mode: Option<String>,
     pub requires_user_api_key: bool,
+    pub credential_mode: ModelCredentialMode,
+    pub model_ref: Option<ModelSelectionRef>,
     /// 被环境变量覆盖的字段名列表（如 `["model", "base_url"]`）。
     /// 空列表表示全部走 settings.json，用户修改会生效。
     pub env_overrides: Vec<String>,
+}
+
+fn resolve_effective_model_selection(
+    prefs: &UserPrefs,
+    selection: Option<&ModelSelectionRef>,
+) -> Result<Option<SavedModel>, String> {
+    match selection {
+        Some(selection) => prefs.resolve_model_ref(selection).map(Some).ok_or_else(|| {
+            "model_selection_unavailable: the selected model no longer exists".to_string()
+        }),
+        // A cleared typed default is an explicit absence. Do not turn the
+        // legacy active-model fallback into a new session binding: that would
+        // bypass the same selection-required state the send path enforces.
+        None if prefs.model_selection_schema_version >= 1
+            && prefs.advanced.default_model_ref.is_none() =>
+        {
+            Ok(None)
+        }
+        None => Ok(prefs.active_model().cloned()),
+    }
+}
+
+/// Effective-credential-state display. A keyless declaration is the endpoint
+/// contract — no code path reads a credential for such a route — so an env
+/// key override must not render as the record's credential state (or list
+/// `api_key` among the live env overrides); the record state (normally
+/// Missing after the keyless save deleted the credential) is the truthful
+/// display. Undeclared records keep the historical env-override precedence.
+fn credential_state_for_display(
+    env_api_key: bool,
+    declares_no_auth: bool,
+    record_state: CredentialState,
+) -> CredentialState {
+    if env_api_key && !declares_no_auth {
+        CredentialState::EnvOverride
+    } else {
+        record_state
+    }
+}
+
+/// Shared tail of [`get_effective_model_config`]: the display construction
+/// over an already-resolved bridge. Extracted so the keyless wiring
+/// (declaration → credential state + env-override list) is unit-pinnable,
+/// not just the pure display helper — a refactor that stops threading the
+/// declaration into this construction must fail a test, not a review.
+fn build_effective_model_config(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    env_api_key: bool,
+) -> EffectiveModelConfig {
+    build_effective_model_config_for_ref(
+        bridge,
+        env_api_key,
+        bridge.prefs.advanced.default_model_ref.clone(),
+    )
+}
+
+fn build_effective_model_config_for_ref(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    env_api_key: bool,
+    model_ref: Option<ModelSelectionRef>,
+) -> EffectiveModelConfig {
+    let mut env_overrides = Vec::new();
+    if std::env::var("DEEPSEEK_MODEL").is_ok() {
+        env_overrides.push("model".to_string());
+    }
+    if std::env::var("DEEPSEEK_BASE_URL").is_ok() {
+        env_overrides.push("base_url".to_string());
+    }
+    let declares_no_auth = bridge.effective_model_declares_no_auth();
+    if env_api_key && !declares_no_auth {
+        env_overrides.push("api_key".to_string());
+    }
+    if std::env::var("DEEPSEEK_PROVIDER").is_ok_and(|provider| provider == bridge.provider()) {
+        env_overrides.push("provider".to_string());
+    }
+    effective_model_config_snapshot(bridge, env_api_key, env_overrides, model_ref)
 }
 
 #[tauri::command]
@@ -222,55 +367,115 @@ pub async fn get_effective_model_config(
     // 读 disk 最新 prefs，并按当前会话解析真正绑定的模型。
     let mut bridge = pool.bridge.clone();
     bridge.prefs = refresh_safe_prefs(UserPrefs::load());
-    let session_model_id = session_id
+    let session_model_ref = session_id
         .as_deref()
-        .and_then(|id| store.session_model_id(id));
-    bridge.session_model = session_model_id
-        .as_deref()
-        .and_then(|id| bridge.prefs.model_by_id(id).cloned());
-    let mut env_overrides = Vec::new();
-    if std::env::var("DEEPSEEK_MODEL").is_ok() {
-        env_overrides.push("model".to_string());
-    }
-    if std::env::var("DEEPSEEK_BASE_URL").is_ok() {
-        env_overrides.push("base_url".to_string());
-    }
+        .and_then(|id| store.session_model_ref(id));
+    effective_model_config_for_selection(&mut bridge, session_model_ref)
+}
+
+/// The command's read-only projection pipeline, shared with its regression
+/// tests so reference resolution and bridge binding cannot diverge from the
+/// final credential/selection snapshot.
+fn effective_model_config_for_selection(
+    bridge: &mut crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    session_model_ref: Option<ModelSelectionRef>,
+) -> Result<EffectiveModelConfig, String> {
+    let model_ref = session_model_ref.or_else(|| bridge.prefs.advanced.default_model_ref.clone());
+    bridge.session_model = resolve_effective_model_selection(&bridge.prefs, model_ref.as_ref())?;
     let env_api_key = std::env::var(MODEL_API_KEY_ENV_OVERRIDE)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    if env_api_key {
-        env_overrides.push("api_key".to_string());
+    Ok(build_effective_model_config_for_ref(
+        bridge,
+        env_api_key,
+        model_ref,
+    ))
+}
+
+/// 展示层快照：从已绑定会话/默认引用的 bridge 解析 EffectiveModelConfig。
+/// 与发送路径（engine_pool 的 model_selection_required 门）同一判定：没有会话
+/// 绑定、typed 默认引用已被清空（schema≥1）时，发送会被拒绝，展示层必须如实
+/// 回空配置，而不是靠 active_model() 的列表首条回退继续报告一个不会真正生效
+/// 的模型（评审第 7 轮 P2：删除默认商店模型后“不自动另选”要在展示层成立）。
+pub(super) fn effective_model_config_snapshot(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    env_api_key: bool,
+    mut env_overrides: Vec<String>,
+    model_ref: Option<ModelSelectionRef>,
+) -> EffectiveModelConfig {
+    let selection_required = bridge.session_model.is_none()
+        && bridge.prefs.model_selection_schema_version >= 1
+        && bridge.prefs.advanced.default_model_ref.is_none();
+    let effective = if selection_required {
+        None
+    } else {
+        bridge.effective_model_owned()
+    };
+    let preset = if selection_required {
+        ""
+    } else {
+        effective
+            .as_ref()
+            .map(|model| model.preset)
+            .unwrap_or_default()
+            .as_str()
+    };
+    // Share the runtime's credential ownership decision. No selected endpoint
+    // means no API-key requirement; the recovery action is to select a model.
+    let credential_mode = model_credential_mode(
+        effective.as_ref(),
+        !selection_required && bridge.api_key_required(),
+    );
+    let backend_managed = credential_mode == ModelCredentialMode::BackendManaged;
+    let requires_user_api_key = credential_mode == ModelCredentialMode::UserManaged;
+    let declares_no_auth = bridge.effective_model_declares_no_auth();
+    if selection_required || backend_managed {
+        env_overrides.clear();
     }
-    if std::env::var("DEEPSEEK_PROVIDER").is_ok_and(|provider| provider == bridge.provider()) {
-        env_overrides.push("provider".to_string());
-    }
-    let effective = bridge.effective_model_owned();
-    let preset = effective
-        .as_ref()
-        .map(|model| model.preset)
-        .unwrap_or_default()
-        .as_str();
-    // 运行时模型准备固定 passthrough（无后台托管凭据），是否要求用户 Key
-    // 完全由 bridge 的鉴权判定（provider + base_url）决定。
-    let requires_user_api_key = bridge.api_key_required();
-    Ok(EffectiveModelConfig {
+    EffectiveModelConfig {
         preset: preset.to_string(),
-        model: bridge.model(),
-        base_url: bridge.base_url(),
-        api_key: String::new(),
-        credential_state: if env_api_key {
-            CredentialState::EnvOverride
-        } else {
+        model: if selection_required {
+            String::new()
+        } else if backend_managed {
             effective
                 .as_ref()
-                .map(|model| model.credential_state)
-                .unwrap_or(CredentialState::Missing)
+                .map(|model| model.model.clone())
+                .unwrap_or_default()
+        } else {
+            bridge.model()
         },
-        has_secret: effective
-            .as_ref()
-            .map(|model| model.has_secret)
-            .unwrap_or(false),
-        provider: bridge.provider(),
+        base_url: if selection_required || backend_managed {
+            String::new()
+        } else {
+            bridge.base_url()
+        },
+        api_key: String::new(),
+        credential_state: if selection_required || backend_managed {
+            CredentialState::Missing
+        } else {
+            credential_state_for_display(
+                env_api_key,
+                declares_no_auth,
+                effective
+                    .as_ref()
+                    .map(|model| model.credential_state)
+                    .unwrap_or(CredentialState::Missing),
+            )
+        },
+        has_secret: !backend_managed
+            && effective
+                .as_ref()
+                .map(|model| model.has_secret)
+                .unwrap_or(false),
+        provider: if selection_required {
+            String::new()
+        } else if backend_managed {
+            // Prepared Account Gateway bridges always use the OpenAI wire
+            // provider. Ordinary process overrides do not apply to that route.
+            "openai".to_string()
+        } else {
+            bridge.provider()
+        },
         provider_kind: effective
             .as_ref()
             .and_then(|model| model.provider_kind.clone()),
@@ -279,8 +484,10 @@ pub async fn get_effective_model_config(
             .as_ref()
             .and_then(|model| model.endpoint_mode.clone()),
         requires_user_api_key,
+        credential_mode,
+        model_ref,
         env_overrides,
-    })
+    }
 }
 
 /// 「添加模型」方案:列出已保存模型 + 当前全局默认 id(前端高亮)。
@@ -296,12 +503,12 @@ pub struct ModelListItem {
 
 impl From<SavedModel> for ModelListItem {
     fn from(model: SavedModel) -> Self {
-        let builtin_llmapi = model.is_builtin_llmapi();
+        let builtin_account_platform = model.is_builtin_account_platform();
         Self {
             model,
-            readonly: builtin_llmapi,
-            system: builtin_llmapi,
-            kind: builtin_llmapi.then(|| "builtin_llmapi".to_string()),
+            readonly: builtin_account_platform,
+            system: builtin_account_platform,
+            kind: builtin_account_platform.then(|| "builtin_account_platform".to_string()),
         }
     }
 }
@@ -310,11 +517,19 @@ impl From<SavedModel> for ModelListItem {
 pub struct ModelsView {
     pub models: Vec<ModelListItem>,
     pub active_model_id: Option<String>,
+    pub default_model_ref: Option<ModelSelectionRef>,
 }
 
 #[tauri::command]
-pub async fn list_models() -> Result<ModelsView, String> {
-    let prefs = refresh_safe_prefs(UserPrefs::load());
+pub async fn list_models(require_readable: Option<bool>) -> Result<ModelsView, String> {
+    // Destructive follow-up actions must distinguish unreadable settings from
+    // the compatible default list used by ordinary model selectors. The strict
+    // snapshot never writes normalization or touches the credential store.
+    let prefs = if require_readable == Some(true) {
+        UserPrefs::load_existing_read_only_model_snapshot().map_err(str::to_owned)?
+    } else {
+        refresh_safe_prefs(UserPrefs::load())
+    };
     Ok(ModelsView {
         models: prefs
             .advanced
@@ -324,6 +539,7 @@ pub async fn list_models() -> Result<ModelsView, String> {
             .map(ModelListItem::from)
             .collect(),
         active_model_id: prefs.advanced.active_model_id.clone(),
+        default_model_ref: prefs.advanced.default_model_ref.clone(),
     })
 }
 
@@ -351,6 +567,7 @@ pub async fn probe_local_server_kind(
     base_url: String,
     api_key: Option<String>,
     model_id: Option<String>,
+    no_auth: Option<bool>,
 ) -> Result<String, String> {
     if !crate::features::assistant::platform::bridge::base_url_uses_local_or_private(&base_url) {
         return Ok("generic".to_string());
@@ -360,7 +577,16 @@ pub async fn probe_local_server_kind(
     // not block the probe (continue as credential-less) — with credentials
     // missing the probe still identifies auth-free endpoints; authenticated
     // endpoints 401 into generic, the same semantics as an unreachable probe.
-    let bearer = match resolve_probe_key(api_key.as_deref().unwrap_or(""), model_id.as_deref()) {
+    // `no_auth` is the form's keyless posture (absent = false, matching the
+    // other probe commands for older web/remote-control callers): while the
+    // declaration is active, neither the retained form key nor the record's
+    // saved credential may ride the automatic tier probe — it hits the very
+    // URL the user is declaring keyless, before any save.
+    let bearer = match resolve_probe_key(
+        api_key.as_deref().unwrap_or(""),
+        model_id.as_deref(),
+        no_auth.unwrap_or(false),
+    ) {
         Ok(Some(key)) => Some(key.trim().to_string()).filter(|k| !k.is_empty()),
         // Includes the swallowed credential-read failure: continue
         // credential-less rather than blocking the probe.
@@ -386,6 +612,9 @@ pub async fn probe_local_server_kind(
 
 /// 用户在编辑模型弹窗里主动点击“显示”时，读取该模型已保存的 API Key。
 /// 环境变量覆盖的凭据不回显，避免给出一个前端并不拥有、保存也不会覆盖的值。
+/// 边界（round-5 review）：这里刻意不查 keyless 声明——「显示」回答的是
+/// 「这条记录的钥匙串里存了什么」，而正常 UI 流程下声明记录的密钥行已隐藏、
+/// 按钮不可达；残留凭据（手改 settings.json 的双状态）如实回显。
 #[tauri::command]
 pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> {
     let prefs = refresh_safe_prefs(UserPrefs::load());
@@ -409,7 +638,7 @@ pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> 
 /// 需要确证时用户可在表单里手动「测试图片能力」。
 #[tauri::command]
 pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Result<(), String> {
-    if model.is_builtin_llmapi() {
+    if model.is_builtin_account_platform() {
         return Err("内置模型不可编辑".to_string());
     }
     let model_id = model.id.clone();
@@ -428,7 +657,7 @@ pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Resul
 /// Testable core of [`save_model`]: the engine-pool notification stays with
 /// the command, mirroring [`delete_model_inner`].
 pub(super) fn save_model_inner(
-    model: SavedModel,
+    mut model: SavedModel,
     store: &dyn CredentialStore,
 ) -> Result<(), String> {
     let model_id = model.id.clone();
@@ -443,10 +672,146 @@ pub(super) fn save_model_inner(
     UserPrefs::update_transaction_with_post_commit(
         |prefs| {
             let old = prefs.model_by_id(&model.id).cloned();
+            // A repeated store import selects a route, not replacement values
+            // for the user's existing model. Resolve it against the latest row
+            // under the prefs lock rather than spreading a client snapshot.
+            if std::mem::take(&mut model.model_store_link_only) {
+                let requested_card = model.model_store_card_id.as_deref();
+                let latest = old.as_ref().filter(|latest| {
+                    model.model_store_link_requested
+                        && !model.reasoning_effort_only
+                        && !model.model_store_link_detached
+                        && requested_card.is_some()
+                        && latest.model_store_card_id.as_deref() == requested_card
+                        && !latest.model_store_link_detached
+                        && !latest.is_builtin_account_platform()
+                        && latest.is_operator_owned_endpoint()
+                });
+                let Some(latest) = latest else {
+                    return Err(
+                        "model store endpoint changed or is unavailable; refresh the card and retry"
+                            .to_string(),
+                    );
+                };
+                let mut linked = latest.clone();
+                linked.preset = model.preset;
+                linked.provider_kind = model.provider_kind.take();
+                linked.vendor = model.vendor.take();
+                linked.endpoint_mode = model.endpoint_mode.take();
+                linked.base_url = std::mem::take(&mut model.base_url);
+                linked.model = std::mem::take(&mut model.model);
+                linked.model_store_card_id = model.model_store_card_id.take();
+                linked.model_store_link_detached = false;
+                linked.model_store_link_requested = true;
+                linked.model_store_link_only = false;
+                linked.preserve_model_store_route = false;
+                linked.preserve_context_window_tokens = false;
+                linked.context_window_edit_requested = false;
+                linked.reasoning_effort_only = false;
+                linked.api_key.clear();
+                linked.credential_action = Some(CredentialEditAction::KeepExisting);
+                model = linked;
+            }
+            // Only a new client's explicit context-field edit records a user
+            // choice. Untouched-field and reasoning-only intent take precedence
+            // over inconsistent payloads; legacy/machine defaults do not opt out.
+            let explicit_context_selection = model.context_window_edit_requested
+                && !model.preserve_context_window_tokens
+                && !model.reasoning_effort_only;
+            model.context_window_edit_requested = false;
+            if std::mem::take(&mut model.reasoning_effort_only) {
+                let mut latest = old
+                    .clone()
+                    .ok_or_else(|| format!("model not found: {}", model.id))?;
+                latest.reasoning_effort = model.reasoning_effort.take();
+                model = latest;
+            }
+            // Editor intent: the context-window field was not edited, so a
+            // background store refresh (e.g. the verified 256K repair, which a
+            // one-time marker then protects) must survive the whole-row save.
+            // An edited field keeps its explicit value, including a deliberate
+            // downgrade or clear.
+            if model.preserve_context_window_tokens {
+                if let Some(old) = old.as_ref() {
+                    model.context_window_tokens = old.context_window_tokens;
+                }
+            }
+            model.preserve_context_window_tokens = false;
+            let explicit_store_link_requested = model.model_store_link_requested
+                || (old.is_none() && model.model_store_card_id.is_some());
+            model.model_store_link_requested = false;
+            if model.preserve_model_store_route && !explicit_store_link_requested {
+                if let Some(latest) = old.as_ref() {
+                    // Endpoint identity includes protocol metadata. Combining a
+                    // latest Responses URL with an older Chat preset changes
+                    // the actual request route despite preserving its address.
+                    model.preset = latest.preset;
+                    model.provider_kind.clone_from(&latest.provider_kind);
+                    model.vendor.clone_from(&latest.vendor);
+                    model.endpoint_mode.clone_from(&latest.endpoint_mode);
+                    model.base_url.clone_from(&latest.base_url);
+                    model.model.clone_from(&latest.model);
+                    model
+                        .model_store_card_id
+                        .clone_from(&latest.model_store_card_id);
+                    model.model_store_link_detached = latest.model_store_link_detached;
+                }
+            }
+            model.preserve_model_store_route = false;
+            // Settings editors predating store provenance omit this optional field.
+            // Keep it for non-route edits; a user-entered route change unlinks it.
+            let same_route = old
+                .as_ref()
+                .is_some_and(|old| old.has_same_endpoint_route(&model));
+            let previous = old
+                .as_ref()
+                .filter(|old| !old.model_store_link_detached)
+                .and_then(|old| old.model_store_card_id.as_deref());
+            let requested = model
+                .model_store_card_id
+                .as_deref()
+                .or_else(|| same_route.then_some(previous).flatten());
+            model.model_store_card_id = requested
+                .filter(|card| {
+                    !model.model_store_link_detached
+                        && !model.is_builtin_account_platform()
+                        && model.is_operator_owned_endpoint()
+                        && ((!explicit_store_link_requested
+                            && same_route
+                            && previous == Some(*card))
+                            // Returning the old card id is not explicit re-link
+                            // intent. A full-object client may edit only protocol
+                            // metadata while the card still serves this URL/model.
+                            || ((explicit_store_link_requested || previous != Some(*card))
+                                && crate::features::model_store::matches_current_model_route(
+                                    card,
+                                    &model.base_url,
+                                    &model.model,
+                                )))
+                })
+                .map(str::to_owned);
+            // A card may stop or enter its update window after the client read
+            // its endpoint. Reject that stale explicit link before writing either
+            // settings or credentials; it is not an intentional manual detach.
+            if explicit_store_link_requested && model.model_store_card_id.is_none() {
+                return Err(
+                    "model store endpoint changed or is unavailable; refresh the card and retry"
+                        .to_string(),
+                );
+            }
+            model.model_store_link_detached = model.model_store_card_id.is_none()
+                && (model.model_store_link_detached
+                    || old.as_ref().is_none_or(|old| {
+                        old.model_store_link_detached || old.model_store_card_id.is_some()
+                    })
+                    || !same_route);
             let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
                 .map_err(|e| sanitize_command_error("save_model", e))?;
             *deferred_delete.borrow_mut() = deferred;
             prefs.upsert_model(model);
+            if explicit_context_selection {
+                prefs.record_explicit_model_context_selection(&model_id);
+            }
             Ok(())
         },
         || {
@@ -465,7 +830,7 @@ pub(super) fn save_model_inner(
     Ok(())
 }
 
-/// 删一条模型。至少保留一条;删到当前 active 会自动回退列表首条。
+/// 删一条用户模型；内置 Account Platform 模型始终保留。
 #[tauri::command]
 pub async fn delete_model(id: String) -> Result<(), String> {
     // Round-51 review: same cross-process settings-lock rationale as
@@ -487,7 +852,7 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
         |prefs| {
             if prefs
                 .model_by_id(id)
-                .is_some_and(|model| model.is_builtin_llmapi())
+                .is_some_and(|model| model.is_builtin_account_platform())
             {
                 return Err("内置模型不可删除".to_string());
             }
@@ -517,6 +882,177 @@ pub(super) fn delete_model_inner(id: &str, store: &dyn CredentialStore) -> Resul
     Ok(())
 }
 
+/// Remove a stale store-managed route only if its current persisted ownership still matches.
+/// A settings form may detach or repurpose the same row while an uninstall is running.
+#[tauri::command]
+pub async fn delete_model_if_store_link(id: String, card_id: String) -> Result<bool, String> {
+    let store = SystemCredentialStore::new();
+    join_blocking("delete_model_if_store_link", move || {
+        delete_model_if_store_link_inner(&id, &card_id, &store)
+    })
+    .await
+}
+
+fn is_store_link_cleanup_target(model: &SavedModel, card_id: &str) -> bool {
+    if card_id.is_empty()
+        || model.model_store_card_id.as_deref() != Some(card_id)
+        || model.model_store_link_detached
+        || model.is_builtin_account_platform()
+        || !model.is_operator_owned_endpoint()
+    {
+        return false;
+    }
+    crate::features::model_store::is_store_managed_route(&model.base_url)
+}
+
+pub(super) fn delete_model_if_store_link_inner(
+    id: &str,
+    card_id: &str,
+    store: &dyn CredentialStore,
+) -> Result<bool, String> {
+    let removed = std::cell::Cell::new(false);
+    let reference = std::cell::RefCell::new(None);
+    UserPrefs::update_readable_model_transaction_with_post_commit(
+        |prefs| {
+            let Some(model) = prefs.model_by_id(id) else {
+                return Ok(());
+            };
+            if !is_store_link_cleanup_target(model, card_id) {
+                return Ok(());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            *reference.borrow_mut() = model.credential_ref.clone();
+            prefs.remove_model(id);
+            removed.set(true);
+            Ok(())
+        },
+        || {
+            // Keep the settings lock until the credential is removed: another save of
+            // the same id must not replace its secret between this commit and cleanup.
+            if let Some(reference) = reference.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model_if_store_link: model {id} removed, but its keyring secret \
+                         could not be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
+    .map_err(|e| sanitize_command_error("delete_model_if_store_link", e))?;
+    Ok(removed.get())
+}
+
+// Local selections must name a user configuration, not the platform runtime
+// carrier. Catalog selections keep their separate, source-aware command path.
+pub(super) fn require_local_model_selection<'a>(
+    model: Option<&'a SavedModel>,
+    id: &str,
+) -> Result<&'a SavedModel, String> {
+    let model = model.ok_or_else(|| format!("model not found: {id}"))?;
+    if model.is_builtin_account_platform() {
+        return Err("select a concrete Account Platform catalog model".to_string());
+    }
+    Ok(model)
+}
+
+/// 设备管理移除回收的**条件删除**（三十三轮评审 P2）：只有当该 id 的当前行
+/// 仍与前端快照捕获的身份（`base_url` + `model` 原串逐字节一致）相同时才删除，
+/// 返回 true = 已删除、false = 身份不匹配或该 id 已不存在（保持幂等，不改任何
+/// 数据）。
+///
+/// [`removeExternalModel`] 的等待窗口里，用户可以经侧栏去设置把同 id 的配置
+/// 改成另一端点/模型并保存（SettingsView 保留原 id；save 的最终事务只按 id
+/// 落盘）。旧清理若只按 id 删（[`delete_model_inner`] 的形态），会用移除开始
+/// 时捕获的陈旧 `savedModels` 快照把用户**改属后的独立配置**连同其凭据引用
+/// 一起删掉——所以前端回收臂必须走本命令，把快照行的 `(base_url, model)`
+/// 作为期望身份传下来，由最终事务内核对当前行。前端快照匹配已经过端点规范化
+/// 与 Ollama 规范身份（`findLinkedRowsForEndpoint`/`…ForOllamaEndpoint`），
+/// 这里的逐字节比对回答的是另一个问题——"这行还是我们决定回收的那一行吗"：
+/// 移除等待期间发生的任何改动都让该行成为用户的独立配置，不得回收。
+#[tauri::command]
+pub async fn delete_model_if_matches(
+    id: String,
+    expected_base_url: Option<String>,
+    expected_model: Option<String>,
+) -> Result<bool, String> {
+    // Round-51 review: same cross-process settings-lock rationale as
+    // [`delete_model`] — join the blocking transaction on a worker.
+    let store = SystemCredentialStore::new();
+    join_blocking("delete_model_if_matches", move || {
+        delete_model_if_matches_inner(&id, expected_base_url, expected_model, &store)
+    })
+    .await
+}
+
+pub(super) fn delete_model_if_matches_inner(
+    id: &str,
+    expected_base_url: Option<String>,
+    expected_model: Option<String>,
+    store: &dyn CredentialStore,
+) -> Result<bool, String> {
+    // Same ordering contract as [`save_model_inner`]（三十五轮评审 P2）：凭据
+    // 删除在 post-commit 钩子里执行——提交成功后、释放 prefs 锁前。放在锁外
+    // 时，A 的行删除提交后、凭据删除前，B 可为同 id 保存新配置和新密钥（同一
+    // 确定性 `model:{id}` 引用）；A 迟到的删除会毁掉 B 的新密钥——新配置保留、
+    // 新密钥丢失，两次操作仍都报成功。锁内后提交清理与 save 的替换写入全序：
+    // B 的替换要么整体先于 A（A 的删除就是更晚的用户意图），要么等 A 的删除
+    // 完成后才拿得到锁。
+    // 同时改走 fail-closed 事务（三十五轮评审 P2）：设置文件读取/解析失败时
+    // 报错且不落盘，而不是把宽松加载折叠出的默认快照当现状、在返回“未删除”
+    // 的同时覆盖用户配置；该 id 不存在或身份不匹配返回 Ok(false) 并跳过落盘，
+    // 原文件字节保持。
+    let deferred_reference = std::cell::RefCell::new(None);
+    let deleted = std::cell::Cell::new(false);
+    UserPrefs::update_transaction_fail_closed(
+        |prefs| {
+            // 该 id 已不存在（用户在等待窗口里自行删了它）：无事可做，如实报告
+            // "未删"而不是报错——回收语义是"清理仍然属于被移除记录的配置"。
+            let Some(model) = prefs.model_by_id(id) else {
+                return Ok(false);
+            };
+            // 期望身份逐字节比对原串；None（调用方拿不出身份）永不匹配——
+            // 拿不出身份的调用方就不该删用户的配置（fail-closed）。旧形态
+            // `unwrap_or("")` 会让 None 期望匹配「base_url/model 均空串」的行，
+            // 与本注释的 fail-closed 承诺自相矛盾（三十五轮评审 P3，唯一产品
+            // 回收链先筛有效身份故不可达；按防御性 API 契约收口）。
+            let matches = expected_base_url.as_deref() == Some(model.base_url.as_str())
+                && expected_model.as_deref() == Some(model.model.as_str());
+            if !matches {
+                return Ok(false);
+            }
+            if model.is_builtin_account_platform() {
+                return Err("内置模型不可删除".to_string());
+            }
+            if prefs.advanced.saved_models.len() <= 1 {
+                return Err("至少保留一个模型".to_string());
+            }
+            if let Some(reference) = model.credential_ref.clone() {
+                *deferred_reference.borrow_mut() = Some(reference);
+            }
+            prefs.remove_model(id);
+            deleted.set(true);
+            Ok(true)
+        },
+        || {
+            if let Some(reference) = deferred_reference.borrow_mut().take() {
+                if let Err(error) = store.delete(&reference) {
+                    log::warn!(
+                        "delete_model_if_matches: model {id} removed, but its keyring secret \
+                         could not be deleted: {}",
+                        error.user_message()
+                    );
+                }
+            }
+        },
+    )
+    .map_err(|e| sanitize_command_error("delete_model_if_matches", e))?;
+    Ok(deleted.get())
+}
+
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
@@ -527,11 +1063,8 @@ pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> 
         let id = id.clone();
         move || {
             UserPrefs::update_transaction(|prefs| {
-                if prefs.model_by_id(&id).is_none() {
-                    return Err(format!("model not found: {id}"));
-                }
-                prefs.advanced.active_model_id = Some(id);
-                Ok(())
+                require_local_model_selection(prefs.model_by_id(&id), &id)?;
+                prefs.set_default_model_ref(ModelSelectionRef::local(&id))
             })
             .map(|_| ())
             .map_err(|e| sanitize_command_error("set_active_model", e))
@@ -571,9 +1104,7 @@ pub async fn set_session_model(
     }
     let prefs = UserPrefs::load();
     if let Some(mid) = &model_id {
-        if prefs.model_by_id(mid).is_none() {
-            return Err(format!("model not found: {mid}"));
-        }
+        require_local_model_selection(prefs.model_by_id(mid), mid)?;
     }
     let selected_model = model_id
         .as_deref()
@@ -606,6 +1137,16 @@ pub async fn get_session_model_id(
     Ok(store.session_model_id(&session_id))
 }
 
+/// Source-aware selection frozen for this session. Legacy callers can keep
+/// using `get_session_model_id`, which exposes the runtime SavedModel carrier.
+#[tauri::command]
+pub async fn get_session_model_ref(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<Option<ModelSelectionRef>, String> {
+    Ok(store.session_model_ref(&session_id))
+}
+
 /// 当前有效模型的图片输入能力(设计 §6.3/§9.2,阶段 G)。前端选图即时警告据此
 /// 提示;发送时 chat 命令仍按同一条解析路径(fresh bridge + 会话模型绑定)复核。
 #[derive(Debug, Clone, Serialize)]
@@ -627,12 +1168,13 @@ pub struct ImageInputCapabilityInfo {
 pub async fn get_image_input_capability(
     session_id: Option<String>,
     pool: State<'_, EnginePool>,
-    store: State<'_, SessionStore>,
 ) -> Result<ImageInputCapabilityInfo, String> {
     // 与 chat 命令的图片路由同一套解析:fresh bridge 按 session 绑定模型(含本地
     // vLLM served name 探测与运行时凭据准备)。尚无会话(全新草稿)时退化为
     // get_effective_model_config 同款 prefs 直读,按全局默认模型解析。
-    let bridge = match session_id.or_else(|| store.active_id()) {
+    // A missing ID is the caller's draft, even when another window/session
+    // remains active in the backend. Never borrow that unrelated binding.
+    let bridge = match session_id {
         Some(sid) => pool.fresh_bridge_for(&sid).await.map_err(|error| {
             sanitize_command_error(
                 &format!("resolve image input capability for {sid}"),
@@ -642,16 +1184,40 @@ pub async fn get_image_input_capability(
         None => {
             let mut bridge = pool.bridge.clone();
             bridge.prefs = refresh_safe_prefs(UserPrefs::load());
-            bridge.session_model = None;
-            bridge
+            return draft_image_input_capability(&mut bridge);
         }
     };
-    Ok(ImageInputCapabilityInfo {
+    Ok(image_input_capability_snapshot(&bridge))
+}
+
+fn draft_image_input_capability(
+    bridge: &mut crate::features::assistant::platform::bridge::Pinvou3Bridge,
+) -> Result<ImageInputCapabilityInfo, String> {
+    // Resolve the typed default just like the effective-config projection.
+    // A stale pool binding or the legacy first-model fallback must not report
+    // an image route after the user has cleared the default selection.
+    bridge.session_model = resolve_effective_model_selection(
+        &bridge.prefs,
+        bridge.prefs.advanced.default_model_ref.as_ref(),
+    )?;
+    if bridge.session_model.is_none()
+        && bridge.prefs.model_selection_schema_version >= 1
+        && bridge.prefs.advanced.default_model_ref.is_none()
+    {
+        return Err("model_selection_required: choose a model before sending".into());
+    }
+    Ok(image_input_capability_snapshot(bridge))
+}
+
+fn image_input_capability_snapshot(
+    bridge: &crate::features::assistant::platform::bridge::Pinvou3Bridge,
+) -> ImageInputCapabilityInfo {
+    ImageInputCapabilityInfo {
         capability: bridge.effective_image_capability().as_str().to_string(),
         image_mode: bridge.image_input_mode().as_str().to_string(),
         is_local_endpoint: bridge.is_local_endpoint(),
         vision_is_local_endpoint: bridge.vision_uses_local_endpoint(),
-    })
+    }
 }
 
 fn parse_search_provider(raw: &str) -> Result<SearchProvider, String> {
@@ -733,6 +1299,27 @@ pub struct ModelConnectionTestResult {
     pub message: String,
     pub detail: Option<String>,
     pub http_status: Option<u16>,
+    /// 端点在 /models 列表里为命中条目自报的上下文/输出长度(§2.4):仅在
+    /// 配置模型自己的条目命中时填充,来源恒为 `endpoint`(本路径不做目录
+    /// 补全)。未命中/解析失败时四字段全部缺席(skip_serializing_if 保持
+    /// 既有 wire 形状)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_from: Option<crate::core::endpoint_discovery::ModelFactSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_from: Option<crate::core::endpoint_discovery::ModelFactSource>,
+    /// 事实命中的配置模型 wire 名(`configured_model_name` 的解析结果):
+    /// 富化按**已保存记录**的 model 字段探得并匹配条目,而前端表单里的
+    /// model 字段是可编辑草稿——编辑表单里未保存的 model-ID 改动会让
+    /// 「表单模型」与「事实模型」分叉。前端把空字段填充守卫对齐到这个名字
+    /// (表单模型 ≠ fact_model 时不填),而不是拿表单模型跟自己比
+    /// (round-3 审 M2);无事实路径(新建表单/未知 id)缺席,既有 wire
+    /// 形状不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fact_model: Option<String>,
 }
 
 fn model_connection_result(
@@ -748,7 +1335,42 @@ fn model_connection_result(
         message: message.to_string(),
         detail,
         http_status,
+        context_window_tokens: None,
+        context_from: None,
+        max_output_tokens: None,
+        output_from: None,
+        fact_model: None,
     }
+}
+
+/// 命中条目的端点自报长度对:context/output 成对携带来源(本路径恒
+/// `Endpoint`),故只需携带值。
+struct MatchedModelFacts {
+    context_window_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
+}
+
+/// 把命中事实接到既有结果上(其他字段一律不动——错误分类与既有行为
+/// 完全不变,成功时只是多带了长度事实)。`fact_model` 携带事实实际匹配
+/// 的配置模型 wire 名(round-3 审 M2):无论条目是否命中都设置——前端
+/// 据此判断「表单当前模型」是否还是探得事实的那个模型。
+fn attach_connection_model_facts(
+    mut result: ModelConnectionTestResult,
+    facts: Option<MatchedModelFacts>,
+    fact_model: Option<String>,
+) -> ModelConnectionTestResult {
+    result.fact_model = fact_model;
+    if let Some(facts) = facts {
+        result.context_window_tokens = facts.context_window_tokens;
+        result.context_from = facts
+            .context_window_tokens
+            .map(|_| crate::core::endpoint_discovery::ModelFactSource::Endpoint);
+        result.max_output_tokens = facts.max_output_tokens;
+        result.output_from = facts
+            .max_output_tokens
+            .map(|_| crate::core::endpoint_discovery::ModelFactSource::Endpoint);
+    }
+    result
 }
 
 fn model_connection_http_result(status: reqwest::StatusCode) -> ModelConnectionTestResult {
@@ -806,8 +1428,67 @@ pub async fn test_model_connection(
     base_url: String,
     api_key: String,
     model_id: Option<String>,
+    no_auth: Option<bool>,
 ) -> Result<ModelConnectionTestResult, String> {
-    Ok(probe_model_connection(&base_url, &api_key, model_id.as_deref()).await)
+    Ok(probe_model_connection(
+        &base_url,
+        &api_key,
+        model_id.as_deref(),
+        no_auth.unwrap_or(false),
+    )
+    .await)
+}
+
+/// 端点模型自动发现(冻结契约 §2.3):用户点击型薄壳——只做协议解析与
+/// key 归一,探测阶梯/错误分类/目录补全全在
+/// [`crate::core::endpoint_discovery::probe_endpoint_models`]。JS 侧参数是
+/// camelCase(`{baseUrl, apiKey, preset, wire}`),Tauri v2 自动映射到这里的
+/// snake_case 形参,不要改名。
+#[tauri::command]
+pub(crate) async fn probe_endpoint_models(
+    base_url: String,
+    api_key: Option<String>,
+    preset: Option<String>,
+    wire: Option<String>,
+) -> Result<crate::core::endpoint_discovery::EndpointModelsListing, String> {
+    if base_url.trim().is_empty() {
+        return Err("empty_base_url".to_string());
+    }
+    // 与 test_model_connection 的 invalid_url 前置检查同一口径:base 连
+    // URL 都解析不了时早退稳定错误串,而不是把「没有 scheme 的裸 host」
+    // 之类交给探测阶梯——reqwest 对不可解析地址只会给出 client 层错误,
+    // 前端拿到的分类提示会失真。
+    if reqwest::Url::parse(base_url.trim()).is_err() {
+        return Err("invalid_url".to_string());
+    }
+    // preset 优先(serde snake_case 反序列化即解析器),失败报稳定小写串;
+    // preset 缺省时 wire 兜底,都缺省(或 wire 空)→ OpenAI 兼容。
+    let protocol = match preset.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(preset) => {
+            let parsed: crate::platform::prefs::ModelPreset =
+                serde_json::from_value(serde_json::Value::String(preset.to_string()))
+                    .map_err(|_| "unknown_preset".to_string())?;
+            crate::core::endpoint_discovery::protocol_for_preset(parsed)
+        }
+        None => wire
+            .as_deref()
+            .map(crate::core::endpoint_discovery::protocol_for_wire)
+            .unwrap_or(crate::core::endpoint_discovery::DiscoveryProtocol::OpenAiCompatible),
+    };
+    // None/空白 key 统一落 None:core 会照常 keyless 发请求(keyless 端点
+    // 合法;远端 401/403 由 core 归类 AuthRequired)。本命令不读 keyring——
+    // 表单 key 是唯一 key 来源,保存凭据属「已保存模型」的生命周期。
+    let key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string);
+    Ok(crate::core::endpoint_discovery::probe_endpoint_models(
+        base_url.trim(),
+        key.as_deref(),
+        protocol,
+    )
+    .await)
 }
 
 /// 连接探测核心:GET models probe URL 验证服务可达与凭据可用。
@@ -816,6 +1497,7 @@ pub async fn probe_model_connection(
     base_url: &str,
     api_key: &str,
     model_id: Option<&str>,
+    no_auth: bool,
 ) -> ModelConnectionTestResult {
     let url = crate::core::model_endpoint::models_probe_url(base_url);
     let parsed_url = match reqwest::Url::parse(&url) {
@@ -832,6 +1514,11 @@ pub async fn probe_model_connection(
     };
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
+        // 禁用重定向(round-3 审 minor:与发现阶梯同一泄漏面):reqwest 跨源
+        // 重定向只剥 Authorization/Cookie 族,anthropic 端点的 `x-api-key`
+        // 会原样发给重定向目标。禁用后 3xx 按 `redirect` 码收口(既有映射,
+        // 此前因客户端跟随跳转而不可达),提示修 URL 而不是泄 key。
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
@@ -847,8 +1534,11 @@ pub async fn probe_model_connection(
     };
     // Anthropic 官方端点用 x-api-key + anthropic-version,不接受 Bearer。
     let is_anthropic = crate::core::model_endpoint::is_anthropic_api_url(&parsed_url);
+    // 成功 body 的列表形态用同一份已解析 URL 判定(anthropic 官方主机 /
+    // gemini 原生路径),不再二次解析。
+    let listing_shape = models_listing_shape(&parsed_url);
     let mut req = client.get(parsed_url);
-    let key = match resolve_probe_key(api_key, model_id) {
+    let key = match resolve_probe_key(api_key, model_id, no_auth) {
         Ok(Some(key)) => key,
         Ok(None) => String::new(),
         Err(e) => {
@@ -871,9 +1561,157 @@ pub async fn probe_model_connection(
     let req =
         crate::core::model_endpoint::with_opencode_session_header(req, base_url, "connection-test");
     match req.send().await {
-        Ok(resp) => model_connection_http_result(resp.status()),
+        Ok(mut resp) => {
+            // 既有行为(状态阶梯、错误分类)原样保留;成功时额外做一次限长
+            // body 读取,把命中条目的自报长度接进结果(§2.4)。
+            let result = model_connection_http_result(resp.status());
+            if !result.ok {
+                return result;
+            }
+            // model_id 未解析出配置名(None / 未知 id / 空白):没有匹配
+            // 目标,连限长 body 读取都不必发生——富化读取只服务命中条目,
+            // 借用激活模型名字的回退被 configured_model_name 刻意拒绝。
+            // 与发现列表共用 core 的限长读取器(minor-11:同一 chunk 循环、
+            // 各自上限;全部 Err 一律折叠为「无事实」,探测结果不受影响)。
+            // fact_model 是解析出的配置名本身(round-3 审 M2):即使条目
+            // 未命中也回带,前端据此对齐表单模型与事实模型。
+            let configured = configured_model_name(model_id);
+            let facts = match configured.as_deref() {
+                Some(name) => {
+                    match crate::core::endpoint_discovery::read_json_body_bounded(
+                        &mut resp,
+                        CONNECTION_MODELS_BODY_CAP_BYTES,
+                    )
+                    .await
+                    {
+                        Ok(value) => connection_model_facts(&value, listing_shape, Some(name)),
+                        Err(_) => None,
+                    }
+                }
+                None => None,
+            };
+            attach_connection_model_facts(result, facts, configured)
+        }
         Err(e) => model_connection_error_result(&e),
     }
+}
+
+/// 配置模型的 wire 名(事实匹配目标):只按显式 `model_id` 解析已保存模型
+/// 的 `model` 字段。凭据阶梯的激活模型回退**不得**延伸到这里——
+/// `model_id = None` 是新建表单,借用激活模型的名字会把别人的窗口填进
+/// 表单(monitor `parse_models_response`「窗口绝不跨条目借用」同一纪律)。
+fn configured_model_name(model_id: Option<&str>) -> Option<String> {
+    let id = model_id?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    UserPrefs::load()
+        .model_by_id(id)
+        .map(|model| model.model.clone())
+        // 与 connection_model_facts 的空白拒绝同口径前移(round-5 审 nit):
+        // 手改记录的空 model 字段在这里就折成 None,不再为必拒的空白名
+        // 白付一次 4 MiB 限长 body 读。
+        .filter(|model| !model.is_empty())
+}
+
+/// 成功响应的列表形态判定(§2.4):与请求装配同一信号——anthropic 官方
+/// 主机走原生 `data` 数组;探测 URL 落在 gemini 原生 `/v1beta/models` 时走
+/// `models` 数组;其余按 OpenAI 兼容形态。请求鉴权分支用的
+/// `is_anthropic_api_url` 与这里是同一个判定函数,不引入第二套形态信号。
+fn models_listing_shape(url: &reqwest::Url) -> ModelsListingShape {
+    if crate::core::model_endpoint::is_anthropic_api_url(url) {
+        ModelsListingShape::Anthropic
+    } else if url.path().ends_with("/v1beta/models") {
+        ModelsListingShape::Gemini
+    } else {
+        ModelsListingShape::OpenAi
+    }
+}
+
+enum ModelsListingShape {
+    OpenAi,
+    Anthropic,
+    Gemini,
+}
+
+/// 成功 body 的限长上限:读取循环收敛在 core 的
+/// [`crate::core::endpoint_discovery::read_json_body_bounded`](minor-11,
+/// 与发现列表同一读法、各自 cap 常量)。模型列表(2000 条量级)上限
+/// 4 MiB 足够;被截断的 body JSON 解析失败 → 无事实,探测结果不受影响。
+const CONNECTION_MODELS_BODY_CAP_BYTES: usize = 4 * 1024 * 1024;
+
+/// 连接测试的事实解析(§2.4,纯函数):body 已由共享限长读取器解析为
+/// JSON(`Err` 折叠为「无事实」,不进这里),按形态取条目列表,再按
+/// monitor `parse_models_response` 的匹配语义找配置模型自己的条目——
+/// 精确 id → ASCII 大小写不敏感 → ollama `:latest` 规范形;未命中不填。
+/// OpenAI 形态(minor-9/10 与发现阶梯对齐)直接迭代条目——`{data}` 数组
+/// **或裸数组**(Together 形态,旧经 `parse_models_response_list` 的实现
+/// 不认),context 用 [`crate::core::endpoint_discovery::
+/// parse_entry_context_window`](三拼写归一取最紧、拒绝 `max_context_length`
+/// 能力上限),output 用 [`crate::core::model_endpoint::
+/// parse_entry_output_limit`](三形态取最紧)——字段名知识只此一份;
+/// anthropic / gemini 原生形态复用 [`crate::core::endpoint_discovery`]
+/// 的共享单条目解析。刻意差异:发现侧 gemini 列表页按 `generateContent`
+/// 过滤条目,富化不过滤——配置了哪个条目就匹配哪个。
+fn connection_model_facts(
+    value: &serde_json::Value,
+    shape: ModelsListingShape,
+    configured: Option<&str>,
+) -> Option<MatchedModelFacts> {
+    let configured = configured.map(str::trim).filter(|name| !name.is_empty())?;
+    let entries: Vec<(String, Option<u32>, Option<u32>)> = match shape {
+        ModelsListingShape::OpenAi => {
+            let items = value
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .or_else(|| value.as_array())?;
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("id").and_then(serde_json::Value::as_str)?.trim();
+                    (!id.is_empty()).then(|| {
+                        (
+                            id.to_string(),
+                            crate::core::endpoint_discovery::parse_entry_context_window(item),
+                            crate::core::model_endpoint::parse_entry_output_limit(item),
+                        )
+                    })
+                })
+                .collect()
+        }
+        ModelsListingShape::Anthropic => value
+            .get("data")?
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                crate::core::endpoint_discovery::anthropic_entry_facts(item)
+                    .map(|facts| (facts.id, facts.context, facts.output))
+            })
+            .collect(),
+        ModelsListingShape::Gemini => value
+            .get("models")?
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                crate::core::endpoint_discovery::gemini_entry_facts(item)
+                    .map(|facts| (facts.id, facts.context, facts.output))
+            })
+            .collect(),
+    };
+    let canonical = crate::core::model_endpoint::ollama_canonical_name(configured);
+    let matched = entries
+        .iter()
+        .find(|(id, _, _)| id == configured)
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|(id, _, _)| id.eq_ignore_ascii_case(configured))
+        })
+        .or_else(|| entries.iter().find(|(id, _, _)| id == &canonical))?;
+    Some(MatchedModelFacts {
+        context_window_tokens: matched.1,
+        max_output_tokens: matched.2,
+    })
 }
 
 /// 测试图片输入能力的结果(设计 §7.3)。`status` 稳定三值,前端据此分态展示:
@@ -932,7 +1770,13 @@ fn summarize_image_probe_text(text: &str, max_chars: usize) -> String {
 }
 
 fn image_capability_test_payload(model: &str) -> serde_json::Value {
-    // 注意:不得携带 temperature——kimi-for-coding 等模型只接受默认值,显式传会 400。
+    // Note: never carry temperature — models like kimi-for-coding only accept
+    // the default, and an explicit value gets a 400.
+    let needs_reasoning_budget =
+        crate::features::assistant::image_capability::moonshot_model_needs_reasoning_budget(model)
+            || crate::features::assistant::image_capability::xai_model_needs_reasoning_budget(
+                model,
+            );
     let thinking_model =
         crate::features::assistant::image_capability::moonshot_model_requires_explicit_thinking(
             model,
@@ -951,18 +1795,28 @@ fn image_capability_test_payload(model: &str) -> serde_json::Value {
                 },
             ],
         }],
-        // always-thinking 模型:thinking 输出吃 token,上限用 thinking 档常量;
-        // 其余模型保持 64(回答「红色」绰绰有余)。
-        "max_tokens": if thinking_model {
+        // Always-reasoning models (kimi k3 / K3.1 / kimi-for-coding, and
+        // xAI's documented always-on grok-4.7 / grok-4.20 rows): reasoning
+        // precedes the answer and is billed against the completion budget,
+        // so the cap uses the reasoning-tier constant; other models keep 64
+        // (ample for a one-word color answer). Budget selection is
+        // deliberately a separate predicate from the thinking injection
+        // below: K3.1 needs the reasoning budget while its legacy thinking
+        // parameter stays omitted (round-5 review — sharing one boolean
+        // silently dropped the K3.1 probe budget to 64).
+        "max_tokens": if needs_reasoning_budget {
             IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING
         } else {
             IMAGE_CAPABILITY_TEST_MAX_TOKENS
         },
         "stream": false,
     });
-    // always-thinking 模型(kimi-for-coding 等):官方接入要求 thinking 保持开启,
-    // 与 bridge 真实链路同一口径(`moonshot_model_requires_explicit_thinking`)。
-    // 省略该参数网关会拒绝请求,导致识图探测误判为「不支持图片」(2026-08 实测)。
+    // Models whose contract requires the legacy top-level `thinking` field
+    // (kimi-for-coding etc.): same shape as the bridge real send path (see
+    // `moonshot_model_requires_explicit_thinking`). Omitting it gets the
+    // request rejected by the gateway and the probe misreported as
+    // "unsupported" (live-tested 2026-08). K3.1 is deliberately NOT injected
+    // here: its contract is the top-level reasoning_effort ladder.
     if thinking_model {
         payload["thinking"] = serde_json::json!({ "type": "enabled" });
     }
@@ -1216,6 +2070,7 @@ pub async fn run_image_capability_probe(
     base_url: &str,
     api_key: &str,
     model_id: Option<&str>,
+    no_auth: bool,
 ) -> ImageCapabilityTestResult {
     let model = model.trim().to_string();
     if model.is_empty() {
@@ -1255,7 +2110,7 @@ pub async fn run_image_capability_probe(
             return image_capability_result("error", false, format!("测试初始化失败: {e}"), None);
         }
     };
-    let key = match resolve_probe_key(api_key, model_id) {
+    let key = match resolve_probe_key(api_key, model_id, no_auth) {
         Ok(Some(key)) => key,
         Ok(None) => String::new(),
         Err(e) => {
@@ -1332,8 +2187,27 @@ pub async fn test_image_input_capability(
     base_url: String,
     api_key: String,
     model_id: Option<String>,
+    no_auth: Option<bool>,
 ) -> Result<ImageCapabilityTestResult, String> {
-    Ok(run_image_capability_probe(&model, &base_url, &api_key, model_id.as_deref()).await)
+    Ok(run_image_capability_probe(
+        &model,
+        &base_url,
+        &api_key,
+        model_id.as_deref(),
+        no_auth.unwrap_or(false),
+    )
+    .await)
+}
+
+/// Field-level patch for the notification switches: a partial update must not
+/// reset unlisted switches to their defaults (a whole-struct replace would let
+/// an "only change needs_input" write reset enabled/task_completed).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationPrefsPatch {
+    pub enabled: Option<bool>,
+    pub task_completed: Option<bool>,
+    pub needs_input: Option<bool>,
 }
 
 /// 通用设置字段补丁。搜索、桌宠、模型列表和激活项由专用命令管理，
@@ -1345,7 +2219,7 @@ pub struct GeneralSettingsPatch {
     pub color_scheme: Option<ColorScheme>,
     pub language: Option<Language>,
     pub memory_enabled: Option<bool>,
-    pub notifications: Option<NotificationPrefs>,
+    pub notifications: Option<NotificationPrefsPatch>,
     pub sidebar: Option<SidebarPrefs>,
     pub chat: Option<ChatPrefs>,
     pub advanced: Option<AdvancedPrefs>,
@@ -1394,7 +2268,17 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         current.memory_enabled = memory_enabled;
     }
     if let Some(notifications) = patch.notifications {
-        current.notifications = notifications;
+        // Field-level merge: a partial patch (e.g. only `needs_input`) must
+        // not reset the untouched switches to their defaults.
+        if let Some(enabled) = notifications.enabled {
+            current.notifications.enabled = enabled;
+        }
+        if let Some(task_completed) = notifications.task_completed {
+            current.notifications.task_completed = task_completed;
+        }
+        if let Some(needs_input) = notifications.needs_input {
+            current.notifications.needs_input = needs_input;
+        }
     }
     if let Some(sidebar) = patch.sidebar {
         current.sidebar = sidebar;
@@ -1406,6 +2290,12 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         // 模型列表和激活项有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
+        advanced.model_store_context_repairs = current.advanced.model_store_context_repairs.clone();
+        advanced.default_model_ref = current.advanced.default_model_ref.clone();
+        advanced.default_model_selection_revision =
+            current.advanced.default_model_selection_revision.clone();
+        advanced.account_platform_default_model =
+            current.advanced.account_platform_default_model.clone();
         current.advanced = advanced;
     }
 }
@@ -1566,8 +2456,40 @@ pub async fn save_search_settings_and_restart(
 use crate::platform::prefs::CredentialStateOps;
 
 #[cfg(test)]
+mod model_snapshot_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::credential_store::MemoryCredentialStore;
+
+    #[test]
+    fn local_model_selection_rejects_platform_carrier() {
+        let model = SavedModel::builtin_account_platform();
+        assert_eq!(
+            require_local_model_selection(Some(&model), &model.id).unwrap_err(),
+            "select a concrete Account Platform catalog model"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_missing_id_error() {
+        assert_eq!(
+            require_local_model_selection(None, "missing").unwrap_err(),
+            "model not found: missing"
+        );
+    }
+
+    #[test]
+    fn local_model_selection_keeps_user_model() {
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "local-user-model".to_string();
+        assert!(std::ptr::eq(
+            require_local_model_selection(Some(&model), &model.id).unwrap(),
+            &model
+        ));
+    }
+
     use crate::platform::paths::tests::ENV_LOCK;
     // SearchProvider 已从 commands prelude 收窄（lib 侧仅测试仍引用）。
     use crate::platform::prefs::SearchProvider;
@@ -1746,6 +2668,64 @@ mod tests {
             payload.get("max_tokens").and_then(|v| v.as_u64()),
             Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING as u64)
         );
+        // K3.1 spellings (2026-11-04 round-5 review regression): the probe
+        // budget must ride the reasoning-tier cap while the legacy thinking
+        // parameter stays omitted. The payload used to choose max_tokens
+        // with the thinking predicate, so removing K3.1 from that list
+        // silently dropped the K3.1 probe budget to 64 — reasoning ate the
+        // whole completion budget before the one-word color answer, and the
+        // extractor (final content only) misreported a vision-capable model
+        // as unverified.
+        for name in [
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            // Reachable [1m] composites (2026-11-05 review): the budget
+            // predicate includes them and the thinking-omission contract is
+            // the same shape. Round-8 review: all 8 spellings are pinned at
+            // the payload level (the two highspeed `[1m]` composites were
+            // previously predicate-level only).
+            "k3.1-pro[1m]",
+            "kimi-k3.1-pro[1m]",
+            "k3.1-pro-highspeed[1m]",
+            "kimi-k3.1-pro-highspeed[1m]",
+        ] {
+            let payload = image_capability_test_payload(name);
+            assert!(
+                payload.get("thinking").is_none(),
+                "{name} walks the K3-series omission contract; thinking must stay omitted"
+            );
+            assert_eq!(
+                payload.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING as u64),
+                "{name} is always-reasoning; the probe budget must stay at the reasoning tier"
+            );
+        }
+        // Round-8 review: xAI's documented always-reasoning rows ride the
+        // same reasoning-tier probe budget (no thinking injection — the
+        // xAI contract is the top-level reasoning.effort, which the probe
+        // omits like the send path). Round-9 review: grok-4.5/4.6 join the
+        // budget list (their detail pages document the effort ladder with a
+        // high default and the guide's "cannot be disabled" covers them).
+        for name in [
+            "grok-4.7",
+            "grok-4.6",
+            "grok-4.5",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-multi-agent-0309",
+        ] {
+            let payload = image_capability_test_payload(name);
+            assert!(
+                payload.get("thinking").is_none(),
+                "{name} must not carry a legacy thinking field"
+            );
+            assert_eq!(
+                payload.get("max_tokens").and_then(|v| v.as_u64()),
+                Some(IMAGE_CAPABILITY_TEST_MAX_TOKENS_THINKING as u64),
+                "{name} is documented always-reasoning; the probe budget must stay at the reasoning tier"
+            );
+        }
     }
 
     /// 锚定内置测试图是合法 PNG:块 CRC 与 zlib 数据全部有效、64×64 RGB 纯红。
@@ -2034,6 +3014,7 @@ mod tests {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
         let active = SavedModel {
+            auth_mode: None,
             id: "saved-active".to_string(),
             name: "active".to_string(),
             alias: None,
@@ -2042,6 +3023,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "active-model".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://active.example/v1".to_string(),
             provider_kind: None,
             vendor: None,
@@ -2072,12 +3061,887 @@ mod tests {
         );
     }
 
+    /// 设备管理条件删除（三十三轮评审 P2）的共享夹具：真实的 update_transaction
+    /// 需要 PINVOU3_HOME（ENV_LOCK 序列化），模型行走与生产同一落盘路径。
+    fn seed_two_models() {
+        UserPrefs::update_transaction(|prefs| {
+            // load 路径会自动补种内置 llmapi 行（ensure_builtin_llmapi_model），
+            // 真实状态永远含内置行——夹具保留它、只追加两条外部行。
+            prefs
+                .advanced
+                .saved_models
+                .retain(|m| m.id == crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+            prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
+                id: "m-recycle".to_string(),
+                name: "recycle".to_string(),
+                alias: None,
+                preset: Default::default(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "qwen3:latest".to_string(),
+                base_url: "http://127.0.0.1:11434/v1".to_string(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: Default::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: Default::default(),
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
+                id: "m-other".to_string(),
+                name: "other".to_string(),
+                alias: None,
+                preset: Default::default(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "other-model".to_string(),
+                base_url: "http://127.0.0.1:8001/v1".to_string(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: Default::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: Default::default(),
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.active_model_id = Some("m-recycle".to_string());
+            Ok(())
+        })
+        .expect("seed models should save");
+    }
+
+    fn with_temp_prefs_home<T>(run: impl FnOnce() -> T) -> T {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old_home = std::env::var_os("PINVOU3_HOME");
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-delete-if-matches-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let result = run();
+        match old_home {
+            Some(home) => unsafe { std::env::set_var("PINVOU3_HOME", home) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        result
+    }
+
+    #[test]
+    fn delete_model_if_matches_clears_the_typed_default_without_selecting_a_sibling() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            UserPrefs::update_transaction(|prefs| {
+                prefs.set_default_model_ref(crate::platform::prefs::ModelSelectionRef::local(
+                    "m-recycle",
+                ))
+            })
+            .unwrap();
+            let store = MemoryCredentialStore::default();
+            assert!(
+                delete_model_if_matches_inner(
+                    "m-recycle",
+                    Some("http://127.0.0.1:11434/v1".into()),
+                    Some("qwen3:latest".into()),
+                    &store,
+                )
+                .unwrap()
+            );
+            let prefs = UserPrefs::load();
+            assert!(prefs.advanced.default_model_ref.is_none());
+            assert!(prefs.advanced.active_model_id.is_none());
+            assert!(prefs.model_by_id("m-recycle").is_none());
+            assert!(prefs.model_by_id("m-other").is_some());
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_deletes_only_on_snapshot_identity_match() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("matching identity must delete");
+            assert!(deleted, "snapshot-identical row must be recycled");
+            let prefs = UserPrefs::load();
+            assert!(
+                prefs.model_by_id("m-recycle").is_none(),
+                "recycled row must be gone"
+            );
+            assert!(
+                prefs.model_by_id("m-other").is_some(),
+                "the sibling config must survive"
+            );
+            // remove_model 的 active 回退取 saved_models 首条（内置行在真正的
+            // 加载路径里永远在场并排在最前）。
+            assert_ne!(
+                prefs.advanced.active_model_id.as_deref(),
+                Some("m-recycle"),
+                "remove_model's active fallback must still run on a real delete"
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_keeps_rehomed_row() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            // 复现评审反例：removeExternalModel 等待期间，用户在设置里把同 id
+            // 配置改属到另一端点/模型并保存（SettingsView 保留原 id）。
+            UserPrefs::update_transaction(|prefs| {
+                let mut row = prefs.model_by_id("m-recycle").cloned().expect("row");
+                row.base_url = "http://127.0.0.1:8000/v1".to_string();
+                row.model = "user-picked-model".to_string();
+                prefs.upsert_model(row);
+                Ok(())
+            })
+            .expect("re-home should save");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("identity mismatch must not error");
+            assert!(
+                !deleted,
+                "the re-homed row belongs to the user now and must be kept"
+            );
+            let prefs = UserPrefs::load();
+            let row = prefs
+                .model_by_id("m-recycle")
+                .expect("re-homed row must survive the late cleanup");
+            assert_eq!(row.base_url, "http://127.0.0.1:8000/v1");
+            assert_eq!(row.model, "user-picked-model");
+            assert_eq!(
+                prefs.advanced.active_model_id.as_deref(),
+                Some("m-recycle"),
+                "keeping the row must not disturb the active fallback either"
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_keeps_when_row_missing_or_identity_unknown() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let store = MemoryCredentialStore::default();
+            // 该 id 已不存在（用户已自行删除）→ 幂等 false，不报错。
+            let deleted = delete_model_if_matches_inner(
+                "m-gone",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("missing id must be a no-op, not an error");
+            assert!(!deleted);
+            // 调用方拿不出期望身份（None）→ fail-closed，永不匹配。
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                None,
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("unknown identity must be a no-op, not an error");
+            assert!(!deleted, "an identity-less caller must never delete");
+            assert!(UserPrefs::load().model_by_id("m-recycle").is_some());
+            // None 期望连「base_url/model 均空串」的行也不匹配（旧
+            // `unwrap_or("")` 形态下 None 期望会误删空身份行，三十五轮评审 P3
+            // 防御性契约收口）。
+            UserPrefs::update_transaction(|prefs| {
+                let mut row = prefs.model_by_id("m-recycle").cloned().expect("row");
+                row.base_url = String::new();
+                row.model = String::new();
+                prefs.upsert_model(row);
+                Ok(())
+            })
+            .expect("empty-identity fixture should save");
+            let deleted = delete_model_if_matches_inner("m-recycle", None, None, &store)
+                .expect("None expectations are a no-op, not an error");
+            assert!(
+                !deleted,
+                "None expectations must not match even an empty-identity row"
+            );
+            assert!(UserPrefs::load().model_by_id("m-recycle").is_some());
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_keeps_builtin_guard() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            // 内置臂：内置 id 的行即便身份完全匹配也不可删（与 delete_model_inner
+            // 同一条守卫、同一句错误文案）。期望身份取内置行自己的当前落盘值——
+            // ensure_builtin_llmapi_model 每次加载都会把内置行归一回默认身份。
+            let builtin = UserPrefs::load()
+                .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .cloned()
+                .expect("builtin row is auto-seeded on load");
+            let store = MemoryCredentialStore::default();
+            let result = delete_model_if_matches_inner(
+                &builtin.id,
+                Some(builtin.base_url.clone()),
+                Some(builtin.model.clone()),
+                &store,
+            )
+            .expect_err("builtin row must be refused even on identity match");
+            assert!(result.contains("内置模型不可删除"));
+            assert!(
+                UserPrefs::load()
+                    .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                    .is_some(),
+                "the builtin row must survive"
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_deletes_down_to_builtin_only() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            // "至少保留一个模型"守卫在真实加载路径下不可达（内置行由
+            // ensure_builtin_llmapi_model 自动在场，内置臂先拦）；可达的边界
+            // 形态是删到只剩内置行——外部行按快照身份照常回收。
+            UserPrefs::update_transaction(|prefs| {
+                prefs.remove_model("m-other");
+                Ok(())
+            })
+            .expect("shrink to one external model should save");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("deleting the last external model must succeed");
+            assert!(deleted);
+            let prefs = UserPrefs::load();
+            assert!(prefs.model_by_id("m-recycle").is_none());
+            assert_eq!(
+                prefs
+                    .advanced
+                    .saved_models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID],
+                "only the auto-seeded builtin row remains",
+            );
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_read_failure_fails_closed_without_writing() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let path = crate::platform::paths::settings_path();
+            let original = std::fs::read_to_string(&path).expect("seeded settings");
+            // 宽松加载把「解析失败」折叠成默认快照（与读取失败的 `.ok()` 同一
+            // 折叠点）；破坏性命令必须在报错的同时保持磁盘字节——否则返回
+            // "未删除"却用默认值覆盖用户配置（三十五轮评审 P2）。
+            std::fs::write(&path, "{not json").expect("corrupt settings");
+            let store = MemoryCredentialStore::default();
+            let result = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            );
+            assert!(
+                result.is_err(),
+                "a destructive transaction must refuse when the settings file is unreadable"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("file still readable"),
+                "{not json",
+                "the corrupted file must not be rewritten by the failed cleanup"
+            );
+            // 恢复合法文件后同一请求照常工作（fail-closed 只拦读不出，不残留
+            // 拒绝态）。
+            std::fs::write(&path, original).expect("restore settings");
+            let deleted = delete_model_if_matches_inner(
+                "m-recycle",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("post-recovery delete must work");
+            assert!(deleted);
+        });
+    }
+
+    #[test]
+    fn delete_model_if_matches_legitimate_absence_keeps_file_bytes() {
+        with_temp_prefs_home(|| {
+            seed_two_models();
+            let path = crate::platform::paths::settings_path();
+            // 未知字段 + 非规范化排版：任何「取出快照再无条件落盘」的路径都会
+            // 改字节；"该 id 已不存在 → 不改任何数据" 必须连落盘都不做。
+            let mut original = std::fs::read_to_string(&path).expect("seeded settings");
+            let trimmed = original.trim_end();
+            assert!(trimmed.ends_with('}'), "seeded settings end with an object");
+            // 未知字段插进顶层对象**内部**（剥掉收尾 `}` 再补回），而非其后。
+            original = format!(
+                "{},\"futureUnknownKey\": 1}}\n",
+                &trimmed[..trimmed.len() - 1]
+            );
+            std::fs::write(&path, &original).expect("annotate settings");
+            let store = MemoryCredentialStore::default();
+            let deleted = delete_model_if_matches_inner(
+                "m-gone",
+                Some("http://127.0.0.1:11434/v1".to_string()),
+                Some("qwen3:latest".to_string()),
+                &store,
+            )
+            .expect("missing row is a no-op, not an error");
+            assert!(!deleted);
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("file readable"),
+                original,
+                "a no-op cleanup must not rewrite the file (bytes stay, unknown key survives)"
+            );
+        });
+    }
+
+    #[test]
+    fn effective_model_credential_projection_preserves_session_catalog_reference() {
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let selection = ModelSelectionRef::account_platform("session-catalog-model");
+        let model = resolve_effective_model_selection(&prefs, Some(&selection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.model, "session-catalog-model");
+        assert_eq!(
+            model_credential_mode(Some(&model), true),
+            ModelCredentialMode::BackendManaged
+        );
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::account_platform("global-catalog-model"))
+        );
+    }
+
+    #[test]
+    fn effective_model_credential_projection_preserves_user_key_failure() {
+        let mut prefs = UserPrefs::default();
+        let mut model = SavedModel::builtin_account_platform();
+        model.id = "user-cloud".into();
+        model.credential_ref = Some(CredentialReference::for_model(&model.id));
+        model.credential_state = CredentialState::Unavailable;
+        prefs.advanced.saved_models = vec![model.clone()];
+        let selection = ModelSelectionRef::local(&model.id);
+        let projected = resolve_effective_model_selection(&prefs, Some(&selection))
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.credential_ref, model.credential_ref);
+        assert_eq!(projected.credential_state, CredentialState::Unavailable);
+        assert_eq!(
+            model_credential_mode(Some(&projected), true),
+            ModelCredentialMode::UserManaged
+        );
+        assert_eq!(
+            model_credential_mode(Some(&projected), false),
+            ModelCredentialMode::None
+        );
+    }
+
+    #[test]
+    fn effective_model_credential_projection_rejects_deleted_selection_without_fallback() {
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![SavedModel::builtin_account_platform()];
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("global-catalog-model"))
+            .unwrap();
+        let selection = ModelSelectionRef::local("deleted-user-model");
+        assert!(
+            resolve_effective_model_selection(&prefs, Some(&selection))
+                .unwrap_err()
+                .starts_with("model_selection_unavailable:")
+        );
+    }
+
+    #[test]
+    fn keyless_posture_suppresses_probe_key_fallback() {
+        // 免鉴权声明生效的表单,探测必须与保存后的鉴权形态一致:类型化 key 与
+        // 已保存凭据都不得外发(no_auth 短路整个 ladder,先于任何凭据读取)。
+        // 两条腿都不触 UserPrefs / 钥匙串 —— 短路发生在 load 之前。
+        assert_eq!(
+            resolve_probe_key("typed-key", Some("unused-id"), true).unwrap(),
+            None,
+            "no_auth 生效时类型化 key 也不得外发(防前端口径回退)"
+        );
+        assert_eq!(
+            resolve_probe_key("", Some("unused-id"), true).unwrap(),
+            None,
+            "no_auth 生效时已保存凭据回退必须被抑制(残留 key 不得发往新 URL)"
+        );
+        // 反方向:无声明的表单保持既有 ladder(类型化 key 优先),防过度短路。
+        assert_eq!(
+            resolve_probe_key("typed-key", None, false).unwrap(),
+            Some("typed-key".to_string()),
+            "无声明时类型化 key 优先的既有语义不变"
+        );
+    }
+
+    #[test]
+    fn effective_model_config_wiring_is_keyless_aware() {
+        // wiring 钉:纯函数钉守不住命令侧构造 —— 把 declaration 停止接入构造
+        // (调用点改传 false)的重构必须在这里变红,而不是靠评审肉眼。
+        use super::build_effective_model_config as build;
+        use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old_model = std::env::var_os("DEEPSEEK_MODEL");
+        let old_base = std::env::var_os("DEEPSEEK_BASE_URL");
+        let old_provider = std::env::var_os("DEEPSEEK_PROVIDER");
+        let old_key = std::env::var_os("DEEPSEEK_API_KEY");
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
+        unsafe {
+            std::env::remove_var("DEEPSEEK_MODEL");
+            std::env::remove_var("DEEPSEEK_BASE_URL");
+            std::env::remove_var("DEEPSEEK_PROVIDER");
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::set_var("DEEPSEEK_API_KEY", "env-injected-key");
+        }
+        let mut bridge = Pinvou3Bridge::test_fixture(None);
+        bridge.prefs.advanced.saved_models = vec![SavedModel {
+            auth_mode: Some("none".to_string()),
+            id: "wiring-model".to_string(),
+            name: "wiring".to_string(),
+            alias: None,
+            preset: crate::platform::prefs::ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "wiring-model-name".to_string(),
+            base_url: "https://wiring.example/v1".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: Default::default(),
+            has_secret: false,
+            credential_action: None,
+        }];
+        bridge.prefs.advanced.active_model_id = Some("wiring-model".to_string());
+        let config = build(&bridge, true);
+        assert_eq!(
+            config.credential_state,
+            CredentialState::Missing,
+            "免鉴权声明生效时 env key 不得把显示状态改写为 EnvOverride(wiring)"
+        );
+        assert!(
+            !config.env_overrides.contains(&"api_key".to_string()),
+            "免鉴权声明生效时 env_overrides 不得列出 api_key: {:?}",
+            config.env_overrides
+        );
+        // 反方向:同一构造在无声明时保持 env 覆盖的既有显示语义。
+        bridge.prefs.advanced.saved_models[0].auth_mode = None;
+        let config = build(&bridge, true);
+        assert_eq!(
+            config.credential_state,
+            CredentialState::EnvOverride,
+            "无声明记录的 env 覆盖显示语义不变(wiring)"
+        );
+        assert!(config.env_overrides.contains(&"api_key".to_string()));
+        if let Some(value) = old_model {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::set_var("DEEPSEEK_MODEL", value) };
+        } else {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::remove_var("DEEPSEEK_MODEL") };
+        }
+        if let Some(value) = old_base {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::set_var("DEEPSEEK_BASE_URL", value) };
+        } else {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::remove_var("DEEPSEEK_BASE_URL") };
+        }
+        if let Some(value) = old_provider {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::set_var("DEEPSEEK_PROVIDER", value) };
+        } else {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::remove_var("DEEPSEEK_PROVIDER") };
+        }
+        if let Some(value) = old_key {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::set_var("DEEPSEEK_API_KEY", value) };
+        } else {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        }
+    }
+
+    #[test]
+    fn credential_state_display_respects_keyless_declaration() {
+        use super::credential_state_for_display as display;
+        // 免鉴权声明是端点契约:任何代码路径都不会为该路由读取凭据,env 覆盖
+        // 不得伪装成记录的凭据状态(无凭据可覆盖),记录自身状态才是真实显示。
+        assert_eq!(
+            display(true, true, CredentialState::Missing),
+            CredentialState::Missing,
+            "声明免鉴权时 env key 不得显示为 EnvOverride"
+        );
+        // 反方向矩阵:未声明记录保持 env 覆盖优先;无 env 时一律记录状态。
+        assert_eq!(
+            display(true, false, CredentialState::Missing),
+            CredentialState::EnvOverride,
+            "未声明记录的 env 覆盖显示语义不变"
+        );
+        assert_eq!(
+            display(true, false, CredentialState::Configured),
+            CredentialState::EnvOverride
+        );
+        assert_eq!(
+            display(false, true, CredentialState::Missing),
+            CredentialState::Missing
+        );
+        assert_eq!(
+            display(false, false, CredentialState::Configured),
+            CredentialState::Configured
+        );
+    }
+
+    #[test]
+    fn keyless_record_suppresses_saved_credential_in_probe_ladder() {
+        // 服务端兜底:记录自身声明免鉴权时,resolve_saved_model_key 不得返回已存
+        // 凭据 —— 无论哪个调用方/客户端版本询问。手改 settings.json 可以同时携带
+        // 声明与活着的 credential_ref(load 归一化只清 local/managed 记录的声明,
+        // 从不清凭据),视觉模型选择器探测的还是「另一条」表单姿态覆盖不到的记录,
+        // 所以防线必须落在 ladder 里而不是前端口径上。
+        use super::resolve_saved_model_key_with as ladder;
+        use crate::platform::credential_store::CredentialError;
+        struct SeededStore;
+        impl CredentialStore for SeededStore {
+            fn get(
+                &self,
+                reference: &CredentialReference,
+            ) -> Result<Option<String>, CredentialError> {
+                // Exact match, not a suffix test: the unseeded fixture arm
+                // uses "ladder-unseeded", which a `ends_with("seeded")`
+                // predicate would silently seed too (round-7 review); the
+                // seeded arm's full account is `model:ladder-seeded`
+                // (`CredentialReference::for_model`).
+                let seeded = reference.account == "model:ladder-seeded";
+                if seeded {
+                    Ok(Some("sk-residual-stored-key".to_string()))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn set(
+                &self,
+                _reference: &CredentialReference,
+                _value: &str,
+            ) -> Result<(), CredentialError> {
+                Ok(())
+            }
+            fn delete(&self, _reference: &CredentialReference) -> Result<(), CredentialError> {
+                Ok(())
+            }
+        }
+        let record = |auth_mode: Option<&str>, ref_seeded: bool| SavedModel {
+            auth_mode: auth_mode.map(str::to_string),
+            id: "ladder-fixtured".to_string(),
+            name: "fixture".to_string(),
+            alias: None,
+            // Cloud preset on purpose: the declaration only survives
+            // normalization on non-local, non-managed records (local_vllm
+            // clears it on save by design, which would mute this fixture).
+            preset: crate::platform::prefs::ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "fixture-model".to_string(),
+            base_url: "https://fixture.example/v1".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: Some(CredentialReference::for_model(if ref_seeded {
+                "ladder-seeded"
+            } else {
+                "ladder-unseeded"
+            })),
+            credential_state: Default::default(),
+            has_secret: ref_seeded,
+            credential_action: None,
+        };
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old_home = std::env::var_os("PINVOU3_HOME");
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-probe-ladder-keyless-guard-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let persist = |model: SavedModel| {
+            UserPrefs::update_transaction(|initial| {
+                initial.migrate_models();
+                initial.advanced.saved_models = vec![model];
+                initial.advanced.active_model_id = Some("ladder-fixtured".to_string());
+                Ok(())
+            })
+            .expect("ladder fixture should save");
+        };
+        // 同义词档位("DISABLED ")与裸声明同一口径:守卫在 store 读取之前命中,
+        // 残留 credential_ref 不得外发(ladder 从磁盘加载,落盘的声明才生效)。
+        persist(record(Some("DISABLED "), true));
+        assert_eq!(
+            ladder(&SeededStore, Some("ladder-fixtured")).unwrap(),
+            None,
+            "免鉴权声明必须服务端抑制已存凭据(防前端口径回退)"
+        );
+        // 反方向:无声明时既有行为不变 —— 已存凭据照常解析,防守卫过度短路。
+        persist(record(None, true));
+        assert_eq!(
+            ladder(&SeededStore, Some("ladder-fixtured"))
+                .unwrap()
+                .as_deref(),
+            Some("sk-residual-stored-key"),
+            "无声明记录的已存凭据解析语义不变"
+        );
+
+        if let Some(value) = old_home {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::set_var("PINVOU3_HOME", value) };
+        } else {
+            // SAFETY: same ENV_LOCK guard as above.
+            unsafe { std::env::remove_var("PINVOU3_HOME") };
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn keyless_save_forces_residual_credential_deletion() {
+        // 服务端纵深防御:记录声明免鉴权时,save 的凭据动作必须收敛为「删除」——
+        // 旧客户端/其他写入方可以在声明 auth_mode="none" 的同时送 keep_existing
+        // 或带类型化 key(GUI 的 delete/replace 已与开关同口径,不会走到这里),
+        // 「声明+活凭据」双态不得落盘(读侧 ladder 只能把双态变惰性,写侧必须
+        // 收敛)。删除仍走 post-commit 延迟通道,这里只断言返回的引用与状态;
+        // 干净记录(无引用、无 key)保持原形态,完全不触碰 keyring。
+        struct RecordingStore {
+            ops: std::sync::Mutex<Vec<String>>,
+        }
+        impl RecordingStore {
+            fn new() -> Self {
+                Self {
+                    ops: std::sync::Mutex::new(Vec::new()),
+                }
+            }
+        }
+        impl CredentialStore for RecordingStore {
+            fn get(
+                &self,
+                _reference: &CredentialReference,
+            ) -> Result<Option<String>, crate::platform::credential_store::CredentialError>
+            {
+                Ok(None)
+            }
+            fn set(
+                &self,
+                reference: &CredentialReference,
+                _value: &str,
+            ) -> Result<(), crate::platform::credential_store::CredentialError> {
+                self.ops
+                    .lock()
+                    .unwrap()
+                    .push(format!("set:{}", reference.account));
+                Ok(())
+            }
+            fn delete(
+                &self,
+                reference: &CredentialReference,
+            ) -> Result<(), crate::platform::credential_store::CredentialError> {
+                self.ops
+                    .lock()
+                    .unwrap()
+                    .push(format!("delete:{}", reference.account));
+                Ok(())
+            }
+        }
+        let record = |auth_mode: Option<&str>, api_key: &str, ref_id: Option<&str>| SavedModel {
+            auth_mode: auth_mode.map(str::to_string),
+            id: "save-fixtured".to_string(),
+            name: "fixture".to_string(),
+            alias: None,
+            preset: crate::platform::prefs::ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "fixture-model".to_string(),
+            base_url: "https://fixture.example/v1".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: api_key.to_string(),
+            credential_ref: ref_id.map(CredentialReference::for_model),
+            credential_state: Default::default(),
+            has_secret: false,
+            credential_action: None,
+        };
+        let store = RecordingStore::new();
+        // 旧写入方送 keep_existing(缺省动作)但记录带声明:残留引用必须收敛为
+        // missing + 延迟删除,且不落任何新 keyring 写。
+        let old = record(None, "", Some("old-fixtured"));
+        let (saved, deferred) = apply_model_credential(
+            record(Some("none"), "", Some("stale-on-record")),
+            Some(&old),
+            &store,
+        )
+        .unwrap();
+        assert!(
+            saved.credential_ref.is_none(),
+            "声明免鉴权的记录不得携带活引用"
+        );
+        assert_eq!(
+            deferred.map(|r| r.account),
+            // 与显式 Delete 臂同一优先级:记录自身的引用先于旧记录的引用。
+            Some("model:stale-on-record".to_string()),
+            "残留引用必须进 post-commit 延迟删除"
+        );
+        assert!(
+            saved.has_secret == false && matches!(saved.credential_state, CredentialState::Missing)
+        );
+        assert!(
+            store
+                .ops
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|op| !op.starts_with("set:")),
+            "免鉴权声明下不得物化任何凭据: {:?}",
+            store.ops.lock().unwrap()
+        );
+        // 带类型化 key 的声明记录:不得落 store,连同确定性引用一起延迟删除。
+        let (saved, deferred) =
+            apply_model_credential(record(Some("none"), "sk-typed-legacy", None), None, &store)
+                .unwrap();
+        assert!(saved.credential_ref.is_none());
+        assert_eq!(
+            deferred.map(|r| r.account),
+            Some("model:save-fixtured".to_string()),
+            "类型化 key 也不得物化;确定性引用进延迟删除"
+        );
+        assert!(
+            store
+                .ops
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|op| !op.starts_with("set:"))
+        );
+        // 反方向:GUI 的干净免鉴权保存(replace 空 key)不触碰 keyring,原形态不变。
+        let mut clean = record(Some("none"), "", None);
+        clean.credential_action = Some(CredentialEditAction::Replace);
+        let (saved, deferred) = apply_model_credential(clean, None, &store).unwrap();
+        assert!(deferred.is_none(), "干净免鉴权保存不得产生 keyring 删除");
+        assert!(matches!(saved.credential_state, CredentialState::Missing));
+        // 过度抑制守卫:无声明记录的 keep_existing 语义原样保留。
+        let old = record(None, "", Some("kept-on-record"));
+        let (saved, deferred) =
+            apply_model_credential(record(None, "", Some("kept-on-record")), Some(&old), &store)
+                .unwrap();
+        assert_eq!(
+            saved.credential_ref.map(|r| r.account),
+            Some("model:kept-on-record".to_string()),
+            "无声明记录的 keep_existing 不得被免鉴权分支吞掉"
+        );
+        assert!(deferred.is_none());
+        assert!(
+            store
+                .ops
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|op| !op.starts_with("set:"))
+        );
+    }
+
     #[test]
     fn general_settings_patch_preserves_unmentioned_and_specialized_domains() {
         let mut current = UserPrefs::default();
         current.migrate_models();
         current.search.provider = SearchProvider::Metaso;
         current.pet.enabled = true;
+        current
+            .advanced
+            .model_store_context_repairs
+            .insert("stable-id".into(), "verified-256k-v1/card".into());
+        let context_repairs = current.advanced.model_store_context_repairs.clone();
         let saved_models = current.advanced.saved_models.clone();
         let active_model_id = current.advanced.active_model_id.clone();
 
@@ -2085,6 +3949,7 @@ mod tests {
             &mut current,
             GeneralSettingsPatch {
                 language: Some(Language::En),
+                advanced: Some(Default::default()),
                 ..Default::default()
             },
         );
@@ -2095,6 +3960,100 @@ mod tests {
         assert!(current.pet.enabled);
         assert_eq!(current.advanced.saved_models, saved_models);
         assert_eq!(current.advanced.active_model_id, active_model_id);
+        assert_eq!(
+            current.advanced.model_store_context_repairs,
+            context_repairs
+        );
+    }
+
+    #[test]
+    fn general_settings_patch_cannot_replace_default_selection_revision() {
+        let mut current = UserPrefs::default();
+        let selection = ModelSelectionRef::account_platform("0199a100-0001-7000-8000-000000000106");
+        current.set_default_model_ref(selection.clone()).unwrap();
+        let revision = current.advanced.default_model_selection_revision.clone();
+        apply_general_settings_patch(
+            &mut current,
+            GeneralSettingsPatch {
+                advanced: Some(Default::default()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(current.advanced.default_model_selection_revision, revision);
+        assert_eq!(current.advanced.default_model_ref, Some(selection));
+    }
+
+    #[test]
+    fn notification_patch_updates_only_carried_switches() {
+        // Seed every switch to the OPPOSITE of its platform default: a
+        // mutation that rebuilds the table from `NotificationPrefs::default()`
+        // and overwrites only the carried fields must then differ from the
+        // seed on every platform, not just where the platform default
+        // happens to disagree with the seed (fresh review 2026-11-12).
+        let defaults = crate::platform::prefs::NotificationPrefs::default();
+        let mut current = UserPrefs::default();
+        current.notifications.enabled = !defaults.enabled;
+        current.notifications.task_completed = !defaults.task_completed;
+        current.notifications.needs_input = !defaults.needs_input;
+
+        apply_general_settings_patch(
+            &mut current,
+            GeneralSettingsPatch {
+                notifications: Some(NotificationPrefsPatch {
+                    needs_input: Some(defaults.needs_input),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(current.notifications.needs_input, defaults.needs_input);
+        assert_eq!(
+            current.notifications.enabled, !defaults.enabled,
+            "an uncarried switch must survive as seeded, not reset to the platform default",
+        );
+        assert_eq!(
+            current.notifications.task_completed, !defaults.task_completed,
+            "an uncarried switch must survive as seeded, not reset to the platform default",
+        );
+    }
+
+    #[test]
+    fn notification_patch_preserves_needs_input_across_master_patch() {
+        // The inverse patch (the {enabled, task_completed} shape sent by the
+        // master switch) likewise merges only carried fields: the persisted
+        // needs_input intent must not reset with the master patch, or
+        // switching the master off->on silently loses the persisted
+        // input-notice intent. Same opposite-of-default seeding as the
+        // needs_input-only test above, so a Default-rebuild mutation fails
+        // on every platform.
+        let defaults = crate::platform::prefs::NotificationPrefs::default();
+        let mut current = UserPrefs::default();
+        current.notifications.enabled = !defaults.enabled;
+        current.notifications.task_completed = !defaults.task_completed;
+        current.notifications.needs_input = !defaults.needs_input;
+
+        apply_general_settings_patch(
+            &mut current,
+            GeneralSettingsPatch {
+                notifications: Some(NotificationPrefsPatch {
+                    enabled: Some(defaults.enabled),
+                    task_completed: Some(defaults.task_completed),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(current.notifications.enabled, defaults.enabled);
+        assert_eq!(
+            current.notifications.task_completed,
+            defaults.task_completed
+        );
+        assert_eq!(
+            current.notifications.needs_input, !defaults.needs_input,
+            "an uncarried needs_input must survive as seeded, not reset to the platform default",
+        );
     }
 
     #[test]
@@ -2240,5 +4199,467 @@ mod tests {
             accepted.is_ok(),
             "web-authorized settings fields must keep deserializing"
         );
+    }
+
+    // ---- §2.4: test_model_connection 的成功 body 事实解析 ----
+
+    /// 规格 §2.10(settings.rs 项):命中条目返回 facts(context + output,
+    /// 来源 endpoint);ASCII 大小写不敏感与 ollama `:latest` 规范形两折
+    /// 匹配与 monitor `parse_models_response` 语义对齐。
+    #[test]
+    fn connection_facts_match_openai_entry_folds() {
+        let body = r#"{"data":[
+            {"id":"Qwen3-32B","max_model_len":40960,"max_completion_tokens":8192},
+            {"id":"ollama-served:latest"}
+        ]}"#;
+        let value = serde_json::from_str::<serde_json::Value>(body).unwrap();
+        // 精确 id 命中。
+        let facts = connection_model_facts(&value, ModelsListingShape::OpenAi, Some("qwen3-32b"));
+        let facts = facts.expect("case-insensitive fold must hit the entry");
+        assert_eq!(facts.context_window_tokens, Some(40_960));
+        assert_eq!(facts.max_output_tokens, Some(8_192));
+        // ollama 裸名配置 → `name:latest` 规范形命中列表里的规范形条目
+        // (Ollama 原生列表的真实形态;条目无长度字段 → 双 None)。
+        let facts =
+            connection_model_facts(&value, ModelsListingShape::OpenAi, Some("ollama-served"))
+                .expect("ollama canonical fold must hit the entry");
+        assert_eq!(facts.context_window_tokens, None);
+        assert_eq!(facts.max_output_tokens, None);
+    }
+
+    /// 未命中/空名/不合形状 → 四字段不填(None):窗口绝不跨条目借用。
+    /// 非 JSON body(Cloudflare HTML 盾页)在共享限长读取器处就 `Err`
+    /// 折叠为无事实(minor-11),不再进本函数。
+    #[test]
+    fn connection_facts_stay_absent_on_miss_or_unusable_input() {
+        let body = r#"{"data":[{"id":"qwen3-32b","max_model_len":40960}]}"#;
+        let value = serde_json::from_str::<serde_json::Value>(body).unwrap();
+        // 配置名不在列表里:不得借用首条目的窗口。
+        assert!(connection_model_facts(&value, ModelsListingShape::OpenAi, Some("gone")).is_none());
+        // 空/纯空白配置名:直接不匹配。
+        assert!(connection_model_facts(&value, ModelsListingShape::OpenAi, Some("   ")).is_none());
+        // 空数组(条目为空):无匹配 → 无事实。
+        assert!(
+            connection_model_facts(
+                &serde_json::Value::Array(Vec::new()),
+                ModelsListingShape::OpenAi,
+                Some("qwen3-32b")
+            )
+            .is_none()
+        );
+        // configured_model_name:未知 id 与 None 都不解析出名字。
+        assert_eq!(configured_model_name(None), None);
+    }
+
+    /// minor-9/10 对齐钉:OpenAI 形态富化与发现阶梯同一份字段名知识——
+    /// 裸数组形态(Together)直接命中;`context_length` / `context_window`
+    /// 拼写采纳(旧经 `parse_models_response_list` 的实现只认
+    /// `max_model_len`);`max_context_length`(LM Studio 能力上限)拒绝,
+    /// 生效窗口字段不被同条目的能力上限覆盖。拒绝口径原本由富化车道
+    /// 经 `parse_models_response_list` 间接获得,现在由本车道自己钉住。
+    #[test]
+    fn connection_facts_openai_arm_matches_discovery_field_aliases() {
+        // 裸数组 + context_length 拼写。
+        let value = serde_json::from_str::<serde_json::Value>(
+            r#"[{"id":"together-x","context_length":32768,"max_output_tokens":4096}]"#,
+        )
+        .unwrap();
+        let facts = connection_model_facts(&value, ModelsListingShape::OpenAi, Some("together-x"))
+            .expect("bare array with context_length must hit");
+        assert_eq!(facts.context_window_tokens, Some(32_768));
+        assert_eq!(facts.max_output_tokens, Some(4_096));
+        // context_window 拼写同样采纳。
+        let value = serde_json::from_str::<serde_json::Value>(
+            r#"{"data":[{"id":"cw","context_window":8192}]}"#,
+        )
+        .unwrap();
+        let facts = connection_model_facts(&value, ModelsListingShape::OpenAi, Some("cw"))
+            .expect("context_window alias must hit");
+        assert_eq!(facts.context_window_tokens, Some(8_192));
+        // max_context_length 拒绝;同条目的 max_model_len 生效值照常采纳。
+        let value = serde_json::from_str::<serde_json::Value>(
+            r#"{"data":[
+                {"id":"cap-only","max_context_length":131072},
+                {"id":"mixed","max_model_len":8192,"max_context_length":131072}
+            ]}"#,
+        )
+        .unwrap();
+        // 条目本身照样命中(cap-only 匹配配置名),但能力上限不得成为
+        // context 事实——双 None。
+        let cap_only = connection_model_facts(&value, ModelsListingShape::OpenAi, Some("cap-only"))
+            .expect("the entry matches; the cap must simply not surface as a fact");
+        assert_eq!(
+            cap_only.context_window_tokens, None,
+            "capability cap must not become a context fact"
+        );
+        assert_eq!(cap_only.max_output_tokens, None);
+        let mixed = connection_model_facts(&value, ModelsListingShape::OpenAi, Some("mixed"))
+            .expect("served window entry must hit");
+        assert_eq!(mixed.context_window_tokens, Some(8_192));
+        assert_eq!(mixed.max_output_tokens, None);
+    }
+
+    /// 限长常量钉(round-1 fix wave):4 MiB 富化读取上限只应显式改动;
+    /// 截断 → 解析失败 → 无事实的良性退化由上方 miss 用例覆盖形状,这里
+    /// 守住「静默放大」(core 侧 LISTING_BODY_CAP_BYTES 有对应的常量钉)。
+    #[test]
+    fn connection_models_body_cap_is_pinned() {
+        assert_eq!(CONNECTION_MODELS_BODY_CAP_BYTES, 4 * 1024 * 1024);
+    }
+
+    /// anthropic / gemini 原生形态命中:max_input_tokens/max_tokens 与
+    /// inputTokenLimit/outputTokenLimit(含 models/ 前缀剥离)。
+    #[test]
+    fn connection_facts_parse_anthropic_and_gemini_native_shapes() {
+        let anthropic = serde_json::from_str::<serde_json::Value>(
+            r#"{"data":[
+            {"id":"claude-x","display_name":"Claude X",
+             "max_input_tokens":200000,"max_tokens":8192}
+        ]}"#,
+        )
+        .unwrap();
+        let facts =
+            connection_model_facts(&anthropic, ModelsListingShape::Anthropic, Some("claude-x"))
+                .expect("anthropic shape must hit");
+        assert_eq!(facts.context_window_tokens, Some(200_000));
+        assert_eq!(facts.max_output_tokens, Some(8_192));
+
+        let gemini = serde_json::from_str::<serde_json::Value>(
+            r#"{"models":[
+            {"name":"models/gemini-pro","displayName":"Gemini Pro",
+             "inputTokenLimit":1000000,"outputTokenLimit":8192}
+        ]}"#,
+        )
+        .unwrap();
+        let facts = connection_model_facts(&gemini, ModelsListingShape::Gemini, Some("gemini-pro"))
+            .expect("gemini shape must hit");
+        assert_eq!(facts.context_window_tokens, Some(1_000_000));
+        assert_eq!(facts.max_output_tokens, Some(8_192));
+    }
+
+    /// 端到端(mock):保存模型的 wire 名命中 mock /models 列表 → 结果携带
+    /// 四字段(来源 endpoint);未命中 → 四字段缺席且序列化串不带这些键
+    /// (skip_serializing_if 保持既有 wire 形状)。
+    #[tokio::test]
+    async fn model_connection_fills_endpoint_facts_from_mock_listing() {
+        use crate::core::model_endpoint::models_mock;
+
+        let mock = models_mock::spawn(&[(
+            "/models",
+            200,
+            r#"{"data":[
+                {"id":"qwen3-32b","max_model_len":40960,"max_output_tokens":8192},
+                {"id":"unrelated"}
+            ]}"#
+            .into(),
+        )]);
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old_home = std::env::var_os("PINVOU3_HOME");
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-conn-facts-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: holding the crate-level ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        UserPrefs::update_transaction(|prefs| {
+            prefs.migrate_models();
+            prefs.upsert_model(SavedModel {
+                id: "m-list".to_string(),
+                name: "listed".to_string(),
+                alias: None,
+                preset: Default::default(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "qwen3-32b".to_string(),
+                base_url: mock.base_url.clone(),
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                // 免鉴权声明缺省 None(此夹具只验端点事实回填,与鉴权无关)。
+                auth_mode: None,
+                image_capability_override: Default::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: Default::default(),
+                has_secret: false,
+                credential_action: None,
+                // Official SavedModel 字段(社区 #870 回流补齐;社区侧无这些字段):
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+            });
+            prefs.upsert_model(SavedModel {
+                id: "m-miss".to_string(),
+                name: "missing".to_string(),
+                alias: None,
+                preset: Default::default(),
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "not-in-listing".to_string(),
+                base_url: mock.base_url.clone(),
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                auth_mode: None,
+                image_capability_override: Default::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: Default::default(),
+                has_secret: false,
+                credential_action: None,
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+            });
+            Ok(())
+        })
+        .expect("seed models should save");
+
+        let hit = probe_model_connection(&mock.base_url, "", Some("m-list"), false).await;
+        assert!(hit.ok, "hit case must stay a successful connection");
+        assert_eq!(hit.context_window_tokens, Some(40_960));
+        assert_eq!(
+            hit.context_from,
+            Some(crate::core::endpoint_discovery::ModelFactSource::Endpoint)
+        );
+        assert_eq!(hit.max_output_tokens, Some(8_192));
+        assert_eq!(
+            hit.output_from,
+            Some(crate::core::endpoint_discovery::ModelFactSource::Endpoint)
+        );
+        // round-3 审 M2 钉:fact_model 回带事实实际匹配的已保存 wire 名——
+        // 前端空字段填充守卫对齐到这个名字,而不是表单模型跟自己比。
+        assert_eq!(hit.fact_model.as_deref(), Some("qwen3-32b"));
+        let hit_json = serde_json::to_string(&hit).expect("result serializes");
+        assert!(hit_json.contains("context_window_tokens"));
+
+        // wire 名不在列表 → 长度四字段全部缺席;序列化串不带这些键。
+        // fact_model 照常回带(条目未命中也要让前端知道事实属于哪个模型)。
+        let miss = probe_model_connection(&mock.base_url, "", Some("m-miss"), false).await;
+        assert!(miss.ok);
+        assert_eq!(miss.context_window_tokens, None);
+        assert_eq!(miss.context_from, None);
+        assert_eq!(miss.max_output_tokens, None);
+        assert_eq!(miss.output_from, None);
+        assert_eq!(miss.fact_model.as_deref(), Some("not-in-listing"));
+        let miss_json = serde_json::to_string(&miss).expect("result serializes");
+        assert!(
+            !miss_json.contains("context_window_tokens"),
+            "skip_serializing_if must keep the miss wire shape unchanged: {miss_json}"
+        );
+
+        // model_id None(新建表单)→ 无名字 → 无事实(不借激活模型),
+        // fact_model 亦缺席。
+        let unnamed = probe_model_connection(&mock.base_url, "", None, false).await;
+        assert!(unnamed.ok);
+        assert_eq!(unnamed.context_window_tokens, None);
+        assert_eq!(unnamed.context_from, None);
+        assert_eq!(unnamed.fact_model, None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        match old_home {
+            // SAFETY: holding ENV_LOCK; restore-side removal serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+    }
+
+    /// round-3 审 minor 钉:连接测试客户端同样禁用重定向——anthropic 端点
+    /// 的 `x-api-key` 是自定义头,reqwest 跨源重定向只剥 Authorization/Cookie
+    /// 族,跟随会把 key 发给用户从未点名的主机。禁用后 302 以既有 `redirect`
+    /// 码收口(此分支此前因客户端跟随跳转而不可达),第二跳 0 次命中。
+    #[tokio::test]
+    async fn connection_test_redirect_is_not_followed_and_classifies_as_redirect() {
+        use crate::core::model_endpoint::models_mock;
+
+        let mock = models_mock::spawn_redirect("/models", "/v1/models");
+        let result = probe_model_connection(&mock.base_url, "", None, false).await;
+        assert!(!result.ok);
+        assert_eq!(result.code, "redirect");
+        assert_eq!(mock.hits_for("/models"), 1, "首跳只发生一次");
+        assert_eq!(mock.hits_for("/v1/models"), 0, "Location 第二跳绝不发生");
+    }
+
+    // ---- §2.3: probe_endpoint_models 命令薄壳 ----
+
+    /// 空 base_url、非 URL 形态与未知 preset 的稳定错误串(直接调命令函数
+    /// 断言)。invalid_url 与 test_model_connection 的前置检查同一稳定码。
+    #[test]
+    fn probe_endpoint_models_command_rejects_empty_url_and_unknown_preset() {
+        let empty = tauri::async_runtime::block_on(probe_endpoint_models(
+            "   ".to_string(),
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(empty.unwrap_err(), "empty_base_url");
+        // minor-5:无 scheme 的裸 host(:前首段以数字开头,不成 scheme)与
+        // 任意非 URL 文本 → invalid_url,而不是探测阶梯的传输错误分类。
+        for malformed in ["127.0.0.1:8000", "not a url"] {
+            let malformed = tauri::async_runtime::block_on(probe_endpoint_models(
+                malformed.to_string(),
+                None,
+                None,
+                None,
+            ));
+            assert_eq!(malformed.unwrap_err(), "invalid_url");
+        }
+        let unknown = tauri::async_runtime::block_on(probe_endpoint_models(
+            "https://example.invalid/v1".to_string(),
+            None,
+            Some("no_such_preset".to_string()),
+            None,
+        ));
+        assert_eq!(unknown.unwrap_err(), "unknown_preset");
+    }
+
+    /// preset/wire/缺省的协议解析(preset 优先;wire 兜底;都缺省 → OpenAI
+    /// 兼容),以及空白 key 的 keyless 传递。mock 环回地址走 OpenAI 兼容
+    /// 阶梯的本地短路(kind 判别 generic),anthropic 协议直打 /v1/models。
+    #[tokio::test]
+    async fn probe_endpoint_models_command_resolves_preset_wire_and_defaults() {
+        use crate::core::endpoint_discovery::ListingStatus;
+        use crate::core::model_endpoint::models_mock;
+
+        // preset=anthropic:打 anthropic 原生 /v1/models;wire 只给 openai
+        // 时会打 /models(mock 无该路由 → 404 → Unsupported),故本断言同时
+        // 钉死 preset 优先于 wire。
+        let mock = models_mock::spawn(&[(
+            "/v1/models",
+            200,
+            r#"{"data":[
+                {"id":"claude-a","display_name":"Claude A",
+                 "max_input_tokens":200000,"max_tokens":8192}
+            ]}"#
+            .into(),
+        )]);
+        let listing = probe_endpoint_models(
+            mock.base_url.clone(),
+            Some("sk-ant-cmd".to_string()),
+            Some("anthropic".to_string()),
+            Some("openai".to_string()),
+        )
+        .await
+        .expect("anthropic preset must resolve");
+        assert_eq!(listing.status, ListingStatus::Listed);
+        assert_eq!(mock.hits_for("/v1/models"), 1);
+        assert_eq!(listing.models.len(), 1);
+        assert_eq!(listing.models[0].id, "claude-a");
+        assert_eq!(listing.models[0].context_window_tokens, Some(200_000));
+        assert_eq!(listing.models[0].max_output_tokens, Some(8_192));
+        // round-4 M6:mock 是环回地址=非官方主机,anthropic 阶梯与 Messages
+        // 直连同口径走 Bearer,x-api-key 只留给 api.anthropic.com。
+        assert_eq!(
+            mock.header_for("/v1/models", "authorization").as_deref(),
+            Some("Bearer sk-ant-cmd")
+        );
+        assert_eq!(mock.header_for("/v1/models", "x-api-key"), None);
+
+        // 仅 wire="anthropic":同样走原生列表(preset 缺省时 wire 兜底)。
+        let mock = models_mock::spawn(&[(
+            "/v1/models",
+            200,
+            r#"{"data":[{"id":"claude-b","max_input_tokens":100000}]}"#.into(),
+        )]);
+        let listing = probe_endpoint_models(
+            mock.base_url.clone(),
+            None,
+            None,
+            Some("anthropic".to_string()),
+        )
+        .await
+        .expect("anthropic wire must resolve");
+        assert_eq!(listing.status, ListingStatus::Listed);
+        assert_eq!(listing.models.len(), 1);
+
+        // 都缺省 → OpenAI 兼容 /models;空白 key 归一为 keyless(不带
+        // Authorization 头),带正式 key 时走 Bearer。
+        let mock = models_mock::spawn(&[(
+            "/models",
+            200,
+            r#"{"data":[{"id":"qwen3-32b","max_model_len":40960}]}"#.into(),
+        )]);
+        let listing = probe_endpoint_models(mock.base_url.clone(), None, None, None)
+            .await
+            .expect("default protocol must resolve");
+        assert_eq!(listing.status, ListingStatus::Listed);
+        assert_eq!(listing.models.len(), 1);
+        assert_eq!(listing.models[0].id, "qwen3-32b");
+        assert_eq!(mock.header_for("/models", "authorization"), None);
+
+        let mock = models_mock::spawn(&[("/models", 200, r#"{"data":[{"id":"kimi-k3"}]}"#.into())]);
+        let listing =
+            probe_endpoint_models(mock.base_url.clone(), Some("  ".to_string()), None, None)
+                .await
+                .expect("blank key must normalize to keyless");
+        assert_eq!(listing.status, ListingStatus::Listed);
+        assert_eq!(mock.header_for("/models", "authorization"), None);
+
+        // preset 显式 openai 系("openai_compatible")与 wire="openai" 都落
+        // 同一兼容阶梯(serde snake_case 解析口径)。
+        let mock = models_mock::spawn(&[("/models", 200, r#"{"data":[{"id":"glm-5.3"}]}"#.into())]);
+        for preset in ["openai_compatible", "local_vllm"] {
+            let listing =
+                probe_endpoint_models(mock.base_url.clone(), None, Some(preset.to_string()), None)
+                    .await
+                    .expect("openai-family preset must resolve");
+            assert_eq!(listing.status, ListingStatus::Listed, "preset {preset}");
+            assert_eq!(listing.models.len(), 1);
+        }
+    }
+
+    /// round-4 审钉:probe_endpoint_models 的 web 放行论据是「keyring
+    /// 盲」——表单 key 是唯一 key 来源,命令体从不解析已保存凭据(见函数
+    /// 内注释;tests/web_access_contract.test.mjs 的 GLOBAL reach 披露以
+    /// 此为前提)。该性质此前没有执行钉,谁给探测加「已保存 key 回退」
+    /// (resolve_probe_key / resolve_saved_model_key / SystemCredentialStore
+    /// / UserPrefs::load 任一出现)本测试即红,必须先回到 web 放行的披露
+    /// 里重新论证。源码契约钉,同 manager/mod.rs 的 source pin 先例。
+    #[test]
+    fn probe_endpoint_models_stays_keyring_blind() {
+        let source = include_str!("settings.rs");
+        let start = source
+            .find("fn probe_endpoint_models(")
+            .expect("probe_endpoint_models must exist");
+        let body = &source[start..];
+        // 命令体以下一个顶层项的文档注释为界(连接测试核心的 /// 块):
+        // probe_model_connection 合法调用 resolve_probe_key(它就是「已保存
+        // key 回退」本身),切片必须在它之前结束。
+        let end = body
+            .find("\n///")
+            .expect("probe_endpoint_models must be followed by the next item's doc comment");
+        let body = &body[..end];
+        assert!(
+            body.contains("empty_base_url"),
+            "the slice must cover the real command body (sanity marker)"
+        );
+        for forbidden in [
+            "resolve_probe_key",
+            "resolve_saved_model_key",
+            "SystemCredentialStore",
+            "UserPrefs::load",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "probe_endpoint_models must stay keyring-blind: its body must not reference \
+                 {forbidden} (the web allowlist disclosure rests on caller-supplied keys only; \
+                 adding a saved-key fallback requires re-arguing the web_access contract)"
+            );
+        }
     }
 }

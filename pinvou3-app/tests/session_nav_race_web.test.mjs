@@ -23,6 +23,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { dict } from './helpers/i18n-all.js';
 
 const webBridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'platform', 'web');
 const read = relativePath => fs.readFileSync(path.join(webBridgeRoot, relativePath), 'utf8');
@@ -32,7 +33,10 @@ const readSharedHelpers = () => fs.readFileSync(path.join(webBridgeRoot, '..', '
 // rerenderFromMessages 的信封判定经 window.PinvouBridgeMessages（同样先于桥加载）。
 const readSharedMessages = () => fs.readFileSync(path.join(webBridgeRoot, '..', '..', 'shared', 'bridge-messages.js'), 'utf8');
 
-function bootWebBridge() {
+function bootWebBridge({ negotiated = false, modelAdmission = true, language = 'zh' } = {}) {
+  const allowed = new Set(JSON.parse(read('access-policy.json')).allowed_commands);
+  if (!modelAdmission) allowed.delete('web_access_create_session_and_chat_with_model');
+  let capabilitiesReady = true;
   const storage = new Map();
   const localStorage = {
     getItem(key) { return storage.has(key) ? storage.get(key) : null; },
@@ -57,26 +61,26 @@ function bootWebBridge() {
     web_access_load_session_chunk: 'load_session_chunk',
   };
   const resolveCommand = name => commandAliases[name] || name;
+  const invoke = (name, args, requestId) => {
+    const command = resolveCommand(name);
+    if (handlers[command]) return handlers[command](args, requestId);
+    if (handlers[name]) return handlers[name](args, requestId);
+    const d = deferreds[command] || deferreds[name];
+    if (d && d.promise) return d.promise;
+    return Promise.resolve(null);
+  };
   const windowObject = {
+    PinvouWebClientStrings: dict[language].uiPlatformMisc.webClientErrors,
     PinvouPlatform: {
       kind: 'web',
       isWeb: true,
       capabilities: {},
       can: () => false,
-      canInvoke: () => false,
-      areInvokeCapabilitiesReady: () => true,
+      canInvoke: command => capabilitiesReady && negotiated && allowed.has(command),
+      areInvokeCapabilitiesReady: () => capabilitiesReady,
     },
     __TAURI__: {
-      core: { invoke: (name, args) => {
-        // 归一名与原始名都查：用例登记 deferred 时两种名字混用
-        //（create 用 web_access_* 全名，list_sessions 用桌面短名）。
-        const command = resolveCommand(name);
-        if (handlers[command]) return handlers[command](args);
-        if (handlers[name]) return handlers[name](args);
-        const d = deferreds[command] || deferreds[name];
-        if (d && d.promise) return d.promise;
-        return Promise.resolve(null);
-      } },
+      core: { invoke, invokeWithRequestId: invoke },
       event: { listen: async (name, fn) => { (listeners[name] = listeners[name] || []).push(fn); return function () {}; } },
       dialog: { open: async () => null },
     },
@@ -140,19 +144,21 @@ function bootWebBridge() {
       return d;
     },
     setHandler(name, fn) { handlers[name] = fn; },
+    setCapabilitiesReady(ready) { capabilitiesReady = ready; },
     emit(name, payload) { (listeners[name] || []).forEach(fn => fn({ payload })); },
     fireWindow(type, detail) { windowObject.dispatchEvent({ type, detail }); },
     personas: api.personas,
+    chat: api.chat,
     sessions: api.sessions,
     interaction: api.interaction,
   };
 }
 
 // 一次性回传完整 transcript JSON 的分块下载应答（web 权威加载的唯一通道）。
-function chunkResponse(saved) {
+function chunkResponse(saved, downloadId = 'dl-test') {
   const encoded = Buffer.from(JSON.stringify(saved), 'utf8');
   return {
-    offset: 0, total: encoded.length, download_id: 'dl-test',
+    offset: 0, total: encoded.length, download_id: downloadId,
     data_base64: encoded.toString('base64'), eof: true,
   };
 }
@@ -258,6 +264,108 @@ test('web ensureSession：尾部 await 期间再进草稿 → 物化中止不漂
   assert.equal(view.activeSessionId, null, '尾部窗口的再进草稿同样必须中止物化');
   equip.resolve({ id: 'persona-x', name: 'X' });
   await p;
+});
+
+// ── materializeSession 草稿内容保护（round-38 review P2，诊断直达）──
+// 与桌面桥同款（session_nav_race.test.mjs 的 tauri 侧钉）：等待窗口之后
+// 晚到的物化遇「未物化草稿 + 未发送文本」必须拒答 null，草稿原地保留；
+// 空草稿与无参调用保持既有语义。Web 无目录选择通道，只钉文本半边。
+
+test('web materializeSession：protectUserDraft 遇未发送草稿 → 放弃且草稿存活', async () => {
+  const rt = bootWebBridge();
+  rt.flat.setComposerDraft('采样窗口里新写的未发送草稿');
+  const refused = await rt.sessions.materializeSession({ protectUserDraft: true });
+  assert.equal(refused, null);
+  const view = rt.view();
+  assert.equal(view.activeSessionId, null, '不得物化覆盖用户草稿');
+  assert.equal(view.composerDraft, '采样窗口里新写的未发送草稿', '未发送文本必须原地保留');
+});
+
+test('web materializeSession：protectUserDraft 空草稿照常物化', async () => {
+  const rt = bootWebBridge();
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ protectUserDraft: true });
+  create.resolve({ id: 'chat-ok', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([]);
+  assert.equal(await pending, 'chat-ok');
+  assert.equal(rt.view().activeSessionId, 'chat-ok');
+});
+
+test('web materializeSession：无参调用遇草稿保持显式入口语义', async () => {
+  const rt = bootWebBridge();
+  rt.flat.setComposerDraft('显式入口前的旧草稿');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession();
+  create.resolve({ id: 'chat-ok', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([]);
+  assert.equal(await pending, 'chat-ok');
+  assert.equal(rt.view().activeSessionId, 'chat-ok');
+});
+
+// ── materializeSession 后台物化（round-39 review P2，zhuowp）──
+// 与桌面桥同款（session_nav_race.test.mjs 的 tauri 侧钉）：prompt 窗口决算
+// 发现用户已切到既有会话 B 时，晚到的物化改走 background——只创建 + 登记
+// （sessionStates buffer + refreshHistoryList 侧栏注册），不进草稿、不切工作
+// 集；随后 sendMessageToSession 钉定投递落进新会话，B 的活动地位、正文与
+// 未发送输入全程原样保留。
+
+test('web materializeSession：background 只登记不抢工作集，B 保持活动', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('web_access_load_session_chunk', ({ id }) => chunkResponse({
+    metadata: { id, title: id }, artifacts: [], transcript_revision: 1,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'B 的正文' }] }],
+  }));
+  await rt.sessions.switchToSession('chat-b');
+  rt.flat.setComposerDraft('B 里未发送的文字');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ background: true });
+  create.resolve({ id: 'chat-bg', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([{ id: 'chat-b', title: 'B', updated_at: 1 }, { id: 'chat-bg', title: '新对话', updated_at: 2 }]);
+  assert.equal(await pending, 'chat-bg');
+  const view = rt.view();
+  assert.equal(view.activeSessionId, 'chat-b', 'B 仍是活动会话（不得 enterDraft/switchActiveTo）');
+  assert.equal(view.composerDraft, 'B 里未发送的文字', '未发送文字原地保留');
+  const bubble = view.chatItems.find(item => item.type === 'user');
+  assert.ok(bubble && String(bubble.text).includes('B 的正文'), 'B 的正文不被诊断会话顶掉');
+  assert.ok((view.sessions || []).some(s => s && s.id === 'chat-bg'), '新会话已登记侧栏历史');
+});
+
+test('web 后台物化会话的钉定发送：消息进新会话，B 视图不动', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('web_access_load_session_chunk', ({ id }) => chunkResponse({
+    metadata: { id, title: id }, artifacts: [], transcript_revision: 1,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'B 的正文' }] }],
+  }));
+  await rt.sessions.switchToSession('chat-b');
+  rt.flat.setComposerDraft('B 里未发送的文字');
+  const create = rt.defer('web_access_create_session');
+  const list = rt.defer('list_sessions');
+  const pending = rt.sessions.materializeSession({ background: true });
+  create.resolve({ id: 'chat-bg', transcript_revision: 1 });
+  await new Promise(r => { setTimeout(r, 0); });
+  list.resolve([{ id: 'chat-b', title: 'B', updated_at: 1 }, { id: 'chat-bg', title: '新对话', updated_at: 2 }]);
+  assert.equal(await pending, 'chat-bg');
+  // 钉定投递：chat 命令按 sessionId 落到后台新会话，B 的工作集不出现消息。
+  const chatCalls = [];
+  rt.setHandler('web_access_chat', (args) => { chatCalls.push(args); return Promise.resolve({}); });
+  const sent = await rt.flat.sendMessageToSession('chat-bg', '排查提示词');
+  assert.equal(sent.accepted, true);
+  const outcome = await sent.completion;
+  assert.equal(outcome.ok, true);
+  assert.equal(chatCalls.length, 1);
+  assert.equal(chatCalls[0].sessionId, 'chat-bg', '投递钉定后台新会话');
+  assert.equal(chatCalls[0].message, '排查提示词');
+  const view = rt.view();
+  assert.equal(view.activeSessionId, 'chat-b', '发送不改变活动会话');
+  assert.equal(view.composerDraft, 'B 里未发送的文字', '发送不吞 B 的未发送文字');
+  assert.ok(!view.chatItems.some(item => item.type === 'user' && String(item.text).includes('排查提示词')),
+    '排查消息不得出现在 B 的视图里');
 });
 
 // ── archiveSession：失败回滚不劫持新草稿 ──────────────────────────
@@ -375,6 +483,392 @@ test('web archiveSession（scheduled run）：归档失败且无导航 → activ
   list.resolve([]);
   assert.equal(await p, false);
   assert.equal(rt.view().activeSessionId, 'sched-run-1', '无新导航时成对回滚');
+});
+
+// Drive the actual Web materialization path through the public bridge API.
+test('web ensureSession: model rejection preserves unsent text and selection intent', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('create_session', () => ({ id: 'public-web-draft', transcript_revision: 1 }));
+  rt.setHandler('account_platform_select_session_model', () => { throw new Error('controlled catalog unavailable'); });
+  rt.setHandler('list_sessions', () => []);
+  rt.setHandler('list_archived_sessions', () => []);
+  rt.flat.setComposerDraft('public web unsent');
+  await rt.flat.switchModelRef(null, { source: 'ACCOUNT_PLATFORM', model_id: 'public-catalog-model' });
+  await rt.personas.equipPersona('public-card');
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().composerDraft, 'public web unsent');
+  assert.equal(rt.view().pendingDraftModelRef.model_id, 'public-catalog-model');
+});
+
+test('web ensureSession: late model rejection leaves a newly entered draft unchanged', async () => {
+  const rt = bootWebBridge();
+  rt.setHandler('create_session', () => ({ id: 'public-web-draft', transcript_revision: 1 }));
+  const selection = rt.defer('account_platform_select_session_model');
+  rt.flat.setComposerDraft('old public draft');
+  await rt.flat.switchModelRef(null, { source: 'ACCOUNT_PLATFORM', model_id: 'public-catalog-model' });
+  const pending = rt.personas.equipPersona('public-card');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(rt.view().activeSessionId, null);
+  rt.leave();
+  rt.flat.setComposerDraft('new public draft');
+  selection.reject(new Error('controlled catalog unavailable'));
+  await pending;
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().composerDraft, 'new public draft');
+  assert.equal(rt.view().pendingDraftModelRef, null);
+});
+
+test('web legacy sends share the confirmed model and preserve order through publication', async () => {
+  const rt = bootWebBridge();
+  const selection = rt.defer('set_session_model');
+  const history = rt.defer('list_sessions');
+  const chat = [];
+  let creates = 0, bindings = 0, atomic = 0;
+  rt.setHandler('create_session', () => {
+    creates++;
+    return { id: 'confirmed-draft', transcript_revision: 1 };
+  });
+  rt.setHandler('set_session_model', args => {
+    bindings++;
+    assert.equal(args.sessionId, 'confirmed-draft');
+    assert.equal(args.modelId, 'saved-local-model');
+    return selection.promise;
+  });
+  rt.setHandler('web_access_create_session_and_chat', () => { atomic++; });
+  rt.setHandler('web_access_chat', args => { chat.push(args); return Promise.resolve(); });
+  rt.setHandler('web_access_ingest_file', () => Promise.resolve({ handle: 'single-use-handle' }));
+
+  await rt.flat.switchModelRef(null, { source: 'LOCAL_CONFIG', saved_model_id: 'saved-local-model' });
+  await rt.flat.addAttachmentByPath('/controlled/attachment.txt');
+  const first = rt.chat.sendMessage('first turn');
+  await waitFor(() => bindings === 1, 'first send reaches model selection');
+  const second = rt.chat.sendMessage('second turn');
+  rt.flat.setComposerDraft('new composer text');
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(creates, 1);
+  assert.equal(atomic + chat.length, 0);
+
+  selection.resolve();
+  await waitFor(() => rt.view().activeSessionId === 'confirmed-draft', 'model confirmed and published');
+  const third = rt.chat.sendMessage('third turn');
+  assert.equal(chat.length, 0, 'a send during post-publication sync must still join the batch');
+  history.resolve([]);
+  assert.deepEqual(await Promise.all([first, second, third]), [true, true, true]);
+  assert.equal(rt.view().activeSessionId, 'confirmed-draft');
+  assert.equal(rt.view().currentSessionModelRef.saved_model_id, 'saved-local-model');
+  assert.equal(rt.view().composerDraft, 'new composer text');
+  assert.deepEqual(Array.from(rt.view().queued, item => item.text), ['second turn', 'third turn']);
+  assert.equal(rt.view().queued[0].attachments.length, 0, 'the next turn must not reuse a one-shot handle');
+  assert.equal(creates, 1);
+  assert.equal(bindings, 1);
+  assert.equal(atomic, 0);
+  assert.deepEqual(chat.map(args => [args.sessionId, args.message]), [['confirmed-draft', 'first turn']]);
+  assert.deepEqual(Array.from(chat[0].attachmentHandles), ['single-use-handle']);
+});
+
+test('web model rejection restores both waiting sends into the same draft', async () => {
+  const rt = bootWebBridge();
+  const selection = rt.defer('account_platform_select_session_model');
+  const deletes = [];
+  let bindings = 0;
+  rt.setHandler('create_session', () => ({ id: 'rejected-draft' }));
+  rt.setHandler('account_platform_select_session_model', args => {
+    bindings++;
+    assert.equal(args.input.modelId, 'platform-model');
+    return selection.promise;
+  });
+  rt.setHandler('delete_session', args => { deletes.push(args.id); });
+  const epoch = rt.view().draftEpoch;
+  await rt.flat.switchModelRef(null, { source: 'ACCOUNT_PLATFORM', model_id: 'platform-model' });
+  const first = rt.chat.sendMessage('first rejected send');
+  await waitFor(() => bindings === 1, 'pending Account Platform binding');
+  const second = rt.chat.sendMessage('second rejected send');
+  rt.flat.setComposerDraft('new text');
+  selection.reject(new Error('controlled binding failure'));
+
+  assert.deepEqual(await Promise.all([first, second]), ['restored', 'restored']);
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().draftEpoch, epoch);
+  assert.equal(rt.view().pendingDraftModelRef.model_id, 'platform-model');
+  assert.equal(rt.view().composerDraft, 'new text\nfirst rejected send\nsecond rejected send');
+  assert.equal(rt.view().composerPrefill.text, rt.view().composerDraft);
+  assert.deepEqual(deletes, [], 'the legacy host already exposed the session to other clients');
+});
+
+test('web rejection leaves a session adopted by navigation intact', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const selection = rt.defer('set_session_model');
+  let binds = 0, deletes = 0;
+  rt.setHandler('create_session', () => ({ id: 'adopted-session' }));
+  rt.setHandler('set_session_model', () => { binds++; return selection.promise; });
+  rt.setHandler('delete_session', () => { deletes++; });
+  rt.setHandler('load_session_chunk', ({ requestedDownloadId }) => chunkResponse({
+    metadata: { id: 'adopted-session', title: 'adopted' }, messages: [], artifacts: [],
+    transcript_revision: 'adopted-revision',
+  }, requestedDownloadId));
+  await rt.flat.switchModel(null, 'local-model');
+  const pending = rt.personas.equipPersona('card');
+  await waitFor(() => binds === 1, 'model selection is in flight');
+  assert.equal(await rt.sessions.switchToSession('adopted-session'), true);
+  rt.flat.setComposerDraft('adopted draft');
+  selection.reject(new Error('late binding failure'));
+  await pending;
+  assert.equal(deletes, 0);
+  assert.equal(rt.view().activeSessionId, 'adopted-session');
+  assert.equal(rt.view().composerDraft, 'adopted draft');
+});
+
+test('web workspace lane change invalidates the pending model result', async () => {
+  const rt = bootWebBridge();
+  const selection = rt.defer('set_session_model');
+  let binds = 0, sent = 0;
+  rt.setHandler('create_session', () => ({ id: 'old-lane-session' }));
+  rt.setHandler('set_session_model', () => { binds++; return selection.promise; });
+  rt.setHandler('web_access_chat', () => { sent++; });
+  await rt.flat.switchModel(null, 'local-model');
+  const pending = rt.chat.sendMessage('old lane text');
+  await waitFor(() => binds === 1, 'old lane reaches model selection');
+  rt.interaction.setModeLane('code');
+  rt.flat.setComposerDraft('new lane text');
+  selection.resolve();
+  assert.equal(await pending, 'restored');
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().modeLane, 'code');
+  assert.equal(rt.view().pendingDraftModelRef.saved_model_id, 'local-model');
+  assert.equal(rt.view().composerDraft, 'new lane text\nold lane text');
+  assert.equal(sent, 0);
+});
+
+test('web atomic first turn remains single-owner after a later model choice', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const acceptance = rt.defer('web_access_create_session_and_chat');
+  let separateCreates = 0;
+  rt.setHandler('create_session', () => { separateCreates++; return { id: 'unexpected-session' }; });
+  assert.equal(await rt.chat.sendMessage('use the default model'), true);
+  await rt.flat.switchModel(null, 'later-local-model');
+  assert.equal(await rt.chat.sendMessage('later input'), false);
+  assert.equal(separateCreates, 0);
+  acceptance.resolve({ id: 'atomic-session' });
+  await waitFor(() => rt.view().activeSessionId === 'atomic-session', 'atomic session published');
+});
+
+test('web selected model uses the negotiated atomic command and keeps an unknown delivery visible', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const reply = rt.defer('web_access_create_session_and_chat_with_model');
+  let requests = 0;
+  rt.setHandler('web_access_create_session_and_chat_with_model', (args, requestId) => {
+    requests++;
+    assert.match(requestId, /^first_turn_/);
+    assert.equal(args.modelId, 'chosen-local-model');
+    assert.equal(args.message, 'selected first turn');
+    return reply.promise;
+  });
+  await rt.flat.switchModel(null, 'chosen-local-model');
+  assert.equal(await rt.chat.sendMessage('selected first turn'), true);
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(await rt.chat.sendMessage('keep this text in the composer'), false);
+  reply.reject(Object.assign(new Error('controlled unknown'), { code: 'outcome_unknown' }));
+  await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'unknown'), 'unknown delivery remains visible');
+  const submission = rt.view().chatItems.find(item => item.deliveryState === 'unknown');
+  rt.chat.retryFirstTurn(submission.clientMessageId);
+  assert.equal(requests, 1);
+  assert.equal(rt.view().pendingDraftModelRef.saved_model_id, 'chosen-local-model');
+});
+
+test('web selected atomic first turn retries a local timeout with the same request ID and model', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const requests = [];
+  rt.setHandler('web_access_create_session_and_chat_with_model', (args, requestId) => {
+    requests.push({ args: structuredClone(args), requestId });
+    return requests.length === 1
+      ? Promise.reject(Object.assign(new Error('controlled timeout'), { code: 'rpc_timeout' }))
+      : Promise.resolve({ id: 'atomic-selected-session' });
+  });
+  rt.setHandler('web_access_ingest_file', () => Promise.resolve({ handle: 'replay-attachment' }));
+  await rt.flat.addAttachmentByPath('/controlled/replay.txt');
+  await rt.flat.switchModel(null, 'chosen-model');
+  assert.equal(await rt.chat.sendMessage('first turn with one request identity', { pinvouPayloadText: 'original payload' }), true);
+  await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'retry chip');
+  rt.flat.setComposerDraft('typed while the first turn was pending');
+  rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+  await waitFor(() => rt.view().activeSessionId === 'atomic-selected-session', 'confirmed session published');
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.deepEqual(requests[0].args, {
+    message: 'original payload', attachmentHandles: ['replay-attachment'], restrictTools: false, modelId: 'chosen-model',
+  });
+  assert.equal(rt.view().currentSessionModelRef.saved_model_id, 'chosen-model');
+  assert.equal(rt.view().composerDraft, 'typed while the first turn was pending');
+  rt.setHandler('get_session_model_id', () => Promise.resolve('chosen-model'));
+  await rt.flat.loadSessionModel('atomic-selected-session');
+  assert.equal(rt.view().currentSessionModelRef.saved_model_id, 'chosen-model');
+  rt.setHandler('get_session_model_id', () => Promise.resolve('builtin_account_platform'));
+  await rt.flat.loadSessionModel('atomic-selected-session');
+  assert.equal(rt.view().currentSessionModelRef, null, 'a platform runtime carrier is not a local model');
+});
+
+test('web definitive first-turn retry takes the current model, lane and navigation ownership', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const requests = [];
+  const retryReply = rt.defer('retry-accepted');
+  rt.setHandler('web_access_create_session_and_chat_with_model', (args, requestId) => {
+    requests.push({ args: structuredClone(args), requestId });
+    return requests.length === 1
+      ? Promise.reject(Object.assign(new Error('controlled rejection'), { code: 'invalid_request' }))
+      : retryReply.promise;
+  });
+  rt.setHandler('load_session_chunk', () => Promise.reject(new Error('controlled history unavailable')));
+  await rt.flat.switchModel(null, 'first-model');
+  assert.equal(await rt.chat.sendMessage('retry this message'), true);
+  await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'definitive rejection');
+  assert.equal(await rt.sessions.switchToSession('unavailable-history'), false);
+  await rt.flat.switchModel(null, 'retry-model');
+  rt.interaction.setModeLane('code');
+  rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0].requestId, requests[1].requestId);
+  assert.equal(requests[1].args.modelId, 'retry-model');
+  retryReply.resolve({ id: 'retry-selected-session' });
+  await waitFor(() => rt.view().activeSessionId === 'retry-selected-session', 'new retry owns the current draft');
+  assert.equal(rt.view().currentSessionModelRef.saved_model_id, 'retry-model');
+  assert.equal(rt.view().modeLane, 'code');
+});
+
+for (const language of ['zh', 'en', 'ja']) {
+  test(`web Account Platform first-turn refusal preserves draft and attachments in ${language}`, async () => {
+    const rt = bootWebBridge({ negotiated: true, language });
+    let requests = 0;
+    rt.setHandler('web_access_create_session_and_chat_with_model', () => {
+      requests++;
+      return Promise.reject(Object.assign(new Error('controlled rejection'), { code: 'invalid_request' }));
+    });
+    rt.setHandler('web_access_create_session_and_chat', () => { requests++; });
+    rt.setHandler('create_session', () => { requests++; });
+    rt.setHandler('web_access_ingest_file', () => Promise.resolve({ handle: 'preserved-attachment' }));
+    await rt.flat.addAttachmentByPath('/controlled/preserved.txt');
+    rt.flat.setComposerDraft('preserved composer text');
+    const attachment = rt.view().attachments[0];
+    const model = { source: 'ACCOUNT_PLATFORM', model_id: 'controlled-platform-model' };
+    await rt.flat.switchModelRef(null, model);
+    assert.equal(await rt.chat.sendMessage('preserved composer text'), false);
+    const notice = dict[language].uiPlatformMisc.webClientErrors.accountPlatformFirstTurnUnsupported;
+    assert.ok(notice);
+    assert.ok(rt.view().chatItems.some(item => item.text === notice));
+    assert.equal(requests, 0);
+    assert.equal(rt.view().activeSessionId, null);
+    assert.equal(rt.view().composerDraft, 'preserved composer text');
+    assert.deepEqual(rt.view().attachments[0], attachment);
+    assert.equal(rt.view().pendingDraftModelRef.model_id, model.model_id);
+
+    await rt.flat.switchModel(null, 'allowed-local-model');
+    assert.equal(await rt.chat.sendMessage('preserved composer text'), true);
+    await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'local model refusal');
+    await rt.flat.switchModelRef(null, model);
+    rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+    assert.equal(requests, 1);
+    assert.deepEqual(rt.view().attachments[0], attachment);
+    assert.equal(rt.view().pendingDraftModelRef.model_id, model.model_id);
+    assert.equal(rt.view().chatItems.filter(item => item.text === notice).length, 2);
+  });
+}
+
+test('web host timeout and local capability refusal preserve the original request after a new choice', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const requests = [];
+  rt.setHandler('web_access_create_session_and_chat_with_model', (args, requestId) => {
+    requests.push([args.modelId, requestId]);
+    if (requests.length === 1) {
+      return Promise.reject(Object.assign(new Error('controlled host timeout'), { code: 'rpc_timed_out' }));
+    }
+    if (requests.length === 2) return Promise.reject(new Error('controlled local refusal'));
+    return Promise.resolve({ id: 'accepted-after-host-timeout' });
+  });
+  await rt.flat.switchModel(null, 'original-model');
+  assert.equal(await rt.chat.sendMessage('keep this request identity'), true);
+  await waitFor(() => rt.view().chatItems.some(item => item.deliveryState === 'failed'), 'host timeout retry chip');
+  await rt.flat.switchModel(null, 'next-model');
+  rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+  await waitFor(() => rt.view().chatItems.some(item => item.deliveryError === 'controlled local refusal'), 'local refusal during replay');
+  rt.chat.retryFirstTurn(rt.view().chatItems.find(item => item.deliveryState === 'failed').clientMessageId);
+  await waitFor(() => rt.view().chatItems.every(item => !item.deliveryState), 'old request settled');
+  assert.equal(requests.length, 3);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.deepEqual(requests[0], requests[2]);
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().pendingDraftModelRef.saved_model_id, 'next-model');
+});
+
+test('web older atomic host preserves explicit model choice and submits no fallback turn', async () => {
+  const rt = bootWebBridge({ negotiated: true, modelAdmission: false });
+  let calls = 0;
+  for (const command of ['create_session', 'web_access_create_session_and_chat', 'web_access_chat']) {
+    rt.setHandler(command, () => { calls++; });
+  }
+  rt.flat.setComposerDraft('unsubmitted composer text');
+  await rt.flat.switchModel(null, 'chosen-model');
+  assert.equal(await rt.chat.sendMessage('unsubmitted composer text'), false);
+  assert.equal(calls, 0);
+  assert.equal(rt.view().composerDraft, 'unsubmitted composer text');
+  assert.equal(rt.view().pendingDraftModelRef.saved_model_id, 'chosen-model');
+});
+
+test('web reconnect does not mistake a missing capability snapshot for a legacy host', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  let legacyCalls = 0, selectedCalls = 0;
+  rt.setHandler('create_session', () => { legacyCalls++; return { id: 'unexpected-legacy' }; });
+  rt.setHandler('web_access_create_session_and_chat_with_model', () => {
+    selectedCalls++;
+    return Promise.resolve({ id: 'selected-after-reconnect' });
+  });
+  rt.setCapabilitiesReady(false);
+  rt.flat.setComposerDraft('send after the capability snapshot');
+  await rt.flat.switchModel(null, 'chosen-model');
+  assert.equal(await rt.chat.sendMessage('send after the capability snapshot'), false);
+  assert.equal(legacyCalls, 0);
+  assert.equal(rt.view().composerDraft, 'send after the capability snapshot');
+  assert.equal(rt.view().pendingDraftModelRef.saved_model_id, 'chosen-model');
+  rt.setCapabilitiesReady(true);
+  assert.equal(await rt.chat.sendMessage('send after the capability snapshot'), true);
+  await waitFor(() => rt.view().activeSessionId === 'selected-after-reconnect', 'selected RPC after reconnect');
+  assert.equal(selectedCalls, 1);
+});
+
+test('web late atomic acceptance cannot replace a newer draft model selection', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const reply = rt.defer('web_access_create_session_and_chat_with_model');
+  await rt.flat.switchModel(null, 'first-model');
+  assert.equal(await rt.chat.sendMessage('bound to the first model'), true);
+  await rt.flat.switchModel(null, 'newer-model');
+  rt.flat.setComposerDraft('new composer text');
+  reply.resolve({ id: 'accepted-in-background' });
+  await waitFor(() => rt.view().chatItems.every(item => !item.deliveryState), 'retire the old optimistic item');
+  assert.equal(rt.view().activeSessionId, null);
+  assert.equal(rt.view().pendingDraftModelRef.saved_model_id, 'newer-model');
+  assert.equal(rt.view().composerDraft, 'new composer text');
+});
+
+test('web pending history navigation owns activation over a late selected first turn', async () => {
+  const rt = bootWebBridge({ negotiated: true });
+  const reply = rt.defer('web_access_create_session_and_chat_with_model');
+  const history = rt.defer('load_session_chunk');
+  let historyRequest;
+  rt.setHandler('load_session_chunk', ({ requestedDownloadId }) => {
+    historyRequest = requestedDownloadId;
+    return history.promise;
+  });
+  await rt.flat.switchModel(null, 'chosen-model');
+  assert.equal(await rt.chat.sendMessage('accept in the background'), true);
+  const navigating = rt.sessions.switchToSession('next-history-session');
+  await waitFor(() => historyRequest, 'history navigation is pending');
+  reply.resolve({ id: 'accepted-in-background' });
+  await waitFor(() => rt.view().chatItems.every(item => !item.deliveryState), 'old optimistic item retired');
+  assert.equal(rt.view().activeSessionId, null, 'acceptance must not publish over pending history');
+  history.resolve(chunkResponse({
+    metadata: { id: 'next-history-session', title: 'next' }, messages: [], artifacts: [],
+    transcript_revision: 'next-revision',
+  }, historyRequest));
+  assert.equal(await navigating, true);
+  assert.equal(rt.view().activeSessionId, 'next-history-session');
 });
 
 // ── 权威重载/对账的 tauri 对齐回归（FE14 分歧修复）──────────────────

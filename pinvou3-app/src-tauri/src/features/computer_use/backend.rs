@@ -135,6 +135,38 @@ pub trait ComputerUseBackend: Send {
     fn set_cancel_flag(&mut self, flag: Option<Arc<AtomicBool>>) {
         let _ = flag;
     }
+    /// Launch an application inside the display target. Virtual backends only;
+    /// physical backends keep the default (explicit Unsupported) — opening apps
+    /// on the user's real desktop is out of scope and disruptive.
+    fn open_app(&mut self, program: &str, args: &[String]) -> Result<u32, ComputerUseError> {
+        let _ = (program, args);
+        Err(ComputerUseError::unsupported(
+            "open",
+            "launching applications is only available on a virtual display target",
+        ))
+    }
+    /// Drain backend-accumulated warnings for the action just executed (the
+    /// warnings vector is cleared by the drain). A backend can only *detect*
+    /// some conditions after the fact — e.g. the Windows hidden-desktop stack
+    /// recognizes a packaged (Microsoft Store) keyboard target that is known
+    /// to ignore message-level input while the posted messages still report
+    /// delivery — and this channel is how such a condition reaches the model
+    /// on an otherwise-successful receipt. The tool layer drains once per
+    /// executed action: on success the strings render on the receipt like
+    /// the tool layer's own warnings; on failure they are drained and
+    /// discarded so they do not ride a later action's receipt. Best-effort,
+    /// with the residuals disclosed on [`BackendHandle::take_warnings`]: the
+    /// drain itself is an ordinary query request — deliberately not
+    /// stop-cancellable — but a worker wedged in a single OS call past the
+    /// drain's own call budget can leave the advisory behind, for the next
+    /// executed action's drain to consume (rendered on that action's
+    /// success receipt, discarded when that action fails); a concurrent
+    /// same-session dispatch can similarly strand an advisory onto the next
+    /// action by gate-rejecting this drain.
+    fn take_warnings(&mut self) -> Vec<String> {
+        let _ = &mut *self;
+        Vec::new()
+    }
 }
 
 enum BackendRequestKind {
@@ -182,6 +214,15 @@ enum BackendRequestKind {
     },
     FocusedElement,
     ReleaseOsGrant,
+    /// Launch an app inside the display target (virtual backends; physical
+    /// backends answer with the trait's explicit-unsupported default).
+    OpenApp {
+        program: String,
+        args: Vec<String>,
+    },
+    /// Drain the backend's accumulated action warnings (see the trait method
+    /// of the same name). Never fails.
+    TakeWarnings,
     Shutdown,
 }
 
@@ -192,6 +233,10 @@ enum BackendReply {
     Unit,
     Tree(String),
     Element(Option<ElementInfo>),
+    /// The spawned child's pid (open_app).
+    Pid(u32),
+    /// Backend-accumulated warnings drained by [`BackendHandle::take_warnings`].
+    Warnings(Vec<String>),
 }
 
 type BackendResult = Result<BackendReply, ComputerUseError>;
@@ -206,8 +251,10 @@ struct BackendRequest {
     /// the skip, a request the caller abandoned on timeout was still
     /// executed as usual — by then the physical input lock was released
     /// and the guard would not re-check, other sessions could be injecting
-    /// at the same time, breaking the cross-session full-serialization
-    /// guarantee, and the model had already been told "the action failed").
+    /// at the same time, breaking the cross-session serialization
+    /// guarantee (which tool.rs scopes to physical targets — a virtual
+    /// session injects into its own isolated display), and the model had
+    /// already been told "the action failed").
     cancelled: Arc<AtomicBool>,
     /// Control-lane request (emergency-stop button release / OS-grant close / Shutdown):
     /// **exempt from the dequeue skip**. An action request executing late
@@ -287,6 +334,11 @@ fn dispatch(
             Ok(()) => BackendReply::Unit,
             Err(error) => return Some(Err(error)),
         },
+        BackendRequestKind::OpenApp { program, args } => match backend.open_app(&program, &args) {
+            Ok(pid) => BackendReply::Pid(pid),
+            Err(error) => return Some(Err(error)),
+        },
+        BackendRequestKind::TakeWarnings => BackendReply::Warnings(backend.take_warnings()),
         BackendRequestKind::Shutdown => return None,
     };
     Some(Ok(result))
@@ -644,7 +696,21 @@ impl BackendInner {
             // uncovered by both cancel mechanisms (round-17 finding): the
             // Pending fast path skipped the sweep and nothing was registered
             // to sweep, so the injection landed after the stop returned.
-            self.register_cancel(Arc::clone(&cancelled));
+            //
+            // TakeWarnings is deliberately NOT registered: it is a
+            // side-effect-free query, not injected work, so a stop/revoke
+            // sweep must not latch its flag and skip it at dequeue — a
+            // skipped drain strands the failed action's advisory in the
+            // backend, where a later action's drain would render it on the
+            // WRONG receipt (the misattribution this channel exists to
+            // prevent). An uncancellable late drain is harmless: it reads a
+            // vector, and the tool layer either renders or discards the
+            // result. (The drain can never be the lazy start itself —
+            // `take_warnings` answers empty on a never-started handle — so
+            // there is no startup window to protect here either.)
+            if !matches!(kind, BackendRequestKind::TakeWarnings) {
+                self.register_cancel(Arc::clone(&cancelled));
+            }
             match self.ensure_sender() {
                 Ok(tx) => tx,
                 Err(error) => {
@@ -965,6 +1031,66 @@ impl BackendHandle {
         self.unit_control(BackendRequestKind::ReleaseOsGrant)
     }
 
+    /// Launch an application inside the backend's display target. Only
+    /// virtual backends implement it (the trait default answers
+    /// explicit-unsupported for physical backends — opening apps on the
+    /// user's real desktop is out of scope); returns the spawned child's pid.
+    pub fn open_app(&self, program: &str, args: &[String]) -> Result<u32, ComputerUseError> {
+        match self.inner.request(BackendRequestKind::OpenApp {
+            program: program.to_string(),
+            args: args.to_vec(),
+        })? {
+            BackendReply::Pid(pid) => Ok(pid),
+            _ => Err(ComputerUseError::failed("unexpected backend reply")),
+        }
+    }
+
+    /// Drain the backend's accumulated warnings (see the trait method of the
+    /// same name): one plain request that runs on the serialized worker, so
+    /// it sees exactly the warnings the just-executed action produced (the
+    /// worker executes one request at a time). Best-effort by design — a
+    /// failed or unexpected reply yields no warnings, never an error.
+    ///
+    /// A never-started backend answers empty WITHOUT the lazy start: this
+    /// drain rides every executed action, and a warning query must not spin
+    /// up a whole platform backend as a side effect. (Today the tool layer's
+    /// capability check lazy-starts the backend ahead of every action, so
+    /// the never-started branch is defense-in-depth for direct handle users
+    /// — it stays because a query channel must never be the thing that
+    /// starts a backend.)
+    ///
+    /// Unlike injected work, the drain is NOT stop-cancellable: it is a
+    /// side-effect-free query, so it does not register in the stop-sweep
+    /// registry and a stop/revoke cannot skip it at dequeue (a skipped drain
+    /// would strand the failed action's advisory in the backend, where a
+    /// later action's drain would render it on the wrong receipt).
+    /// Residual: a worker wedged in a single OS call delays the drain up to
+    /// its own BACKEND_CALL_TIMEOUT — a wedge past that budget can still
+    /// leave the advisory behind, for the next executed action's drain to
+    /// consume (rendered on that action's success receipt, discarded when
+    /// that action fails); concurrent with another request's lazy start,
+    /// the never-started check waits on the worker-state lock until that
+    /// start settles and then answers as a plain request. Same-session
+    /// concurrency has its own narrow residual: a
+    /// concurrent same-session dispatch can acquire the gate in the
+    /// reply-to-drain window and answer this drain empty — the advisory
+    /// stays in the backend and the next executed action's drain consumes
+    /// it on the same render-or-discard terms
+    /// (the physical input lock only serializes Input-class actions against
+    /// physical targets, so an Observe action or any virtual-target action
+    /// can enter that window). Sequential dispatch (the norm) never sees
+    /// this; the misdelivered payload is one self-healing advisory, never an
+    /// action result.
+    pub fn take_warnings(&self) -> Vec<String> {
+        if self.is_never_started() {
+            return Vec::new();
+        }
+        match self.inner.request(BackendRequestKind::TakeWarnings) {
+            Ok(BackendReply::Warnings(warnings)) => warnings,
+            _ => Vec::new(),
+        }
+    }
+
     /// Best-effort physical button release through the control lane
     /// (bypasses the in-flight gate, queues behind any in-flight action).
     /// Emergency cleanup for sessions that may die mid-drag: a model that
@@ -979,9 +1105,11 @@ impl BackendHandle {
     pub fn emergency_mouse_up(&self) -> Result<(), ComputerUseError> {
         // Release the three buttons one by one (synthetic presses of the
         // right/middle buttons also strand on stop/drop — previously only the
-        // left button was released). For unpressed buttons, every backend's
-        // harmless no-op (consistent with the established line in the cleanup comment
-        // below); better one release too many than a stuck button.
+        // left button was released). For unpressed buttons this is harmless
+        // on the physical and Linux/Windows stacks (a no-op up), and on the
+        // macOS stack posts one unsolicited up to the resolved target —
+        // apps ignore an up for a button they do not hold; better one
+        // release too many than a stuck button.
         let mut first_err = None;
         for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
             if let Err(error) = self.unit_control(BackendRequestKind::MouseUp { button }) {
@@ -1058,7 +1186,9 @@ impl BackendRegistry {
     ///
     /// The registration is KEPT: cleanup is idempotent (the OS-grant close
     /// is take()-based inside the backend, and a mouse-up on an unpressed
-    /// button is a no-op), and a session re-granted after this revoke must
+    /// button is a no-op on the physical and Linux/Windows stacks — the
+    /// macOS stack posts one unsolicited up, same as the release path
+    /// above), and a session re-granted after this revoke must
     /// stay reachable for a later global stop
     /// ([`Self::emergency_release_all`]). Live tools leave the registry via
     /// [`Self::release_and_unregister`] on Drop.
@@ -1116,6 +1246,54 @@ impl BackendRegistry {
         for handle in handles {
             std::thread::spawn(move || emergency_cleanup(handle));
         }
+    }
+
+    /// [`Self::emergency_release_all`] plus a bounded, completion-driven
+    /// wait: returns when every spawned cleanup has finished or `grace`
+    /// has elapsed, whichever comes first. The app-exit harvest uses this
+    /// so the release grace tracks actual completion instead of a flat
+    /// sleep — healthy sub-second releases return early, a wedged cleanup
+    /// gives up at the grace (R13: the flat 2 s sleep parked the caller
+    /// for the full budget even when every release finished in
+    /// milliseconds).
+    pub fn emergency_release_all_and_wait(&self, grace: std::time::Duration) {
+        let handles: Vec<BackendHandle> = self.handles.lock().values().cloned().collect();
+        if handles.is_empty() {
+            return;
+        }
+        let count = handles.len();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        for handle in handles {
+            let tx = done_tx.clone();
+            std::thread::spawn(move || {
+                emergency_cleanup(handle);
+                let _ = tx.send(());
+            });
+        }
+        drop(done_tx);
+        // Wait exactly `count` completions within the total grace: each
+        // recv_timeout gets only the REMAINING budget, so one wedged
+        // cleanup cannot extend the wait past the caller's bound.
+        let started = std::time::Instant::now();
+        for _ in 0..count {
+            let left = grace.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match done_rx.recv_timeout(left) {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Whether any session currently has a registered backend. The app-exit
+    /// harvest gates its synthetic-press release grace on this (R11):
+    /// `ComputerUseShared` is managed unconditionally, so an ungated 2 s
+    /// exit sleep taxed every quit and restart of the app — including
+    /// users who never enabled computer use — with zero sessions live.
+    pub fn has_live_sessions(&self) -> bool {
+        !self.handles.lock().is_empty()
     }
 
     /// The currently registered handle for the same session, if any. tool Drop uses it to
@@ -1193,6 +1371,7 @@ fn emergency_cleanup(handle: BackendHandle) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::DisplayTarget;
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1208,6 +1387,8 @@ mod tests {
                 input: true,
                 ui_tree: false,
                 notes: "mock".to_string(),
+                target: DisplayTarget::Physical,
+                target_note: String::new(),
             }
         }
 
@@ -1283,6 +1464,98 @@ mod tests {
         }
     }
 
+    /// MockBackend with a warnings pocket: drives the take_warnings channel
+    /// tests (round-trip, clear-on-drain, never-started fast path).
+    struct WarningBackend {
+        warnings: Vec<String>,
+    }
+
+    impl ComputerUseBackend for WarningBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                screenshot: true,
+                input: true,
+                ui_tree: false,
+                notes: "warnings-mock".to_string(),
+                target: DisplayTarget::Physical,
+                target_note: String::new(),
+            }
+        }
+
+        fn capture(&mut self) -> Result<Capture, ComputerUseError> {
+            Ok(Capture {
+                rgba: vec![0u8; 4 * 4 * 4],
+                width: 4,
+                height: 4,
+                origin_x: 0,
+                origin_y: 0,
+                input_scale_x: 1.0,
+                input_scale_y: 1.0,
+                input_aligned: true,
+            })
+        }
+
+        fn cursor_position(&mut self) -> Result<(i32, i32), ComputerUseError> {
+            Ok((10, 20))
+        }
+
+        fn move_to(&mut self, _x: i32, _y: i32) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn click(&mut self, _button: MouseButton, _count: u8) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn mouse_down(&mut self, _button: MouseButton) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn mouse_up(&mut self, _button: MouseButton) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn drag(&mut self, _from: (i32, i32), _to: (i32, i32)) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn scroll(
+            &mut self,
+            _direction: ScrollDirection,
+            _clicks: u32,
+        ) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn type_text(&mut self, _text: &str) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn key_chord(&mut self, _keys: &[Key]) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn hold_key(&mut self, _keys: &[Key], _ms: u64) -> Result<(), ComputerUseError> {
+            Ok(())
+        }
+
+        fn ui_tree(&mut self, _opts: &UiTreeOptions) -> Result<String, ComputerUseError> {
+            Err(ComputerUseError::unsupported("ui_tree", "mock has no tree"))
+        }
+
+        fn element_at_point(
+            &mut self,
+            _x: i32,
+            _y: i32,
+        ) -> Result<Option<ElementInfo>, ComputerUseError> {
+            Ok(None)
+        }
+
+        fn take_warnings(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.warnings)
+        }
+    }
+
     #[test]
     fn handle_round_trips_typed_requests_on_worker_thread() {
         let constructed_on_worker = Arc::new(AtomicBool::new(false));
@@ -1325,6 +1598,79 @@ mod tests {
     }
 
     #[test]
+    fn take_warnings_round_trips_through_the_worker_and_clears() {
+        let handle = BackendHandle::lazy(|| {
+            Ok(Box::new(WarningBackend {
+                warnings: vec![
+                    "w1: the keyboard target is a packaged app".to_string(),
+                    "w2: the follow-up advisory".to_string(),
+                ],
+            }) as Box<dyn ComputerUseBackend>)
+        });
+        // The tool layer lazy-starts the backend (the capability check runs
+        // ahead of every action), so a live drain always rides a started
+        // worker — start it here the same way before draining.
+        assert!(handle.capabilities().is_ok());
+        // The worker executes one request at a time, so the drain observes
+        // exactly the backend's accumulated vector.
+        assert_eq!(
+            handle.take_warnings(),
+            vec![
+                "w1: the keyboard target is a packaged app".to_string(),
+                "w2: the follow-up advisory".to_string(),
+            ]
+        );
+        // The drain clears: a second query must not re-render a stale
+        // advisory.
+        assert!(handle.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn take_warnings_on_a_never_started_backend_answers_empty_without_lazy_start() {
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&started);
+        let handle = BackendHandle::lazy(move || {
+            flag.store(true, Ordering::SeqCst);
+            Ok(Box::new(WarningBackend {
+                warnings: Vec::new(),
+            }) as Box<dyn ComputerUseBackend>)
+        });
+        // Pending state: the query must answer WITHOUT spinning up the
+        // platform backend — a warning query must never be the thing that
+        // starts one.
+        assert!(handle.take_warnings().is_empty());
+        assert!(!started.load(Ordering::SeqCst));
+        // Sanity: a real request does start it, and the flag flips.
+        assert!(handle.capabilities().is_ok());
+        assert!(started.load(Ordering::SeqCst));
+    }
+
+    /// The take_warnings drain is deliberately NOT registered in the
+    /// stop/revoke sweep (it is a side-effect-free query; a sweep-latched
+    /// drain is skipped at dequeue and strands the failed action's advisory
+    /// onto the NEXT action's receipt — the exact misattribution this
+    /// channel exists to prevent). The exemption has no runtime seam a CI
+    /// leg could exercise (a stop landing between an action and its drain is
+    /// not deterministically reproducible here), so it is source-counted
+    /// like the other stay-wired pins: removing the exemption — re-folding
+    /// the drain into `register_cancel` — silently reopens the race.
+    #[test]
+    fn take_warnings_stays_out_of_the_stop_sweep_registry() {
+        let src = include_str!("backend.rs");
+        let production = &src[..src.find("mod tests {").expect("tests module marker")];
+        assert_eq!(
+            production
+                .matches("if !matches!(kind, BackendRequestKind::TakeWarnings)")
+                .count(),
+            1,
+            "the request path must keep exempting TakeWarnings from \
+             register_cancel — registering the drain lets a stop/revoke \
+             sweep latch its flag, and the dequeue skip then strands the \
+             failed action's advisory onto the next action's receipt"
+        );
+    }
+
+    #[test]
     fn drop_shuts_worker_thread_down() {
         let dropped = Arc::new(AtomicBool::new(false));
         struct TrackDrop(Arc<AtomicBool>);
@@ -1341,6 +1687,8 @@ mod tests {
                     input: false,
                     ui_tree: false,
                     notes: String::new(),
+                    target: DisplayTarget::Physical,
+                    target_note: String::new(),
                 }
             }
             fn capture(&mut self) -> Result<Capture, ComputerUseError> {
@@ -1427,6 +1775,8 @@ mod tests {
                     input: true,
                     ui_tree: false,
                     notes: "test".to_string(),
+                    target: DisplayTarget::Physical,
+                    target_note: String::new(),
                 }
             }
             fn set_cancel_flag(&mut self, flag: Option<Arc<AtomicBool>>) {
@@ -1590,6 +1940,8 @@ mod tests {
                 input: true,
                 ui_tree: false,
                 notes: "panic-on-type".to_string(),
+                target: DisplayTarget::Physical,
+                target_note: String::new(),
             }
         }
 
@@ -1903,6 +2255,8 @@ mod tests {
                 input: true,
                 ui_tree: false,
                 notes: "probe".to_string(),
+                target: DisplayTarget::Physical,
+                target_note: String::new(),
             }
         }
 
@@ -2175,6 +2529,55 @@ mod tests {
         assert_eq!(state.releases, 2);
     }
 
+    /// The bounded wait is completion-driven (R13): fast cleanups return
+    /// well inside the grace instead of paying the full budget (the
+    /// harvest's old flat sleep), and the releases still ran. The generous
+    /// grace makes the timing leg a real mutation pin — reverting the wait
+    /// to a flat `sleep(grace)` costs the full budget and fails the bound.
+    #[test]
+    fn emergency_release_all_and_wait_returns_on_completion() {
+        let state = Arc::new(Mutex::new(ProbeState::default()));
+        let registry = BackendRegistry::default();
+        let handle = probe_handle(&state);
+        registry.insert("s-wait", handle.clone());
+        // Start the backend first: a never-started (Pending) handle takes
+        // emergency_cleanup's fast path and would skip the cleanup entirely.
+        assert!(handle.capabilities().is_ok());
+        let grace = std::time::Duration::from_secs(10);
+        let started = std::time::Instant::now();
+        registry.emergency_release_all_and_wait(grace);
+        assert!(
+            started.elapsed() < grace,
+            "completion-driven wait must return before the grace elapses"
+        );
+        wait_for_cleanup(&state, |s| s.releases > 0 && !s.mouse_ups.is_empty());
+    }
+
+    /// `has_live_sessions` (R11: the app-exit harvest gates its 2 s
+    /// synthetic-press grace on this) mirrors the registry exactly: an
+    /// empty registry answers false (the ungated sleep taxed every
+    /// quit/restart of the app with zero sessions), any registration —
+    /// including one kept by a release — answers true, and only
+    /// `release_and_unregister`/removal returns it to false.
+    #[test]
+    fn has_live_sessions_tracks_the_registry() {
+        let state = Arc::new(Mutex::new(ProbeState::default()));
+        let registry = BackendRegistry::default();
+        assert!(
+            !registry.has_live_sessions(),
+            "an empty registry must answer false (the exit grace must not tax session-free apps)"
+        );
+        let handle = probe_handle(&state);
+        registry.insert("s-live", handle.clone());
+        assert!(registry.has_live_sessions());
+        // A release KEEPS the registration (see the release contract): the
+        // session is still live for the exit grace's purposes.
+        registry.emergency_release("s-live");
+        assert!(registry.has_live_sessions());
+        registry.release_and_unregister("s-live", &handle);
+        assert!(!registry.has_live_sessions());
+    }
+
     /// `release_and_unregister` (tool-Drop path) removes the registry entry
     /// synchronously AND still runs the button/grant cleanup on the detached
     /// thread.
@@ -2297,6 +2700,8 @@ mod tests {
                     input: true,
                     ui_tree: false,
                     notes: "test".to_string(),
+                    target: DisplayTarget::Physical,
+                    target_note: String::new(),
                 }
             }
             fn set_cancel_flag(&mut self, flag: Option<Arc<AtomicBool>>) {

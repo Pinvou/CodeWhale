@@ -5,8 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import react from '@vitejs/plugin-react';
-import * as puppeteer from 'puppeteer-core';
-import { createServer } from 'vite';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -109,6 +109,17 @@ try {
     `row estimate was not seeded from the live tail: size ${completionMigration.immediateRowSize}px vs live tail ${completionMigration.liveTailHeight}px`);
   assert.ok(Math.abs(completionMigration.immediateBottomDistance) <= 1, `live tail completion drifted immediately by ${completionMigration.immediateBottomDistance}px`);
   assert.ok(Math.abs(completionMigration.bottomDistance) <= 1, `completed live tail drifted by ${completionMigration.bottomDistance}px`);
+
+  const selectedCompletion = await page.evaluate(
+    () => window.__PINVOU_TIMELINE_PERFORMANCE__.runSelectedCompletion(),
+  );
+  assert.equal(selectedCompletion.selected, 'selected', 'completion must retain the native selection');
+  assert.ok(selectedCompletion.beforeGap > 100, 'continued output must move beyond the selected reading position');
+  // Completing removes the processing badge and remeasures rows. Allow one
+  // line of natural layout change, but never following into the appended output.
+  assert.ok(selectedCompletion.afterGap > 100, 'completion must not force the selected reader to the bottom');
+  assert.ok(Math.abs(selectedCompletion.afterSelectionTop - selectedCompletion.beforeSelectionTop) <= 32,
+    `virtual completion scrolled away from the selected reader: ${JSON.stringify(selectedCompletion)}`);
 
   const crossing = await page.evaluate(
     () => window.__PINVOU_TIMELINE_PERFORMANCE__.runThresholdCrossing(),

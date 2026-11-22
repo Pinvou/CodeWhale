@@ -365,6 +365,7 @@ function useComposerVoiceInput(adapter) {
         ownerKind: current.ownerKind || 'chat',
         sessionId: current.sessionId || null,
         modelId: current.modelId || null,
+        modelRef: current.modelRef || null,
       },
     );
     return true;

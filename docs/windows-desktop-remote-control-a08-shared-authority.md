@@ -17,15 +17,87 @@ manager 在同一锁中验证 reader 所属 endpoint 并投递到相应通道。
 绑定序号还须在实际入队前由权限锁再次验证，旧 reader、旧 sender 与迟到 Drop/Stop
 均不能影响替换后的通道。锁内不调用业务生命周期、执行 await 或触发外部回调。
 
-业务帧只能在当前认证连接上发送，旧队列不能跨 socket 重放。唯一允许在断线时提前
-入队的是严格验证、匹配已登记租约的 `controller_resume_prepare`，它只定位到下一次
-连接轮次。首次断线冻结的最后有效认证存活证据预算不会因重连或恢复消息延长。
+业务帧只能在当前认证连接上发送，旧队列不能跨 socket 重放。底层已有的断线 prepare
+scope 仍只定位到下一次连接轮次；写失败保留的旧 scope 不会被重定向到更晚的 socket。
+B 的生产恢复候选现在等待真正协商 controller 协议的 socket 就绪，再从原 owner
+管理器锁内借用当前令牌，重新构造匹配当前 epoch、binding、generation 和完整租约的
+prepare。只有原候选仍处于 Prepared 且首次冻结的本地截止尚有效时才准入；不重新
+执行 prepare 状态转换，不旋转令牌，也不启动新预算。初始材料的临时令牌副本立即
+清零，重排时的借用副本由 Zeroizing 清零，不把令牌额外留在 worker 的重试状态。
+
+同一 socket epoch 最多排队一次；后继 controller socket 复用同一请求 ID 和挑战，
+保持 Relay 对精确 prepare 的幂等合同，重试不会增长五阶段错误回执集合。Legacy
+socket 可以消耗 epoch，但不能接纳 controller prepare；下一次 controller socket
+再按仍有效的原候选重建。Relay 已接纳到旧 socket 的候选仍遵守原冲突及截止拒绝，
+不借重连把已确认阶段移植到新 socket。其他控制帧和业务帧不取得跨 epoch 重放权限。
+
+新 prepare 的队列元数据携带同域的本地截止，在开始写操作前再次核对；Relay wire
+deadline 只作原协议身份，不当作本地时钟。已经开始的异步网络写仍遵守既有取消和
+断线边界，此处不声称硬实时中断阻塞写。首次断线冻结的最后有效认证存活证据预算
+不会因重连、重复通知或恢复消息延长。
 Legacy WebUI v2 的共享连接及本地 Chat/ACP/Stop 不引入此远控权限门禁。
 
 回归使用实际 loopback WebSocket reader，而非手工写入凭据：覆盖首轮登记、恢复成功、
 错配/重复 final、关闭/停止/同代替换、断线 prepare，以及旧 reader 的投递隔离。
 Windows 原生回归贯穿真实 RelayClient、manager 与 worker，并核验冻结预算和保留的
 存活 epoch；不等价于真实双机部署、外部 provider 或发布验收。
+prepare 重排另覆盖已知未写出故障和 Legacy 中间 socket 后的完整认证恢复。写故障
+只在测试中由该实例的 writer 在发送前注入，沿生产保留队列及重连分支处理；只保留
+失败帧的摘要，用后继帧摘要核对请求、挑战和证明未被重建成另一候选。Legacy 使用
+真实缺失子协议协商和 Ping/Pong 顺序屏障，验证无 controller 帧泄漏。pending 夹具
+采用实际 B activation ACK 的 request ID，与 Relay 生产写方一致。
+
+## Controller 通道启动与 endpoint 生命周期
+
+共享 Web endpoint 启动在安装 pending sender 之前取得 Relay 生命周期锁，与 Web
+Stop/Refresh 串行化，不跨 await 持有锁。读端撤销在不持状态锁或权限锁的入口
+按相同顺序取得生命周期锁，覆盖精确 reader 退休及两个持久文件删除，在推送状态前
+释放生命周期锁。这样旧清理不能擦掉后继 Refresh/Start 已提交的配置或 RPC 账本。
+窄范围通道停止仍只取状态锁；启动在同一状态锁内核对精确 pending sender，并完成
+配置创建、落盘及 endpoint 安装。pending sender 已退休的启动返回 stale，不能在返回
+错误之前重新创建配置或 socket。
+启动失败只清理仍由本次 sender 持有的 pending 通道，不按同名代际清除替换者。
+
+真实 Controlled worker 还须在其原 operation 的状态锁内核验 intent、generation 与
+Registering 阶段，并连续完成同步 Relay 安装，之后释放该锁才启动异步注册。真实
+Controlled Stop/Refresh 先失效时，旧 operation 不得创建配置、账本、通道或 endpoint；
+准入先取得锁时，提交先于后续失效，窄停止仍保留已经提交的共享 endpoint。原公开
+async Relay 入口保留；raw 通道仍按 generation、binding 和 socket owner 独立围栏。
+
+Web 状态快照与 reader 派发在 Relay 状态锁外进行；启动中的 `web_access:status`
+通知仍位于 Relay 生命周期锁及 Controlled 准入锁内，同步监听回调不得重入 Controlled
+状态。注册等待、业务及清理回调不进入该准入锁。Legacy WebUI 的共享 endpoint、
+重复启用与已有持久配置的恢复语义继续保留。真实 Wry 无窗口宿主回归通过独立子进程
+和私有目录固定七个场景：pending 通道停止、Stop、Refresh、读端撤销串行化、旧清理与
+后继 Refresh、启动失败和迟到旧 Drop。撤销消息通过实际 manager reader 入口受控投递。
+CI 的实际二进制过滤器也通过共享进程监督器执行，保留非零退出与零命中检查。回归验证
+本地启动状态与副作用，不替代真实 Relay 部署演练。
+
+另一个独立真实宿主根装配生产 Controlled 状态、清理端口与 worker，覆盖停止先行、
+刷新先行、worker 持准入锁等待 Relay 生命周期锁时停止，以及同步准备失败后恢复。
+旧 operation 的拒绝核验配置/账本及 endpoint/pending/binding 均未产生；合法后继通过
+loopback 观察生产 endpoint 注册及配对注册请求。这证明可继续发起注册，不等于完成
+配对、真实 Relay 部署或发布验收。纯状态回归另钉住同代异 intent、异代、阶段拒绝、
+回调期间持锁和错误释放；所有旧七场景及单个子进程预算保持。
+
+### A 端业务密钥的退出退休
+
+主动断开在等待最终帧回执前，按会话意图 → manager → business 顺序提交本地退休、清理托管业务
+密钥及本连接的会话/回执状态。回执等待仍以两秒为界，仅持有旧 socket；等待完成或
+取消只关闭该 socket，不重新读取并清理可能已重连的当前业务通道。会话清理复用已持有的意图锁，
+不会在 manager 锁内重新取会话锁，与能力请求、快照及取消路径保持同一顺序。等待结束返回当前
+状态。发送失败不改变本地断开的权威性。
+
+keeper 捕获通过当前 operation/原 transport 登记校验的业务密钥安装实例；正常退出、
+入站结束、失去 owner 或任务取消，均按该实例退休。实例标识不含密钥，不按 session ID
+或租约字符串清理；即使完整租约相同，迟到退出也不清替换后的密钥或恢复挂起状态。
+生产任务在 spawn 前持有退出清理范围，尚未首次 poll 就被取消也能收口。可恢复断线
+仍留在 keeper 循环中保留材料，只有确定退出才退休，沿用现有密码原语的 Drop 语义。
+
+`encrypted_lane::retirement_tests` 检查实例隔离、未 poll/已 poll 取消及恢复保留；
+`controlling_service::inbound_tests::retirement_tests` 使用真实握手、manager、transport
+和密钥状态，控制下一条事件的边界，检查入站结束、owner 更替和旧回执晚完成。
+这些受控边界测试不等价于 WebSocket 关闭、真实 Tauri IPC 或双机部署验收。
 
 ## A07 本轮修复传入 A08 的保全边界
 
@@ -90,8 +162,10 @@ refresh_token、裸 Basic 及敏感 HTTP header 的折行续值，包含 CRLF �
 单调时钟。ACP 的 task_cleanup_busy 只是发布窗口瞬时竞争：未生成审批时等待下一次
 有界 poll，不退休运行时；真实任务世代或所有权错误仍失败关闭。
 
-B 上传 admission 使用宿主的摄入预算（与本地文件摄入共用20MiB），预留与 staging
-分配前拒绝超限；共享上传/下载协议核心32MiB不因此改写。模型列表的 keychain/设置
+B 上传 admission 使用宿主的摄入预算（与本地文件摄入共用50MiB），预留与 staging
+分配前拒绝超限；共享上传/下载协议核心同步为50MiB——community PR #894 把宿主预算
+提到 50 MiB 后，核心必须保持 ≥ 宿主预算，否则 A 端放行的文件会被 B 端 admission
+拒绝。模型列表的 keychain/设置
 读取移至阻塞工作线程，无消费者的主动模型导出入口删除，准备阶段不迁移或写设置。
 前端轮询依赖完整租约/会话身份及相关 lifecycle journal 修订，不以每个文本块更换的
 对象身份重发；B 端审批读取依赖等待任务集合，并每2秒无重叠刷新，以获取同一等待
@@ -269,6 +343,8 @@ attempted-task 台账检查；闭包不重入会话管理器。close/reopen 不�
 逻辑清除 controller generation/binding/inbound 与旧 authority。测试用真实
 loopback WebSocket 向存活 lane 发撤销，确认旧 sender/recv 失效、新 lane 可启动，
 并故意复用 generation 验证旧 Drop 不清新绑定；迟到旧 reader 撤销不得清新端点。
+
+控制入站队列保留 128 帧上限。显式携带旧 generation 的迟到帧先于入队被丢弃，不占用后继通道容量，也不会触发其满队列退场；无 generation 的端点级通知保持现有语义。当前 reader 遇到属于本代的队列已满或接收端已关闭时，立即退休该通道的绑定并记录固定错误码。接收端丢弃该绑定的缓冲帧，按已有的通道关闭路径退出。共享的 Legacy Web v2 端点仍可继续服务。
 
 归档 seal 在同一进程 owner/fd-lock 内、写不可逆 pending 前检查 local ID、remote
 ref 与 client/task 两域冲突。仅完全相同不可变记录及完整墓碑可幂等返回，不增长

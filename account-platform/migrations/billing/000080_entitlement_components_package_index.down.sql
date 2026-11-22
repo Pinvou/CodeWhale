@@ -1,0 +1,1 @@
+DROP INDEX public.entitlement_components_package_idx;

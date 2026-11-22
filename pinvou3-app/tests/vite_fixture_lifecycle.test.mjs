@@ -1,0 +1,230 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { createServer, prepareFixtureModules } from './helpers/vite-fixture.mjs';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const config = { root, configFile: false, logLevel: 'error', optimizeDeps: { noDiscovery: true } };
+
+test('module readiness includes a delayed static dependency before a browser case starts', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-module-crawl-'));
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import {value} from './dependency.js'; export {value};");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const value = 1;');
+  let dependencyTransformed = false;
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-delayed-dependency',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+        dependencyTransformed = true;
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/entry.js']);
+    assert.equal(dependencyTransformed, true, 'listener/entry readiness alone is insufficient');
+    assert.ok((await server.environments.client.moduleGraph.getModuleByUrl('/dependency.js')).transformResult);
+    await assert.rejects(prepareFixtureModules(server, ['/absent.js']), /Failed to load url|does not exist/u);
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('module readiness waits for later entries after Vite first crawl has settled', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-later-crawl-'));
+  fs.writeFileSync(path.join(directory, 'early.js'), 'export const early = true;');
+  fs.writeFileSync(path.join(directory, 'late.js'), "import './dependency.js'; export const late = true;");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const dependency = true;');
+  let dependencyTransformed = false;
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-later-static-dependency',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        dependencyTransformed = true;
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/early.js']);
+    // Vite resolves this once. It is no longer a barrier for the new graph.
+    await server.environments.client.waitForRequestsIdle();
+    await prepareFixtureModules(server, ['/late.js']);
+    assert.equal(dependencyTransformed, true, 'a settled initial crawl must not report later imports ready');
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('later static preparation handles re-exports and cycles without loading lazy branches', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-static-graph-'));
+  fs.writeFileSync(path.join(directory, 'early.js'), 'export const early = true;');
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import './cycle.js'; export { value } from './shared.js'; export const lazy = () => import('./lazy.js');");
+  fs.writeFileSync(path.join(directory, 'cycle.js'), "import './entry.js'; import './shared.js';");
+  fs.writeFileSync(path.join(directory, 'shared.js'), 'export const value = 1;');
+  fs.writeFileSync(path.join(directory, 'lazy.js'), 'export const lazy = true;');
+  const transformed = new Set();
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-static-graph',
+    async transform(_code, id) {
+      if (id.endsWith('/shared.js')) await new Promise(resolve => setTimeout(resolve, 80));
+      transformed.add(path.basename(id));
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/early.js']);
+    await prepareFixtureModules(server, ['/entry.js']);
+    assert.ok(['entry.js', 'cycle.js', 'shared.js'].every(name => transformed.has(name)));
+    assert.equal(transformed.has('lazy.js'), false, 'setup must not execute or eagerly prepare a case-triggered lazy import');
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('a later deep static transform failure remains a setup failure', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-static-error-'));
+  fs.writeFileSync(path.join(directory, 'early.js'), 'export const early = true;');
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import './dependency.js';");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const value = 1;');
+  const server = await createServer({ ...config, root: directory, logLevel: 'silent', plugins: [{
+    name: 'controlled-late-static-failure',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+        throw new Error('controlled late static transform failure');
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/early.js']);
+    await assert.rejects(prepareFixtureModules(server, ['/entry.js']), /controlled late static transform failure/u);
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('module setup propagates failure, enforces one bounded deadline and never retries', async () => {
+  const failure = new Error('controlled fixture transform failure');
+  let calls = 0;
+  const server = { environments: { client: {
+    transformRequest() { calls++; throw failure; },
+    waitForRequestsIdle() { throw new Error('must not report readiness after a failed transform'); },
+  } } };
+  await assert.rejects(prepareFixtureModules(server, ['/entry.js']), error => error === failure);
+  assert.equal(calls, 1);
+  server.environments.client.transformRequest = async () => ({ code: 'entry' });
+  server.environments.client.waitForRequestsIdle = () => new Promise(() => {});
+  await assert.rejects(prepareFixtureModules(server, ['/entry.js'], { timeoutMs: 20 }), /setup budget exceeded/u);
+  for (const entry of ['https://example.org/x.js', '//example.org/x.js', '/../x.js', '/x.js?fetch']) {
+    await assert.rejects(prepareFixtureModules(server, [entry]), /root-relative paths/u);
+  }
+});
+
+test('two middleware fixtures have private optimizer output and no default WebSocket listener', async () => {
+  const servers = [];
+  try {
+    servers.push(await createServer({ ...config, server: { middlewareMode: true } }));
+    servers.push(await createServer({ ...config, server: { middlewareMode: true } }));
+    assert.notEqual(servers[0].config.cacheDir, servers[1].config.cacheDir);
+    for (const server of servers) {
+      assert.equal(server.config.server.hmr, false);
+      assert.equal(server.config.server.ws, false);
+      assert.ok(fs.existsSync(server.config.cacheDir));
+    }
+    await servers[0].close();
+    await servers[0].close();
+    assert.equal(fs.existsSync(servers[0].config.cacheDir), false);
+    assert.equal(fs.existsSync(servers[1].config.cacheDir), true);
+  } finally {
+    const results = await Promise.allSettled(servers.map(server => server.close()));
+    assert.ok(results.every(result => result.status === 'fulfilled'));
+  }
+});
+
+test('two HTTP fixtures bind distinct dynamic ports and closing one leaves the other alive', async () => {
+  const servers = [];
+  try {
+    for (let index = 0; index < 2; index++) {
+      const server = await createServer(config);
+      servers.push(server);
+      await server.listen();
+    }
+    const ports = servers.map(server => server.httpServer.address().port);
+    assert.notEqual(ports[0], ports[1]);
+    // Vite injects its browser client even with hmr:false. It must be able to
+    // connect on each fixture's HTTP port, without a separate fixed listener.
+    for (const port of ports) {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/`, 'vite-hmr');
+      try {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('owned Vite WebSocket did not connect')), 5000);
+          socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+          socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('owned Vite WebSocket failed')); }, { once: true });
+        });
+      } finally { socket.close(); }
+    }
+    await servers[0].close();
+    assert.equal(servers[0].httpServer.listening, false);
+    assert.equal(servers[1].httpServer.listening, true);
+    const response = await fetch(`http://127.0.0.1:${ports[1]}/__fixture_lifecycle_ping__`);
+    assert.equal(response.status, 404);
+  } finally {
+    const results = await Promise.allSettled(servers.map(server => server.close()));
+    assert.ok(results.every(result => result.status === 'fulfilled'));
+  }
+});
+
+test('native setup failure preserves its primary error and containment retires the private workspace', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-setup-probe-'));
+  try {
+    const receipt = path.join(directory, 'probe.json');
+    const module = new URL('./helpers/vite-fixture.mjs', import.meta.url).href;
+    const source = `import { createServer } from ${JSON.stringify(module)};
+      try { await createServer({configFile:false,server:{middlewareMode:true},plugins:[{name:'controlled-failure',configureServer(){throw new Error('controlled setup failure')}}]}); }
+      catch (error) { console.error('PRIMARY_SETUP_PROBE:'+error.message); process.exit(7); }`;
+    const python = process.env.PINVOU_CI_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    // Includes interpreter/module startup and the bounded native-close probe.
+    const result = spawnSync(python, [fileURLToPath(new URL('../../scripts/ci-fixture-process.py', import.meta.url)), '--receipt', receipt, '--', process.execPath, '--input-type=module', '-e', source], { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+    assert.equal(result.status, 7, result.stderr);
+    assert.match(result.stderr, /PRIMARY_SETUP_PROBE:controlled setup failure/);
+    const retired = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    assert.equal(retired.state, 'released');
+    assert.equal(retired.cleanup_failed, true);
+    assert.equal(fs.existsSync(retired.workspace.path), false);
+  } finally { fs.rmSync(directory, { recursive: true }); }
+});
+
+for (const mode of ['http', 'middleware', 'mixed', 'beforeExit']) {
+  test(`native Vite and signal-exit wait for shared peer cleanup: ${mode}`, () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-signal-probe-'));
+    try {
+      const ledger = path.join(directory, 'resources');
+      fs.mkdirSync(ledger);
+      const scope = new URL('./helpers/fixture-scope.mjs', import.meta.url).href;
+      const vite = new URL('./helpers/vite-fixture.mjs', import.meta.url).href;
+      const source = `
+        import {fixtureScope} from ${JSON.stringify(scope)};
+        import {createServer} from ${JSON.stringify(vite)};
+        fixtureScope.register({kind:'probe',id:'peer',
+          async close(){
+            ${mode === 'beforeExit' ? "process.emit('SIGTERM');" : ''}
+            await new Promise(resolve=>setImmediate(resolve));console.log('PEER_CLOSED');},
+          remove(){console.log('PEER_REMOVED');}});
+        const servers=[];
+        for(let i=0;i<2;i++){
+          const server=await createServer({...${JSON.stringify(config)},
+            server:{middlewareMode:${JSON.stringify(['middleware', 'beforeExit'].includes(mode))}}});
+          ${['middleware', 'beforeExit'].includes(mode) ? '' : 'await server.listen();'}servers.push(server);
+        }
+        ${mode === 'beforeExit' ? "process.emit('beforeExit',0);" : mode === 'mixed'
+          ? "process.emit('SIGINT');process.emit('SIGTERM');"
+          : "if(process.platform==='win32')process.emit('SIGTERM');else process.kill(process.pid,'SIGTERM');"}
+      `;
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: ledger }, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+      });
+      assert.equal(result.status, mode === 'mixed' ? 130 : 143, result.stderr);
+      assert.match(result.stdout, /PEER_CLOSED/);
+      assert.match(result.stdout, /PEER_REMOVED/);
+      const receipts = fs.readdirSync(ledger).map(file => JSON.parse(fs.readFileSync(path.join(ledger, file))));
+      assert.equal(receipts.length, 3);
+      assert.ok(receipts.every(receipt => receipt.state === 'released'));
+    } finally { fs.rmSync(directory, { recursive: true }); }
+  });
+}

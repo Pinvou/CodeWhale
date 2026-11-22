@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pinvou.com/contracts/model-token-evidence-trust.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "expected_plan_sha256",
+    "max_age_seconds",
+    "keys"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "expected_plan_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "max_age_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "keys": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key_id",
+          "public_key_base64url",
+          "source",
+          "environment",
+          "kinds",
+          "executor_references",
+          "reviewer_references",
+          "approval_references",
+          "valid_from",
+          "valid_until"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "public_key_base64url": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          },
+          "source": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "environment": {
+            "enum": [
+              "CLOUD_UAT",
+              "PRODUCTION"
+            ]
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "GATE_MATRIX",
+                "CURSOR_ISOLATION",
+                "LEGACY_LINKS",
+                "AUTHORIZATION",
+                "THREE_SERVICE_COMMANDS",
+                "WORKER_READINESS_SAFE",
+                "NATS_CONSUMERS",
+                "GOVERNANCE_POLICY_HANDLER",
+                "WRITER_FENCE",
+                "ACCOUNT_POLICY_LOCK",
+                "CAP_BOOTSTRAP",
+                "DEADLINES_CAPACITY",
+                "DUAL_ORIGIN_BROWSER",
+                "PROXY_LOG_SAFETY",
+                "WORKLOAD_ROTATION",
+                "SAFE_ROLLBACK",
+                "OBSERVATION"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 17,
+            "uniqueItems": true
+          },
+          "executor_references": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true
+          },
+          "reviewer_references": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true
+          },
+          "approval_references": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true
+          },
+          "valid_from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "valid_until": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true
+    }
+  }
+}

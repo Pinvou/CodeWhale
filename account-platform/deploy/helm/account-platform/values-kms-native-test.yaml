@@ -1,0 +1,11 @@
+# Public parsing fixture only. Layer after values-model-token-test.yaml; not deployable.
+tokenGateway:
+  secretProvider: vault-transit
+  secretKeyId: fixture-transit-key
+nativeKms:
+  endpoint: https://openbao.example.invalid:8200
+  port: 8200
+  caConfigMap: fixture-public-kms-ca
+  gatewayBootstrapSecret: fixture-kms-gateway-approle
+  credentialBootstrapSecret: fixture-kms-credential-approle
+  cidrs: [192.0.2.40/32]

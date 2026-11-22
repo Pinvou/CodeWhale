@@ -1,0 +1,8 @@
+DROP TRIGGER billing_financial_fact_revision_spaces ON pricing_space_versions;
+DROP TRIGGER billing_financial_fact_revision_blocks ON pricing_blocks;
+DROP TRIGGER billing_financial_fact_revision_units ON metering_unit_definitions;
+DROP TRIGGER billing_financial_fact_revision_bindings ON billing_protocol_formula_bindings;
+DROP TRIGGER billing_financial_fact_revision_configs ON pricing_version_unit_configs;
+DROP TRIGGER billing_financial_fact_revision_prices ON pricing_versions;
+DROP FUNCTION bump_billing_financial_fact_revision();
+DROP TABLE billing_financial_fact_revisions;

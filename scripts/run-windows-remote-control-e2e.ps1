@@ -48,8 +48,11 @@ $JourneyCatalog = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', '
 $EvidenceSchema = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'docs', 'schemas', 'remote-control-release-evidence.v1.schema.json')
 $EvidenceSchemaValidator = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'docs', 'schemas', 'remote-control-release-evidence.v1.validator.mjs')
 $EvidenceValidator = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'scripts', 'validate-controller-release-evidence.mjs')
+$EvidenceArtifactReader = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'scripts', 'release-evidence-artifacts.mjs')
 $UiSmokeScript = [System.IO.Path]::Combine($RepoRoot, 'pinvou3-app', 'scripts', 'remote-control-ui-smoke.mjs')
 $ProcessGuardScript = [System.IO.Path]::Combine($PSScriptRoot, 'windows-e2e-process-guard.ps1')
+$OwnedProcessSource = [System.IO.Path]::Combine($PSScriptRoot, 'windows-owned-process.cs')
+. $ProcessGuardScript
 $OrchestratorHelperScript = [System.IO.Path]::Combine($PSScriptRoot, 'windows-e2e-orchestrator-helpers.ps1')
 $RemoteBase = 'C:\ProgramData\PinvouE2E'
 $TimestampFormat = 'yyyy-MM-ddTHH:mm:ss.fffZ'
@@ -121,7 +124,7 @@ function Get-PinvouFileVersion([string]$Path) {
 }
 
 function Invoke-PinvouLocalWhitelistedProcess {
-    param([Parameter(Mandatory = $true)][string]$FilePath, [string[]]$Arguments = @(), [hashtable]$PurposeEnvironment = @{})
+    param([Parameter(Mandatory = $true)][string]$FilePath, [string[]]$Arguments = @(), [hashtable]$PurposeEnvironment = @{}, [ValidateRange(1, 3600000)][int]$TimeoutMilliseconds = 600000, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
     if (-not [System.IO.Path]::IsPathRooted($FilePath)) { throw 'e2e_local_process_path_not_absolute' }
     $info = [System.Diagnostics.ProcessStartInfo]::new()
     $info.FileName = [System.IO.Path]::GetFullPath($FilePath)
@@ -149,10 +152,7 @@ function Invoke-PinvouLocalWhitelistedProcess {
         [void]$builder.Append(('\' * ($backslashes * 2))); [void]$builder.Append('"'); $builder.ToString()
     }
     $info.Arguments = $quoted -join ' '
-    $process = [System.Diagnostics.Process]::new(); $process.StartInfo = $info
-    if (-not $process.Start()) { throw 'e2e_process_start_failed' }
-    $stdout = $process.StandardOutput.ReadToEnd(); $stderr = $process.StandardError.ReadToEnd(); $process.WaitForExit()
-    [pscustomobject]@{ ExitCode = $process.ExitCode; StdOut = $stdout; StdErr = $stderr; ProcessId = $process.Id }
+    Invoke-PinvouOwnedProcess -StartInfo $info -TimeoutMilliseconds $TimeoutMilliseconds -CancellationToken $CancellationToken
 }
 
 function Invoke-PinvouVerifiedLocalProcess {
@@ -285,6 +285,8 @@ $RemoteBootstrap = {
     . ([System.IO.Path]::Combine($rootPath, 'windows-e2e-orchestrator-helpers.ps1'))
     . ([System.IO.Path]::Combine($rootPath, 'windows-e2e-process-guard.ps1'))
     $global:PinvouE2EExpectedFileHashes = $hashes
+    $global:PinvouE2EOwnedProcessSha256 = $hashes['windows-owned-process.cs']
+    $global:PinvouE2EOwnedProcessScopes = @()
     $global:PinvouE2ENode = [System.IO.Path]::Combine($rootPath, 'pinvou-node.exe')
     $global:PinvouE2ENodeSha256 = $hashes['pinvou-node.exe']; $global:PinvouE2ENodeSignerThumbprint = $NodeThumbprint; $global:PinvouE2ENodeSignerPublisher = $NodePublisher
     $global:PinvouE2EHelperSha256 = $hashes['windows-e2e-orchestrator-helpers.ps1']; $global:PinvouE2EProcessGuardSha256 = $hashes['windows-e2e-process-guard.ps1']; $global:PinvouE2EUiSmokeSha256 = $hashes['remote-control-ui-smoke.mjs']
@@ -339,8 +341,9 @@ if ($ghVersion.ExitCode -ne 0 -or $ghVersion.StdOut -notmatch '(?m)^gh version \
 $trustedSourceHashes = @{}
 $trustedSourceBytes = @{}
 foreach ($trustedSource in @(
-    @($JourneyCatalog, ''), @($EvidenceSchema, ''), @($EvidenceSchemaValidator, ''), @($EvidenceValidator, ''), @($UiSmokeScript, ''),
+    @($JourneyCatalog, ''), @($EvidenceSchema, ''), @($EvidenceSchemaValidator, ''), @($EvidenceValidator, ''), @($EvidenceArtifactReader, ''), @($UiSmokeScript, ''),
     @($ProcessGuardScript, 'scripts/windows-e2e-process-guard.ps1'),
+    @($OwnedProcessSource, 'scripts/windows-owned-process.cs'),
     @($OrchestratorHelperScript, 'scripts/windows-e2e-orchestrator-helpers.ps1'),
     @($RouteSpecPreparer, ''), @($ProviderAttestationVerifier, ''), @($InstallerSupplyChainVerifier, '')
 )) {
@@ -355,6 +358,7 @@ $providerSourceHashes = @{ $ProviderAttestationVerifier = $trustedSourceHashes[$
 $supplyChainSourceHashes = @{ $InstallerSupplyChainVerifier = $trustedSourceHashes[$InstallerSupplyChainVerifier] }
 $validatorSourceHashes = @{
     $EvidenceValidator = $trustedSourceHashes[$EvidenceValidator]
+    $EvidenceArtifactReader = $trustedSourceHashes[$EvidenceArtifactReader]
     $ProviderAttestationVerifier = $trustedSourceHashes[$ProviderAttestationVerifier]
     $InstallerSupplyChainVerifier = $trustedSourceHashes[$InstallerSupplyChainVerifier]
     $JourneyCatalog = $trustedSourceHashes[$JourneyCatalog]
@@ -392,6 +396,8 @@ $driverSha = Get-PinvouFileSha256 $driver
 $providerVerifierSha = Get-PinvouFileSha256 $providerVerifier
 $uiSmokeSha = $trustedSourceHashes[[IO.Path]::GetFullPath($UiSmokeScript)]
 $processGuardSha = $trustedSourceHashes[[IO.Path]::GetFullPath($ProcessGuardScript)]
+$ownedProcessSha = $trustedSourceHashes[[IO.Path]::GetFullPath($OwnedProcessSource)]
+$global:PinvouE2EOwnedProcessSha256 = $ownedProcessSha
 $orchestratorHelperSha = $trustedSourceHashes[[IO.Path]::GetFullPath($OrchestratorHelperScript)]
 $legacyRelaySha = Get-PinvouFileSha256 $legacyRelay
 $inventorySha = Get-PinvouFileSha256 $inventory
@@ -411,6 +417,7 @@ if (Test-Path -LiteralPath $evidenceRoot) { throw 'e2e_evidence_directory_exists
 New-Item -ItemType Directory -Path $evidenceRoot | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $evidenceRoot 'build') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $evidenceRoot 'rollback') -Force | Out-Null
+$primaryFailure = $null
 $sessions = @()
 $legacyRuntimePid = $null
 $legacyConfiguration = $null
@@ -522,6 +529,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         foreach ($trustedRemoteSource in @(
             @('remote-control-ui-smoke.mjs', $UiSmokeScript),
             @('windows-e2e-process-guard.ps1', $ProcessGuardScript),
+            @('windows-owned-process.cs', $OwnedProcessSource),
             @('windows-e2e-orchestrator-helpers.ps1', $OrchestratorHelperScript)
         )) {
             $trustedSourcePath = [IO.Path]::GetFullPath([string]$trustedRemoteSource[1])
@@ -554,6 +562,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
             [pscustomobject]@{ RelativePath = 'pinvou-e2e-driver.exe'; Sha256 = $driverSha; SignaturePolicy = 'app' },
             [pscustomobject]@{ RelativePath = 'remote-control-ui-smoke.mjs'; Sha256 = $uiSmokeSha; SignaturePolicy = 'none' },
             [pscustomobject]@{ RelativePath = 'windows-e2e-process-guard.ps1'; Sha256 = $processGuardSha; SignaturePolicy = 'none' },
+            [pscustomobject]@{ RelativePath = 'windows-owned-process.cs'; Sha256 = $ownedProcessSha; SignaturePolicy = 'none' },
             [pscustomobject]@{ RelativePath = 'windows-e2e-orchestrator-helpers.ps1'; Sha256 = $orchestratorHelperSha; SignaturePolicy = 'none' },
             [pscustomobject]@{ RelativePath = 'pinvou-provider-verifier.exe'; Sha256 = $providerVerifierSha; SignaturePolicy = 'app' }
             [pscustomobject]@{ RelativePath = 'pinvou-node.exe'; Sha256 = $TrustedNodeSha256; SignaturePolicy = 'node' }
@@ -669,6 +678,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         $listenerUrl = 'ws://127.0.0.1:' + $ListenerPort
         $configuration = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-configure-gateway', '--gateway-url', $Gateway, '--listener-url', $listenerUrl, '--expected-pid', [string]$LegacyRuntimePid, '--route-spec', $routeSpecPath, '--route-spec-sha256', $RouteSpecSha, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--require-no-bypass', '--require-full-control-plane-snapshot', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput) -AdditionalFilePaths @($routeSpecPath)) | ConvertFrom-Json
         $configureExitCode = $LASTEXITCODE
+        $legacyFlowFailure = $null
         try {
             if ($configureExitCode -ne 0 -or $configuration.route_activated -ne $true -or $configuration.mock -ne $false) { throw 'e2e_legacy_gateway_activation_failed' }
             $before = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-traffic-counter', '--gateway-url', $Gateway, '--expected-pid', [string]$LegacyRuntimePid, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--source-commit', $Commit)) | ConvertFrom-Json
@@ -680,10 +690,16 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
             $bareV2 = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-bare-v2-probe', '--gateway-url', $Gateway, '--request-nonce', $Nonce, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--role', 'A', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput)) | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0 -or $bareV2.schema -ne 'pinvou-legacy-bare-v2-rejection' -or $bareV2.gateway_url_sha256 -ne $GatewaySha `
                 -or $bareV2.request_nonce -ne $Nonce -or $bareV2.response_kind -ne 'upgrade_rejected' -or $bareV2.rejected -ne $true -or $bareV2.mock -ne $false) { throw 'e2e_legacy_bare_v2_probe_invalid' }
+        } catch {
+            $legacyFlowFailure = $_
+            throw
         } finally {
-            $restoration = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-deconfigure-gateway', '--gateway-url', $Gateway, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--restore-original-state', $configuration.original_state_digest, '--canonical-input-state-digest', $configuration.canonical_input_state_digest, '--expected-control-plane-state-digest', $configuration.control_plane_state_before_digest, '--require-full-control-plane-reread', '--require-public-route-withdrawn', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput)) | ConvertFrom-Json
-            if ($LASTEXITCODE -ne 0 -or $restoration.owned_route_removed -ne $true -or $restoration.public_route_withdrawn -ne $true `
-                -or $restoration.restored_state_digest -ne $configuration.original_state_digest -or $restoration.mock -ne $false) { throw 'e2e_legacy_gateway_restore_failed' }
+            $restoration = Invoke-PinvouCleanupPreservingFailure -PrimaryFailure $legacyFlowFailure -FailureCode 'e2e_legacy_gateway_cleanup_failed' -Cleanup {
+                $restored = (Invoke-PinvouTrustedGuard -FilePath $driverPath -Arguments @('legacy-deconfigure-gateway', '--gateway-url', $Gateway, '--run-nonce', $RunNonce, '--route-id', $RouteId, '--restore-original-state', $configuration.original_state_digest, '--canonical-input-state-digest', $configuration.canonical_input_state_digest, '--expected-control-plane-state-digest', $configuration.control_plane_state_before_digest, '--require-full-control-plane-reread', '--require-public-route-withdrawn', '--source-commit', $Commit, '--output-root', $global:PinvouE2EOutput)) | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $restored.owned_route_removed -ne $true -or $restored.public_route_withdrawn -ne $true `
+                -or $restored.restored_state_digest -ne $configuration.original_state_digest -or $restored.mock -ne $false) { throw 'e2e_legacy_gateway_restore_failed' }
+                $restored
+            }
         }
         [ordered]@{ configuration = $configuration; probe = $probe; bare_v2 = $bareV2; restoration = $restoration; counter_before = [long]$before.count; counter_after = [long]$after.count } | ConvertTo-Json -Depth 10 -Compress
     } -ArgumentList $LegacyGatewayUrl, $gatewayUrlSha, $legacyRouteSpecSha, $routeSpec.route_id, $runNonce, $legacyRuntimePid, $legacyRuntime.listener_port, $legacyRequestNonce, $actualHead
@@ -900,6 +916,21 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
     $uiSummarySha = Add-LocalArtifact $artifacts $evidenceRoot 'gates\ui_smoke.json' 'ui-smoke'
     $gates.ui_smoke = [ordered]@{ result = 'pass'; artifact_sha256 = $uiSummarySha }
 
+    # Freeze functional run completion before artifact signing/qualification.
+    # The signed marker owns both wall-clock and monotonic interval bounds.
+    $runClock.Stop()
+    if ($runClock.ElapsedMilliseconds -gt (120 * 60 * 1000)) { throw 'e2e_run_duration_invalid' }
+    $runFinishedAt = [DateTime]::UtcNow.ToString($TimestampFormat)
+    $completion = [ordered]@{
+        schema = 'pinvou-remote-control-run-completion'; version = 1
+        source_commit_sha = $actualHead; run_nonce = $runNonce
+        started_at = $runStartedAt; finished_at = $runFinishedAt
+        monotonic_interval_sha256 = Get-PinvouSha256Hex ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @([long]0, [long]$runClock.ElapsedMilliseconds) -Compress)))
+    }
+    $completionPath = Join-Path $evidenceRoot 'gates\run-completion.json'
+    [IO.File]::WriteAllText($completionPath, (($completion | ConvertTo-Json -Depth 4 -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+    $completionSha = Add-LocalArtifact $artifacts $evidenceRoot 'gates\run-completion.json' 'check'
+
     foreach ($artifact in $artifacts) {
         if ($artifact.signature) {
             if ($artifact.machine_role -ne 'B' -or $artifact.path -ne 'checks/RC-E2E-008-controlled_attachment_received.json') { throw 'e2e_pre_attested_artifact_forbidden' }
@@ -915,6 +946,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         } else {
             $roleIndex = if ($artifact.machine_role -eq 'A') { 0 } else { 1 }; $remoteAttestPath = "$RemoteOutput\attest-$([Guid]::NewGuid().ToString('N')).bin"
             Copy-Item -LiteralPath $artifactPath -Destination $remoteAttestPath -ToSession $sessions[$roleIndex]
+            $attestationFailure = $null
             try {
                 $attestationJson = Invoke-Command -Session $sessions[$roleIndex] -ScriptBlock {
                     param($Provider, $KeyId, $RolePolicy, $Path, $Relative, $Kind, $Role, $RunNonce, $Commit)
@@ -922,7 +954,14 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
                     if ($LASTEXITCODE -ne 0) { throw 'e2e_remote_artifact_attestation_failed' }; $output
                 } -ArgumentList $AttestationProvider, $identity[0].key_id, $identity[0].role_policy_sha256, $remoteAttestPath, $artifact.path, $artifact.kind, $artifact.machine_role, $runNonce, $actualHead
                 $attestationResult = $attestationJson | ConvertFrom-Json; $attestationExitCode = 0
-            } finally { Invoke-Command -Session $sessions[$roleIndex] -ScriptBlock { Remove-Item -LiteralPath $using:remoteAttestPath -Force -ErrorAction Stop } }
+            } catch {
+                $attestationFailure = $_
+                throw
+            } finally {
+                Invoke-PinvouCleanupPreservingFailure -PrimaryFailure $attestationFailure -FailureCode 'e2e_attestation_cleanup_failed' -Cleanup {
+                    Invoke-Command -Session $sessions[$roleIndex] -ScriptBlock { Remove-Item -LiteralPath $using:remoteAttestPath -Force -ErrorAction Stop }
+                }
+            }
         }
         if ($attestationExitCode -ne 0 -or $attestationResult.schema -ne 'pinvou-e2e-artifact-attestation' `
             -or $attestationResult.sha256 -ne $artifact.sha256 `
@@ -939,7 +978,6 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
         $artifact.signature = $attestationResult.signature
     }
 
-    $runClock.Stop()
     $manifest = [ordered]@{
         schema = 'pinvou-remote-control-release-evidence'; version = 1; commit_sha = $actualHead
         provenance = [ordered]@{ kind = 'physical-dual-windows'; orchestrator = 'pinvou-windows-e2e-v1'; source_commit_sha = $actualHead; synthetic = $false; node_version = $trustedNodeVersion; node_sha256 = $TrustedNodeSha256; node_artifact_path = 'binaries/pinvou-node.exe'; node_authenticode_thumbprint = $TrustedNodeSignerThumbprint; node_publisher = $TrustedNodeSignerPublisher }
@@ -955,7 +993,8 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
             [ordered]@{ role = 'A'; identity_digest = $machineFacts[0].IdentityDigest; windows_build = $machineFacts[0].WindowsBuild },
             [ordered]@{ role = 'B'; identity_digest = $machineFacts[1].IdentityDigest; windows_build = $machineFacts[1].WindowsBuild }
         )
-        started_at = $runStartedAt; finished_at = [DateTime]::UtcNow.ToString($TimestampFormat)
+        started_at = $runStartedAt; finished_at = $runFinishedAt
+        run_completion_artifact_sha256 = $completionSha
         monotonic_start_ms = 0; monotonic_end_ms = [long]$runClock.ElapsedMilliseconds
         journeys = @($journeyEvidence); artifacts = @($artifacts); gates = $gates
     }
@@ -978,6 +1017,9 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
     }
     $validationProcess = Invoke-PinvouVerifiedLocalProcess -FilePath $trustedNode -ExpectedSha256 $TrustedNodeSha256 -ExpectedThumbprint $TrustedNodeSignerThumbprint -ExpectedPublisher $TrustedNodeSignerPublisher -Arguments @($EvidenceValidator, $manifestPath) -PurposeEnvironment $validatorEnvironment -AdditionalExpectedSha256 $validatorSourceHashes
     if ($validationProcess.ExitCode -ne 0) { throw 'e2e_evidence_validation_failed' }
+} catch {
+    $primaryFailure = $_
+    throw
 } finally {
     $cleanupErrors = [Collections.Generic.List[string]]::new()
     $cleanupRouteId = if ($routeSpec) { [string]$routeSpec.route_id } else { '' }
@@ -1025,6 +1067,7 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
                         if ($LASTEXITCODE -ne 0) { throw 'e2e_role_cleanup_failed' }
                     }
                 } catch { $remoteCleanupErrors.Add(('role-process:' + $_.Exception.Message)) }
+                try { Close-PinvouOwnedProcessScopes } catch { $remoteCleanupErrors.Add('owned-process:e2e_process_cleanup_unconfirmed') }
                 try {
                     $base = [IO.Path]::GetFullPath($using:RemoteBase).TrimEnd([IO.Path]::DirectorySeparatorChar)
                     $target = [IO.Path]::GetFullPath((Join-Path $base $using:runNonce))
@@ -1049,5 +1092,10 @@ $flagOffEvidence = [Collections.Generic.List[object]]::new()
             $cleanupErrors.Add(('session-' + @('A', 'B')[$cleanupIndex] + ':' + $_.Exception.Message))
         }
     }
-    if ($cleanupErrors.Count -gt 0) { throw ('e2e_cleanup_failed:' + ($cleanupErrors -join '|')) }
+    if ($cleanupErrors.Count -gt 0) {
+        if ($primaryFailure) {
+            $primaryFailure.Exception.Data['PinvouCleanupFailed'] = $true
+            [Console]::Error.WriteLine('e2e_cleanup_failed')
+        } else { throw ('e2e_cleanup_failed:' + ($cleanupErrors -join '|')) }
+    }
 }

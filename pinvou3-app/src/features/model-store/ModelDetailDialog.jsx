@@ -3,14 +3,14 @@
 // 「供 Agent 应用接入」放在最后一段,并且把 Key 的管理也并进去:模型 ID、API 地址、
 // API Key 本来就是同一件事要凑齐的三样东西,拆开会让 Key 看着像两个不同的东西。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { KeyRound, Plus } from '../../components/icons.jsx';
+import { KeyRound, MoreHorizontal, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail, revokeApiKey } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, followDeploymentContext, revokeApiKey } from './model-store-api.js';
 import { LanSharingPanel } from './LanSharingPanel.jsx';
 import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
-import { buildSavedModel, checkLinkable, findLinkedRows, pickApiKey } from './pinvou-model-link.js';
+import { buildSavedModel, checkLinkable, findCardLinkedRows, pickApiKey } from './pinvou-model-link.js';
 import { formatBytes, libraryStateOf } from './model-store-logic.js';
 import {
   HOVER_SURFACE,
@@ -69,9 +69,12 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
 /**
  * 模型详情弹窗。
  *
+ * `card` 是主线版本的合并商店卡片 prop，主线原用于渲染权重校验档位黄条
+ * （WeightVerifyNotice）。该组件在合并树中已随重构移除，此 prop 眼下没有
+ * 消费者；保留在签名里以维持与主线调用方的 props 兼容。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, savedModels, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup, onCheckUpdate, onVersions }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
   const [keysKnown, setKeysKnown] = useState(false);
@@ -82,6 +85,10 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
   // 借用会让重试转圈时把那两个按钮也一起禁掉(虽然此刻它们并不在屏幕上,
   // 但重试成功后 busy 若未归位就会留下一排灰按钮)。
   const [retrying, setRetrying] = useState(false);
+  // 「更多」次要动作菜单（11-16 用户反馈③：详情底部主+次按钮平铺最多六个，
+  // 用户不知道按哪个）。主按钮永远只有一个（状态机），次要全部收进菜单；
+  // 换卡或弹窗重开时收起。
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [updateConfirmation, setUpdateConfirmation] = useState(null);
   const updateSubmitted = useRef(false);
 
@@ -91,11 +98,15 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
   // 回来」之前,弹窗会短暂显示 A 的名字、运行时和接入地址——用户以为自己看的是 B。
   // ModelStoreView 里那个测试商店的 effect 用的是同一个套路(cancelled 标志)。
   const loadTokenRef = useRef(0);
+  // A request generation cannot protect callbacks that start a *new* request
+  // after an older mutation finishes. Scope those callbacks to this open card.
+  const viewTokenRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!cardId) return;
     const token = (loadTokenRef.current += 1);
-    const stale = () => token !== loadTokenRef.current;
+    const viewToken = viewTokenRef.current;
+    const stale = () => token !== loadTokenRef.current || viewToken !== viewTokenRef.current;
     try {
       // Key 拿不到不算致命:模型本身的信息照样该显示出来。
       const [modelDetail, keyList] = await Promise.all([
@@ -120,6 +131,7 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
   }, [cardId]);
 
   useEffect(() => {
+    viewTokenRef.current += 1;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 换一张卡时先把上一张的详情/Key 清空再拉新的;不清会让新卡短暂显示旧卡的运行时和 Key
     setDetail(null);
     setKeys([]);
@@ -127,60 +139,68 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
     setRevokePending(null);
     setError(null);
     setUpdateConfirmation(null);
+    setBusy(false);
+    setRetrying(false);
+    setMoreMenuOpen(false);
     load();
+    return () => { viewTokenRef.current += 1; };
   }, [load]);
 
   // 错误态的重试入口。就是再跑一次 load()——失败原因基本都是瞬时的
   // (后端刚重启、请求超时、Key 接口抖了一下),重来一次往往就好了。
   const retry = async () => {
+    const viewToken = viewTokenRef.current;
     setRetrying(true);
     try {
       await load();
     } finally {
-      setRetrying(false);
+      if (viewToken === viewTokenRef.current) setRetrying(false);
     }
   };
 
   const copyText = async (text) => {
+    const viewToken = viewTokenRef.current;
     try {
       await navigator.clipboard.writeText(text);
-      onToast(copy.copied);
+      if (viewToken === viewTokenRef.current) onToast(copy.copied);
     } catch {
       // 没有剪贴板权限时不谎报成功 —— 内容本来就是可见可手选的。
-      onToast(copy.copyFailed);
+      if (viewToken === viewTokenRef.current) onToast(copy.copyFailed);
     }
   };
 
   const addKey = async () => {
     // r6 P2-4：慢 IPC 期间用户可能已切到另一张卡——过期响应的 toast 和 load()
-    // 会把 A 卡的结果落进 B 卡的弹窗（revokeKey 同款闸门）。
-    const token = loadTokenRef.current;
+    // 会把 A 卡的结果落进 B 卡的弹窗（revokeKey 同款闸门）。请求代际
+    // loadTokenRef 保护不了「完成后又发起下一次请求」的回调，回调一律按
+    // viewTokenRef 归属到当前打开的这张卡。
+    const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
       await createApiKey(cardId, null);
-      if (token !== loadTokenRef.current) return;
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.keyCreated);
       await load();
     } catch (keyError) {
-      if (token === loadTokenRef.current) onToast(String(keyError?.message || keyError));
+      if (viewToken === viewTokenRef.current) onToast(String(keyError?.message || keyError));
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
   const revokeKey = async (id) => {
-    const token = loadTokenRef.current;
+    const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
       await revokeApiKey(id);
-      if (token !== loadTokenRef.current) return;
+      if (viewToken !== viewTokenRef.current) return;
       setRevokePending(null);
       onToast(copy.keyRevoked);
       await load();
     } catch (e) {
-      if (token === loadTokenRef.current) onToast(lanError(copy, e));
+      if (viewToken === viewTokenRef.current) onToast(lanError(copy, e));
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
@@ -194,6 +214,7 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
   // `model` 要填 `endpoint_model` 而不是 `model_name`：前者是推理服务真正认的 id。
   // 经网关时填 model_name 是对的（网关按它查表再替换），直连时填错就是 404。
   const useInPinvou = async () => {
+    const viewToken = viewTokenRef.current;
     const bridge = tryGetTauriBridge();
     if (!bridge?.models?.saveModel) {
       onToast(copy.linkBridgeMissing);
@@ -206,8 +227,7 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
       return;
     }
     // r6 P2-4：saveModel 是慢 IPC——期间用户可能切卡，过期结果的 toast/load()
-    // 会落进别的卡（revokeKey 同款闸门）。
-    const token = loadTokenRef.current;
+    // 会落进别的卡（revokeKey 同款闸门，同按 viewTokenRef 归属）。
     setBusy(true);
     try {
       const modelName = record.endpoint_model || record.model_name;
@@ -215,29 +235,53 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
         modelName,
         displayName: copy.linkModelName(record.card_name || record.model_name),
         baseUrl: record.endpoint_url,
+        cardId,
         contextWindow: null,
-        // 已经接入过就**沿用那一行的 id**，让这次保存变成更新而不是新增。
+        // 已经接入过就沿用 id，并由后端窄事务保留最新用户参数与凭据。
         //
         // 不查重的话，`makeModelId()` 每次都生成新 id：用户连点两次、或者隔天
         // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且
-        // 每次都会被设为当前模型。判据跟移除侧的 findLinkedRows 完全一致
-        // （model + 回环 base_url），两边用同一把尺子才不会出现"接得进、清不掉"。
-        existingId: findLinkedRows(savedModels, modelName)[0]?.id,
+        // 每次都会被设为当前模型。接入与移除都只认后端确认的卡片关联，
+        // 不复用用户自行配置或已经解除关联的同名本地接口。
+        existingId: findCardLinkedRows(savedModels, cardId)[0]?.id,
       });
       await bridge.models.saveModel(saved);
-      if (token !== loadTokenRef.current) return;
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。
       if (bridge.models.setActiveModel) await bridge.models.setActiveModel(saved.id);
+      if (viewToken !== viewTokenRef.current) return;
       onToast(copy.linkDone);
       await load();
     } catch (linkError) {
-      if (token === loadTokenRef.current) onToast(String(linkError?.message || linkError));
+      const message = String(linkError?.message || linkError);
+      if (viewToken === viewTokenRef.current) onToast(message.includes("model store endpoint changed or is unavailable") ? copy.linkEndpointChanged : message);
     } finally {
-      setBusy(false);
+      if (viewToken === viewTokenRef.current) setBusy(false);
     }
   };
 
   const record = detail?.record;
+  const linkedModels = findCardLinkedRows(savedModels, cardId);
+  const followContext = async (modelId) => {
+    const viewToken = viewTokenRef.current;
+    setBusy(true);
+    try {
+      await followDeploymentContext(cardId, modelId);
+      if (viewToken !== viewTokenRef.current) return;
+      onToast(copy.contextFollowDone);
+      await load();
+    } catch (contextError) {
+      const message = String(contextError?.message || contextError);
+      let failure = copy.contextFollowFailed;
+      if (message === 'model store endpoint changed or is unavailable; refresh the card and retry') {
+        failure = copy.linkEndpointChanged;
+      } else if (message === 'Command model_store_follow_deployment_context not found' || message === 'Tauri invoke is unavailable') {
+        failure = copy.contextFollowUnavailable;
+      }
+      if (viewToken === viewTokenRef.current) onToast(failure);
+    } finally {
+      if (viewToken === viewTokenRef.current) setBusy(false);
+    }
+  };
   // 能不能接进品悟。算一次给按钮的禁用态和下面那行原因共用——两处各算一次的话,
   // 很容易出现"按钮灰着但没给原因"或者反过来。
   const linkable = checkLinkable(detail);
@@ -327,9 +371,8 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
             {record.endpoint_url ? <MsRow label={copy.detailEndpoint}>{record.endpoint_url}</MsRow> : null}
           </div>
 
-          {/* 紧跟在「这个模型是什么」那几行后面:权重完整性跟引擎、体积是同一类
-              事实,不是一条飘在页尾的免责声明。达标的卡这里什么都不长。 */}
-          {/* 只在服务器确实有新版脚本时才渲染更新入口——自动检测替代手动检查 */}
+          {/* 「检查更新」入口见下方 secondary 按钮区（非 builtin 卡恒可达，
+              自动徽章为主信号、手动为兜底——与正文 r42 修订后的描述一致）。 */}
 
 
           <div className="mt-5">
@@ -486,6 +529,29 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
             </div>
           </div>
 
+          {/* 主线新增：品悟模型列表里指向本卡的行及其上下文窗口档位。
+              「跟随部署上下文」把这些已接入模型的固定档位对齐到本卡当前部署；
+              没有固定档位（自动）的行没有可跟随的东西，不给按钮。 */}
+          {linkedModels.length > 0 ? (
+            <div className={`mt-4 rounded-[12px] p-3 ${SUBTLE_SURFACE}`} data-testid="model-store-context-settings">
+              <p className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.contextFollowHint}</p>
+              {linkedModels.map((model) => (
+                <div key={model.id} className="mt-2 flex items-center justify-between gap-3">
+                  <span className={`text-[12px] ${TEXT_PRIMARY}`}>
+                    {model.name || model.model} · {model.context_window_tokens
+                      ? copy.contextFixed(model.context_window_tokens.toLocaleString()) : copy.contextAutomatic}
+                  </span>
+                  {model.context_window_tokens ? (
+                    <MsButton tone="ghost" disabled={busy || !linkable.ok} onClick={() => followContext(model.id)}
+                      data-testid="model-store-follow-context">
+                      {copy.contextFollow}
+                    </MsButton>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
             {/* 这个「重新部署」**刻意常驻**，跟列表行那个不是一回事：
                 - 列表行（ModelRow）只在 needs_redeploy 时出现——脚本更新了、跟上次
                   部署用的版本对不上。那是日常路径，不该让用户对着一个常亮的按钮
@@ -519,8 +585,26 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
               const secondaryDisabled = isRunning || cardBusy;
 
               // 主按钮
+              // P2-17（r24）：cleanup_required 必须优先于 hasUpdate——否则
+              // 「更新脚本」遮蔽「继续清理」，组合态下清理入口不可达（行卡
+              // 正常、仅此弹窗遮蔽）。清理是管理残留文件的前置，更新脚本
+              // 在未清理完的卡上执行只会把残留带进新一轮部署。
               let primary;
-              if (hasUpdate) {
+              if (state === 'cleanup_required') {
+                // P2-17：cleanup_required 优先——组合态（cleanup+hasUpdate）
+                // 此前被 hasUpdate 遮蔽，清理入口不可达。清理是前置动作，
+                // 更新脚本放次要位置。
+                primary = (
+                  <MsButton
+                    tone="danger"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-action-cleanup"
+                  >
+                    {copy.continueCleanup}
+                  </MsButton>
+                );
+              } else if (hasUpdate) {
                 primary = (
                   <MsButton
                     tone="primary"
@@ -543,25 +627,6 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
                     data-testid="model-store-detail-action-uninstall"
                   >
                     {copy.actionUninstall}
-                  </MsButton>
-                );
-              } else if (state === 'cleanup_required') {
-                // r21 P1-1：cleanup_required 此前一路落进下面的 final else——
-                // mark_cleanup_required 不清 weights_ready_at（db.rs），于是
-                // weightsReady=true 弹窗摆出**可点的「部署模型」**，与状态行
-                // 「需继续清理」自相矛盾；weights_ready_at=NULL 的子情形更拧巴：
-                // disabled 部署 + title「需继续下载」。行卡同态的主按钮一直是
-                // danger「继续清理」（ModelRow），这里补显式分支对齐：走
-                // onUninstall，uninstallOptionsFor 会按 cleanup-only 给出只含
-                // 清理范围的确认框——同一条路，不是新入口。
-                primary = (
-                  <MsButton
-                    tone="danger"
-                    disabled={cardBusy}
-                    onClick={() => { onClose(); onUninstall?.(record); }}
-                    data-testid="model-store-detail-action-cleanup"
-                  >
-                    {copy.continueCleanup}
                   </MsButton>
                 );
               } else if (!weightsReady) {
@@ -590,6 +655,23 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
 
               // 次级按钮（与主按钮同一行，排版统一）
               const secondary = [];
+              // P2-17：cleanup 态下更新脚本放次要位置（主按钮是「继续清理」）
+              if (state === 'cleanup_required' && hasUpdate) {
+                secondary.push(
+                  <MsButton
+                    key="update"
+                    tone="ghost"
+                    disabled={cardBusy}
+                    onClick={() => {
+                      updateSubmitted.current = false;
+                      setUpdateConfirmation(record.card_id);
+                    }}
+                    data-testid="model-store-detail-secondary-update"
+                  >
+                    {copy.actionUpdate}
+                  </MsButton>
+                );
+              }
               if (isDeployed) {
                 if (hasUpdate) {
                   secondary.push(
@@ -634,10 +716,66 @@ function ModelDetailDialog({ cardId, copy, theme, onClose, onRedeploy, onToast, 
                 );
               }
 
+              // 主线新增：脚本更新检查 / 版本历史入口。builtin 卡的脚本打包在
+              // 应用内、没有远端源头可查，与行卡同判据（card_source !== 'builtin'）。
+              if (record.card_source !== 'builtin') {
+                secondary.push(
+                  <MsButton
+                    key="check-update"
+                    tone="ghost"
+                    disabled={busy}
+                    onClick={() => onCheckUpdate(record)}
+                  >
+                    {copy.cardUpdateCheck}
+                  </MsButton>
+                );
+                if (onVersions) {
+                  secondary.push(
+                    <MsButton
+                      key="versions"
+                      tone="ghost"
+                      onClick={() => onVersions(record)}
+                    >
+                      {copy.versionHistory}
+                    </MsButton>
+                  );
+                }
+              }
+
               return (
                 <div className="flex flex-wrap items-center gap-2">
                   {primary}
-                  {secondary}
+                  {secondary.length > 0 ? (
+                    <div className="relative">
+                      <MsButton
+                        tone="ghost"
+                        aria-haspopup="menu"
+                        aria-expanded={moreMenuOpen}
+                        data-testid="model-store-detail-more"
+                        onClick={() => setMoreMenuOpen((v) => !v)}
+                      >
+                        <MoreHorizontal size={14} />
+                        {copy.moreActions}
+                      </MsButton>
+                      {moreMenuOpen ? (
+                        <>
+                          {/* 点菜单外任意处收起（含主按钮区/遮罩层；z 序压内容） */}
+                          <div
+                            className="fixed inset-0 z-10"
+                            role="presentation"
+                            onClick={() => setMoreMenuOpen(false)}
+                          />
+                          <div
+                            role="menu"
+                            data-testid="model-store-detail-more-menu"
+                            className="absolute right-0 top-full z-20 mt-1 flex min-w-[180px] flex-col gap-1 rounded-xl border border-slate-200 bg-white p-2 shadow-lg dark:border-white/10 dark:bg-slate-900"
+                          >
+                            {secondary}
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               );
             })()}

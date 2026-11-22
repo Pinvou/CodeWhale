@@ -18,8 +18,8 @@ pub type StoreError = AppError;
 
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 单独的连接阶段时限，取值与 `llmapi_hub/adapter.rs` 的 `HTTP_CONNECT_TIMEOUT_SECS`
-/// 一致。见 `get_json` 里的说明：没有它，握不上手的链路会把整个 API_TIMEOUT 吃光。
+/// 连接阶段最多等待 5 秒，避免无法握手的链路耗尽 15 秒的 API 总预算。
+/// `get_json` 同时设置连接时限和总时限。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 同一个引擎+模型组合下，不同的部署参数方案（比如"基准测试配置" vs
@@ -211,7 +211,7 @@ const STORE_API_ATTEMPTS: u32 = 3;
 
 /// 商店 JSON 响应的体积上限。
 ///
-/// 商店地址是用户可配的，无界 `json()` 等于把「往内存里灌多少」交给对端决定。
+/// 商店地址是编译期常量，但信任边界不变：无界 `json()` 等于把「往内存里灌多少」交给对端决定。
 /// 64 MiB 取自仓库既有先例 `marketplace/python_dependencies.rs`（`MAX_WHEEL_BYTES`），
 /// 保持同一个量级，免得两处各定一个数。卡片列表实际是几十 KB 量级，离这条线很远。
 const MAX_STORE_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
@@ -234,10 +234,11 @@ pub(super) enum CappedReadError {
 
 /// 把一个 HTTP 响应体按上限读进内存。
 ///
-/// 为什么要有上限：商店地址是**用户在设置里自己填的**，无界的 `.json()` /
-/// `.text()` 等于把「往我的内存里灌多少」这个决定权交给对端——一个填错的地址或
-/// 一台被改过的商店，回一条几个 G 的 body 就能把应用打到 OOM。而脚本正文更要紧：
-/// 它是在 sha256 校验**之前**整体进内存的，校验拦不住 OOM。
+/// 为什么要有上限：商店地址虽已是编译期常量（`config::STORE_URL`，2026-09-30
+/// 起不再可配），无界的 `.json()` / `.text()` 仍等于把「往我的内存里灌多少」
+/// 这个决定权交给对端——一台被改过或被劫持的商店，回一条几个 G 的 body 就能把
+/// 应用打到 OOM。而脚本正文更要紧：它是在 sha256 校验**之前**整体进内存的，
+/// 校验拦不住 OOM。
 ///
 /// 两道一起来：
 /// 1. 先信 header 声明的长度，能在读任何字节之前就退出；
@@ -281,12 +282,24 @@ fn redirect_is_refused(url: &reqwest::Url, previous_hops: usize) -> bool {
 
 pub struct StoreClient {
     base_url: String,
+    timeout: Duration,
+    attempts: u32,
 }
 
 impl StoreClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            timeout: API_TIMEOUT,
+            attempts: STORE_API_ATTEMPTS,
+        }
+    }
+
+    pub(super) fn for_startup(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            timeout: Duration::from_secs(5),
+            attempts: 1,
         }
     }
 
@@ -315,15 +328,15 @@ impl StoreClient {
         // 一个 3xx 响应体解析失败，指向完全错误的方向。
         // 写法照搬 marketplace/python_dependencies.rs 里下载 wheel 的那处。
         //
-        // 顺带一提：那里还带了主机白名单，这里没有——商店地址是用户在设置里自己
-        // 填的，本来就没有"可信主机"这个名单可言。
+        // 顺带一提：那里还带了主机白名单，这里没有——商店地址是编译期常量
+        // （`config::STORE_URL`），主机固定，白名单没有增量价值。
         let url = format!("{}{}", self.base_url, path);
         let client = reqwest::blocking::Client::builder()
             // 只设总超时的话，一条连不上的慢链路能把 15 秒预算全耗在 TCP/TLS
-            // 握手上，界面要等满 15 秒才看到"连不上"。对照 llmapi_hub/adapter.rs
-            // 的 blocking_client()，两个超时都设。
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(API_TIMEOUT)
+            // 握手上，连接时限与总预算都必须受本次请求剩余时间约束；
+            // 普通 API 保留 15 秒总时限，启动检查使用更短的单卡/单轮预算。
+            .connect_timeout(CONNECT_TIMEOUT.min(self.timeout))
+            .timeout(self.timeout)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if redirect_is_refused(attempt.url(), attempt.previous().len()) {
                     let redirect_url = attempt.url().clone();
@@ -343,14 +356,14 @@ impl StoreClient {
         // 只重试**快速失败**：超时本身已经等满了 API_TIMEOUT，再重试只会让页面
         // 卡得更久；4xx 是商店明确的回答，重试多少次结果都一样。
         let mut last_err = String::new();
-        for attempt in 1..=STORE_API_ATTEMPTS {
+        for attempt in 1..=self.attempts {
             match client.get(&url).send() {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.as_u16() == 404 {
                         return Err(StoreError::new("未找到对应的商店内容"));
                     }
-                    if status.is_server_error() && attempt < STORE_API_ATTEMPTS {
+                    if status.is_server_error() && attempt < self.attempts {
                         last_err = format!("模型商店返回错误（{}）", status.as_u16());
                         std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
                         continue;
@@ -401,7 +414,7 @@ impl StoreClient {
                         humanize_reqwest_error(&e),
                         HINT_CHECK_INTERNET_ACCESS
                     );
-                    if e.is_timeout() || attempt == STORE_API_ATTEMPTS {
+                    if e.is_timeout() || attempt == self.attempts {
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
@@ -449,7 +462,7 @@ pub(crate) const HINT_CHECK_INTERNET_ACCESS: &str = "请检查设备能不能访
 /// errors.humanize_error 里针对 requests 异常类型的分支）。
 pub fn humanize_reqwest_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
-        format!("{HINT_CONNECT_TIMEOUT}，请检查网络（或尝试在设置里切换镜像地址）")
+        format!("{HINT_CONNECT_TIMEOUT}，请检查网络或联系管理员")
     } else if e.is_connect() {
         format!("{HINT_CONNECT_FAILED}，请检查网络是否可用")
     } else if e.is_request() {

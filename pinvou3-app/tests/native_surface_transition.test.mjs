@@ -4,20 +4,12 @@ import test from 'node:test';
 import {
   createDegradedNativeSurfaceHideLease,
   createNativeSurfaceTransitionGate,
+  createNavigationOwnership,
   hideNativeSurfaceWithRetry,
   isFailedNativeSurfaceHideGenerationCurrent,
   settleBrowserUiPublicationAfterCommit,
 } from '../src/features/browser/native-surface-transition.mjs';
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, reject, resolve };
-}
+import { deferred } from './helpers/deferred.mjs';
 
 test('publishes synchronously when no native surface can be visible', () => {
   const publications = [];
@@ -478,4 +470,158 @@ test('native surface hide never retries more than once', async () => {
     ['failure 1', { attempt: 1, willRetry: true }],
     ['failure 2', { attempt: 2, willRetry: false }],
   ]);
+});
+
+test('revision reports per-channel counters for cross-channel ownership capture', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'a', hasWorkspace: false, visible: false }),
+  });
+  assert.equal(gate.revision('view'), 0);
+  gate.invalidate('view');
+  assert.equal(gate.revision('view'), 1);
+  gate.run(() => true, { channel: 'view' });
+  assert.equal(gate.revision('view'), 2);
+  // 其他通道互不影响。
+  gate.invalidate('session');
+  assert.equal(gate.revision('view'), 2);
+  assert.equal(gate.revision('session'), 1);
+});
+
+test('createNavigationOwnership: same-session view navigation retires a pending session entry (三十二轮评审 P2)', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  // 设备 doctor 的形态：动作开始拍 view 修订号，随后进入 session 通道的长
+  // 等待（prompt 采样 / materialize / completion）。
+  const ownership = createNavigationOwnership(gate, 'view');
+  assert.equal(ownership.kept(), true);
+  let publicationIsCurrent;
+  gate.run(({ isCurrent }) => {
+    publicationIsCurrent = isCurrent;
+    return new Promise(() => {});
+  }, { channel: 'session', hideMode: 'none', guardSession: false });
+
+  // 用户经真实设置导航离开（view 通道，同一 sessionId 不换 sid）：session
+  // 票据仍然有效——光看 isCurrent 拦不住晚到的拽回；view 归属必须单独退役。
+  gate.invalidate('view');
+  assert.equal(
+    publicationIsCurrent(),
+    true,
+    'session-channel ticket alone must miss the same-session view navigation (the reported gap)'
+  );
+  assert.equal(
+    ownership.kept(),
+    false,
+    'view ownership must be retired by the view-channel navigation'
+  );
+});
+
+test('createNavigationOwnership: the ticket must be taken before the prompt wait, not after it (复核 P2)', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  // 修后生产顺序：runDoctor 在按钮动作里、buildDoctorPrompt 等待**之前**拍票
+  // （captureChatOwnership），onOpenChat 收到的就是这张等待前的票。
+  const ownershipBeforeWait = createNavigationOwnership(gate, 'view');
+  // prompt 采样挂起期间，用户经侧栏去设置（view 通道失效）。
+  gate.invalidate('view');
+  assert.equal(
+    ownershipBeforeWait.kept(),
+    false,
+    'pre-wait ticket must be retired by the navigation that happened during the prompt wait'
+  );
+
+  // 修前顺序回归钉（本轮复核的受控反例 view:settings → send → view:chat）：
+  // onOpenChat 在 prompt resolve 之后才拍，拿到的是去设置之后的新修订号——
+  // kept() 恒真，晚到的完成把用户从设置页拽回聊天。视图层已把拍点提前
+  // （DeviceManagerView runDoctor + smoke ⑥-f），这里钉死「为什么必须提前」。
+  const lateOwnership = createNavigationOwnership(gate, 'view');
+  assert.equal(
+    lateOwnership.kept(),
+    true,
+    'a capture taken after the wait snapshots the post-navigation revision — exactly the reported bug'
+  );
+});
+
+test('createNavigationOwnership: a newer same-channel session switch still wins through isCurrent', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  const ownership = createNavigationOwnership(gate, 'view');
+  let publicationIsCurrent;
+  gate.run(({ isCurrent }) => {
+    publicationIsCurrent = isCurrent;
+    return true;
+  }, { channel: 'session', hideMode: 'none', guardSession: false });
+
+  // 负控（同通道竞态仍按旧口径胜出）：用户切到别的会话，session 通道失效，
+  // view 修订号没动——isCurrent 那把尺子拦下，归属尺子放行。
+  gate.invalidate('session');
+  assert.equal(publicationIsCurrent(), false, 'same-channel invalidation must still retire the ticket');
+  assert.equal(ownership.kept(), true, 'view revision untouched by the session-channel switch');
+});
+
+test('createNavigationOwnership: the session-channel switch during the prompt wait retires the intent (三十三轮评审 P2)', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'sid-1', hasWorkspace: false, visible: false }),
+  });
+  // 修后生产形态：动作起点拍 ['view','session'] 双通道（captureChatOwnership）。
+  const ownership = createNavigationOwnership(gate, ['view', 'session']);
+  assert.equal(ownership.kept(), true);
+
+  // prompt 挂起期间用户经侧栏切到会话 B：handleSwitchSession 走 session 通道
+  // （run 起手 issue 新修订号；其 publication 内的 setCurrentView 因
+  // publishing>0 走直改分支，view 修订号不动）——单看 view 尺子的旧形态
+  // kept() 恒真，晚到的动作自己再签发 session 票据时 isCurrent 也恒真，
+  // 会把已选会话 B 的用户拽进排查会话。双尺子形态必须在此退役。
+  gate.run(() => true, { channel: 'session', hideMode: 'none', guardSession: false });
+  assert.equal(
+    ownership.kept(),
+    false,
+    'a session-channel navigation during the pre-transition window must retire the intent',
+  );
+  assert.equal(
+    ownership.keptChannel('view'),
+    true,
+    'the view ruler stays independent: the completion check consumes the session ruler via isCurrent',
+  );
+});
+
+test('createNavigationOwnership: multi-channel capture snapshots every channel and validates inputs', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'a', hasWorkspace: false, visible: false }),
+  });
+  gate.invalidate('session'); // session 修订号从非零起点开始
+  const ownership = createNavigationOwnership(gate, ['view', 'session']);
+  assert.ok(ownership.revisionAtStart instanceof Map, 'array capture snapshots as a Map');
+  assert.equal(ownership.revisionAtStart.get('view'), 0);
+  assert.equal(ownership.revisionAtStart.get('session'), 1);
+  // 无导航时 kept() 真；view 动、session 不动 → kept() 假、keptChannel('session') 仍真。
+  gate.invalidate('view');
+  assert.equal(ownership.kept(), false);
+  assert.equal(ownership.keptChannel('session'), true);
+  assert.equal(ownership.keptChannel('view'), false);
+  // 未知通道按起点 0 快照，与 gate.revision 的只读语义一致。
+  const fresh = createNavigationOwnership(gate, ['untracked']);
+  assert.equal(fresh.kept(), true);
+  gate.invalidate('untracked');
+  assert.equal(fresh.kept(), false);
+});
+
+test('createNavigationOwnership defaults to the view channel and validates its gate', () => {
+  const gate = createNativeSurfaceTransitionGate({
+    acquireHide: () => assert.fail('hide must not be called'),
+    getContext: () => ({ sessionId: 'a', hasWorkspace: false, visible: false }),
+  });
+  const ownership = createNavigationOwnership(gate);
+  assert.equal(ownership.channel, 'view');
+  assert.equal(ownership.revisionAtStart, 0);
+  assert.throws(() => createNavigationOwnership({}), TypeError);
+  assert.throws(() => createNavigationOwnership(null), TypeError);
 });

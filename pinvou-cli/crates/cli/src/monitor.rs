@@ -287,13 +287,42 @@ fn snapshot_payload(
         None => "Ram: unavailable".to_owned(),
     };
     let cpu_line = match &snapshot.cpu {
-        Some(cpu) => format!(
-            "Cpu: {}\t{}",
-            crate::support::collapse_control_characters(&cpu.name),
-            cpu.total_usage_pct
-                .map(|pct| format!("{pct:.1}%"))
-                .unwrap_or_else(|| "-".to_owned()),
-        ),
+        Some(cpu) => {
+            // The process gauge mirrors its JSON fields (parity note above):
+            // `None` means "not sampled yet, probe failed, or an unusable
+            // sample pair (counter wraparound, zero elapsed wall time)" and
+            // prints like the system gauge's missing reading; `cores` is the
+            // per-core normalization denominator (omitted when probing
+            // failed). In THIS lane both gauges are USUALLY `-`: the
+            // snapshot is taken once per process, and the process gauge
+            // always needs a predecessor to difference against. The system
+            // gauge is platform/probe dependent: the Windows PDH counter
+            // primes its query when the query opens and collects again in
+            // the sample, so `total_usage_pct` can already be available on
+            // the first outer snapshot there (macOS/Linux need a previous
+            // system-tick sample). The renderer prints whatever reading the
+            // snapshot carries, so a valid first-sample system reading is
+            // preserved (the same one-shot property the
+            // `not_applicable_headless` disclosures cover for self_perf and
+            // session_uptime).
+            let mut line = format!(
+                "Cpu: {}\t{}",
+                crate::support::collapse_control_characters(&cpu.name),
+                cpu.total_usage_pct
+                    .map(|pct| format!("{pct:.1}%"))
+                    .unwrap_or_else(|| "-".to_owned()),
+            );
+            line.push_str(&format!(
+                "\tprocess={}",
+                cpu.process_usage_pct
+                    .map(|pct| format!("{pct:.1}%"))
+                    .unwrap_or_else(|| "-".to_owned()),
+            ));
+            if cpu.logical_processors > 0 {
+                line.push_str(&format!("\tcores={}", cpu.logical_processors));
+            }
+            line
+        }
         None => "Cpu: unavailable".to_owned(),
     };
     // The headless operator reads this line instead of the GUI card, so the
@@ -822,6 +851,8 @@ mod tests {
             cpu: Some(pinvou3_lib::features::monitor::CpuSnapshot {
                 name: "test-cpu".to_owned(),
                 total_usage_pct: Some(12.5),
+                process_usage_pct: Some(6.5),
+                logical_processors: 4,
             }),
             ..MonitorSnapshot::default()
         };
@@ -841,6 +872,9 @@ mod tests {
             "{human_without}"
         );
         assert!(human_with.contains("Cpu: test-cpu"), "{human_with}");
+        // The per-process gauge mirrors its JSON fields in human mode too.
+        assert!(human_with.contains("process=6.5%"), "{human_with}");
+        assert!(human_with.contains("cores=4"), "{human_with}");
     }
 
     /// The `vllm` object is serialized whole from the shared `VllmSnapshot`
@@ -883,6 +917,61 @@ mod tests {
                 "prompt_tokens_total",
             ],
             "the vllm object's key set moved — update this pin in the same change"
+        );
+    }
+
+    /// Same rationale as [`snapshot_vllm_object_keeps_a_stable_key_set`], for
+    /// the `cpu` object: the per-process CPU field additions widened the
+    /// published JSON silently (only an unrelated test literal above happened
+    /// to catch the compile break). This pin makes the widening conscious: a
+    /// field added to or removed from `CpuSnapshot` fails here until this
+    /// list is updated in the same change (serde declaration order;
+    /// `serde_json` preserves it).
+    #[test]
+    fn snapshot_cpu_object_keeps_a_stable_key_set() {
+        let sample = MonitorSnapshot {
+            cpu: Some(pinvou3_lib::features::monitor::CpuSnapshot {
+                name: "test-cpu".to_owned(),
+                total_usage_pct: Some(12.5),
+                process_usage_pct: Some(6.5),
+                logical_processors: 4,
+            }),
+            ..MonitorSnapshot::default()
+        };
+        let (_, value) = snapshot_payload(&sample, Some(1)).expect("renders");
+        assert_eq!(
+            keys(&value["cpu"]),
+            [
+                "name",
+                "total_usage_pct",
+                "process_usage_pct",
+                "logical_processors",
+            ],
+            "the cpu object's key set moved — update this pin in the same change"
+        );
+
+        // The None form must keep the same four keys: a future
+        // `skip_serializing_if` on either Option field would make the
+        // published key set conditional on the sample state.
+        let unsampled = MonitorSnapshot {
+            cpu: Some(pinvou3_lib::features::monitor::CpuSnapshot {
+                name: "test-cpu".to_owned(),
+                total_usage_pct: None,
+                process_usage_pct: None,
+                logical_processors: 4,
+            }),
+            ..MonitorSnapshot::default()
+        };
+        let (_, value) = snapshot_payload(&unsampled, Some(1)).expect("renders");
+        assert_eq!(
+            keys(&value["cpu"]),
+            [
+                "name",
+                "total_usage_pct",
+                "process_usage_pct",
+                "logical_processors",
+            ],
+            "the cpu object's key set moved — update this pin in the same change"
         );
     }
 }

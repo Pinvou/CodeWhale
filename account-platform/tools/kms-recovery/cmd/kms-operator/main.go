@@ -1,0 +1,101 @@
+// kms-operator is a separate interactive online command, never a secret printer.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/Pinvou/pinvou3/account-platform/tools/kms-recovery/internal/operator"
+	"golang.org/x/term"
+)
+
+func run() error {
+	action := flag.String("action", "", "unseal, bootstrap, finalize-bootstrap, rotate-transit, offline stage-agents, or offline verify-snapshot")
+	expectedVersion := flag.Int("expected-version", 0, "explicit previous Transit version, only for rotate-transit")
+	config := flag.String("config", "", "absolute public operator configuration")
+	dir := flag.String("directory", "", "absolute local custody directory")
+	bundle := flag.String("bundle", "", "absolute encrypted package (roles.age for stage-agents/rotate-transit; snapshot.age for verify-snapshot)")
+	output := flag.String("output-directory", "", "private bootstrap artifact or rotation attempt directory")
+	flag.Parse()
+	noOutputAction := *action == "unseal" || *action == "verify-snapshot"
+	if flag.NArg() != 0 || (!noOutputAction && *action != "bootstrap" && *action != "finalize-bootstrap" && *action != "stage-agents" && *action != "rotate-transit") || !term.IsTerminal(int(os.Stdin.Fd())) || (noOutputAction && *output != "") || (!noOutputAction && *output == "") || (*action == "rotate-transit" && (*expectedVersion < 1 || *expectedVersion >= 2147483647)) || (*action != "rotate-transit" && *expectedVersion != 0) {
+		return fmt.Errorf("LOCAL_INTERACTIVE_OPERATION_REQUIRED")
+	}
+	cfg, err := operator.LoadConfig(*config)
+	if err != nil {
+		return err
+	}
+	if *action == "bootstrap" {
+		fmt.Fprintln(os.Stderr, "将创建固定四类最小权限身份并生成加密包，不撤销 root，不覆盖已有配置。")
+	}
+	if *action == "finalize-bootstrap" {
+		fmt.Fprintln(os.Stderr, "将验证已有身份包与实际权限，然后撤销初始化 root；不创建或覆盖配置。")
+	}
+	if *action == "stage-agents" {
+		fmt.Fprintln(os.Stderr, "仅离线暂存三个 Agent 的机器引导文件；不读取初始化包，不导出运维身份，不联网。")
+	}
+	if *action == "verify-snapshot" {
+		fmt.Fprintln(os.Stderr, "仅离线验证加密快照的完整性和实例绑定；不输出内容，不联网，不执行恢复。")
+	}
+	if *action == "rotate-transit" {
+		fmt.Fprintln(os.Stderr, "仅使用既有运维身份轮换固定 Transit key 一次；已存在的尝试只查询，不重发轮换。不读取初始化 root。")
+	}
+	fmt.Fprint(os.Stderr, "请输入本机恢复口令（输入不回显，不要通过聊天或 Agent 输入）： ")
+	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	defer clear(pass)
+	if err != nil {
+		return fmt.Errorf("LOCAL_PASSPHRASE_READ_FAILED")
+	}
+	if *action == "rotate-transit" {
+		if err := operator.RunRotateTransit(context.Background(), cfg, *dir, *bundle, pass, *output, *expectedVersion); err != nil {
+			return err
+		}
+		fmt.Println("KMS_ROTATION_VERIFIED：固定 key 版本递增已确认；请继续加密快照、离线备份和完整业务门禁。")
+		return nil
+	}
+	if *action == "verify-snapshot" {
+		if err := operator.RunVerifySnapshot(cfg, *dir, *bundle, pass); err != nil {
+			return err
+		}
+		fmt.Println("KMS_SNAPSHOT_VERIFIED_OFFLINE：完整认证解密和绑定验证通过；不等于灾难恢复已执行。")
+		return nil
+	}
+	if *action == "stage-agents" {
+		if err := operator.RunStageAgentFiles(cfg, *dir, *bundle, pass, *output); err != nil {
+			return err
+		}
+		fmt.Println("AGENT_FILES_STAGED：三个 Agent 的引导文件已受限暂存；不能作为离线恢复备份，尚未传输或启动服务。")
+		return nil
+	}
+	if *action != "unseal" {
+		if err := operator.RunBootstrap(context.Background(), cfg, *dir, *bundle, pass, *output, *action == "finalize-bootstrap"); err != nil {
+			return err
+		}
+		if *action == "bootstrap" {
+			fmt.Println("BOOTSTRAP_PREPARED：身份已加密保存并验证，尚未撤销 root。")
+		} else {
+			fmt.Println("BOOTSTRAP_FINALIZED：初始化 root 已撤销，四类身份已再次验证；尚未完成业务部署。")
+		}
+		return nil
+	}
+	changed, err := operator.Run(context.Background(), cfg, *dir, *bundle, pass)
+	if err != nil {
+		return err
+	}
+	if changed {
+		fmt.Println("KMS_UNSEALED：目标已解封；未发送 root token，未完成部署验收。")
+	} else {
+		fmt.Println("KMS_ALREADY_UNSEALED：目标已解封，未重复提交材料。")
+	}
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

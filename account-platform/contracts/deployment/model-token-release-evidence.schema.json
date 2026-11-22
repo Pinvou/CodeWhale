@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pinvou.com/contracts/model-token-release-evidence.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate",
+    "environment",
+    "kind",
+    "status",
+    "started_at",
+    "ended_at",
+    "executor_reference",
+    "reviewer_reference",
+    "approval_reference",
+    "report_sha256",
+    "report_path"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "image_sha256",
+        "config_sha256",
+        "migration_manifest_sha256",
+        "policy_set_digest",
+        "handler_set_digest"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "image_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "migration_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "policy_set_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "handler_set_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "environment": {
+      "enum": [
+        "CLOUD_UAT",
+        "PRODUCTION"
+      ]
+    },
+    "kind": {
+      "enum": [
+        "GATE_MATRIX",
+        "CURSOR_ISOLATION",
+        "LEGACY_LINKS",
+        "AUTHORIZATION",
+        "THREE_SERVICE_COMMANDS",
+        "WORKER_READINESS_SAFE",
+        "NATS_CONSUMERS",
+        "GOVERNANCE_POLICY_HANDLER",
+        "WRITER_FENCE",
+        "ACCOUNT_POLICY_LOCK",
+        "CAP_BOOTSTRAP",
+        "DEADLINES_CAPACITY",
+        "DUAL_ORIGIN_BROWSER",
+        "PROXY_LOG_SAFETY",
+        "WORKLOAD_ROTATION",
+        "SAFE_ROLLBACK",
+        "OBSERVATION"
+      ]
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "executor_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "reviewer_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "approval_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "report_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "report_path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\\.(?:json|ndjson|txt)$"
+    }
+  }
+}

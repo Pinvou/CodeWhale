@@ -1,0 +1,16 @@
+DROP TABLE idempotency_records;
+DROP TABLE usage_holds;
+DROP INDEX pricing_versions_active_model_idx;
+DROP TABLE pricing_versions;
+DROP TABLE recharge_products;
+ALTER TABLE ledger_postings DROP CONSTRAINT ledger_postings_credit_lot_fk;
+DROP TABLE credit_lots;
+DROP TRIGGER ledger_postings_immutable ON ledger_postings;
+DROP TRIGGER journal_entries_immutable ON journal_entries;
+DROP FUNCTION prevent_ledger_mutation;
+DROP TRIGGER ledger_postings_balanced ON ledger_postings;
+DROP FUNCTION enforce_balanced_journal_entry;
+DROP TABLE ledger_postings;
+DROP TABLE journal_entries;
+DROP TABLE ledger_accounts;
+DROP TABLE wallets;

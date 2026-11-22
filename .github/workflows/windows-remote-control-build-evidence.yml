@@ -8,6 +8,11 @@ permissions:
   id-token: write
   attestations: write
 
+env:
+  # Use the verified official source; do not inherit a failing runner mirror.
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   protected-windows-installer:
     environment: windows-release
@@ -27,13 +32,26 @@ jobs:
         shell: pwsh
         run: git submodule update --init --recursive -- CodeWhale
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Build Windows rustc stack wrapper
         shell: pwsh
         run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -45,10 +63,15 @@ jobs:
         working-directory: pinvou3-app
         run: |
           npm ci --prefer-offline --no-audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run runtime:windows:init
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run runtime:windows:onnx-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node ../scripts/sync-version.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build:nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Resolve exactly one installer
         id: installer
@@ -64,15 +87,31 @@ jobs:
           $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
           node scripts/create-installer-spdx.mjs '${{ steps.installer.outputs.path }}' installer-sbom.spdx.json '${{ github.sha }}' $version pinvou3-app/package-lock.json pinvou3-app/src-tauri/Cargo.lock pinvou3-app/src-tauri/target/release/nsis-stage/manifest.json pinvou3-app/src-tauri/target/release/nsis-stage pinvou3-app/src-tauri/target/release/pinvou3-tauri.exe
 
+      - name: Prepare CI transfer runtime (3)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Attest installer build provenance
         id: provenance
         uses: actions/attest-build-provenance@v3
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           subject-path: ${{ steps.installer.outputs.path }}
           show-summary: true
 
+      - name: Prepare CI transfer runtime (4)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Attest SBOM provenance
         uses: actions/attest-build-provenance@v3
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           subject-path: installer-sbom.spdx.json
           show-summary: true
@@ -101,8 +140,16 @@ jobs:
           Download-OneBundle '${{ steps.installer.outputs.path }}' 'installer-attestation.sigstore.jsonl'
           Download-OneBundle (Resolve-Path -LiteralPath installer-sbom.spdx.json).Path 'installer-sbom-attestation.sigstore.jsonl'
 
+      - name: Configure artifact transport for Upload installer, attestation bundle, and SPDX
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload installer, attestation bundle, and SPDX
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-remote-control-protected-build
           if-no-files-found: error

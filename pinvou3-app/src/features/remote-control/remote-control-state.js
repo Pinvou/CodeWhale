@@ -57,7 +57,6 @@
       connectedDurationMs: null,
       workspaceCount: 0,
       codeModeAllowed: false,
-      workspaces: [],
       lastError: null,
     };
   }
@@ -251,7 +250,6 @@
             ? payload.pairingRemainingMs : null),
       connectedDurationMs: Number.isSafeInteger(payload.connectedDurationMs)
         && payload.connectedDurationMs >= 0 ? payload.connectedDurationMs : null,
-      workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.errorCode || payload.error || null,
     };
     if (generation && !CONTROLLED_TERMINAL[status]) {
@@ -288,6 +286,33 @@
       return state;
     }
     var candidate = shallowCopy(state);
+    candidate.controlledOpenIntent = intent;
+    candidate.controlledTerminatedOpenIntent = null;
+    var applied = applyControlledStatus(candidate, Object.assign({}, payload, { intent: intent }));
+    return applied === candidate ? state : applied;
+  }
+
+  // Only the bridge's fresh status read after the current open command rejects
+  // with this bounded registration error may cross a generation in terminal
+  // state. Ordinary events keep the existing starting-status binding fence.
+  function reconcileControlledRegistrationFailure(state, intent, envelope) {
+    var payload = envelope || {};
+    var generation = payload.generation ? String(payload.generation) : "";
+    var statusIntent = String(payload.statusIntent || "");
+    var current = state.controlledDevice;
+    if (state.intents.controlled !== intent
+      || (state.controlledOpenIntent !== intent && state.controlledTerminatedOpenIntent !== intent)
+      || payload.status !== "error" || payload.errorCode !== "pairing_registration_failed"
+      || !generation || !/^(0|[1-9][0-9]*)$/.test(statusIntent)
+      || state.retiredControlledGenerations.indexOf(generation) >= 0
+      || (current.statusIntent && (BigInt(statusIntent) < BigInt(current.statusIntent)
+        || (generation !== current.generation && BigInt(statusIntent) === BigInt(current.statusIntent))))) {
+      return state;
+    }
+    var candidate = shallowCopy(state);
+    candidate.controlledDevice = Object.assign({}, current, { generation: null });
+    candidate.retiredControlledGenerations = generation !== current.generation
+      ? retireIdentity(state.retiredControlledGenerations, current.generation) : state.retiredControlledGenerations;
     candidate.controlledOpenIntent = intent;
     candidate.controlledTerminatedOpenIntent = null;
     var applied = applyControlledStatus(candidate, Object.assign({}, payload, { intent: intent }));
@@ -1215,6 +1240,7 @@
     isCurrentIntent: isCurrentIntent,
     applyControlledStatus: applyControlledStatus,
     reconcileControlledOpenStatus: reconcileControlledOpenStatus,
+    reconcileControlledRegistrationFailure: reconcileControlledRegistrationFailure,
     applyControlledSession: applyControlledSession,
     applyControllerStatus: applyControllerStatus,
     reconcileControllerOpenStatus: reconcileControllerOpenStatus,

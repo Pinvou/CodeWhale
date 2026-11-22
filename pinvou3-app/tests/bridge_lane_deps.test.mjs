@@ -192,16 +192,27 @@ let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
-// T4b 后 Official 313 = upstream #746 后 313：裁决③ 定案的 helpers 合并体
-// clearVoiceInput 已整删（两 lane 本地覆盖与 facade 保留，上游同形；
-// a7-f-registry §6）。#746 新增 replay 结果写入器 applyToolItemResult：私有、
-// 仅参数依赖。AST 范围审计：updateToolItem 只新增该 helper；replay 另加标准
-// Map。无新簇依赖/导出/转发，REQUIRED 不变。
-// 313 → 315：isInternalUserMessage + isKnownInternalMetadataBlock 只读
-// window.PinvouBridgeMessages 经典全局与自身参数，无簇字面量新增依赖；
-// userMessageDisplayText 以 base 本地声明调用二者（回流 #782）。
+// Combined main adds the two internal-message classifiers; Account retains
+// compactNow. All are local calls without new cluster dependency keys.
+// raisePinvouSummonHighwater reads only `state`, which every consuming cluster
+// literal already provides, so it adds no cluster dependency key.
 const EXPECTED_SURFACE = {
-  sharedFnCount: 315,
+  // cancelKbModel (kb_model_cancel chain) reads only `invoke`; the sole
+  // consuming cluster (tauriKnowledgeModel) already passes it, so only the
+  // count moves. raisePinvouSummonHighwater (community #841 summon-seq
+  // alignment) joins the same shared base; with the community #899/#900
+  // additions below the union count is two higher than the shared base.
+  // probeEndpointModels (endpoint model auto-discovery wave) reads only
+  // `invoke` as well; the settings cluster already passes it — count only.
+  // scheduledTaskDraftCronReject (issue #821 round-3 M2: the chat draft
+  // fence) is pure — it reads only its parameter and JS builtins, so no
+  // cluster literal gains a dep; autoCreateScheduledTaskDraft's new call
+  // resolves it as a base-local declaration. Exported from web and
+  // tauriScheduled, neither of which carries a REQUIRED pin — count only.
+  // cronWsTrim (#900 review P3 round 2: the Unicode White_Space trim the
+  // fence's key/value/EXPR parsing needs) is pure as well and resolves as
+  // a base-local declaration inside the same fence — count only.
+  sharedFnCount: 321,
 };
 
 assert.equal(
@@ -254,7 +265,7 @@ const EXPECTED_CLUSTER_KEYS = {
   'tauriArtifactTracker': ['DELIVERABLE_EXTS', 'invoke', 'isScheduledRunSession', 'notify', 'state'],
   // Official：无 hasCommand——桌面 webview 与后端同包发布（version-locked），
   // T4b 起 listDeliverableIndex 委托共享核 v2 协商，缺键按 v2 可用处理
-  //（helpers typeof 守卫）。
+  //（helpers typeof 守卫）。Web 传 artifactInfo+hasCommand 保留水合与旧宿主回退。
   'tauriArtifacts': [
     'addAttachmentByPath',
     'addSystemItem',
@@ -501,6 +512,9 @@ const EXPECTED_CLUSTER_KEYS = {
   // 的 web 簇字面量逐键对齐（含 hasCommand: canInvoke——helpers
   // listDeliverableIndex v2 协商用）；官方 F 路由前向器（freshBuffer 等 9 名）
   // 与 createScheduledTask no-op 键随壳化移除，与上游集一致。
+  // Account 组合（PR #2053 复审对齐）沿用 main T4b 形态：lane 侧同名函数均为
+  // 委托壳，不得作为 forwarder dep 传回共享核（否则 base 重绑定到壳产生
+  // 自引用递归——freshBuffer 栈溢出实测）；共享核函数体即生效实现。
   'web': [
     'BT_TABLE',
     'DELIVERABLE_EXTS',

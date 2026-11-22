@@ -115,9 +115,9 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 const SHADOW_AUDIT_ROTATE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// rrule product subset (deliberately stricter than the domain parser, same
-/// rules as the MCP server's `validate_rrule`): HOURLY/WEEKLY/ONCE only —
-/// CRON and minute-granular frequencies are a product-level rejection, not a
-/// parse error.
+/// rules as the MCP server's `validate_rrule`): HOURLY/WEEKLY/ONCE plus the
+/// CRON fixed-minute subset (issue #821) — minute-granular frequencies stay
+/// a product-level rejection, not a parse error.
 const WEEKDAY_TOKENS: [&str; 7] = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 
 /// Guard for the creation-request watcher task: held in a
@@ -160,19 +160,17 @@ impl SpoolRequestKind {
 
 /// One spooled task request (create / update / delete). Field names mirror
 /// server.py's `_spool_payload` exactly (snake_case JSON on disk); unknown
-/// fields are skipped on read (contract §4.4 drift defense). The `id` field
-/// is informational only — the watcher keys its state on the directory-listed
-/// file name, never on this field (a user-writable spool must not control
-/// watcher paths). Payload fields are optional because update supplies only
-/// the changed subset and delete supplies none; `validate` enforces the
-/// per-kind requirements.
+/// fields are skipped on read (contract §4.4 drift defense) — server.py
+/// still writes its informational `id`/`created_at` keys, which the watcher
+/// never reads (its state keys on the directory-listed file name, so a
+/// user-writable spool must not control watcher paths). Payload fields are
+/// optional because update supplies only the changed subset and delete
+/// supplies none; `validate` enforces the per-kind requirements.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct SpooledCreationRequest {
     pub schema_version: u32,
     #[serde(default)]
     pub kind: SpoolRequestKind,
-    #[serde(default)]
-    pub id: String,
     #[serde(default)]
     pub task_id: Option<String>,
     #[serde(default)]
@@ -192,8 +190,6 @@ pub(crate) struct SpooledCreationRequest {
     pub paused: Option<bool>,
     #[serde(default)]
     pub from_session: Option<String>,
-    #[serde(default)]
-    pub created_at: String,
     #[serde(default)]
     pub idempotency_key: Option<String>,
 }
@@ -403,13 +399,13 @@ pub(crate) fn validate_product_rrule(rrule: &str) -> Result<String> {
         "MINUTELY" | "SECONDLY" | "DAILY" => {
             bail!("minute-granular or daily FREQ '{freq}' is not supported by the product subset")
         }
-        "CRON" => bail!("CRON rrule is not supported by the product subset"),
-        "HOURLY" | "WEEKLY" | "ONCE" => {}
+        "CRON" | "HOURLY" | "WEEKLY" | "ONCE" => {}
         other => bail!("unsupported FREQ '{other}'"),
     }
     let allowed: &[&str] = match freq {
         "HOURLY" => &["FREQ", "INTERVAL", "BYDAY", "BYHOUR", "BYMINUTE"],
         "WEEKLY" => &["FREQ", "BYDAY", "BYHOUR", "BYMINUTE"],
+        "CRON" => &["FREQ", "EXPR"],
         _ => &["FREQ", "AT"],
     };
     for (key, _) in &parts {
@@ -477,6 +473,12 @@ pub(crate) fn validate_product_rrule(rrule: &str) -> Result<String> {
             };
             parse_int("BYMINUTE", byminute, 0, 59)?;
         }
+        "CRON" => {
+            let Some(expr) = get("EXPR") else {
+                bail!("invalid rrule: FREQ=CRON requires EXPR");
+            };
+            validate_cron_expr(expr)?;
+        }
         _ => {
             // ONCE: exactly the local wall-clock form YYYY-MM-DDTHH:MM — no
             // seconds, no 'Z', no UTC offset — and strictly in the future
@@ -534,6 +536,56 @@ pub(crate) fn validate_product_rrule(rrule: &str) -> Result<String> {
         }
     }
     Ok(normalized)
+}
+
+/// Validates the CRON EXPR subset the product surfaces accept — structural
+/// rules only, mirroring the MCP server's CRON arm (B9: the watcher must
+/// reject exactly what the server rejects). The engine's `ParsedCronExpr`
+/// stays the semantic authority on every path: field bounds, impossible
+/// day-of-month/month combinations, and unknown names are rejected there,
+/// and that engine error reaches the caller through the same failure path.
+///
+/// Product rules:
+/// - exactly five whitespace-separated fields (minute hour day-of-month
+///   month day-of-week);
+/// - the minute field must be one fixed value 0-59 — minute-granular
+///   schedules stay outside the product subset (the same constraint the
+///   scheduled-task wizard prompt states), so lists/ranges/steps are not
+///   accepted there;
+/// - the remaining fields keep the standard cron vocabulary the engine
+///   parses (`*`, lists, `a-b` ranges, `p/s` steps, JAN-DEC/SUN-SAT
+///   names) with no empty list items.
+fn validate_cron_expr(expr: &str) -> Result<()> {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    if fields.len() != 5 {
+        bail!(
+            "invalid rrule: CRON EXPR must have exactly 5 fields: minute hour day-of-month month day-of-week"
+        );
+    }
+    let minute = fields[0];
+    if !minute.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("invalid rrule: CRON EXPR minute field must be a fixed value, got '{minute}'");
+    }
+    let Ok(minute_value) = minute.parse::<u32>() else {
+        bail!("invalid rrule: CRON EXPR minute field must be a fixed value, got '{minute}'");
+    };
+    if minute_value > 59 {
+        bail!("invalid rrule: CRON EXPR minute must be between 0 and 59");
+    }
+    for field in &fields[1..] {
+        // split_whitespace never yields an empty item (same reason server.py
+        // has no empty-field arm), so no explicit empty-field check here.
+        if !field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'*' | b',' | b'-' | b'/'))
+        {
+            bail!("invalid rrule: CRON EXPR field '{field}' is not valid cron syntax");
+        }
+        if field.split(',').any(|item| item.is_empty()) {
+            bail!("invalid rrule: CRON EXPR field '{field}' contains an empty list item");
+        }
+    }
+    Ok(())
 }
 
 fn spool_root() -> PathBuf {
@@ -1258,12 +1310,29 @@ fn is_permanent_domain_error(error: &str) -> bool {
     // handles field shape, mode, schedule syntax and body limits. I/O, registry
     // recovery and index-read failures remain bounded retries. A typed error
     // migration is deferred; do not classify generic OS/parse text as poison.
-    const PERMANENT_MARKERS: [&str; 5] = [
+    const PERMANENT_MARKERS: [&str; 13] = [
         "only scheduled-message tasks can change their target session",
         "target_session not found:",
         "scheduled task not found:",
         "ACP/code session",
         "Once schedule has no future run",
+        // Engine CRON parse classes (automation_manager): the watcher gate
+        // admits these shapes structurally and the engine is the semantic
+        // authority (issue #821), but the stored rrule is fixed — a retry
+        // re-runs the identical parse, so the failure marker must land on
+        // the first attempt instead of burning the 3-attempt budget.
+        "Invalid CRON",
+        "is out of range",
+        "step must be >= 1",
+        "Failed to parse CRON",
+        "range start must be <=",
+        "can never occur",
+        // Engine CRON next-run guards: deterministic for a fixed rule, and
+        // reachable from gate-admitted shapes (a leap-day rule resumed in
+        // 2097-2098 has no Feb 29 inside the 5-year window — 2100 is not a
+        // leap year). Both name CRON, so they cannot swallow HOURLY/WEEKLY.
+        "Unable to compute next CRON run within 5 years",
+        "CRON schedule exceeded its range",
     ];
     PERMANENT_MARKERS
         .iter()
@@ -1452,8 +1521,23 @@ fn quarantine_with_warning(path: &Path, warnings: &mut usize) -> bool {
 fn sanitize_marker_text(text: &str) -> String {
     let pinvou3_home = crate::platform::paths::pinvou3_home();
     let home = crate::platform::paths::user_home_dir();
-    // Longest prefix first so the pinvou3-home placeholder wins over "~".
-    let longest_first = [(&pinvou3_home, "<pinvou3-home>"), (&home, "~")];
+    // The validator's permanent errors embed the CANONICALIZED home (a
+    // symlinked-home spelling such as macOS /var → /private/var differs
+    // from the plain prefix), so the canonical spelling scrubs alongside
+    // the plain ones. Longest prefix first so the pinvou3-home placeholder
+    // wins over "~".
+    let pinvou3_home_canonical = crate::platform::paths::pinvou3_home()
+        .canonicalize()
+        .unwrap_or_else(|_| pinvou3_home.clone());
+    let home_canonical = crate::platform::paths::user_home_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| home.clone());
+    let longest_first = [
+        (&pinvou3_home, "<pinvou3-home>"),
+        (&pinvou3_home_canonical, "<pinvou3-home>"),
+        (&home, "~"),
+        (&home_canonical, "~"),
+    ];
     let mut sanitized = text.to_string();
     for (prefix, placeholder) in longest_first {
         let prefix_text = prefix.to_string_lossy().to_string();
@@ -1496,6 +1580,63 @@ fn sanitize_marker_text_scrubs_home_prefixes() {
     );
 }
 
+/// Canonical-spelling pin (round-1 review N5): on machines where the
+/// canonicalize() spelling differs from the plain spelling (macOS
+/// /var→/private/var, a symlinked home), the validator error embeds the
+/// canonical spelling and the canonicalization arm must fold it away. A
+/// symlink pointing into the temp dir constructs an environment where the
+/// two spellings necessarily differ, so the pin genuinely bites on every
+/// platform.
+#[test]
+fn sanitize_marker_text_scrubs_the_canonicalized_home_spelling() {
+    let _env_lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = std::env::temp_dir().join(format!(
+        "pinvou3-sanitize-canonical-{}-{}",
+        std::process::id(),
+        crate::platform::paths::tests::unique_suffix()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    #[cfg(unix)]
+    {
+        let link = directory.join("linked-home");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+        // SAFETY: ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &link) };
+        let canonical = link.canonicalize().unwrap();
+        assert!(
+            canonical != link,
+            "fixture must produce two distinct spellings"
+        );
+        let text = format!(
+            "apply {} {} failed: is a file",
+            link.join("workspaces/w-1").display(),
+            canonical.join("workspaces/w-1").display(),
+        );
+        let scrubbed = sanitize_marker_text(&text);
+        assert!(
+            !scrubbed.contains(&link.display().to_string())
+                && !scrubbed.contains(&canonical.display().to_string()),
+            "both spellings must scrub: {scrubbed}"
+        );
+        assert_eq!(
+            scrubbed.matches("<pinvou3-home>").count(),
+            2,
+            "each spelling folds once: {scrubbed}"
+        );
+        // SAFETY: ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::remove_var("PINVOU3_HOME") };
+    }
+    #[cfg(not(unix))]
+    {
+        // No portable symlink construction here: the canonical spelling
+        // coincides with the plain one, which the sibling test covers.
+        let _ = &directory;
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
 /// Write a failure marker for an already-consumed spool file (the caller has
 /// quarantined it): a still-waiting MCP call receives the failure instead of
 /// hanging until its 5s timeout (design C4). The marker also unblocks the
@@ -1512,7 +1653,17 @@ fn write_failure_marker(stem: &str, error: &anyhow::Error) {
     // like every other marker read.
     if let Some(existing) = read_regular_bounded(&marker, MAX_RESULT_MARKER_BYTES) {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&existing) {
-            if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            // The receipt is a DIGEST-BOUND ok:true (the same definition
+            // `result_marker_suppresses` and the session_creation sibling
+            // enforce): a digest-LESS ok:true marker is not a recorded
+            // result (forged or pre-digest) and the failure marker
+            // replaces it.
+            if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                && value
+                    .get("request_digest")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            {
                 log::warn!(
                     "[scheduled-creation] refusing to overwrite an ok:true receipt for {stem}"
                 );
@@ -2687,7 +2838,6 @@ mod tests {
         let request = SpooledCreationRequest {
             schema_version: 1,
             kind: SpoolRequestKind::Create,
-            id: "irrelevant".to_string(),
             task_id: None,
             target_session: None,
             name: Some("早报".to_string()),
@@ -2696,7 +2846,6 @@ mod tests {
             model_id: None,
             paused: Some(false),
             from_session: Some("src".to_string()),
-            created_at: String::new(),
             idempotency_key: Some("k".to_string()),
         };
         assert_eq!(
@@ -2889,6 +3038,17 @@ mod tests {
             " FREQ=ONCE;AT=2099-06-01T09:30 ",
             "FREQ=HOURLY",
             "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=0;BYMINUTE=59",
+            // Issue #821: CRON/每月 is a product surface. Fixed minute, the
+            // full engine cron vocabulary (ranges/steps/names) in the other
+            // fields; semantic bounds stay the engine's job. Leading-zero and
+            // Unicode-White_Space separators parse exactly as the server's
+            // mirror does (B9), so the editor and spool shapes agree.
+            "FREQ=CRON;EXPR=30 9 1 * *",
+            "freq=cron;expr=0 9-18 1,15 * MON-FRI",
+            "FREQ=CRON;EXPR=15 9 */2 * *",
+            "FREQ=CRON;EXPR=5 9 1 JAN *",
+            "FREQ=CRON;EXPR=059 9 1 * *",
+            "FREQ=CRON;EXPR=30\u{3000}9 1 * *",
         ] {
             let normalized = validate_product_rrule(rrule)
                 .unwrap_or_else(|e| panic!("{rrule} should pass: {e}"));
@@ -2899,7 +3059,32 @@ mod tests {
     #[test]
     fn rrule_subset_rejects_cron_and_minute_granular() {
         for rrule in [
+            // Minute-granular CRON stays outside the product subset even
+            // though the domain parser would run it.
             "FREQ=CRON;EXPR=*/5 * * * *",
+            "FREQ=CRON;EXPR=0,30 * * * *",
+            "FREQ=CRON;EXPR=5-55/10 * * * *",
+            "FREQ=CRON;EXPR=* * * * *",
+            // Structural subset bounds.
+            "FREQ=CRON",
+            "FREQ=CRON;EXPR=30 9 1 *",
+            "FREQ=CRON;EXPR=30 9 1 * * *",
+            "FREQ=CRON;EXPR=60 9 1 * *",
+            "FREQ=CRON;EXPR=abc 9 1 * *",
+            "FREQ=CRON;EXPR=30 9 1,3 * *;BYDAY=MO",
+            "FREQ=CRON;EXPR=30 9 1,,3 * *",
+            "FREQ=CRON;EXPR=30 9 1 * ?",
+            // B9: Python's isspace() strips/splits U+001C-U+001F but this
+            // watcher's Unicode White_Space does not — the server aligns to
+            // the White_Space set, and these vectors pin that both sides
+            // reject every shape carrying the four separators.
+            "FREQ=CRON;EXPR=30\u{1c}9 1 * *",
+            "FREQ=CRON;EXPR=\u{1c}30 9 1 * *",
+            "FREQ=CRON;EXPR=30 9 1 * *\u{1c}",
+            "FREQ=WEEKLY;BYDAY=\u{1c}MO;BYHOUR=9;BYMINUTE=30",
+            // Minute overflowing u32: the same fixed-value rejection class
+            // the server's bounds check lands on.
+            "FREQ=CRON;EXPR=99999999999999999999 9 1 * *",
             "FREQ=MINUTELY;INTERVAL=5",
             "FREQ=DAILY;BYHOUR=8;BYMINUTE=30",
             "FREQ=HOURLY;INTERVAL=0",
@@ -3759,8 +3944,12 @@ mod tests {
         // swallow the bump (the natural write raced the park clock on CI).
         let parked_at = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
         *retries.parked.get_mut("swap.json").expect("parked") = parked_at;
+        // Still poison after issue #821: the fixed-minute product subset
+        // accepts simple CRON schedules, so a valid-looking rule like
+        // "0 5 * * *" would now apply — the corrected payload must stay a
+        // REJECTED shape (minute-granular) for the re-park to be a poison.
         let corrected =
-            spool_record_json(&[("rrule", serde_json::json!("FREQ=CRON;EXPR=0 5 * * *"))]);
+            spool_record_json(&[("rrule", serde_json::json!("FREQ=CRON;EXPR=*/5 * * * *"))]);
         std::fs::write(spool.join("swap.json"), &corrected).unwrap();
         std::fs::File::options()
             .write(true)
@@ -5854,6 +6043,53 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Converged with the session_creation sibling (its round-13 MAJOR 4b):
+    /// the write_failure_marker receipt refusal is DIGEST-bound — a readable
+    /// digest-bound ok:true receipt is never clobbered by a later failure
+    /// marker (deleting the refusal arm turns this red).
+    #[test]
+    fn failure_marker_never_clobbers_a_digest_bound_receipt() {
+        let _home = TempHome::new();
+        let dir = done_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("rrr1212.json");
+        std::fs::write(
+            &marker,
+            serde_json::json!({
+                "ok": true,
+                "task_id": "t",
+                "request_digest": spool_request_digest(&valid_record()),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let before = std::fs::read(&marker).unwrap();
+        write_failure_marker("rrr1212", &anyhow::anyhow!("boom"));
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            before,
+            "the readable digest-bound receipt survives byte-for-byte"
+        );
+    }
+
+    /// And the receipt DEFINITION: a digest-LESS ok:true marker is not a
+    /// receipt and IS replaced by the failure marker (the watcher's retry
+    /// path depends on this — the model's next retry re-applies instead of
+    /// replaying a forged success).
+    #[test]
+    fn failure_marker_overwrites_a_digest_less_ok_marker() {
+        let _home = TempHome::new();
+        let dir = done_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("sss1313.json");
+        std::fs::write(&marker, serde_json::json!({"ok": true}).to_string()).unwrap();
+        write_failure_marker("sss1313", &anyhow::anyhow!("boom"));
+        let replaced: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(replaced["ok"], serde_json::json!(false));
+        assert_eq!(replaced["error"], serde_json::json!("boom"));
+    }
+
     #[tokio::test]
     async fn failure_marker_lets_a_retry_reapply() {
         let _home = TempHome::new();
@@ -7152,6 +7388,19 @@ mod tests {
         for error in [
             "scheduled task not found: task-1",
             "target_session not found: target001",
+            // Engine CRON parse classes: every deterministic rejection the
+            // fixed-minute gate can hand to the engine (issue #821 opened the
+            // subset; these are the shapes that pass it structurally).
+            "Failed to create scheduled task: CRON hour value 24 is out of range 0-23",
+            "Failed to create scheduled task: Invalid CRON day-of-week value 'XYZ'",
+            "Failed to create scheduled task: CRON EXPR day-of-month/month combination can never occur",
+            "Failed to create scheduled task: CRON hour step must be >= 1",
+            "Failed to create scheduled task: Failed to parse CRON hour step",
+            "Failed to create scheduled task: CRON day-of-month range start must be <= end",
+            // Next-run guards (round-3 review minor 5): deterministic for a
+            // fixed rule once a gate-admitted shape reaches activation.
+            "Failed to create scheduled task: Unable to compute next CRON run within 5 years",
+            "Failed to create scheduled task: CRON schedule exceeded its range",
         ] {
             assert!(is_permanent_domain_error(error));
         }

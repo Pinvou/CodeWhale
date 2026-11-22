@@ -40,9 +40,9 @@ Every human-authored commit must include a valid `Signed-off-by`:
 git commit -s
 ```
 
-Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/) and [DCO.md](DCO.md) for what the trailer certifies and how CI enforces it. CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
+Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/) and [DCO.md](DCO.md) for what the trailer certifies and how CI enforces it. CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt. The dedicated `DCO` workflow runs its sign-off verification on pull requests only (the merge-queue leg merely re-reports the per-PR result), but direct pushes to `main` are still sign-off-checked: the `commit-message` gate in `pr-check` runs `scripts/validate-commit-msg.py` over the pushed range and validates message format and sign-offs together — relaxing only the signer-must-match-author rule on push, to accept GitHub's squash commits; on pull requests the signer must match the commit author. See [DCO.md](DCO.md) for the division of labor between the two gates.
 
-The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 19 existing integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
+The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 20 explicitly registered integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
 
 ## Where changes belong
 
@@ -77,6 +77,35 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
+The retained Token financial phase has a 40-minute Go test-binary timeout,
+including the complete selected package. Retained Billing keeps its 75-minute
+budget and other financial test binaries keep 20 minutes. Within the existing
+owners job, Billing schema contracts run as two sequential binaries: the complete
+LegacyExpiry historical-upgrade root, then all remaining required schema roots.
+Each keeps its 20-minute limit, making the schema portion's cumulative test budget
+40 minutes instead of 20. Compilation, startup and ownership checks are outside
+these test-binary budgets; the Account job retains its existing outer limit.
+Each batch must restore the pristine instance before the next can run. No roots,
+subcases, race detection, actor checks or ordinary resource-retirement gates are
+removed, and the existing job groups and runner concurrency are unchanged.
+
+The six financial Jobs keep the same root selection and race checks. With
+`PINVOU_CI_FIXTURE_TEMPLATES=1`, retained Billing business fixtures may clone a
+process-owned, frozen baseline prepared by the real migration actor. The cache
+key includes complete SQL/checksums, fixture policy, cluster identity, role OIDs,
+attributes and memberships. Every case still owns a new UUID database and an
+opaque cleanup lease. Sources refuse connections and retire before phase-level
+role cleanup. Token's absent-role setup is not shared; historical expiry baselines
+are scoped inside their original actor-owning root, and all 36 upgrade/replay
+cases still run. No cached test success, shared mutable database, forced backend
+termination or durability-setting change is permitted. The six Jobs execute a
+real snapshot-isolation probe before their contracts. Unconfirmed preparation,
+changed source identity/owner, writable source, cleanup failure or a skipped
+probe remains a failure. Local runs retain the original empty-create setup by
+default. Set `PINVOU_CI_FIXTURE_TIMING=1` to report bounded setup/cleanup costs;
+financial phases stream their original output and store timing/root-pass diagnostics
+in the existing lifecycle artifact for before/after comparison.
+
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
 copied verbatim into the lock's `resolved` URLs, and
@@ -87,7 +116,185 @@ up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
+Windows relay signer regressions report only closed spawn-error/signal categories,
+bounded status and elapsed time, and the last observed test instrumentation stage.
+Unknown values remain unknown; these observations do not establish an underlying
+timeout or infrastructure root cause. Invalid stored-key cases must prove refusal
+by the signer itself before publication, independently of the writer's safeguards.
+Raw child output and exception text must not enter failure diagnostics.
+
+Controller bootstrap workers retain a separate bounded diagnostic IPC cache.
+Unexpected exits report only closed opening/post-open, store-error and native-cause
+observations, plus an ancestor phase only when that verifier actually failed.
+Missing observations stay unknown and never add a wait. Ordinary worker messages,
+native defaults and the exact 81/82/83 fault-qualification exits remain unchanged;
+better diagnostics do not establish the cause of a previously unexplained exit.
+
+### Test resource lifetime
+
+Release command ownership, failure diagnostics and supported interpreter setup are
+documented in [the release process lifetime guide](docs/remote-release-process-lifetime.md).
+
+One-shot CI fixtures must create resources through the shared lifetime boundary:
+
+- Go PostgreSQL fixtures use `internal/cifixture.CreateDatabase` and retain the
+  returned opaque lease for `DropDatabase`. Close clients first. Cleanup observes
+  backend exit and checks cluster, database OID and the fixture's original owner
+  policy before ordinary DROP; it never disconnects another backend. Keep existing
+  role/dependency checks. Job-owned disposable PostgreSQL services contain roles
+  and interrupted database setup; no shared or production database is reclaimed.
+- Frontend fixtures use `tests/helpers/{vite,puppeteer,http,https,net}-fixture.mjs`
+  (CommonJS browser adapter: `puppeteer-fixture.cjs`). Servers bind independent
+  loopback ports; Vite optimizer output and browser profiles are private. Await
+  close acknowledgement before deleting directories. Legacy explicit exits use
+  `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+  A smoke with a large Vite import graph may explicitly call
+  `prepareFixtureModules(server, ['/tests/fixtures/entry.jsx'])` before its first
+  case. It waits for static module transforms and optimizer crawl in that owned
+  server, with one setup budget capped at 30 seconds and no retry. Keep the
+  original navigation/action deadlines and readiness assertions; close the
+  server in `finally` even when setup fails. Never share optimizer output across
+  jobs or use module preparation to bypass a browser/application failure.
+  Vite's initial crawl-idle promise is one-shot: readiness must also traverse
+  each requested static import/re-export graph and await its optimizer generation.
+  Lazy `import()` branches stay case-triggered, and modules are transformed,
+  never executed during preparation. HTTP fixtures may explicitly include
+  `/@vite/client` so browser-client compilation is covered by the same budget.
+  When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
+  bounded console/page errors, failed requests and HTTP errors under
+  `browser-diagnostics/` in that job's existing resource artifact. Before close,
+  it captures the last DOM and viewport screenshot of loopback fixture pages;
+  this is a last-state snapshot, not proof of the exact assertion-time state.
+  Remote page DOM, headers, cookies, storage, URL queries and form values are
+  excluded. Common token forms and explicitly private DOM regions are masked;
+  fixtures must still use synthetic data, since redaction cannot identify every
+  possible secret. The first 32 browsers per ledger reserve up to 768 KiB each
+  (24 MiB total), 128 events and the first three pages. Capture adds at most
+  1.5 seconds per close, reports omissions, and never changes assertion timeouts,
+  native cleanup acknowledgements or the original test result. Native crashes
+  and forcibly killed processes may leave only already-written events.
+  Rejected navigation/selector/function waits also emit bounded, redacted
+  `[browser-fixture-diagnostic]` stderr records with pending requests, recent
+  network events, script/resource timing and page readiness. These records
+  survive artifact-upload failures. A separate bounded error ring retains
+  failed imports even when successful requests fill the ordinary timeline;
+  the failure record includes up to eight errors for that page, even if DOM
+  capture stalls. Up to three read-only failure snapshots
+  per browser are allowed even after the first three page numbers; they do not
+  mask the live page or change the original exception, wait arguments or budget.
+- Linux CI browser shards pass `--isolate-network` to the shared smoke runner.
+  The frontend logic suite (including browser diagnostics regression tests) and
+  credential-origin real-browser matrix also run their complete fixture trees
+  through `scripts/ci-browser-network.py` inside the existing process supervisor.
+  After dependency installation and builds, each smoke's driver, mock servers,
+  Vite and Chrome share a private user/network namespace with loopback only.
+  This prevents other jobs' Docker interface changes from canceling local module
+  requests. The original UID/GID and resource cgroup are retained, setup
+  capabilities are dropped before tests execute, and the outer process
+  supervisor still owns detached descendants and cancellation. A missing
+  `unshare`, denied namespace, or unconfirmed isolation fails the job without
+  retrying in the host network. No fixture in this stage may depend on external
+  downloads/services; prepare those dependencies before isolation. Local runs
+  can request the same flag; other platforms keep their existing behavior.
+- Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
+  subreaper / Windows child Job Object contains detached descendants and assigns
+  a private temporary directory. A killed Linux controller can be recovered only
+  by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
+  sweep or shared Runner Job Object is used.
+  For stalled-process investigation, `--diagnostics` emits bounded phase names
+  and one Python stack snapshot after a phase has stalled for three seconds.
+  It never changes the command, cleanup deadline, cancellation or exit verdict.
+  The Windows supervisor regression preserves captured evidence when its
+  existing 15-second subprocess limit expires. The release-contract artifact
+  action additionally opts into bounded passive file/HTTP transport evidence;
+  it excludes signed URLs, headers, payloads, file paths and raw error messages.
+  These logs distinguish local receipt reads, TCP/TLS and response waits without
+  suppressing stream errors or extending the artifact's three-minute limit.
+  The Windows atomic regression suite runs each original patched-executable
+  filter in an independent scope and retains attempted-receipt inventory even
+  on failure. Its capture-retention fixtures hand off the child's creation
+  identity before launcher exit and verify the same kernel object's exit;
+  a `finished` phase marker alone is not resource retirement.
+  This Windows atomic chain validates the job's existing native 64-bit CPython
+  (3.12 or newer) and binds its absolute executable for initialization, each
+  filter and retirement. Missing or incompatible interpreters fail before the
+  ledger starts; this fixture setup does not install or reconfigure system Python.
+- Node test Workers register with the shared fixture scope as `worker` resources.
+  Configuration changes require acknowledgement, and snapshots come from the
+  worker that owns the state. Close the owned listeners and observe Worker exit
+  before releasing its receipt or removing fixture files; a sent stop request
+  alone does not confirm retirement. Workers are never recovered by a PID sweep.
+- A deliberately blocked browser observer waits on shared counters of real
+  accepted host replies, after their IPC response files have been published.
+  Keep a bounded observer deadline and the intended minimum stall; do not infer
+  a reply count from a fixed sleep or compare different processes' wall clocks.
+  For cancellation cases, hold the fake upstream behind an owned release file
+  until its cancellation audit exists; assert that completion and host-end have
+  not happened, then release it and verify completion-before-end. A fixed fake
+  tool lifetime does not guarantee that a heartbeat has already failed. Release
+  finite barriers during cleanup even when assertions fail; intentionally
+  uncooperative shutdown fixtures retain their separate never-release path.
+  Keep live process fixtures behind explicit release barriers until ownership
+  assertions finish, rather than giving them fixed lifetimes that can expire
+  during another scope's startup.
+- Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
+  writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
+  validates all leases before stopping exact IDs and checks anonymous volumes.
+  Missing creation confirmation fails closed. Direct Docker API creation must
+  add equivalent ownership registration before use. Images, named cache volumes
+  and shared BuildKit builders are outside this disposable resource boundary.
+
+`ci-resource-ledger.py --init` starts fresh job receipts; the workflow always
+checks them and attempts to upload them with seven-day retention. Diagnostic
+uploads have a three-minute limit and warn on transport failure; original local
+receipts/logs remain available. Upload delivery does not replace or relax the
+mandatory tests and resource-retirement gate. `--recover` is restricted to the
+current GitHub job ledger. Unknown or unconfirmed cleanup fails the gate and
+never grants permission to retry another smoke. Existing business assertions,
+required roots, dependency skips and retries remain unchanged. Download/build
+caches are reusable resources and must not be deleted as fixture residue.
+
+Account PostgreSQL service retirement shares the existing 105-second stop budget
+with exact container and anonymous-volume disappearance checks. Docker stop is
+issued once; bounded inventory observations wait for AutoRemove acknowledgement.
+A failed stop, incomplete registration, query failure, or exhausted budget remains
+a failed gate with its original receipt retained; no force removal or pruning is
+used.
+
+Run `python3 scripts/ci-fixture-guard.py` plus its regression tests when adding
+fixtures. The guard covers test database DDL and JS/CommonJS resource imports;
+runtime identity checks remain authoritative. A new resource type needs a shared
+factory, failure/cancellation verification and a zero-resource postcondition,
+rather than another ad-hoc cleanup command in an individual test.
+
+The static fixture guard covers Go test database DDL and JavaScript server/browser
+factories. It does not inspect Docker commands or Python/shell subprocess paths.
+An absolute Docker executable bypasses the job's PATH wrapper, just as a direct
+Docker API does; either requires equivalent ownership registration and retirement
+checks. A passing static guard does not establish Docker coverage for those paths.
+Fixture signal hooks allow at most 30 seconds for cooperative cleanup, then exit
+nonzero while preserving unfinished receipts. A process exit never confirms that
+surviving child resources stopped; use the owning process supervisor and ledger.
+
 ## CI and merge queue
+
+Account Platform PostgreSQL closure contracts remain in `account-closure-test`.
+Nonfinancial Account contracts run in `account-platform-test`; six independent
+`account-financial-test` jobs (owners, Token, and four Billing groups) can start
+alongside it on separate runners. Every applicable group, the base contracts and
+closure are mandatory. Each financial job admits and retires one private service;
+the base job retains only its audit/broker services. Matrix fail-fast is disabled.
+The matrix validator rejects omitted, repeated or unknown groups, and successful
+input reuse requires all six exact jobs and their mandatory retirement checks;
+old monolithic or partial evidence is insufficient. Workflow/verifier/policy
+changes retain the existing requirement for real Merge Queue execution.
+Billing still assigns complete roots by longest estimated duration first using
+`scripts/account-financial-test-durations.json`; new roots receive the documented
+default weight and remain included exactly once. Race detection, required roots
+and subcases, exclusive actors, identity checks, per-worker limits and strict
+retirement are unchanged. Runner availability controls actual concurrency; this
+scheduling change does not promise a fixed speedup.
+
 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
 (lint, build, deterministic logic tests, and Rust formatting where applicable).
@@ -100,9 +307,26 @@ platform, permission, credential, session, remote-control, and other high-blast-
 radius paths automatically add full Linux and Windows Rust regression before
 queueing. Maintainers can apply `ci:full-rust` to force the same full regression
 for another ready Rust pull request; the label has no effect on a draft.
+
 The current lightweight Rust boundaries are internal-only changes under `feedback`,
 `personas`, and `pet`. Changing their registration, app commands, shared platform
 surface, Cargo metadata, or any unclassified Rust path still runs full regression.
+
+Frontend quality/build/logic remains in `frontend-test`. On Ready PRs and merge
+groups, `frontend-browser-test` runs four independent jobs alongside it. Every job
+selects the same actual tested diff, then assigns smoke entries by their stable
+selection order to one of four shards (`--shard INDEX/COUNT`, one-based). The union
+is the complete selected suite, with no duplicate assignments; a valid small
+selection can explicitly leave a shard empty, while an empty global selection
+fails. Each job prepares its own locked dependencies/builds and resource ledger;
+all applicable shards and the quality/logic job must pass `required-gate`.
+Matrix fail-fast is disabled so one failed shard does not cancel its peers.
+Successful-input reuse requires every configured shard and mandatory step,
+including retirement; partial or old monolithic evidence cannot replace them.
+The existing smoke retries, assertions, dependency-skip refusals and job timeouts
+are unchanged. Four workers permit parallel execution; actual elapsed time still
+depends on selected smoke duration and available runner capacity.
+
 Trusted same-repository `backflow/community-*` pull requests add a content-aware
 decision over the actual base-to-head diff. A pure release is accepted only when
 `VERSION` and every field managed by `scripts/sync-version.mjs` change mechanically
@@ -149,21 +373,85 @@ zswap and the image swap as fallbacks.
 Self-hosted runners retain their administrator-provisioned memory and swap;
 the memory setup script leaves them unchanged, and apt cleanup is hosted-only.
 
+The real PDF gate creates an exclusive temporary workspace per invocation and
+cleans only that workspace, including on failure; persistent runner temporary
+files from earlier jobs are never reused or deleted. Account and Reader browser
+fixtures recover only loopback static GET loads interrupted by Chromium's
+`ERR_NETWORK_CHANGED` (up to three loads). This does not retry product assertions
+or application requests; Docker interface changes on a shared host must not
+silently turn a failed module load into an empty-page timeout.
+
+Deployment PostgreSQL contracts reuse a local image only when its recorded
+repository digest matches the selected pinned manifest. They pull that exact
+manifest only on a cache miss and validate it again before running contracts;
+an image tag or dependency preparation alone never counts as a test pass.
+During dependency preparation, an available runner Go download archive is
+mounted read-only as a file proxy, and configured local file proxies are
+translated to container paths. Actions jobs with a configured Go cache and host
+Go toolchain fill missing archives from the isolated source copy first; standalone
+Docker-only invocations do not require host Go. The disposable module directory
+remains fresh;
+`go mod verify` and the configured checksum/private-module policy stay enabled.
+An available npm content-addressed cache is mounted only for preparation with
+prefer-offline lookup; npm lockfile integrity checks remain enabled. Verification
+containers retain their network isolation and do not receive these cache mounts.
+If a deployment-contract subprocess fails, its stage and bounded, redacted log
+tail are emitted into the CI job log before temporary files are cleaned up.
+Raw Go JSON remains unchanged for required-root, failure and no-skip validation;
+successful dependency preparation never substitutes for a contract result.
+Managed PostgreSQL fixture teardown waits for server-side backend exit within
+the existing 15-second cleanup budget after closing clients. Every observation
+rechecks the expected database owner; zero sessions remain mandatory, and the
+final drop never forces disconnection. The required real PostgreSQL regression
+holds an advisory-lock barrier to prove that a closed client can still have a
+live backend, and verifies timeout, owner and missing-database refusal.
+The Python financial and closure wrappers observe the same shutdown boundary:
+each identity-guarded SQL snapshot must retain exactly the expected databases
+and roles, no bootstrap objects, and zero other client backends. They may wait
+up to 15 seconds for backends to exit, checking all conditions on every sample;
+query/identity errors or catalog drift fail immediately. This never terminates
+a backend, removes an unknown actor, or retries a business contract.
+
 Repository administrators can set `PINVOU_LINUX_RUNNER` to a JSON label array
 (for example `["self-hosted","Linux","pinvou3"]`) to route x64 Linux jobs to
 a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
 The runner needs passwordless sudo for dependency setup, Docker with Compose and
 Buildx, GitHub CLI, and access to the required package registries. It must be
 reserved for trusted repository code. Self-hosted jobs retain local npm caches
-and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_MAC_ENABLED`
-to the literal `false` to disable Windows/macOS jobs and their corresponding
-required results; Linux checks remain required. Unset or any other value keeps
-the existing three-platform policy. ARM release jobs keep their hosted ARM label.
+and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_ENABLED` or
+`PINVOU_MACOS_ENABLED` to the literal `false` to disable that platform's jobs and
+corresponding required results independently; Linux checks remain required.
+Unset or any other value keeps that platform enabled. ARM release jobs keep their
+hosted ARM label.
 Optional `PINVOU_LINUX_HEAVY_RUNNER`, `PINVOU_LINUX_MEDIUM_RUNNER`, and
 `PINVOU_LINUX_LIGHT_RUNNER` arrays override that default for compilation,
 application/integration tests, and fast policy checks respectively. Each falls
 back to `PINVOU_LINUX_RUNNER`, then to the hosted 22.04 image. Distinct pool labels
 keep large Rust compilations away from small policy runners.
+
+Windows jobs accept `PINVOU_WINDOWS_HEAVY_RUNNER`,
+`PINVOU_WINDOWS_MEDIUM_RUNNER`, and `PINVOU_WINDOWS_LIGHT_RUNNER` JSON label
+arrays, falling back to `PINVOU_WINDOWS_RUNNER` and then `windows-latest`.
+For `pull_request`, these overrides are used only when both the head and base
+repository names and IDs match the workflow's `github.repository` and
+`github.repository_id`. Forks and missing or inconsistent repository metadata
+use the hardcoded hosted `windows-latest` fallback, including Windows matrix
+legs. Actor membership and approval do not establish repository identity.
+Push, manual dispatch, and Merge Group keep their existing pool routing only in
+workflows that already declare that event. Missing or undeclared event names
+also use the hardcoded hosted fallback.
+The release-only `PINVOU_REMOTE_RELEASE_RUNNER` scalar override uses the same
+PR source check; its job still runs only for the existing release events.
+
+This is the checked-in routing policy, not a security boundary against a fork
+that changes its workflow YAML. Before exposing persistent Windows self-hosted
+runners to PR workflows, maintainers must configure and verify a runner group
+restricted to trusted workflow/ref entries. The persistent-runner security finding
+remains blocking until that configuration is demonstrated; routing tests alone do
+not resolve it. The workflow files do not configure or verify those
+administrator-managed controls. An Actions approval alone does not make untrusted
+code safe for a persistent host. See
+[GitHub's runner security guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
 Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
 `scripts/ci/runner-image/`. This retains the existing release glibc compatibility
@@ -214,6 +502,76 @@ green. Queue independent ready pull requests without routine rebases; resolve ac
 conflicts, and let the queue validate freshness. Maintainers may queue at most two
 low-risk, independent pull requests in one merge group. Dependency-lock, CI, release,
 permission, session, CodeWhale gitlink, and other high-risk changes enter alone.
+
+All reviewed content checks in PR Check can reuse a successful ready-PR
+execution in a single-PR merge group: version consistency, frontend, Account,
+Relay/Hub, release-console and packaging contracts, Rust/CLI/knowledge lint and
+regression, Windows/macOS runtime checks, native Windows matrix phases and
+LoongArch cross checks. `ci-reuse-policy.py` classifies the current product jobs;
+unclassified new jobs continue running until their input contract is reviewed.
+The independently introduced `account-closure-test` has matching optional wiring.
+The separate `rustc-wrapper-smoke` and `evidence-validator-container` workflows
+use the same verifier with independent proof profiles and aggregate gates.
+Wrapper reuse requires every configured native platform leg. The container workflow
+diff-selects its real Docker test on queue entries; manual dispatch always runs it.
+
+When enabling these auxiliary queue workflows in branch protection, require
+`wrapper-gate` and `validator-gate`, rather than the individual `smoke` matrix
+checks or `linux-amd64`: those product jobs can legitimately skip after verified
+reuse or a non-applicable diff. Replace any existing requirements on those old
+names before enabling this behavior. This PR does not change server-side rules
+or make these auxiliary workflows mandatory where they were not required.
+
+The lightweight `changes` job verifies immutable source and queue Git objects,
+unchanged workflow/verifiers, effective inputs, runner labels, source repository,
+PR/head, source run attempt and successful workflow aggregate gate. PR Check
+schema 2 compares each job's source/dependency entries, base-to-tested diff,
+effective configuration and routing independently. The currently reviewed
+Rust/CLI domains exclude the independent Account/Hub/release-console service
+trees; other jobs retain whole-tree inputs. Shared scripts, unknown paths and
+unknown configuration remain conservative fences. See
+[the input boundary](docs/ci-result-reuse.md) for the precise supported scope.
+Schema 1 and the two auxiliary workflow profiles retain exact whole-tree/base,
+all-variable and routing checks. A matrix is reusable only if
+all configured legs are present exactly once and every step required in the
+queue has successful execution evidence. A format-only or partial ready-PR run
+cannot replace full queue regression. Unknown expressions require successful
+step evidence; unknown runner/matrix shapes, missing/duplicate/failed/skipped
+required evidence retain execution. Cache preparation and advisory diagnostics
+cannot substitute for a product test or resource-retirement step.
+
+Reuse recognizes the checked-in Windows same-repository name/ID routing recipe,
+including the existing native matrices, only when its exact expression matches
+the reviewed recipe. Source job labels must match the queue's selected pool;
+unknown or modified context-dependent runner expressions retain execution.
+
+Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
+does not donate successful individual jobs. The recorded base comes from the
+actual tested merge commit's first parent, not the mutable PR event/API base SHA.
+Lookup independently verifies that immutable commit's own base, head and tree;
+schema 2 additionally recomputes the relevant inputs before comparing them with
+the queue. The PR Check proof producer fetches two generations so its real first
+parent is available even on a clean runner. Ready-PR browser smoke selection uses that same actual merge parent
+and tested tree, including main-side renames, so its named step can witness the
+queue selection. Expected record refusals emit notices without configuration values.
+
+`changes`, `required-gate`, `commit-message`, `merge-authored-audit`,
+`backflow-portability` and `fast-gate` retain their existing event-specific
+execution: they inspect current routing, history, provenance or mutable gitlink
+reachability, or verify the current queue proof. Separate metadata workflows
+retain their own existing policies. Deployment/publication is not replayed from
+old artifacts. Jobs exposing per-run outputs/reusable-workflow calls are excluded.
+
+Proofs must come from a successful same-repository ready PR and be less than
+24 hours old. Forks, multi-PR groups, changed inputs, edited verifier policy and
+API/transport failures execute normal tests. Only verified skipped jobs may be
+normalized; failures/cancellations never become success. Proofs contain no raw
+configuration or credentials, and no status/check-write permission is used.
+Rotate `PINVOU_CI_REUSE_EPOCH` when changing runner images/toolchains or other
+inputs outside the repository; the proof attests the versioned environment recipe,
+not an externally modified machine. `PINVOU_CI_REUSE_FORCE_RUN=true` disables reuse.
+Failed advisory proof transport only loses the reuse opportunity. `changes`
+reports the source Actions run ID for every verified reuse decision.
 
 ## Pull requests
 

@@ -1,3 +1,6 @@
+import { ModelVersionsDialog } from "./ModelVersionsDialog.jsx";
+import { ModelStoreOperationResults } from './ModelStoreOperationResults.jsx';
+import { dismissModelStoreOperationResult, rememberForceRemoveResult } from './operation-results.js';
 // 模型商店:浏览 / 下载 / 在本机部署大模型。
 //
 // 数据来自本进程的 model_store 命令(见 model-store-api.js),本文件不直接碰
@@ -12,16 +15,19 @@
 //
 // 依赖方向 features -> components/shared/platform,不得反向引用 app/。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Database, Package, RefreshCw } from '../../components/icons.jsx';
+import { AlertTriangle, Package, RefreshCw } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { IosSearchField } from '../../components/IosControls.jsx';
 import {
   fetchLibrary,
   fetchMemoryAdmission,
+  startVersionAction,
+  fetchSavedModels,
   fetchStoreCards,
   forceRemoveModel,
   startDeploy,
+  startCardUpdate,
   startDownload,
   startEnable,
   startStop,
@@ -30,6 +36,8 @@ import {
   takeStartupCleanup,
 } from './model-store-api.js';
 import {
+  selectedDeployProfile,
+  deployProfileLabel,
   cardIdFromLifecycleKey,
   canStopRetainedProcess,
   downloadTaskKey,
@@ -37,13 +45,15 @@ import {
   formatBytes,
   lifecycleTaskKey,
   mergeModels,
+  operationWarningText,
   sortModels,
   storeGuideState,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
 } from './model-store-logic.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
-import { findLinkedRows } from './pinvou-model-link.js';
+import { findCardLinkedRows } from './pinvou-model-link.js';
 import { updateScriptsWithCleanup } from './update-scripts-workflow.js';
 // 发起/取消/应答/关闭都是模块级函数,身份恒定。直接引用而不是从 hook 的返回值上
 // 取,这样下面那些 useCallback 的依赖数组才是稳的——挂在 hook 返回对象上的话,
@@ -59,7 +69,8 @@ import {
   useLmmTasks,
 } from './useLmmTasks.js';
 import { StoreGuide } from './ModelStoreCards.jsx';
-import { ModelRow } from './ModelRow.jsx';
+import { MemoizedModelRow as ModelRow } from './ModelRow.jsx';
+import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
 import { StoreCardDialog } from './StoreCardDialog.jsx';
@@ -93,8 +104,9 @@ const PILL_BASE = 'inline-flex h-9 items-center rounded-full px-3.5 text-[13px] 
 const PILL_ON = 'bg-[#3A3A3C] text-white dark:bg-white dark:text-black';
 const PILL_OFF = 'bg-[#F2F2F7] text-black hover:bg-[#E5E5EA] dark:bg-[#2C2C2E] dark:text-white dark:hover:bg-[#3A3A3C]';
 const EMPTY_LIBRARY = { models: [], corrected: [] };
+const EMPTY_STARTUP_UPDATES = [];
 
-const ModelStoreView = ({ theme, t, bs }) => {
+const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, onLibrarySnapshot = NOOP }) => {
   const copy = t.uiModelStore;
   // 桥接快照只做「宿主是否已就绪」的标记;模型商店的数据走 LMM 自己的管理接口,
   // 不从 bs 里取。
@@ -123,6 +135,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
   const [detailCard, setDetailCard] = useState(null);
   const [detailCardId, setDetailCardId] = useState(null);
+  const [updateRecord, setUpdateRecord] = useState(null);
+  const [versionsRecord, setVersionsRecord] = useState(null);
   const [confirmUninstall, setConfirmUninstall] = useState(null);
   // 卸载失败后的逃生路径。两段:'confirm' 是二次确认,'result' 是移除之后把
   // LMM 报回来的残留路径摊开给用户看。
@@ -211,17 +225,19 @@ const ModelStoreView = ({ theme, t, bs }) => {
       const libraryList = await fetchLibrary();
       if (stale()) return;
       setLibrary(libraryList || EMPTY_LIBRARY);
+      onLibrarySnapshot(libraryList?.models || []);
       setLibraryError(null);
       // 启动时按实际容器状态纠正过运行标记的模型:用户上次看到的「运行中」其实
       // 已经不在了,不说一声他会以为模型还在服务。
       const corrected = libraryList?.corrected ?? [];
       if (corrected.length > 0) showToast(copy.corrected(corrected[0]));
+      if (libraryList?.link_sync_error) showToast(copy.linkSyncFailed(libraryList.link_sync_error));
     } catch (error) {
       if (!stale()) setLibraryError(String(error?.message || error));
     } finally {
       if (!stale()) setLibraryLoading(false);
     }
-  }, [copy, showToast]);
+  }, [copy, showToast, onLibrarySnapshot]);
 
   /**
    * 两份数据一起刷。**刻意不是 Promise.all**:两条路各自成败、各自记错误态,
@@ -254,7 +270,11 @@ const ModelStoreView = ({ theme, t, bs }) => {
       if (Object.keys(server).length === 0) continue;
       const types = new Set([...Object.keys(local), ...Object.keys(server)]);
       for (const t of types) {
-        if ((local[t] || '') !== (server[t] || '')) {
+        // P2-16（r24）：SHA-256 是十六进制串，大小写不影响值但影响严格等值。
+        // 后端 verify 侧已用 eq_ignore_ascii_case；前端严格 !== 会在服务端
+        // 下发大写 digest 时把同版脚本误判为「有可用更新」→ 确认更新后
+        // updateScriptsWithCleanup 先停运行中模型再拉一个零变化更新。
+        if (String(local[t] || '').toLowerCase() !== String(server[t] || '').toLowerCase()) {
           map[model.card_id] = true;
           break;
         }
@@ -325,7 +345,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * 把这次运行丢掉(库还没加载完、或者卡片刚被删,恰恰是最需要看到这张任务卡的
    * 时刻)。
    * @param {{card_id?:string, kind?:string}} run - 后端给的活跃运行。
-   * @returns {{title:string, key:string}|null} 标题与任务 key;认不出的操作返回 null。
+   * @returns {{title:string, cardName?:string, key:string}|null} 标题与任务 key;认不出的操作返回 null。
    */
   const describeActiveRun = useCallback(
     (run) => {
@@ -338,12 +358,18 @@ const ModelStoreView = ({ theme, t, bs }) => {
           return { title: copy.taskDownload(name), key: downloadTaskKey(cardId) };
         case 'deploy':
           return { title: copy.taskDeploy(name), key: lifecycleTaskKey(cardId) };
+        case 'version_stage':
+        case 'version_switch':
+        case 'version_delete':
+          return { title: copy.versionTask(name), cardName: name, key: lifecycleTaskKey(cardId) };
+        case 'update':
+          return { title: copy.taskCardUpdate(name), key: lifecycleTaskKey(cardId) };
         case 'enable':
           return { title: copy.taskEnable(name), key: lifecycleTaskKey(cardId) };
         case 'stop':
           return { title: copy.taskStop(name), key: lifecycleTaskKey(cardId) };
         case 'uninstall':
-          return { title: copy.taskUninstall(name), key: lifecycleTaskKey(cardId) };
+          return { title: copy.taskUninstall(name), cardName: name, key: lifecycleTaskKey(cardId) };
         case 'card_scripts':
           return { title: copy.cardScriptsTask(name), key: lifecycleTaskKey(cardId) };
         // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了
@@ -373,8 +399,14 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 接回来的任务没有等在 await 上的调用方(它是上一次挂载、甚至上一次页面加载
   // 发起的),跑完之后得有人去刷模型库——否则任务卡消失了,列表还停在「下载中」
   // 的那一版。自己发起的那些由各自的 handler 收尾,这里不重复刷。
-  useEffect(() => subscribeTaskSettled((task) => {
-    if (task?.reattached) loadLibrary();
+  //
+  // r27 P2-6（r28）：本挂载发起、原挂载已卸载的任务 settle 时 reattached=false
+  // （reattach 因 attachedRuns 跳过），旧挂载的 loadLibrary() 落在已卸载树上，
+  // 新挂载的订阅又被 reattached 门住——完成的下载要等手动刷新才出现。
+  // 修法：任务 settle 时一律刷库（loadLibrary 是本地 sqlite 查询，幂等且廉价，
+  // 双刷的代价远小于漏刷）。
+  useEffect(() => subscribeTaskSettled(() => {
+    loadLibrary();
   }), [loadLibrary]);
 
   /**
@@ -388,53 +420,53 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * `quiet` 给强制移除用：那条路径的结果页已经在说"磁盘上还有残留"，再叠一句
    * "顺带清了几行配置"只会稀释更要紧的提醒。但**清不掉时无论如何都要说**——
    * 品悟不允许删掉最后一个模型，那种情况下用户会留着一个静默失效的默认模型。
-   * @param {string|undefined} modelName - LMM 的 model_name。
+   * @param {string} cardId - 后端确认的卡片关联。
    * @param {string} displayName - 用于提示的模型名。
    * @param {{quiet?: boolean}} [options] - 成功时要不要出声。
    * @returns {Promise<boolean>} 清干净了(或本来就没什么要清)为 true;清不掉为 false。
    */
   const cleanLinkedRows = useCallback(
-    // names 要把这个模型的**全部标识**都带上（model_name 和 endpoint_model）。
-    // 接入时存的是 endpoint_model，只按 model_name 找必然落空——见 findLinkedRows。
-    async (names, displayName, { quiet = false } = {}) => {
+    // 名字和回环地址不足以授权删除用户配置，关联迁移由后端精确判断。
+    async (cardId, displayName, { quiet = false } = {}) => {
       const bridge = tryGetTauriBridge();
-      // **先分清「查过了没有」和「根本没查成」**。
-      //
-      // `findLinkedRows` 对 `undefined` 和空数组返回的都是 `[]`，下面那句
-      // `rows.length === 0 → return true` 于是会在**我们压根没能力查看**的情况下
-      // 宣告清理成功。品悟模型列表那一行照样留着，而调用方拿到 true、提示语说
-      // 「已卸载」，用户毫不知情——2026-09-22 真机上驭光卡删除后留下的那行死数据
-      // 就是这么来的（卸载本身成功、清理这步悄悄放过）。
-      //
-      // 拿不到快照时返回 false：宁可让用户看见一句「没能自动清掉，请手动删」，
-      // 也不能让他以为清干净了。
-      if (!Array.isArray(bs?.savedModels)) {
-        showToast(copy.linkBridgeMissing);
+      // 卸载可能等待很久；启动 handler 的 React props 即使之后刷新也仍是旧快照。
+      // 关联迁移会在后台写入设置，必须在操作完成后重新读取，不能把加载失败当空表。
+      let savedModels;
+      try {
+        savedModels = (await fetchSavedModels())?.models;
+      } catch {
+        // Both transport failures and invalid responses use the same recovery notice.
+      }
+      if (!Array.isArray(savedModels)) {
+        showToast(copy.linkRowStale(displayName, copy.linkSnapshotReadFailed));
         return false;
       }
-      const rows = findLinkedRows(bs.savedModels, ...names);
+      const rows = findCardLinkedRows(savedModels, cardId);
       // 真的没有死行要清:这是最常见的情况(用户从没接入过这个模型),不必出声。
       if (rows.length === 0) return true;
-      // 有死行、但拿不到 deleteModel。这两个条件**不能**合并成一句 return:合并之后
+      // 有死行、但拿不到条件删除能力。这两个条件**不能**合并成一句 return:合并之后
       // 「该清但清不掉」会被当成「没什么要清的」静默放过,留下一行静默失效的默认模型。
       // linkBridgeMissing 是一条**定值文案**(不是模板函数),别当函数调用。
-      if (!bridge?.models?.deleteModel) {
+      if (!bridge?.models?.deleteModelIfStoreLink) {
         showToast(copy.linkBridgeMissing);
         return false;
       }
+      // The snapshot only selects candidates; the backend rechecks current ownership
+      // under the settings lock so a concurrent manual edit cannot be deleted.
+      let removed = 0;
       for (const row of rows) {
         try {
-          await bridge.models.deleteModel(row.id);
+          if (await bridge.models.deleteModelIfStoreLink(row.id, cardId)) removed += 1;
         } catch (error) {
           showToast(copy.linkRowStale(row.name || displayName, String(error?.message || error)));
           // 清不掉是**失败**,要让调用方知道,否则它会紧接着弹一句成功提示把这条盖掉。
           return false;
         }
       }
-      if (!quiet) showToast(copy.linkRowRemoved(displayName, rows.length));
+      if (!quiet && removed > 0) showToast(copy.linkRowRemoved(displayName, removed));
       return true;
     },
-    [bs, copy, showToast]
+    [copy, showToast]
   );
 
   const handleDownload = useCallback(
@@ -458,14 +490,16 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 回的实际结果措辞，而那份结果在发请求时还不存在。
   const runLifecycle = useCallback(
     async ({ record, kind, title, start, doneText }) => {
-      const result = await runTask({ title, kind, key: lifecycleTaskKey(record.card_id), start });
+      const result = await runTask({ title, cardName: record.card_name, kind, key: lifecycleTaskKey(record.card_id), start });
       if (result.duplicate || result.aborted) return result;
-      if (result.ok) showToast(typeof doneText === 'function' ? doneText(result.result) : doneText);
+      if (result.ok) showToast(result.result?.link_sync_error
+        ? copy.linkSyncFailed(result.result.link_sync_error)
+        : (typeof doneText === 'function' ? doneText(result.result) : doneText));
       loadAll();
       // 把结果交回调用方：卸载成功后还要顺带清理品悟模型列表里的死行。
       return result;
     },
-    [loadAll, showToast]
+    [copy, loadAll, showToast]
   );
 
   const executeDeploy = useCallback(
@@ -492,12 +526,51 @@ const ModelStoreView = ({ theme, t, bs }) => {
     }
   }, [copy, executeDeploy, showToast]);
 
+  const handleCardUpdate = useCallback(
+    (record, revision) => runLifecycle({
+      record,
+      kind: 'update',
+      title: copy.taskCardUpdate(record.card_name),
+      start: () => startCardUpdate(record.card_id, revision),
+      doneText: (outcome) => (outcome?.changed ? copy.cardUpdateDone : copy.cardUpdateCurrent),
+    }),
+    [copy, runLifecycle]
+  );
+
+  const executeVersionAction = useCallback(
+    (record, action, versionId, memoryConfirmed = false) => runLifecycle({ record, kind: `version_${action}`,
+      title: copy.versionTask(record.card_name),
+      start: () => startVersionAction(record.card_id, action, versionId, memoryConfirmed),
+      doneText: (outcome) => action === 'delete' ? copy.versionDeleted((outcome?.freed_bytes || 0) / 1024 ** 3) : (action === 'stage' ? copy.versionStaged : copy.versionSwitched),
+    }),
+    [copy, runLifecycle]
+  );
+
+  const handleVersionAction = useCallback(async (record, action, versionId) => {
+    // r42 P1-1：switch 会走到 deploy（部署脚本可能自行启动运行时）——与
+    // 部署/启用同一把内存准入尺，需要确认时弹同一个确认框。预检只是 UX
+    // 尽力而为：失败不拦截（放行后由服务端同一准入给出规范报错），权威
+    // 门在 Rust 侧 start_version_action。
+    if (action === 'switch') {
+      try {
+        const admission = await fetchMemoryAdmission(record.card_id, versionId);
+        if (admission?.requires_confirmation) {
+          setMemoryConfirm({ record, admission, action: 'switch', versionId });
+          return;
+        }
+      } catch {
+        // 预检不可用（如测试桩未覆盖）：交给服务端准入。
+      }
+    }
+    return executeVersionAction(record, action, versionId, false);
+  }, [executeVersionAction]);
+
   const handleDeploy = useCallback(
     (record) => {
       // 多套部署方案的卡片先弹方案选择器;单方案/无方案卡片直接部署。
       const profiles = record.profiles || [];
       if (profiles.length > 1) {
-        setProfilePick({ record, selectedId: record.active_profile_id || profiles[0].id });
+        setProfilePick({ record, selectedId: selectedDeployProfile(record) });
         return;
       }
       deployWithProfile(record, null);
@@ -534,9 +607,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
     setMemoryConfirm(null);
     if (pending?.record) {
       if (pending.action === 'deploy') await executeDeploy(pending.record, pending.profileId, true);
+      else if (pending.action === 'switch') await executeVersionAction(pending.record, 'switch', pending.versionId, true);
       else await startEnabledModel(pending.record, true);
     }
-  }, [executeDeploy, memoryConfirm, startEnabledModel]);
+  }, [executeDeploy, executeVersionAction, memoryConfirm, startEnabledModel]);
 
   const handleStop = useCallback(
     (record) => runLifecycle({
@@ -629,10 +703,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
     // 强制移除那条路径一直是接住的（`const linksCleaned = ...`），两条路不该有
     // 差别：判据是「这个模型还能不能被调用」，跟用户点的是哪个按钮无关。
     const linksCleaned = await cleanLinkedRows(
-      [record.endpoint_model, record.model_name],
+      record.card_id,
       record.card_name,
+      { quiet: !!result.result?.link_sync_error },
     );
-    if (!linksCleaned) showToast(copy.uninstallLinksLeft(record.card_name));
+    const warning = uninstallCleanupWarning(copy, record.card_name, linksCleaned, result.result?.link_sync_error);
+    if (warning) showToast(warning);
   }, [cleanLinkedRows, confirmUninstall, copy, runLifecycle, showToast]);
 
   /**
@@ -680,7 +756,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
     [mergedModels]
   );
 
-  const closeForceRemove = useCallback(() => setForceRemove(null), []);
+  const closeForceRemove = useCallback(() => {
+    if (forceRemove?.stage === 'result') dismissModelStoreOperationResult(forceRemove.resultId);
+    setForceRemove(null);
+  }, [forceRemove]);
 
   const confirmForceRemove = useCallback(async () => {
     const target = forceRemove;
@@ -688,6 +767,9 @@ const ModelStoreView = ({ theme, t, bs }) => {
     setForceRemoveBusy(true);
     try {
       const result = await forceRemoveModel(target.cardId);
+      // Register before any follow-up await: navigation or linked-row cleanup
+      // failures must not lose the only disclosure of files left on disk.
+      const resultId = rememberForceRemoveResult(target, result);
       // 那张失败的任务卡该走了:它指向的记录已经不存在,留着只会让用户再点一次
       // 同一个入口,然后收到一句「没有这张卡」。
       dismissTask(target.taskId);
@@ -701,7 +783,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
       // 这里刻意不弹第二条 toast:强制移除的结果页已经在说"磁盘上还有残留"了,
       // 再叠一句"顺带清了几行配置"只会稀释那个更要紧的提醒。清不掉时才说话。
       const linksCleaned = await cleanLinkedRows(
-        [result?.endpoint_model, result?.model_name],
+        target.cardId,
         target.cardName,
         { quiet: true },
       );
@@ -711,7 +793,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
       // 会在同一 tick 把它盖掉,用户永远看不到。残留信息结果页上本来就有,让位给
       // 那条更要紧的。
       if (linksCleaned) showToast(copy.forceRemoveDone(target.cardName, residual.length));
-      setForceRemove({ ...target, stage: 'result', result: { ...result, residual_paths: residual } });
+      setForceRemove({ ...target, stage: 'result', resultId, result: { ...result, residual_paths: residual } });
     } catch (error) {
       // 失败就把框关掉、只留一句话:记录还在,那张任务卡也还在,用户可以再试。
       setForceRemove(null);
@@ -719,10 +801,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
     } finally {
       setForceRemoveBusy(false);
     }
-    // cleanLinkedRows 必须在依赖里。它依赖 bs（品悟的模型列表快照），漏掉的话
-    // bs 一变它就重建、而这里不重建，强制移除会拿着旧快照去 findLinkedRows：
-    // 要么漏清刚接入的那几行，要么对着已经不存在的 id 调 deleteModel、把一次
-    // 成功清理报成失败。残留路径结果页是用户清磁盘的唯一凭据,不能被闭包竞态吞掉。
+    // 清理回调读取操作完成后的设置；保留依赖以使用当前语言的恢复提示。
   }, [cleanLinkedRows, copy, forceRemove, loadAll, showToast]);
 
   const confirmProfileDeploy = useCallback(() => {
@@ -743,10 +822,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
    * 两个弹窗承载的信息不一样，不能合并——库详情要的字段商店卡片根本没有。
    * @param {object} model - 合并后的模型项。
    */
-  const openDetail = (model) => {
+  // r29 P2：useCallback 稳定引用——此前内联函数经 onOpen 传入 ModelRow
+  // （React.memo），每次父重渲染都是新函数引用击穿浅比较，memo 无效。
+  const openDetail = useCallback((model) => {
     if (model.record) setDetailCardId(model.id);
     else setDetailCard(model);
-  };
+  }, []);
 
   /**
    * 一个分区：标题 + 计数 + 两列行卡。
@@ -761,11 +842,12 @@ const ModelStoreView = ({ theme, t, bs }) => {
           {copy[titleKey]}
           <span className="ml-1.5 font-semibold opacity-60">{items.length}</span>
         </h3>
-        <div className="grid grid-cols-1 gap-x-6 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {items.map((model) => (
             <ModelRow
               key={model.id}
               model={model}
+              hasUpdate={startupUpdates.some((update) => update.card_id === model.id && update.local_revision === model.record?.card_revision)}
               copy={copy}
               scriptUpdate={!!scriptUpdates[model.record?.card_id || model.card_id]}
               busyKind={
@@ -779,6 +861,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               onEnable={handleEnable}
               onStop={handleStop}
               onUninstall={requestUninstall}
+              onCheckUpdate={setUpdateRecord} onVersions={setVersionsRecord}
             />
           ))}
         </div>
@@ -929,6 +1012,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
                 inputTestId="model-store-search"
                 onChange={(event) => setQuery(event.target.value)}
               />
+              {/* 存储设置不再单列顶栏按钮（11-16 用户反馈②：与「资源管理」菜单里的
+                  存储项双入口重复）——唯一入口=资源管理菜单，见 ResourceManagerDialog。 */}
               <button
                 type="button"
                 data-testid="model-store-resources"
@@ -973,6 +1058,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
               ))}
             </div>
           ) : null}
+          <ModelStoreOperationResults copy={copy} hiddenResultId={forceRemove?.stage === 'result' ? forceRemove.resultId : null} />
           {renderBody()}
         </div>
       </main>
@@ -1032,8 +1118,25 @@ const ModelStoreView = ({ theme, t, bs }) => {
         }}
       />
 
+      {versionsRecord ? <ModelVersionsDialog record={library.models?.find((r) => r.card_id === versionsRecord.card_id) || versionsRecord} copy={copy} theme={theme} busy={!!runningTask(lifecycleTaskKey(versionsRecord.card_id))} onClose={() => setVersionsRecord(null)} onAction={handleVersionAction} /> : null}
+      {updateRecord ? (
+        <CardUpdateDialog
+          key={updateRecord.card_id}
+          record={updateRecord}
+          copy={copy}
+          theme={theme}
+          busy={!!runningTask(lifecycleTaskKey(updateRecord.card_id))}
+          onClose={() => setUpdateRecord(null)}
+          onUpdate={handleCardUpdate} onStage={(record, revision) => handleVersionAction(record, "stage", revision)} onVersions={setVersionsRecord}
+        />
+      ) : null}
+
       <ModelDetailDialog
+        onVersions={(record) => { setDetailCardId(null); setVersionsRecord(record); }}
         cardId={detailCardId}
+        // 只为了权重校验档位：那是卡片元数据，库记录（弹窗自己 fetch 的那份）里
+        // 没有这一列。找不到时传 null，弹窗会按最不安全那一档出提示。
+        card={mergedModels.find((m) => m.id === detailCardId) ?? null}
         scriptUpdates={scriptUpdates}
         onUninstall={requestUninstall}
         cardBusy={!!runningTask(lifecycleTaskKey(detailCardId)) || !!runningTask(downloadTaskKey(detailCardId))}
@@ -1045,6 +1148,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
         savedModels={bs?.savedModels}
         onToast={showToast}
         onClose={() => setDetailCardId(null)}
+        onCheckUpdate={(record) => {
+          setDetailCardId(null);
+          setUpdateRecord(record);
+        }}
         onRedeploy={(record) => {
           setDetailCardId(null);
           handleDeploy(record);
@@ -1163,9 +1270,9 @@ const ModelStoreView = ({ theme, t, bs }) => {
         {forceRemove && forceRemove.stage === 'result' ? (
           <>
             <MsDialogTitle id="model-store-force-remove-title">{copy.forceRemoveResultTitle}</MsDialogTitle>
-            {/* warning 是 LMM 那边写好的、可以直接上界面的一句人话,原样显示。
-                自己再改写一遍只会让两边的说法慢慢对不上。 */}
-            <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>{forceRemove.result?.warning || ''}</p>
+            {/* 警告码经 operationWarningText 按当前语言渲染；未知字符串（旧结果/
+                测试桩的纯文本）原样显示。 */}
+            <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>{operationWarningText(copy, forceRemove.result?.warning)}</p>
             {forceRemove.result?.residual_paths?.length ? (
               <>
                 <div className={`mt-4 text-[13px] font-medium ${TEXT_PRIMARY}`}>
@@ -1202,6 +1309,9 @@ const ModelStoreView = ({ theme, t, bs }) => {
         {profilePick ? (
           <>
             <MsDialogTitle id="model-store-profile-title">{copy.profileTitle}</MsDialogTitle>
+            {profilePick.record.card_id === 'qwen38-27b-nvfp4-mtp' ? (
+              <p className={`mb-4 text-[13px] leading-6 ${TEXT_SECONDARY}`} data-testid="model-store-mtp-network-hint">{copy.mtpNetworkHint}</p>
+            ) : null}
             <div className="space-y-2">
               {profilePick.record.profiles.map((profile) => (
                 <label
@@ -1216,7 +1326,10 @@ const ModelStoreView = ({ theme, t, bs }) => {
                     onChange={() => setProfilePick((prev) => ({ ...prev, selectedId: profile.id }))}
                   />
                   <span className="min-w-0">
-                    <span className={`block text-[13px] ${TEXT_PRIMARY}`}>{profile.name}</span>
+                    <span className={`block text-[13px] ${TEXT_PRIMARY}`}>
+                      {deployProfileLabel(profilePick.record, profile, copy)}
+                      {profile.id === profilePick.record.default_profile_id ? <span className={`ml-2 text-[11px] ${TEXT_SECONDARY}`}>{copy.profileDefault}</span> : null}
+                    </span>
                     {profile.description ? (
                       <span className={`block text-[11px] ${TEXT_SECONDARY}`}>{profile.description}</span>
                     ) : null}

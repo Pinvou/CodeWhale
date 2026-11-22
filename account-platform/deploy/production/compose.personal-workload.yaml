@@ -1,0 +1,92 @@
+# Combine with compose.personal.yaml. Only the seven implemented F04 identities
+# obtain renewable tokens; writer discovery names never shadow business services.
+name: pinvou-personal
+x-agent: &agent
+  image: ${WORKLOAD_AGENT_IMAGE:?set same-source F01 workload agent image}
+  pull_policy: never
+  user: "65532:65532"
+  command: [-config, /run/config/workload.json]
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 96m
+  cpus: 0.25
+  pids_limit: 32
+  ulimits: {core: {soft: 0, hard: 0}}
+  environment:
+    SSL_CERT_FILE: /run/config/ca.crt
+    GOMEMLIMIT: 64MiB
+  logging:
+    driver: local
+    options: {max-size: "2m", max-file: "2"}
+  healthcheck:
+    test: [CMD, /service, -config, /run/config/workload.json, -check]
+    interval: 10s
+    timeout: 15s
+    start_period: 20s
+    retries: 6
+  # Canonical issuer host bypasses the public realm-denying edge only on this private network.
+  extra_hosts:
+    - "${PERSONAL_PUBLIC_HOST:?set canonical issuer DNS hostname}:${PERSONAL_KEYCLOAK_BACKEND_IP:?set verified private Keycloak IP}"
+  networks: [backend]
+services:
+  account-service-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${ACCOUNT_WORKLOAD_CONFIG_DIRECTORY:?set Account public config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${ACCOUNT_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only Account bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${ACCOUNT_SERVICE_WORKLOAD_DIRECTORY:?set only Account projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  identity-service-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${IDENTITY_WORKLOAD_CONFIG_DIRECTORY:?set Identity public config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${IDENTITY_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only Identity bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${IDENTITY_SERVICE_WORKLOAD_DIRECTORY:?set only Identity projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  billing-service-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${BILLING_WORKLOAD_CONFIG_DIRECTORY:?set Billing public config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${BILLING_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only Billing bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${BILLING_SERVICE_WORKLOAD_DIRECTORY:?set only Billing projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  token-gateway-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${TOKEN_WORKLOAD_CONFIG_DIRECTORY:?set Token public config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only Token bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_GATEWAY_WORKLOAD_DIRECTORY:?set only Token projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  keycloak-mobile-authenticator-workload-agent:
+    <<: *agent
+    user: "1000:0"
+    volumes:
+      - {type: bind, source: "${KEYCLOAK_WORKLOAD_CONFIG_DIRECTORY:?set authenticator public config and CA directory}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${KEYCLOAK_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only authenticator bootstrap secret directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${KEYCLOAK_WORKLOAD_TOKEN_DIRECTORY:?set only authenticator projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  token-credential-portal-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_CONFIG_DIRECTORY:?set only token-credential-portal public config and CA}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only token-credential-portal bootstrap directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${CREDENTIAL_WORKLOAD_TOKEN_DIRECTORY:?set only token-credential-portal projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  token-command-executor-workload-agent:
+    <<: *agent
+    volumes:
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_CONFIG_DIRECTORY:?set only token-command-executor public config and CA}", target: /run/config, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_BOOTSTRAP_DIRECTORY:?set only token-command-executor bootstrap directory}", target: /run/bootstrap, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_EXECUTOR_WORKLOAD_TOKEN_DIRECTORY:?set only token-command-executor projected token directory}", target: /run/projected, bind: {create_host_path: false}}
+  account-service:
+    depends_on:
+      account-service-workload-agent: {condition: service_healthy}
+  identity-service:
+    depends_on:
+      identity-service-workload-agent: {condition: service_healthy}
+  billing-service:
+    depends_on:
+      billing-service-workload-agent: {condition: service_healthy}
+  token-gateway:
+    depends_on:
+      token-gateway-workload-agent: {condition: service_healthy}
+networks:
+  backend:
+    external: true
+    name: ${PERSONAL_BACKEND_NETWORK:?set independently provisioned private dependency network}

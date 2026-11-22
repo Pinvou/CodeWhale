@@ -1,0 +1,85 @@
+# 私有 KMS 配置
+
+状态：独立 KMS、四类身份、初始 root 撤销及三个 Agent 权限/续租已通过；每小时加密备份已启用，保管人已确认首包完整校验及离线保存。每 5 分钟本机运行检查已启用。业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
+
+固定镜像：`quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641`（2.6.2）。
+
+- `server.hcl`：真实 Raft、TLS、声明式脱敏审计；非 dev，不自动解封。KMS 只接入专用私网，正式环境没有公网管理入口。
+- `agent.hcl`：每服务独立 Agent 与 AppRole bootstrap，只投递文件，不开启代理或 HTTP listener。
+- `runtime-policy.hcl`：只访问 `pinvou-token-data` 的加解密与自身租约；生产初始化将相同权限分别注册为两个服务策略，AppRole 仅关联其自身策略，不附加 default/root。
+- `approle.json`：只包含通用约束；初始化时加入唯一该服务的 `token_policies`。网关和凭据 Portal 分别创建角色、RoleID、SecretID、sink 目录，不能共用秘密。
+
+正式 token 5 分钟有效，续租最多累计 15 分钟后必须重新认证。SecretID 本身是长寿命机器 bootstrap 秘密，仅 Agent 读取，并非业务短期 token；至少每 30 天轮换，泄露或角色停用立即销毁 SecretID accessor 并撤销该角色的现存 token accessor。换新后强制 Agent 重新认证，确认新身份可用，再撤销旧 SecretID；不要在新值投递前盲删旧值造成中断。role-id/secret-id 文件由运维写入 0600，Agent 只读；业务容器不能挂载这些文件。
+
+KMS/Agent 固定 Linux UID/GID 65532:65532。数据、审计、单服务 sink 目录由部署步骤预创建并限定所有者；配置、TLS、信任根和 bootstrap 只读挂载。sink 位于受控 `/run` 内存文件系统，每服务单独目录，业务只读目录而非单文件，文件由 Agent 写为 0600。重启后可重新签发，不备份短期 token。
+
+根 CA 私钥离线加密保管；KMS 仅挂载服务器叶证书私钥。不关闭 TLS 校验，不把 root token 或解封材料放入业务镜像/环境/日志。单节点 Raft 不是高可用，服务器重启后需保管人参与解封。禁用未加密 swap、休眠及系统 crash dump，宿主 root 仍在信任边界内。
+
+审计目录持久化并按容量告警。外部轮转采用 rename/create（0600、同 UID），向固定 KMS 进程发送 SIGHUP 重开日志，再实际调用并验证新文件持续有 HMAC 审计；不使用 copytruncate、`log_raw=true` 或 discard/stdout 替代。轮转与磁盘空间门禁未接线前不放量。应用普通日志与 KMS 审计必须分开。
+
+Raft 快照是含加密密钥的数据备份，不等于解封材料。正式恢复必须同时具备验证过的快照和离线解封材料，在隔离恢复实例上实际读回旧密文；仅重启解封或备份文件存在不算恢复演练。初始化、加密响应托管、快照外层加密、真实恢复以及旧 root 撤销仍归 SECINF-03C/04。
+
+参考：[Raft](https://openbao.org/docs/configuration/storage/raft/)、[声明式审计](https://openbao.org/docs/configuration/audit/)、[AppRole](https://openbao.org/docs/agent-and-proxy/autoauth/methods/approle/)、[审计轮转](https://openbao.org/docs/audit/file/)。
+
+## 隔离验证
+
+Linux Docker 操作者先取得上述固定镜像，运行 `python3 scripts/account-platform-openbao-fixture.py --isolated-fixture --config-directory account-platform/deploy/openbao`。只创建独立临时网络、容器和目录，无业务挂载及公开端口；测试结束精确清理，不 prune。需要宿主可路由新建的私有 Docker 网络。
+
+2026-09-07 实际完整运行输出 `OPENBAO_INFRASTRUCTURE_FIXTURE_PASS`：可信 TLS 及证书负例、双 AppRole 隔离、真实 Agent 续租/重认证/旧 token 实际过期、权限拒绝与强制 AAD、v1→v2 轮换、HMAC 审计和 SIGHUP 重开、Raft 重启后封存拒绝与解封后旧密文读回、撤销测试 root 后拒绝。正式租期模板不变；测试只缩短隔离角色租期。另有 4 项静态配置测试通过。此结果不包含快照恢复、正式初始化和离线恢复交接。
+
+## 独立设施启动模板
+
+`compose.yaml` 只定义 KMS，不自动初始化、解封或部署业务服务。使用新建、已核对为 `internal` 的专用 Docker 网络，预留私有 IPv4 并先为它签发证书；仅设置公开变量 `OPENBAO_NETWORK`、`OPENBAO_PRIVATE_IPV4`、`OPENBAO_STATE_DIRECTORY`。部署前核对网络未附加其他业务，状态路径必须是新的受控目录，不得指向旧账号平台/New API 或其他系统数据。
+
+状态目录预置 `config/server.hcl`、`tls/server.crt`、`tls/server.key`、`trust/ca.crt`、空 `data/` 与 `audit/`；配置、证书、数据与审计子目录为 0700、UID/GID 65532，文件为 0600 可被该 UID 读取。Compose 禁止自动创建缺失挂载路径，目录须由部署步骤明确建立。不得上传 CA 明文私钥、custody 私钥、root token 或解封材料。
+
+先 `docker compose --env-file <公开环境文件> -f compose.yaml config` 核对无端口暴露、身份与目录，再启动。模板不发布宿主端口、只读根目录、禁用 core dump、限制 CPU/内存/PID，仅保留 IPC_LOCK。健康检查使用真实 TLS；未初始化或封存时非健康是预期状态，不得修改检查让其假健康。正式初始化须使用已验证的单次加密初始化器，保管人本机解封后才可创建逐服务策略/Agent，并在通过备份及运行门禁前保持业务未接入。
+
+逐服务身份、独立运维身份及定时备份已有独立验收记录；证书续签/到期告警、审计轮转容量门禁和业务 Compose/Helm 接线仍待完成。此模板启动成功不是完整生产可用证明。
+
+逐服务身份初始化使用独立本机 [kms-operator](../../tools/kms-recovery/cmd/kms-operator/README.md) 的固定 bootstrap/finalize 流程；原生 2.6.2 创建/轮换 key 返回 200 元数据。该工具已完成真实隔离联验，正式执行需要保管人本机口令，不把初始 root 投递到服务端文件、环境变量或命令参数。输出为加密角色包，Agent bootstrap 文件与定时快照任务仍需后续受控部署。
+
+业务侧 native provider 支持以下接线（完整 Compose/Helm 覆盖仍需 SECINF-04 后续任务，不要直接叠加仍强制 `remote` 的旧覆盖）：
+
+```text
+TOKEN_SECRET_PROVIDER=vault-transit
+TOKEN_SECRET_PROVIDER_CA_FILE=/var/run/secrets/pinvou/kms-trust/ca.crt
+TOKEN_SECRET_PROVIDER_TOKEN_FILE=/var/run/secrets/pinvou/kms/token
+TOKEN_SECRET_KEY_ID=pinvou-token-data
+```
+
+网关与凭据服务必须挂载各自的 Agent sink 整个目录，业务只读，不能挂载另一个服务的 sink 或任何 bootstrap。专用 CA 包只影响该 KMS client，不能通过替换全局 `SSL_CERT_FILE` 破坏 OIDC/商城的系统根信任。CA 包需要有效 CA 和显式 CertSign 用途；缺失、损坏或组/全局可写时拒绝启动。Kubernetes 的只读投影符号链接允许解析后读取，但挂载必须不可被业务写入。CA 启动时加载，更新后受控滚动重启；TLS 主机名验证始终开启，KMS client 不继承环境代理。未配置专用 CA 时保留系统 CA 兼容行为，显式配置不能在 local/remote 模式中被静默忽略。
+
+固定镜像声明了未使用的 `/openbao/file` 与 `/openbao/logs` 卷；模板显式用受限 tmpfs 覆盖，避免隐式匿名持久卷。实际业务数据与审计仍仅使用 `/bao/data`、`/bao/audit` 的登记绑定目录。启动前检查真实容器挂载不得出现未登记 volume；不能仅凭 YAML 没写 volume 就认定不存在。
+
+## 独立 Agent 部署
+
+`compose.agents.yaml` 使用独立项目，仅三个固定 Agent，不启动或重建 KMS/业务容器。公开环境变量为 `OPENBAO_AGENT_DIRECTORY`、`OPENBAO_TRUST_DIRECTORY`、`OPENBAO_NETWORK`。前者包含只读 `config/agent.hcl` 和三个 `bootstrap/<角色名>/` 子目录；不允许包含运维身份。根目录 root 0700，配置及角色目录 UID/GID 65532、0700，文件 0600。传输后核验摘要再启动，禁止把机器秘密放入环境变量。
+
+安装 `pinvou-kms-agents.tmpfiles.conf` 到系统 tmpfiles 配置目录，先确认 `/run` 是 tmpfs，再执行该文件的 `systemd-tmpfiles --create`。系统启动时目录重建早于 Docker；KMS 尚未解封时 Agent 会等待，不能以此宣称自动解封。业务将来只读挂载自己的 sink 目录；同一 UID 不等于跨容器共享权限，严禁挂载父目录或另一角色目录。
+
+现场验证运行 `scripts/account-platform-kms-agent-check.py`，指定私有 HTTPS IP endpoint、Agent 目录、CA 信任目录和网络。它只读既有 token、检查真实容器与文件隔离并执行最小权限探测，不读取 bootstrap 内容。运行中令牌须真实有效且为对应唯一角色，期限 300/900 秒；等待真实续租后加 `--require-renewal` 复验。所有输出仅固定状态，不能打印响应诊断。仅文件存在不算健康，因此 Compose 不配置虚假文件存在健康检查；持续在线告警仍需后续监控任务接线。
+
+三角色均验收成功后，精确移除本机六个明文暂存文件，不删除既有加密恢复包。服务端机器引导文件长期保留给 Agent 重新登录，必须按既定周期轮换。备份 Agent 的快照权限验证不会保存快照，不能替代正式加密备份调度和恢复验收。
+
+## 定时加密备份
+
+使用 `compose.backup.yaml` 与 `pinvou-kms-snapshot.service/.timer`；公开变量为 `OPENBAO_BACKUP_DIRECTORY`、`OPENBAO_TRUST_DIRECTORY`、`OPENBAO_NETWORK`。备份目录预置 `bin/kms-snapshot`、`config/snapshot.json`、`recipient/recipient.txt`、`snapshots/`，根目录 root/0700，子目录 UID/GID 65532/0700，二进制 0500、配置和 recipient 0600。只读输入与唯一可写加密输出严格分离，不得将恢复身份、SecretID 或其他 token 放入这些目录。
+
+先核对固定镜像与二进制来源、recipient 指纹、真实容器挂载和资源，再安装并启动定时器。每小时生成独立加密包，失败 unit 不算成功；手动运行使用 `systemctl start pinvou-kms-snapshot.service`，查看 `Result`/`ExecMainStatus` 以及完成清单，不能仅看 timer active。保管人已选择定期下载离线保存，不配置异机自动上传。完整命令和恢复边界见 [快照手册](../../tools/kms-recovery/cmd/kms-snapshot/README.md)。
+
+现场首包已成功，单次容器正常退出并移除，timer enabled/active；下载到保管人本机后的密文摘要一致，保管人已反馈 `KMS_SNAPSHOT_OFFLINE_SAVED`，完成首包完整认证校验与离线保存。初期无自动删除；保留策略及剩余运行措施未闭环前仍不放量。两实例隔离测试已使用同一生产备份函数完成真实恢复，并不等同于对正式实例执行灾难恢复。
+
+## 本机运行检测
+
+`pinvou-kms-monitor.service/.timer` 每 5 分钟执行受限检测；公开环境配置 `monitor.env` 只含 `KMS_MONITOR_ENDPOINT`、`KMS_MONITOR_NETWORK`，状态文件为受限 monitor 目录中的 `status.json`。检查真实线上证书（14 天窗口）、服务健康、三个 Agent 身份、备份任务和最近成功包（90 分钟窗口）、磁盘/inode、审计活动，不使用 root token、不续租身份或再次下载快照。
+
+通过 `systemctl status pinvou-kms-monitor.service`、`journalctl -u pinvou-kms-monitor.service` 和状态 JSON 检查结果。非 ok 为非零退出码；状态 `checked_at` 超过 10 分钟必须视为检测器失效，不能沿用旧 ok。本机 journal/failed unit 不等于消息通知到人；当前 `notification_delivery=local_status_only`，外部通知待负责人确定。监控不删除文件、不重启/解封服务器、不调用高风险操作。证书临期必须在到期前由保管人参与受控续签，不能通过关闭 TLS 校验临时放行。
+
+## 审计日志轮转
+
+`pinvou-kms-audit-rotate.service/.timer` 独立按小时运行 `audit.logrotate.conf`，10 MiB 阈值、保留全部归档，不压缩、不 copytruncate、不自动删除。`create 0600` 继承原日志的数字 UID/GID，兼容宿主没有容器 UID 同名账号的情况；重新打开程序要求原归属仍为 65532:65532。不要套用全局 logrotate 的删除/压缩策略，也不要对 KMS 日志运行全局 prune。
+
+轮转后脚本先验证专用 KMS 容器身份及审计挂载，再对准确 ID 发 SIGHUP，随后实际查询三个 Agent 并验证新日志继续写入；失败保留所有文件并返回非零。首次现场轮转验证旧文件字节完整保留、新日志持续写入，服务仍 healthy。日常 timer 不使用 force；手工强制轮转仅用于受控验收或运维场景。
+
+检测器包含审计轮转 unit/timer 状态。出现 `KMS_AUDIT_REOPEN_FAILED_PRESERVE_ALL_LOGS` 时，先保留归档与当前文件，检查文件权限、目标容器和 KMS TLS 状态；修复后可独立运行重新打开脚本，不需再次轮转、更不能清空日志。归档默认无限保留，容量预警后应先按保管制度转存并评审精确清理范围，不能静默自动删除证据。

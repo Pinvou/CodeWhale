@@ -1,0 +1,7 @@
+# Historical usage waiver replay
+
+Completed SAFE_RELEASE actions written by commit 828242031c42911099792ec78c1f746ed8620c49 retain the original trimmed key (8–120 bytes), trimmed reason/actor, and NUL-separated SHA-256 fingerprint. The current authenticated release endpoint recognizes those exact stored facts and returns the original read-only receipt. Fixed-history JSON fingerprints remain supported under their original exact facts. Original history is never rewritten or converted to a modern command.
+
+A new command still requires the modern 16-character key minimum. Unknown short keys, changed hold/reason/actor, or mismatched fingerprints cannot authorize a release. Unresolved fixed-history prepared commands remain review-only; no upstream reference or financial outcome is inferred. Existing route authentication, permission and configured waiver-client gates remain required.
+
+Regression TestUsageWaiverOriginal828HTTPReplayPostgres executes the extracted original transaction (only its method identifier is renamed) and original read helper on the complete public Billing schema, under billing_service. The allocation release helper is current; this is an original-writer compatibility proof, not an old binary upgrade or production integration. Controlled Account HTTP authorizes the human; Token must receive zero calls. Keys 8–15, 16 and 120 replay through the registered current HTTP route, with changed-fact rejection and whole financial/waiver snapshot equality.

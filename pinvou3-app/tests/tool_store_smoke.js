@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 工具商店真实浏览器旅程：加载 Vite dist，mock Tauri 命令/事件，但点击真实 React UI。
  * 覆盖 MCP 装卸、Obsidian 前置探测、配套技能联动、独立技能和五类授权连接器。
@@ -7,11 +8,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) for (const d of fs.readdirSync(npx)) {
     const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-    if (fs.existsSync(p)) try { return require(p); } catch (_) { /* next */ }
+    if (fs.existsSync(p)) try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) { /* next */ }
   }
   console.error('SKIP: 找不到 puppeteer-core');
   process.exit(2);
@@ -119,7 +120,14 @@ function injectSource() {
         case 'list_marketplace_skills': return Promise.resolve(skills());
         case 'install_marketplace_tool':
           if(BLOCKING_INSTALL_OAUTH_TOOLS.has(args.toolId)) return new Promise(resolve=>{state.finishOAuthInstall=()=>{state.installed[args.toolId]=true;state.finishOAuthInstall=null;resolve(null);};});
-          state.installed[args.toolId]=true; return Promise.resolve(null);
+          state.installed[args.toolId]=true;
+          // Synthetic inventory exercises the success-card subtitle independently
+          // of weather's real manifest; Rust tests cover native validation routing.
+          // Ten names (> the 8-name display cap) with one 76-char name in the
+          // reported window and two overflow probes: the card must list 8,
+          // clip the long name, and end with +2 (see the assertion below).
+          if(args.toolId==='weather') return Promise.resolve(['gaode_weather_query','gaode_weather_forecast','gaode_weather_history','gaode_air_quality','gaode_poi_search','gaode_route_plan','gaode_geofence_area','gaode_'+'x'.repeat(70),'gaode_ninth_overflow_probe','gaode_tenth_overflow_probe']);
+          return Promise.resolve(null);
         case 'uninstall_marketplace_tool': state.installed[args.toolId]=false; return Promise.resolve(null);
         case 'start_marketplace_tool_oauth_login': return new Promise(resolve=>{state.oauthRequests[args.requestId]={toolId:args.toolId,resolve};});
         case 'cancel_marketplace_tool_oauth_login': {
@@ -381,6 +389,20 @@ async function visibilityBox(page, cardText, modeLabel, click) {
   rec('高德天气经 Env 凭据配置连接',await page.evaluate(()=>{
     const call=[...window.__TOOL_STORE_TEST__.calls].reverse().find(x=>x.cmd==='install_marketplace_tool'&&x.args.toolId==='weather');
     return window.__TOOL_STORE_TEST__.installed.weather&&call?.args?.config?.AMAP_KEY==='amap-test-token';
+  }));
+  rec('安装成功卡报告校验发现的工具清单',await page.evaluate(()=>
+    document.body.innerText.includes('已验证，发现工具')&&document.body.innerText.includes('gaode_weather_query')));
+  // 清单远端可控，展示双重截断+溢出计数，且提示语与副标题并存（清单卡是
+  // 唯一 showInstallHint 开启的卡片）。未截断/未封顶/提示语丢失任一发生即红。
+  rec('成功卡清单截断:8 上限+超长名截断到 64+溢出计数+提示语并存',await page.evaluate(()=>{
+    const text=document.body.innerText;
+    return text.includes('gaode_weather_query')
+      && text.includes('gaode_'+'x'.repeat(58))
+      && !text.includes('x'.repeat(70))
+      && !text.includes('gaode_ninth_overflow_probe')
+      && !text.includes('gaode_tenth_overflow_probe')
+      && text.includes('+2')
+      && text.includes('新工具开关默认关闭');
   }));
 
   // 安装成功后的「新建会话」是商城数据与聊天页之间唯一的业务交叉点。
@@ -898,5 +920,5 @@ async function visibilityBox(page, cardText, modeLabel, click) {
   fs.rmSync(PROFILE,{recursive:true,force:true});
   const failed=results.filter(r=>!r.pass).length;
   console.log(failed?`\n❌ ${failed}/${results.length} FAILED`:`\n✅ ALL ${results.length} PASS`);
-  process.exit(failed?1:0);
-})().catch(e=>{console.error('FATAL',e.stack||e);process.exit(1);});
+  finishFixtures(failed?1:0);
+})().catch(e=>{console.error('FATAL',e.stack||e);finishFixtures(1);});

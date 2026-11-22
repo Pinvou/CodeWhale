@@ -1,0 +1,76 @@
+name: pinvou-security
+
+services:
+  openbao:
+    image: quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
+    container_name: pinvou-security-openbao
+    entrypoint: ["/usr/bin/bao"]
+    command: ["server", "-config=/bao/config/server.hcl"]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["IPC_LOCK"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      core:
+        soft: 0
+        hard: 0
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777
+      - /openbao/file:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+      - /openbao/logs:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+    environment:
+      BAO_ADDR: https://openbao:8200
+      BAO_CACERT: /bao/trust/ca.crt
+    healthcheck:
+      test: ["CMD", "/usr/bin/bao", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+    volumes:
+      - type: bind
+        source: ${OPENBAO_STATE_DIRECTORY:?required}/config
+        target: /bao/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_STATE_DIRECTORY:?required}/tls
+        target: /bao/tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_STATE_DIRECTORY:?required}/trust
+        target: /bao/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_STATE_DIRECTORY:?required}/data
+        target: /bao/data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_STATE_DIRECTORY:?required}/audit
+        target: /bao/audit
+        bind: {create_host_path: false}
+    networks:
+      kms:
+        ipv4_address: ${OPENBAO_PRIVATE_IPV4:?required}
+        aliases: ["openbao"]
+
+networks:
+  kms:
+    name: ${OPENBAO_NETWORK:?required}
+    external: true

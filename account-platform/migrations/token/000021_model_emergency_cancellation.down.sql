@@ -1,0 +1,6 @@
+DROP TRIGGER IF EXISTS model_emergency_cancellation_evidence_immutable ON model_emergency_cancellation_evidence;
+DROP TRIGGER IF EXISTS model_emergency_cancellation_policies_immutable ON model_emergency_cancellation_policies;
+DROP TABLE IF EXISTS model_emergency_cancellation_evidence;
+DROP TABLE IF EXISTS model_emergency_cancellations;
+DROP TABLE IF EXISTS model_emergency_cancellation_policies;
+ALTER TABLE usage_requests DROP COLUMN IF EXISTS cancellation_origin;

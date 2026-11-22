@@ -17,6 +17,7 @@
 //! - `get_or_create_aux_session(session_id)` / `discard_aux_session(session_id)`
 //! - `reset_aux_session(session_id)` (atomic discard+recreate, M6)
 
+pub(crate) mod account_platform;
 pub(crate) mod acp_providers;
 pub(crate) mod artifacts;
 pub(crate) mod assistant_response;
@@ -46,12 +47,13 @@ pub(crate) mod desktop_remote_permission;
 pub(crate) mod desktop_remote_proxy;
 pub(crate) mod desktop_remote_state;
 pub(crate) mod desktop_remote_task;
+mod desktop_remote_validation;
+pub(crate) mod device;
 pub(crate) mod diagnostics;
 pub(crate) mod files;
 pub(crate) mod global_shortcut;
 pub(crate) mod interaction;
 pub(crate) mod knowledge;
-pub(crate) mod llmapi;
 pub(crate) mod marketplace;
 pub(crate) mod memory;
 pub(crate) mod model_store;

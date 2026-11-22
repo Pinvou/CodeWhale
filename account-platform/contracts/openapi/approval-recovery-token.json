@@ -1,0 +1,460 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Approval recovery TOKEN owner observations",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "token service origin; separate service document, not a Portal endpoint"
+    }
+  ],
+  "x-service": "token",
+  "paths": {
+    "/internal/v1/approval-recovery/results/{approval_request_id}": {
+      "get": {
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "x-required-permission": "internal.token.approval-result.read",
+        "x-required-workloads": [
+          "account-service",
+          "account-approval-recovery"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid or noncanonical closed input",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication missing/invalid at existing middleware",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope or dedicated workload identity denied",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authority unavailable; result remains unknown",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read-only original result or conservative effect observation",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "readTOKENResult",
+        "summary": "Read original owner observation; no financial effect or redispatch",
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "command_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{64}$"
+            }
+          },
+          {
+            "name": "original_key_digest",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{64}$"
+            }
+          }
+        ],
+        "x-input-rules": [
+          "exact query fields, no duplicates; authority command registry must match this service",
+          "canonical positive decimal approval_epoch on Billing result; original key sent only as digest on Token result"
+        ],
+        "x-conservative-result": "UNCONFIRMED, UNKNOWN, and ABSENT are observations, never permission to retry or invalidate"
+      }
+    },
+    "/internal/v1/approval-effects/{approval_request_id}": {
+      "get": {
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "x-required-permission": "internal.token.approval-effect.read",
+        "x-required-workloads": [
+          "account-service",
+          "account-approval-recovery"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid or noncanonical closed input",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication missing/invalid at existing middleware",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope or dedicated workload identity denied",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authority unavailable; result remains unknown",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read-only original result or conservative effect observation",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Effect"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "readTOKENEffect",
+        "summary": "Read original owner observation; no financial effect or redispatch",
+        "parameters": [
+          {
+            "name": "approval_request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "command_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "command_fingerprint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{64}$"
+            }
+          }
+        ],
+        "x-input-rules": [
+          "exact query fields, no duplicates; authority command registry must match this service",
+          "canonical positive decimal approval_epoch on Billing result; original key sent only as digest on Token result"
+        ],
+        "x-conservative-result": "UNCONFIRMED, UNKNOWN, and ABSENT are observations, never permission to retry or invalidate"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "WorkloadBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "existing workload service identity"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "Result": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "command_type": {
+            "type": "string"
+          },
+          "command_fingerprint": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "original_key_digest": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "UNCONFIRMED",
+              "PENDING",
+              "SUCCEEDED",
+              "REJECTED",
+              "FAILED",
+              "UNKNOWN"
+            ]
+          },
+          "command_reference": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schema_version",
+          "approval_request_id",
+          "command_type",
+          "command_fingerprint",
+          "original_key_digest",
+          "state",
+          "observed_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "SUCCEEDED"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "command_reference"
+              ],
+              "properties": {
+                "command_reference": {}
+              }
+            },
+            "else": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "command_reference"
+                    ],
+                    "properties": {
+                      "command_reference": {}
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Effect": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "authority": {
+            "const": "TOKEN"
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "command_type": {
+            "type": "string"
+          },
+          "command_fingerprint": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ABSENT",
+              "EFFECT_OR_ATTEMPT_OBSERVED"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "schema_version",
+          "authority",
+          "approval_request_id",
+          "command_type",
+          "command_fingerprint",
+          "state",
+          "observed_at"
+        ]
+      }
+    }
+  }
+}

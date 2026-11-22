@@ -1,0 +1,9 @@
+[Unit]
+Description=Pinvou daily PostgreSQL incremental backup schedule
+[Timer]
+OnCalendar=Mon..Sat *-*-* 02:00:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=pinvou-postgres-backup-incr.service
+[Install]
+WantedBy=timers.target

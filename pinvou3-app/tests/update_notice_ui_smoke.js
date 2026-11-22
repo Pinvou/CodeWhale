@@ -1,16 +1,17 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) {}
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) {}
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const d of fs.readdirSync(npx)) {
       const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-      if (fs.existsSync(p)) { try { return require(p); } catch (_) {} }
+      if (fs.existsSync(p)) { try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) {} }
     }
   }
   console.error('SKIP: 找不到 puppeteer-core');
@@ -42,11 +43,28 @@ async function main() {
   });
   const page = await browser.newPage();
   await page.evaluateOnNewDocument(() => {
+    // This smoke exercises the updater with an existing local model; first-use
+    // model onboarding has its own coverage and intentionally isolates chat.
+    const localModel = {
+      id: 'update-smoke-local',
+      name: 'Update smoke local',
+      preset: 'local_vllm',
+      model: 'update-smoke-local',
+      base_url: 'http://127.0.0.1:8000/v1',
+    };
     const invoke = async (command) => {
       if (command === 'get_settings') return { theme: 'genesis', language: 'zh-Hans' };
       if (command === 'get_app_version') return '1.1.0';
-      if (command === 'get_effective_model_config') return {};
-      if (command === 'list_models') return { models: [], active_model_id: null };
+      if (command === 'get_effective_model_config') {
+        return { ...localModel, model_id: localModel.id, requires_user_api_key: false };
+      }
+      if (command === 'list_models') {
+        return {
+          models: [localModel],
+          active_model_id: localModel.id,
+          default_model_ref: { source: 'LOCAL_CONFIG', saved_model_id: localModel.id },
+        };
+      }
       if (command === 'list_sessions' || command === 'list_archived_sessions' ||
           command === 'list_personas' || command === 'list_scheduled_tasks' ||
           command === 'list_scheduled_runs') return [];
@@ -116,5 +134,5 @@ async function main() {
 
 main().catch(err => {
   console.error('FAIL:', err && err.stack || err);
-  process.exit(1);
+  finishFixtures(1);
 });

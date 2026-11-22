@@ -1,0 +1,200 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  financialRepairInputs, financialRepairPrecheckBody,
+  financialRepairProjectionRows, financialRepairDraftFromProjection,
+} from './admin-financial-repair-form.js';
+import { financialRepairPrecheck } from './admin-financial-repair-drafts.js';
+import { formatBalance } from './balance-view.js';
+import { useFinanceOperation } from './useFinanceOperation.js';
+import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
+
+// The repair page never asks the operator for amounts the owner already knows:
+// the precheck returns the frozen projection and the draft copies it verbatim.
+// The only operator inputs are the target references, the free-text reason and
+// the request key.
+const usageSettlementRepairCommandTypes = ['USAGE_SETTLEMENT_REPAIR'];
+
+export function AdminUsageSettlementFinancialRepairForm({ client, copy, onCreated, owner = '', operationCopy = copy, commandTypes = usageSettlementRepairCommandTypes }) {
+  const [commandType, setCommandType] = useState(commandTypes[0]);
+  const [values, setValues] = useState({});
+  const [facts, setFacts] = useState(null);
+  const [projection, setProjection] = useState(null);
+  const acceptedDisplay = useRef(null);
+  const hintID = React.useId();
+  const [reason, setReason] = useState('');
+  const [requestKey, setRequestKey] = useState('');
+  const [busy, setBusy] = useState('');
+  const [failure, setFailure] = useState('');
+  const [created, setCreated] = useState('');
+  const [needsAuthentication, setNeedsAuthentication] = useState(false);
+  const factsRevision = useRef(0);
+  const mounted = useRef(false);
+  const currentClient = useRef(client);
+  currentClient.current = client;
+  const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
+  const usageSettlementRepair = commandType === 'USAGE_SETTLEMENT_REPAIR';
+  const governed = usageSettlementRepair;
+  const task = usageSettlementRepair ? copy.usageSettlementTask : null;
+  const fixedTask = commandTypes.length === 1 ? task : null;
+  const locked = busy !== '' || operation.busy || operation.unknown;
+  const pending = operation.pendingFacts;
+  const epoch = client.financeSessionEpoch || 0;
+  const identityCopy = usageSettlementRepair ? copy.usageSettlementIdentity : null;
+  const planCopy = usageSettlementRepair ? copy.usageSettlementPlan : null;
+  const matchesDisplayScope = fact => fact?.client === client && fact.owner === owner && fact.epoch === epoch;
+  const visiblePending = usageSettlementRepair && !matchesDisplayScope(pending?.displayScope) ? null : pending;
+  const presented = visiblePending?.projection || (!pending && busy !== 'facts' && matchesDisplayScope(acceptedDisplay.current) && acceptedDisplay.current.projection === projection ? projection : null);
+  const verified = usageSettlementRepair ? financialRepairPrecheck(presented) : null;
+  const displayedFacts = usageSettlementRepair ? (verified ? financialRepairProjectionRows(presented) : null) : pending ? financialRepairProjectionRows(pending.projection) : facts;
+
+  useEffect(() => {
+    mounted.current = true;
+    setNeedsAuthentication(false);
+    setFacts(null);
+    setProjection(null);
+    setBusy((current) => current === 'facts' ? '' : current);
+    return () => {
+      mounted.current = false;
+      factsRevision.current += 1;
+    };
+  }, [client]);
+
+  const fields = financialRepairInputs[commandType];
+  const label = (field) => (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
+  const setValue = (key, value) => {
+    factsRevision.current += 1;
+    setBusy((current) => current === 'facts' ? '' : current);
+    setValues((current) => ({ ...current, [key]: value }));
+    setFacts(null);
+    setProjection(null);
+    setFailure('');
+    setCreated('');
+  };
+  const changeCommand = (next) => {
+    factsRevision.current += 1;
+    setBusy((current) => current === 'facts' ? '' : current);
+    setCommandType(next);
+    setValues({});
+    setFacts(null);
+    setProjection(null);
+    setFailure('');
+    setCreated('');
+  };
+
+  const readFacts = async (event) => {
+    event.preventDefault();
+    const prepared = financialRepairPrecheckBody(commandType, values);
+    if (prepared.error) {
+      setProjection(null);
+      setFacts(null);
+      setFailure(copy.invalidInput);
+      return;
+    }
+    const revision = ++factsRevision.current;
+    const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
+    setBusy('facts');
+    setNeedsAuthentication(false);
+    setFailure('');
+    setCreated('');
+    try {
+      const answer = await client.approvalCommandPrecheck(prepared.body);
+      if (!live()) return;
+      const rendered = financialRepairProjectionRows(answer);
+      if (!rendered) throw Object.assign(new Error('unusable projection'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
+      if (usageSettlementRepair && (answer.command_type !== commandType || answer.target_resource_id !== prepared.body.target_resource_id ||
+        answer.normalized_command.hold_id !== prepared.body.target_resource_id ||
+        answer.normalized_command.usage_request_id !== prepared.body.usage_request_id ||
+        answer.normalized_command.loss_review_id !== prepared.body.loss_review_id)) {
+        throw Object.assign(new Error('owner projection changed the usage-loss intent'), { code: 'FINANCIAL_REPAIR_PRECHECK_INVALID' });
+      }
+      setProjection(answer);
+      acceptedDisplay.current = { client, owner, epoch, projection: answer };
+      setFacts(rendered);
+    } catch (error) {
+      if (!live()) return;
+      setProjection(null);
+      setFacts(null);
+      if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401) setNeedsAuthentication(true);
+      setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
+    } finally {
+      if (live()) setBusy('');
+    }
+  };
+
+  const createDraft = async (event) => {
+    event.preventDefault();
+    if (governed) {
+      const prepared = pending || { ...financialRepairDraftFromProjection(projection, reason, requestKey), projection, displayScope: { client, owner, epoch } };
+      if (!prepared.draft) { setFailure(copy.invalidDraft); return; }
+      const recovering = operation.unknown;
+      const revision = factsRevision.current;
+      const live = () => mounted.current && factsRevision.current === revision && currentClient.current === client;
+      setNeedsAuthentication(false);
+      const result = await operation.mutate(prepared, async current => {
+        try { return await createAndSubmitFreshGovernedApproval(client, current.draft); }
+        catch (error) {
+          // Inspect the original denial before preserving a previous unknown
+          // write with COMMAND_RESULT_UNKNOWN; the facts/key stay unchanged.
+          if (live() && (error?.code === 'RECENT_AUTHENTICATION_REQUIRED' || error?.status === 401)) setNeedsAuthentication(true);
+          // A denied replay cannot prove that an earlier unknown write did not
+          // commit. Keep the original facts/key until authority confirms it.
+          if (recovering && !error.finalResult) throw Object.assign(error, { code: 'COMMAND_RESULT_UNKNOWN' });
+          throw error;
+        }
+      });
+      if (result) {
+        setCreated(result.approval_request_id); setProjection(null); setFacts(null);
+        setValues({}); setReason(''); setRequestKey(''); onCreated?.(result.approval_request_id);
+      }
+      return;
+    }
+
+  };
+
+  return <section className="adm-financial-repair" aria-label={copy.title}>
+    <h3>{copy.title}</h3>
+    <p>{task?.lead || copy.lead}</p>
+    {governed && operation.error && <p role="alert">{operation.error}</p>}
+    {needsAuthentication && <div className="adm-usage-settlement-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
+    <form className="adm-financial-repair-target" onSubmit={readFacts}>
+      {!fixedTask && <label>{copy.command}
+        <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
+          {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
+        </select>
+      </label>}
+      {fields.map((field) => <label key={field.key}>{label(field)}
+        <input disabled={governed && locked} required aria-describedby={identityCopy ? hintID + '-' + field.key : undefined} value={visiblePending ? String(field.key === 'target_resource_id' ? visiblePending.draft.target_resource_id : field.key === 'expected_version' ? visiblePending.draft.normalized_command.expected_receivable_version : visiblePending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+          onChange={(event) => setValue(field.key, event.target.value)} />
+        {identityCopy && <small id={hintID + '-' + field.key}>{identityCopy.hints[field.key]}</small>}
+      </label>)}
+      <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : fixedTask?.load || copy.readFacts}</button>
+    </form>
+    {failure && <p role="alert">{failure}</p>}
+    {fixedTask && <details className="adm-financial-repair-technical"><summary>{fixedTask.technical}</summary><p><code>{commandType}</code></p></details>}
+    {created && <p role="status">{task?.submitted || copy.createdHint} <code>{created}</code></p>}
+    {displayedFacts && <div className="adm-financial-repair-facts">
+      <h4>{verified && identityCopy ? identityCopy.title : copy.frozenFacts}</h4>
+      {verified && identityCopy ? <><p>{identityCopy.scope}</p><dl>
+        <div><dt>{copy.targets[commandType]}</dt><dd><code>{verified.normalized.hold_id}</code></dd></div>
+        <div><dt>{copy.fields.usage_request_id}</dt><dd><code>{verified.normalized.usage_request_id}</code></dd></div>
+        <div><dt>{copy.fields.loss_review_id}</dt><dd><code>{verified.normalized.loss_review_id}</code></dd></div>
+        <div><dt>{identityCopy.wallet}</dt><dd><code>{verified.financial.wallet_id}</code></dd></div>
+      </dl></> : <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>}
+      {verified && planCopy && <section aria-label={planCopy.title}>
+        <h5>{planCopy.title}</h5><p>{planCopy.scope}</p>
+        <dl>{[['expected', 'expected_microcredits'], ['settle', 'settlement_microcredits'], ['overage', 'overage_microcredits']].map(([key, field]) =>
+          <div key={key}><dt>{planCopy[key]}</dt><dd>{formatBalance(verified.financial[field], planCopy.language)} {planCopy.points}</dd></div>)}
+        </dl>
+      </section>}
+      <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
+      <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>
+    </div>}
+    {(projection || governed && operation.unknown) && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
+      <label>{copy.reason}<textarea disabled={governed && locked} required minLength="10" maxLength="2000" value={pending?.draft.reason ?? reason} onChange={(event) => setReason(event.target.value)} /></label>
+      <small>{copy.reasonHint}</small>
+      <label>{copy.requestKey}<input disabled={governed && locked} required maxLength="111" value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
+      <small>{copy.requestKeyHint}</small>
+      <button type="submit" disabled={busy !== '' || operation.busy}>{governed && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? task?.submitting || copy.creating : task?.submit || copy.createDraft}</button>
+    </form>}
+  </section>;
+}

@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
+use zeroize::Zeroize;
 
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
@@ -28,7 +29,7 @@ use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
     ControlledResumeMaterial, ControlledResumeStep, ControlledStateError, ControlledStatus,
     ControlledStatusKind, ControlledTransportAuthority, ControlledTransportOwner,
-    MAX_HANDSHAKE_TTL_MS,
+    MAX_HANDSHAKE_TTL_MS, PERMISSION_DISPATCH_DEFERRED,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -58,7 +59,7 @@ const REMOTE_ACTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 #[derive(Clone)]
 struct CachedRemoteActionResult {
     fingerprint: [u8; 32],
-    response: Value,
+    response: Option<Value>,
     touched_at: Instant,
 }
 
@@ -84,19 +85,29 @@ impl RemoteActionResultCache {
         match entries.get_mut(request_id) {
             Some(entry) if entry.fingerprint == fingerprint => {
                 entry.touched_at = now;
-                RemoteActionCacheLookup::Hit(entry.response.clone())
+                entry
+                    .response
+                    .clone()
+                    .map_or(RemoteActionCacheLookup::Miss, RemoteActionCacheLookup::Hit)
             }
             Some(_) => RemoteActionCacheLookup::Conflict,
             None => RemoteActionCacheLookup::Miss,
         }
     }
 
-    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Value) {
+    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Option<Value>) {
         let mut entries = self.entries.lock();
         let now = Instant::now();
         entries.retain(|_, entry| {
             now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
         });
+        if let Some(entry) = entries.get_mut(&request_id) {
+            if entry.fingerprint == fingerprint && entry.response.is_none() {
+                entry.response = response;
+                entry.touched_at = now;
+            }
+            return;
+        }
         if entries.len() >= REMOTE_ACTION_CACHE_CAPACITY {
             if let Some(oldest) = entries
                 .iter()
@@ -505,6 +516,8 @@ fn log_stage(value: &str) -> &'static str {
         "journal_snapshot_rejected",
         "task_status_sent",
         "task_status_not_sent",
+        "task_interrupt_persistence_failed",
+        "task_restart_persistence_failed",
         "journal_event_not_sent",
         "journal_event_sent",
         "journal_snapshot_sent",
@@ -537,6 +550,7 @@ fn log_stage(value: &str) -> &'static str {
         "attachment_uploads_expired",
         "artifact_downloads_expired",
         "task_terminal_persist_failed",
+        "controller_inbound_retired",
         "task_rejected_persist_failed",
         "task_dispatch_rejected",
         "task_session_discard_failed",
@@ -602,6 +616,8 @@ fn log_detail(value: &str) -> &'static str {
         "session_mapping_missing",
         "status_unavailable",
         "outbound_unavailable",
+        "desktop_controller_inbound_full",
+        "desktop_controller_inbound_closed",
         "seal_failed",
         "queue_failed",
         "inbound_item_capacity",
@@ -613,6 +629,8 @@ fn log_detail(value: &str) -> &'static str {
         "permission_expired",
         "permission_denied",
         "task_conflict",
+        "task_ledger_persist_failed",
+        "task_ledger_capacity",
         "missing",
         "remote_binding_mismatch",
         "controller_not_connected",
@@ -855,6 +873,17 @@ impl Drop for ProcessedControllerFrame {
 #[async_trait::async_trait]
 pub(crate) trait ControlledRelayPort: Send {
     fn try_send(&self, message: Value) -> Result<(), String>;
+    fn resume_socket_epoch(&self, _lease: &LeaseContext) -> Option<u64> {
+        None
+    }
+    fn try_send_resume_prepare(
+        &self,
+        _message: Value,
+        _epoch: u64,
+        _deadline_b: u64,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
     async fn recv(&mut self) -> Option<Value>;
 }
 
@@ -862,6 +891,23 @@ pub(crate) trait ControlledRelayPort: Send {
 impl ControlledRelayPort for crate::features::remote_control::manager::ControllerRelayChannel {
     fn try_send(&self, message: Value) -> Result<(), String> {
         crate::features::remote_control::manager::ControllerRelayChannel::try_send(self, message)
+    }
+
+    fn resume_socket_epoch(&self, lease: &LeaseContext) -> Option<u64> {
+        crate::features::remote_control::manager::ControllerRelayChannel::resume_socket_epoch(
+            self, lease,
+        )
+    }
+
+    fn try_send_resume_prepare(
+        &self,
+        message: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, String> {
+        crate::features::remote_control::manager::ControllerRelayChannel::try_send_resume_prepare(
+            self, message, epoch, deadline_b,
+        )
     }
 
     async fn recv(&mut self) -> Option<Value> {
@@ -906,13 +952,17 @@ impl ControlledHandshakeDriver {
     }
 
     /// `controller_pairing_reserved`：验签 transcript、派生会话密钥与 receipt，
-    /// 产出本端 `finished_receipt_commit`。未验签或重复接管都失败关闭。
+    /// 产出本端 `finished_receipt_commit`。同一已验签预留的通知仅忽略；
+    /// 不同绑定或无效签名仍失败关闭，不重发一次性帧。
     pub(crate) fn accept_reserved(
         &mut self,
         message: &Value,
         trust: &AuthenticatedRelayTrustConfig,
-    ) -> Result<Value, &'static str> {
-        if self.handshake.is_some() {
+    ) -> Result<Option<Value>, &'static str> {
+        if let Some(handshake) = self.handshake.as_ref() {
+            if handshake.is_reserved_replay(message, trust) {
+                return Ok(None);
+            }
             return Err("controller_handshake_stage_invalid");
         }
         let keys = self.keys.take().ok_or("controller_handshake_key_invalid")?;
@@ -920,7 +970,7 @@ impl ControlledHandshakeDriver {
             ControlledHandshake::new(message, keys, trust).map_err(|error| error.code)?;
         let commit = handshake.commit().map_err(|error| error.code)?;
         self.handshake = Some(handshake);
-        Ok(commit)
+        Ok(Some(commit))
     }
 
     /// `finished_receipt_commit`：记录对端 commitment 后产出本端 Finished。
@@ -1085,16 +1135,51 @@ async fn finish_controlled_registration<W, S, F>(
     serve(worker).await;
 }
 
+/// Keep the task until its registration result has been observed. If it exits
+/// abnormally, joining it before reporting channel closure guarantees that its
+/// generation-bound worker/channel have been dropped. Successful registration
+/// still leaves the existing serving task running independently.
+pub(crate) struct ControlledRegistrationTask {
+    done: oneshot::Receiver<Result<ControlledStatus, String>>,
+    task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    #[cfg(test)]
+    abort: tokio::task::AbortHandle,
+}
+
+impl ControlledRegistrationTask {
+    pub(crate) async fn wait(
+        self,
+    ) -> Result<Result<ControlledStatus, String>, oneshot::error::RecvError> {
+        let result = self.done.await;
+        if result.is_err() {
+            // The JoinError can contain a panic payload. It is deliberately
+            // neither formatted nor exposed through diagnostics or IPC.
+            self.task.await;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_handle_for_test(&self) -> tokio::task::AbortHandle {
+        self.abort.clone()
+    }
+}
+
 impl ControlledRelayWorker {
     pub(crate) async fn start(
         app: AppHandle,
         relay: RemoteControlManager,
         operation: ControlledOperation,
         business: std::sync::Arc<dyn ControlledBusinessPort>,
-    ) -> Result<oneshot::Receiver<Result<ControlledStatus, String>>, String> {
+    ) -> Result<ControlledRegistrationTask, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
-        let channel = relay.start_controller_relay(operation.generation()).await?;
+        let channel = {
+            let manager = app.state::<ControlledDeviceManager>();
+            manager.with_registration_start(&operation, || {
+                relay.start_controller_relay_sync(operation.generation())
+            })?
+        };
         log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
@@ -1117,7 +1202,7 @@ impl ControlledRelayWorker {
             #[cfg(test)]
             evidence_hooks: None,
         };
-        tauri::async_runtime::spawn(async move {
+        let task = tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
             finish_controlled_registration(
                 worker,
@@ -1128,7 +1213,18 @@ impl ControlledRelayWorker {
             )
             .await;
         });
-        Ok(done_rx)
+        #[cfg(test)]
+        let abort = task.inner().abort_handle();
+        Ok(ControlledRegistrationTask {
+            done: done_rx,
+            // The lifecycle owns a completion future rather than exporting a
+            // host runtime handle through its interface. Join errors stay private.
+            task: Box::pin(async move {
+                let _ = task.await;
+            }),
+            #[cfg(test)]
+            abort,
+        })
     }
 
     async fn register_pairing(&mut self) -> Result<ControlledStatus, String> {
@@ -1697,12 +1793,18 @@ impl ControlledRelayWorker {
         message: &Value,
         driver: &mut ControlledHandshakeDriver,
     ) -> Result<Option<Value>, String> {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        if !manager.is_pending_handshake(self.operation.clone()) {
+            return Err("controller_handshake_stage_invalid".to_owned());
+        }
         let trust = load_relay_trust_config(|name| std::env::var(name).ok())
             .map_err(|_| RELAY_TRUST_UNCONFIGURED.to_owned())?;
-        let manager = self.app.state::<ControlledDeviceManager>();
-        let commit = driver
+        let Some(commit) = driver
             .accept_reserved(message, &trust)
-            .map_err(str::to_owned)?;
+            .map_err(str::to_owned)?
+        else {
+            return Ok(None);
+        };
         let now_b = controlled_monotonic_millis();
         let deadline_b =
             handshake_deadline_b(driver.signed_expires_at_ms().map_err(str::to_owned)?, now_b)?;
@@ -1811,7 +1913,10 @@ impl ControlledRelayWorker {
         // Exact operation validation precedes all cleanup. A retired worker
         // must not clear the replacement generation's keys or projection.
         let result = match self.transport_owner.as_ref() {
-            Some(owner) => manager.fail_owned_transport(owner, sanitize_error(error)),
+            Some(owner) => {
+                let lane = self.app.state::<ControlledLaneState>();
+                manager.fail_owned_transport(owner, sanitize_error(error), || lane.clear())
+            }
             None => manager.fail_operation(self.operation.clone(), sanitize_error(error)),
         };
         if let Ok(status) = result {
@@ -2197,6 +2302,16 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             let action = port
                 .remote_action(lease, session_ref, operation, body)
                 .await;
+            if operation == "permission_decide"
+                && action
+                    .as_ref()
+                    .is_err_and(|code| code == PERMISSION_DISPATCH_DEFERRED)
+            {
+                // Bind the request ID across the pause without inventing a
+                // terminal result or replaying a failure after the SDK commit.
+                action_results.insert(request_id.to_owned(), fingerprint, None);
+                return Ok(Vec::new());
+            }
             match &action {
                 Ok(_) => log_remote_action_event(
                     "controlled",
@@ -2213,7 +2328,7 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             }
             let response =
                 remote_action_response(lease, session_ref, request_id, operation, action);
-            action_results.insert(request_id.to_owned(), fingerprint, response.clone());
+            action_results.insert(request_id.to_owned(), fingerprint, Some(response.clone()));
             Ok(vec![("remote_action_result", response)])
         }
         "capability_snapshot_request" => {
@@ -2405,6 +2520,11 @@ fn remote_action_response(
 
 fn public_remote_action_error(code: &str) -> &'static str {
     match code {
+        "user_input_invalid" => "user_input_invalid",
+        "user_input_stale" => "user_input_stale",
+        "user_input_already_answered" => "user_input_already_answered",
+        "user_input_busy" => "user_input_busy",
+        "user_input_unavailable" => "user_input_unavailable",
         "permission_expired" => "permission_expired",
         "permission_already_decided" => "permission_already_decided",
         "permission_not_found" => "permission_not_found",
@@ -2544,7 +2664,8 @@ pub(crate) struct ControlledResumeAttempt {
     owner: Option<ControlledTransportOwner>,
     #[cfg(test)]
     activation_probe: Option<Box<dyn FnOnce() + Send + Sync>>,
-    // Five actual send points in the frozen resume exchange, never peer IDs.
+    // At most five local request identities, never peer IDs. Prepare reserves
+    // one slot before socket readiness; retries never allocate another slot.
     request_ids: Vec<String>,
     lease: Option<LeaseContext>,
     activation_id: Option<String>,
@@ -2556,6 +2677,7 @@ pub(crate) struct ControlledResumeAttempt {
     ack_sent: bool,
     liveness_sent: bool,
     ready_sent: bool,
+    prepare_epoch: Option<u64>,
 }
 
 impl ControlledResumeAttempt {
@@ -2579,8 +2701,9 @@ pub(crate) enum ControlledResumeOutcome {
 
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
-/// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
-/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// 必须结束本代通道。仅管理器 resume_gate.prepare 失败分支会立即清理
+/// 租约与本代凭证；operation 失效、非 Reconnecting、缺 lease context 的
+/// 前置拒绝不执行该清理。构造或入队等管理器外失败由已冻结的 watchdog 截止及命令层
 /// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
 /// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
 /// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
@@ -2601,32 +2724,23 @@ fn begin_owned_controlled_resume<P: ControlledRelayPort + ?Sized>(
     let Ok(material) = manager.begin_owned_resume(owner, now_b) else {
         return false;
     };
-    prepare_controlled_resume(port, resume, owner, material)
+    prepare_controlled_resume(port, manager, resume, owner, material)
 }
 
 fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
+    manager: &ControlledDeviceManager,
     resume: &mut ControlledResumeAttempt,
     owner: &ControlledTransportOwner,
-    material: ControlledResumeMaterial,
+    mut material: ControlledResumeMaterial,
 ) -> bool {
+    material.resume_token.zeroize();
     let Ok(challenge) = new_resume_challenge() else {
         return false;
     };
     let request_id = format!("request-resume-{}", uuid::Uuid::new_v4().simple());
-    let Ok(frame) = build_controller_resume_prepare(
-        &material.lease,
-        super::relay_transport::ControllerRole::ControlledB,
-        &request_id,
-        &material.resume_token,
-        &challenge,
-        material.relay_deadline_identity_ms,
-    ) else {
-        return false;
-    };
-    if port.try_send(frame).is_err() {
-        return false;
-    }
+    // Keep only public attempt identity locally. The lifecycle owner lends
+    // its current token under its lock when a real controller socket is ready.
     resume.operation = Some(owner.operation().clone());
     resume.owner = Some(owner.clone());
     resume.request_ids = vec![request_id];
@@ -2641,7 +2755,64 @@ fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
     resume.ack_sent = false;
     resume.liveness_sent = false;
     resume.ready_sent = false;
-    true
+    resume.prepare_epoch = None;
+    retry_controlled_resume_prepare(port, manager, resume, controlled_monotonic_millis)
+        != ControlledResumeOutcome::Failed
+}
+
+/// Reconstruct rather than retarget. The original request/challenge are reused
+/// for Relay's exact-prepare idempotency; only a new socket epoch can enqueue
+/// again, and neither this read nor the send renews the original frozen cutoff.
+fn retry_controlled_resume_prepare<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    resume: &mut ControlledResumeAttempt,
+    clock: impl FnOnce() -> u64,
+) -> ControlledResumeOutcome {
+    let Some(owner) = resume.owner.clone() else {
+        return ControlledResumeOutcome::Ignored;
+    };
+    let Some(request_id) = resume.request_ids.first() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    let result = manager.with_owned_prepared_resume(
+        &owner,
+        clock,
+        |lease, token, wire_deadline, deadline_b| {
+            if resume.lease.as_ref() != Some(lease)
+                || resume.relay_deadline_identity_ms != wire_deadline
+            {
+                return Err("desktop_remote_resume_invalid".to_owned());
+            }
+            let Some(epoch) = port.resume_socket_epoch(lease) else {
+                return Ok(None);
+            };
+            if resume.prepare_epoch == Some(epoch) {
+                return Ok(None);
+            }
+            let frame = build_controller_resume_prepare(
+                lease,
+                super::relay_transport::ControllerRole::ControlledB,
+                request_id,
+                token,
+                &resume.challenge_b64,
+                wire_deadline,
+            )
+            .map_err(|error| error.to_string())?;
+            port.try_send_resume_prepare(frame, epoch, deadline_b)
+                .map(|sent| sent.then_some(epoch))
+        },
+    );
+    match result {
+        Ok(Some(Ok(Some(epoch)))) => {
+            resume.prepare_epoch = Some(epoch);
+            ControlledResumeOutcome::Ignored
+        }
+        Ok(Some(Err(_))) => ControlledResumeOutcome::Failed,
+        // Retired owners, later phases, expired budgets and not-ready/racing
+        // sockets cannot send. Existing expiry/retirement still owns cleanup.
+        _ => ControlledResumeOutcome::Ignored,
+    }
 }
 
 /// E2E-06：按 Relay/A 的恢复帧推进 B 端相位。任何相位不符、对端确认验签失败或
@@ -2668,7 +2839,21 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
     {
         return ControlledResumeOutcome::Ignored;
     }
+    // This notice is synthesized by the current local reader, not a wire
+    // protocol message (the manager rejects wire imitations). It deliberately
+    // has no lease tuple. The captured transport owner above supplies the
+    // authority; a second loss terminates this candidate without a new budget.
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(false)
+    {
+        return ControlledResumeOutcome::Failed;
+    }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(true)
+    {
+        return retry_controlled_resume_prepare(port, manager, resume, controlled_monotonic_millis);
+    }
     // Relay errors deliberately have no lease tuple. Authority comes from
     // strict protocol validation and this operation's locally sent request.
     if kind == "error" {
@@ -3033,6 +3218,9 @@ pub(crate) mod reader_resume_tests;
 mod owner_interleaving_tests;
 
 #[cfg(test)]
+mod resume_prepare_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3245,6 +3433,16 @@ mod tests {
             assert_eq!(log_remote_action_operation(sentinel), "other");
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(
+            log_stage("controller_inbound_retired"),
+            "controller_inbound_retired"
+        );
+        for detail in [
+            "desktop_controller_inbound_full",
+            "desktop_controller_inbound_closed",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_stage("preconnect_expired"), "preconnect_expired");
         for detail in [
             "desktop_remote_pairing_expired",
@@ -3257,6 +3455,15 @@ mod tests {
             log_stage("task_session_discard_failed"),
             "task_session_discard_failed"
         );
+        for stage in [
+            "task_interrupt_persistence_failed",
+            "task_restart_persistence_failed",
+        ] {
+            assert_eq!(log_stage(stage), stage);
+        }
+        for detail in ["task_ledger_persist_failed", "task_ledger_capacity"] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_detail("delete_failed"), "delete_failed");
         assert_eq!(
             log_stage("pending_revocation_queue_full"),
@@ -3403,7 +3610,10 @@ mod tests {
             a_keys,
             relay.trust.clone(),
         );
-        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let b_commit = driver
+            .accept_reserved(&reservation, &relay.trust)
+            .unwrap()
+            .unwrap();
         let a_commit = a.accept_reserved(&reservation).unwrap();
         let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
         let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
@@ -3510,6 +3720,19 @@ mod tests {
         fn try_send(&self, message: Value) -> Result<(), String> {
             self.sent.lock().unwrap().push(message);
             Ok(())
+        }
+
+        fn resume_socket_epoch(&self, _lease: &LeaseContext) -> Option<u64> {
+            Some(0)
+        }
+
+        fn try_send_resume_prepare(
+            &self,
+            message: Value,
+            _epoch: u64,
+            _deadline_b: u64,
+        ) -> Result<bool, String> {
+            self.try_send(message).map(|()| true)
         }
 
         async fn recv(&mut self) -> Option<Value> {
@@ -4041,7 +4264,7 @@ mod tests {
         trust: &AuthenticatedRelayTrustConfig,
     ) -> (ControlledHandshakeDriver, ControllingHandshake) {
         let mut driver = ControlledHandshakeDriver::new(b_keys);
-        let b_commit = driver.accept_reserved(reservation, trust).unwrap();
+        let b_commit = driver.accept_reserved(reservation, trust).unwrap().unwrap();
         let mut a = ControllingHandshake::new(
             reservation["request_id"].as_str().unwrap(),
             "claim-0001",
@@ -4091,16 +4314,24 @@ mod tests {
         );
         assert!(!driver.is_active());
 
-        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let b_commit = driver
+            .accept_reserved(&reservation, &relay.trust)
+            .unwrap()
+            .unwrap();
         assert!(driver.is_active());
         assert_eq!(b_commit["type"], "finished_receipt_commit");
         assert_eq!(b_commit["sender_role"], "B");
-        // 重复接管同一预留必须拒绝。
-        assert_eq!(
+        // 同一已验签通知是无副作用重放，不重发commit或生成收据秘密。
+        assert!(
             driver
                 .accept_reserved(&reservation, &relay.trust)
-                .unwrap_err(),
-            "controller_handshake_stage_invalid"
+                .unwrap()
+                .is_none()
+        );
+        assert!(driver.keys.is_none());
+        assert_eq!(
+            driver.handshake.as_ref().unwrap().stage(),
+            super::super::controlled_handshake::ControlledHandshakeStage::Committed
         );
         // 收到 A 的 commitment 之前不能回送 Finished。
         assert_eq!(
@@ -4221,6 +4452,7 @@ mod tests {
             action_calls: std::sync::atomic::AtomicUsize,
             task_calls: std::sync::atomic::AtomicUsize,
             block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+            defer_action: std::sync::atomic::AtomicBool,
         }
 
         #[async_trait::async_trait]
@@ -4234,6 +4466,12 @@ mod tests {
             ) -> Result<Value, String> {
                 self.action_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self
+                    .defer_action
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(PERMISSION_DISPATCH_DEFERRED.into());
+                }
                 if let Some((started, release)) = &self.block {
                     started.notify_one();
                     release.notified().await;
@@ -4380,6 +4618,62 @@ mod tests {
             port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a reused request id with a different binding must never execute"
+        );
+
+        let deferred = StubPort {
+            defer_action: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        };
+        let deferred_results = RemoteActionResultCache::default();
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &deferred,
+                &deferred_results,
+                &lease,
+                "remote_action_request",
+                &action,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let mut conflict_action = action.clone();
+        conflict_action["session_id"] = json!("different-session");
+        let conflict = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &conflict_action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict[0].1["error_code"], "result_unknown");
+        let resumed = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, first);
+        let repeated = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated, resumed);
+        assert_eq!(
+            deferred
+                .action_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
         );
 
         let frames = dispatch_decrypted_payload(
@@ -4603,9 +4897,8 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let blocking = Arc::new(StubPort {
-            action_calls: Default::default(),
-            task_calls: Default::default(),
             block: Some((started.clone(), release.clone())),
+            ..Default::default()
         });
         let cache = Arc::new(RemoteActionResultCache::default());
         let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const finishFixtures = require('./helpers/fixture-exit.cjs');
 /**
  * 输入框工具菜单 smoke：验证独立“技能”按钮已消失，技能合并进“工具”菜单。
  * 依赖先运行 `npm run build:ui`。
@@ -7,11 +8,11 @@ const fs = require('fs'), path = require('path'), os = require('os');
 const { startUiTestServer } = require('./ui_test_server');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return require('./helpers/puppeteer-fixture.cjs'); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) for (const d of fs.readdirSync(npx)) {
     const p = path.join(npx, d, 'node_modules', 'puppeteer-core');
-    if (fs.existsSync(p)) try { return require(p); } catch (_) { /* next */ }
+    if (fs.existsSync(p)) try { return require('./helpers/browser-fixture.cjs').wrapNative(require(p)); } catch (_) { /* next */ }
   }
   console.error('SKIP: 找不到 puppeteer-core');
   process.exit(2);
@@ -190,9 +191,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   fs.rmSync(PROFILE, { recursive: true, force: true });
   const failed = results.filter(r => !r.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  process.exit(failed ? 1 : 0);
+  finishFixtures(failed ? 1 : 0);
 })().catch(e => {
   try { fs.rmSync(PROFILE, { recursive: true, force: true }); } catch (_) {}
   console.error('FATAL', e.stack || e);
-  process.exit(1);
+  finishFixtures(1);
 });

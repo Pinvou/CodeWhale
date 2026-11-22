@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS store_models (
     resource_requirements_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS model_versions (
+ card_id TEXT NOT NULL, version_id TEXT NOT NULL, state TEXT NOT NULL,
+ record_json TEXT, models_root TEXT, runtime_card_id TEXT NOT NULL,
+ resource_dir TEXT, managed INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, error TEXT, planned_bytes INTEGER NOT NULL DEFAULT 0,
+ measured_bytes INTEGER,
+ PRIMARY KEY(card_id,version_id));
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
     card_id TEXT,
@@ -99,6 +107,15 @@ CREATE TABLE IF NOT EXISTS api_keys (
 /// 安装的设备上了，`CREATE TABLE IF NOT EXISTS` 不会给已存在的表补列，这里做
 /// 一个很轻量的迁移：缺哪列就补哪列。
 const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "model_versions",
+        &[
+            ("planned_bytes", "INTEGER NOT NULL DEFAULT 0"),
+            // 登记的目录实测大小（评审第 7 轮 P1）：展示与配额准入读登记值，
+            // 不再每行每次全树遍历；仅在状态迁移与显式「重新测量」时更新。
+            ("measured_bytes", "INTEGER"),
+        ],
+    ),
     (
         "store_models",
         &[
@@ -119,16 +136,20 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("deploy_topology", "TEXT"),
             // 附属文件的本地固化副本（相对路径 -> 正文+哈希），见 assets_content
             ("assets_content_json", "TEXT"),
-            // 这里原来有一列 `card_source`（"builtin" = 内置测试商店 / "store" =
-            // 真实商店）。2026-09-30 内置测试商店整体拿掉之后，卡片只可能来自生产
-            // 商店，这一列没有任何读者，连同 `refresh_builtin_card_scripts` 和回填
-            // 一起删了。存量设备上的这一列会留在表里不再被写——`ensure_columns` 只
-            // 补列不删列，而 INSERT 显式列名、列本身可空，留着不影响任何语句。
+            // 卡片来源："store"（生产商店下载）/ "local"（本机登记导入）。历史值
+            // "builtin"（内置测试商店）随 2026-09-30 测试商店删除后不再有写入方；
+            // 这一列被 version_store 的整行回写与 card_update 的身份守卫读取，
+            // 必须保留并继续为缺失它的库补列。
             // enable 脚本报上来的容器名（LMM_CONTAINER_NAME 标记行）。
             // 这是判断"某个容器是不是本应用起的"唯一可靠的依据——镜像不是身份，
             // 别人用同一个镜像起的容器跟我们的长得一模一样。
             ("container_name", "TEXT"),
             ("resource_requirements_json", "TEXT"),
+            ("card_update_pending", "INTEGER NOT NULL DEFAULT 0"),
+            ("models_root", "TEXT"),
+            ("runtime_card_id", "TEXT"),
+            ("active_version_id", "TEXT"),
+            ("card_source", "TEXT"),
         ],
     ),
     ("api_keys", &[("card_id", "TEXT")]),
@@ -170,7 +191,7 @@ pub fn db_path() -> PathBuf {
 /// WAL 会在库文件旁多出 `models.db-wal` / `models.db-shm` 两个文件。已确认全仓
 /// 没有任何地方按 `models.db` 这个确切文件名去删除、备份或导出（`db_path()`
 /// 只有本文件在用），所以不存在"删掉主库、留下两个残片"的清理漏网。
-fn connect() -> rusqlite::Result<Connection> {
+pub(super) fn connect() -> rusqlite::Result<Connection> {
     // 开库之前先把库文件的权限收好，库里存着明文网关密钥（见 ensure_db_file_private）。
     ensure_db_file_private();
     let conn = Connection::open(db_path())?;
@@ -342,6 +363,17 @@ pub fn init_db() -> rusqlite::Result<()> {
     // 顺序要紧：先把缺的列补齐（老表可能还没有 docker_image），再重建主键，
     // 否则搬数据那句 SELECT 会因为列不存在而失败。
     migrate_engine_primary_key(&conn)?;
+    // r45 P1-1：weights_ready_at 是本 PR 新列，存量行一律 NULL——而前端
+    // libraryStateOf 对 NULL 判 incomplete、下载门按裸 status 拒、部署门又指回
+    // 「继续下载」，三门互指成环，升级设备的每张存量已部署卡死锁。对
+    // `status='deployed'` 的存量行回填：能部署到这个状态的卡，历史上必然通过
+    // 过一次部署脚本的权重校验（老流程里部署即校验），回填为迁移时刻即恢复
+    // 「已部署」的完整语义。incomplete/cleanup_required 不动（它们本来就缺凭据）。
+    let _ = conn.execute(
+        "UPDATE store_models SET weights_ready_at = ?1 \
+         WHERE status = 'deployed' AND weights_ready_at IS NULL",
+        params![chrono::Utc::now().to_rfc3339()],
+    );
     Ok(())
 }
 
@@ -364,7 +396,7 @@ pub struct InstalledEngineRecord {
 }
 
 impl InstalledEngineRecord {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             engine_name: row.get("engine_name")?,
             engine_version: row.get("engine_version")?,
@@ -790,7 +822,7 @@ pub fn find_docker_image_users(
 
 // ---------------- 商店模型记录 ----------------
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoreModelRecord {
     pub card_id: String,
     pub model_name: String,
@@ -834,7 +866,22 @@ pub struct StoreModelRecord {
     /// 根本不知道自己为什么要点它。
     pub deployed_script_sha256: Option<String>,
     /// 卡片下发的运行内存需求。空结构表示当前卡片尚未提供可信预算。
+    /// serde(default)：主线 lineage 的 version rows（record_json）没有这一列，
+    /// 升级设备上缺字段必须落到默认（空结构=无可信预算），否则整行反序列化
+    /// 失败会让版本清理与配额 admission 全部报错。
+    #[serde(default)]
     pub resource_requirements: ResourceRequirements,
+    /// 卡片来源："store"（生产商店下载）或 "local"（本机登记导入）。历史值
+    /// "builtin"（内置测试商店）不再产生；存量行保留，card_update 据此拒绝更新。
+    pub card_source: String,
+    /// A whole-package update must be installed and deployed before enabling.
+    pub card_update_pending: bool,
+    #[serde(default)]
+    pub models_root: Option<String>,
+    #[serde(default)]
+    pub runtime_card_id: Option<String>,
+    #[serde(default)]
+    pub active_version_id: Option<String>,
 }
 
 /// 一份固化下来的脚本：正文 + 它的 sha256（来源哈希，用于"检查卡片更新"时
@@ -846,7 +893,7 @@ pub struct ScriptBlob {
 }
 
 impl StoreModelRecord {
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+    pub(super) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         let profiles_raw: Option<String> = row.get("profiles_json")?;
         let profiles = profiles_raw
             .and_then(|s| serde_json::from_str::<Vec<DeployProfile>>(&s).ok())
@@ -906,6 +953,13 @@ impl StoreModelRecord {
                 .get::<_, Option<String>>("resource_requirements_json")?
                 .and_then(|raw| serde_json::from_str(&raw).ok())
                 .unwrap_or_default(),
+            card_source: row
+                .get::<_, Option<String>>("card_source")?
+                .unwrap_or_else(|| "store".into()),
+            card_update_pending: row.get::<_, i64>("card_update_pending")? != 0,
+            models_root: row.get("models_root")?,
+            runtime_card_id: row.get("runtime_card_id")?,
+            active_version_id: row.get("active_version_id")?,
         })
     }
 }
@@ -999,6 +1053,106 @@ pub fn replace_card_package(
     Ok(true)
 }
 
+/// r43 P1-5：脚本-only 更新允许引擎身份变化（避免「先卸载再更新」死锁复燃），
+/// 但记录的引擎字段必须随之更新——否则重部署导出旧 LMM_ENGINE_NAME/VERSION、
+/// 安装登记也落在旧 (name, version) 键下，部署/探测/登记三方身份漂移。
+pub fn update_engine_identity(
+    card_id: &str,
+    engine_name: &str,
+    engine_version: Option<&str>,
+) -> Result<(), String> {
+    let conn = connect().map_err(|e| e.to_string())?;
+    conn.execute(
+        // r44 P2-5：身份变化即清部署回执——启用 stale-gate 只比脚本哈希，
+        // 脚本字节相同时旧回执会放行一次用旧引擎身份的启用（P1-5 同类漂移）。
+        "UPDATE store_models SET engine_name=?2, engine_version=?3, deployed_script_sha256='', card_update_pending=1 WHERE card_id=?1",
+        params![card_id, engine_name, engine_version],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Commit metadata, profiles and the verified file package together. Keep model
+/// identity, credentials, weights, endpoints and deployment history intact.
+pub fn commit_card_update_package(
+    expected: &StoreModelRecord,
+    card: &super::store_client::StoreCardDetail,
+    blobs: &std::collections::BTreeMap<String, ScriptBlob>,
+    assets: &std::collections::BTreeMap<String, ScriptBlob>,
+) -> Result<(), String> {
+    let replace = || -> rusqlite::Result<bool> {
+        let mut conn = connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current = tx.query_row(
+            "SELECT * FROM store_models WHERE card_id = ?1",
+            params![expected.card_id],
+            StoreModelRecord::from_row,
+        )?;
+        if current.running
+            || current.status != expected.status
+            || current.card_source != expected.card_source
+            || current.scripts_fetched_at != expected.scripts_fetched_at
+            || super::card_update::local_manifest(&current)
+                != super::card_update::local_manifest(expected)
+        {
+            return Ok(false);
+        }
+        let active_profile = current
+            .active_profile_id
+            .filter(|id| card.profiles.iter().any(|p| &p.id == id));
+        let size_bytes = i64::try_from(card.summary.size_bytes)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        tx.execute(
+            "UPDATE store_models SET card_name=?1, org=?2, description=?3,
+             engine_name=?4, engine_version=?5, size_bytes=?6, quantization=?7,
+             source_repo_id=?8, source_filename=?9, profiles_json=?10,
+             active_profile_id=?11, scripts_content_json=?12, assets_content_json=?13,
+             scripts_fetched_at=?14, card_update_pending=1,
+             script_install_engine=?15, script_download_model=?16, script_deploy=?17,
+             script_enable=?18, script_stop=?19, script_uninstall=?20,
+             resource_requirements_json=?22
+             WHERE card_id=?21",
+            params![
+                card.summary.name,
+                card.summary.org,
+                card.summary.description,
+                card.summary.engine_name,
+                card.summary.engine_version,
+                size_bytes,
+                card.summary.quantization,
+                card.source_repo_id,
+                card.source_filename,
+                serde_json::to_string(&card.profiles)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                active_profile,
+                serde_json::to_string(blobs)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                serde_json::to_string(assets)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                now_iso(),
+                card.scripts.get("install_engine"),
+                card.scripts.get("download_model"),
+                card.scripts.get("deploy"),
+                card.scripts.get("enable"),
+                card.scripts.get("stop"),
+                card.scripts.get("uninstall"),
+                expected.card_id,
+                // r39 P2-6（=r36 P2-5）：整卡更新后内存准入档位同步刷新——
+                // 否则停留旧值直到整卡重下，与 set_resource_requirements 的
+                // 「用户重新下载/更新卡片后才会刷新」承诺相反。
+                serde_json::to_string(&card.summary.resource_requirements)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    };
+    match replace().map_err(|e| format!("保存卡片更新失败，已保留原版本：{e}"))? {
+        true => Ok(()),
+        false => Err("模型状态在更新期间发生变化，未替换卡片；请重新检查更新。".into()),
+    }
+}
+
 pub struct AddStoreModelParams<'a> {
     pub card_id: &'a str,
     pub model_name: &'a str,
@@ -1015,9 +1169,28 @@ pub struct AddStoreModelParams<'a> {
     pub status: &'a str,
     pub profiles: &'a [DeployProfile],
     pub deploy_topology: DeployTopology,
+    /// 卡片来源："store"（生产商店下载）或 "local"（本机登记导入）。
+    pub card_source: &'a str,
 }
 
 pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreModelRecord> {
+    add_store_model_at_root(p, None)
+}
+
+/// Persist the fixed download directory in the same commit as the new model.
+/// A crash before clearing its quota plan must not make deployment use a later
+/// default directory instead of the one that actually received the files.
+pub fn add_store_model_with_root(
+    p: AddStoreModelParams<'_>,
+    models_root: &str,
+) -> rusqlite::Result<StoreModelRecord> {
+    add_store_model_at_root(p, Some(models_root))
+}
+
+fn add_store_model_at_root(
+    p: AddStoreModelParams<'_>,
+    models_root: Option<&str>,
+) -> rusqlite::Result<StoreModelRecord> {
     let now = now_iso();
     let deployed_at = if p.status == "deployed" {
         Some(now.clone())
@@ -1036,8 +1209,9 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
              size_bytes, quantization, source_repo_id, source_filename, status,
               script_install_engine, script_deploy, script_download_model,
               script_enable, script_stop, script_uninstall,
-              downloaded_at, weights_ready_at, deployed_at, profiles_json, deploy_topology)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+              downloaded_at, weights_ready_at, deployed_at, profiles_json, deploy_topology,
+              card_source, models_root)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
          ON CONFLICT(card_id) DO UPDATE SET
              model_name=excluded.model_name, card_name=excluded.card_name,
              org=excluded.org, description=excluded.description, engine_name=excluded.engine_name,
@@ -1053,7 +1227,9 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
               weights_ready_at=excluded.weights_ready_at,
               deployed_at=COALESCE(excluded.deployed_at, store_models.deployed_at),
              profiles_json=excluded.profiles_json,
-             deploy_topology=excluded.deploy_topology",
+             deploy_topology=excluded.deploy_topology,
+             card_source=excluded.card_source,
+             models_root=COALESCE(excluded.models_root, store_models.models_root)",
         params![
             p.card_id,
             p.model_name,
@@ -1083,6 +1259,8 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
             serde_json::to_value(p.deploy_topology)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string)),
+            p.card_source,
+            models_root,
         ],
     )?;
     conn.query_row(
@@ -1102,7 +1280,7 @@ pub fn update_store_model_status(
     let conn = connect()?;
     if status == "deployed" {
         conn.execute(
-            "UPDATE store_models SET status = ?1, deployed_at = ?2, deployed_script_sha256 = ?3              WHERE card_id = ?4",
+            "UPDATE store_models SET status = ?1, deployed_at = ?2, deployed_script_sha256 = ?3, card_update_pending = 0 WHERE card_id = ?4",
             params![status, now_iso(), deploy_script_sha256, card_id],
         )?;
     } else {
@@ -1110,6 +1288,40 @@ pub fn update_store_model_status(
             "UPDATE store_models SET status = ?1 WHERE card_id = ?2",
             params![status, card_id],
         )?;
+    }
+    Ok(())
+}
+
+/// P2-6（r24）：条件版 set_running——reconcile 收编用。只在**记录仍在且
+/// running 仍为 0** 时才写 1，避免与并发 uninstall/stop 竞态（读→探测→盲写
+/// 的窗口里对端已把记录删掉或已启动停用流程，无条件 UPDATE 会写出一个
+/// 幽灵 running=1）。
+pub fn set_running_if_was_stopped(card_id: &str) -> rusqlite::Result<bool> {
+    let conn = connect()?;
+    let n = conn.execute(
+        "UPDATE store_models SET running = 1 WHERE card_id = ?1 AND running = 0",
+        params![card_id],
+    )?;
+    Ok(n == 1)
+}
+
+/// Persist the successful deployment and its selected profile as one statement.
+/// A failed write must not clear the redeployment gate while retaining an older
+/// profile; the caller reports failure even though the script already ran.
+pub fn mark_deployed(
+    card_id: &str,
+    deploy_script_sha256: Option<&str>,
+    profile_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    let conn = connect()?;
+    let changed = conn.execute(
+        "UPDATE store_models SET status = 'deployed', deployed_at = ?1,
+         deployed_script_sha256 = ?2, card_update_pending = 0, active_profile_id = ?3
+         WHERE card_id = ?4",
+        params![now_iso(), deploy_script_sha256, profile_id, card_id],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
     }
     Ok(())
 }
@@ -1273,6 +1485,7 @@ pub fn list_store_models() -> rusqlite::Result<Vec<StoreModelRecord>> {
 pub struct LibraryRow {
     pub record: StoreModelRecord,
     pub script_hashes: std::collections::BTreeMap<String, String>,
+    pub asset_hashes: std::collections::BTreeMap<String, String>,
 }
 
 pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
@@ -1292,6 +1505,8 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                 m.endpoint_url, m.endpoint_model, m.profiles_json, m.active_profile_id,
                 NULL AS scripts_content_json,
                 m.scripts_fetched_at, m.deployed_script_sha256, m.deploy_topology,
+                m.card_source, m.card_update_pending, m.models_root, m.runtime_card_id,
+                m.active_version_id,
                 NULL AS assets_content_json,
                 m.resource_requirements_json,
                 COALESCE((SELECT json_group_object(j.key, json_extract(j.value, '$.sha256'))
@@ -1300,13 +1515,24 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
                                       OR json_valid(m.scripts_content_json)
                                  THEN m.scripts_content_json ELSE NULL END) j
                           WHERE json_valid(j.value) AND json_type(j.value) = 'object'),
-                         '{}') AS script_hashes_json
+                         '{}') AS script_hashes_json,
+                COALESCE((SELECT json_group_object(j.key, json_extract(j.value, '$.sha256'))
+                          FROM json_each(
+                            CASE WHEN m.assets_content_json IS NULL
+                                      OR json_valid(m.assets_content_json)
+                                 THEN m.assets_content_json ELSE NULL END) j
+                          WHERE json_valid(j.value) AND json_type(j.value) = 'object'),
+                         '{}') AS asset_hashes_json
          FROM store_models m ORDER BY m.downloaded_at DESC",
     )?;
     let rows = stmt
         .query_map([], |row| {
             let hashes_raw: Option<String> = row.get("script_hashes_json")?;
             let script_hashes = hashes_raw
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let assets_raw: Option<String> = row.get("asset_hashes_json")?;
+            let asset_hashes = assets_raw
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             let mut record = StoreModelRecord::from_row(row)?;
@@ -1316,10 +1542,85 @@ pub fn list_store_models_light() -> rusqlite::Result<Vec<LibraryRow>> {
             Ok(LibraryRow {
                 record,
                 script_hashes,
+                asset_hashes,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// Startup discovery reads catalogue metadata and stored digests only. Serde
+/// skips source contents without allocating copies; no weight files are opened.
+pub(super) fn startup_card_ids() -> rusqlite::Result<Vec<String>> {
+    let conn = connect()?;
+    let mut query = conn
+        .prepare("SELECT card_id FROM store_models WHERE card_source='store' ORDER BY card_id")?;
+    query.query_map([], |row| row.get(0))?.collect()
+}
+
+pub(super) fn startup_card_manifest(card_id: &str) -> rusqlite::Result<Option<serde_json::Value>> {
+    #[derive(serde::Deserialize)]
+    struct DigestOnly {
+        sha256: String,
+    }
+    fn json_error(e: serde_json::Error) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    }
+    fn digests(
+        row: &rusqlite::Row<'_>,
+        column: &str,
+    ) -> rusqlite::Result<std::collections::BTreeMap<String, String>> {
+        let raw = row.get_ref(column)?;
+        let text = if raw == rusqlite::types::ValueRef::Null {
+            "{}"
+        } else {
+            raw.as_str()?
+        };
+        // 与轻量查询（json_valid 守门）同口径：损坏 JSON 退化为空摘要而不是
+        // 让整条启动检查报错——两条路径必须对同一行给出**同一个** manifest
+        // （前端「有更新」等值门依赖这一点），且半截 JSON 不能砸掉启动检查。
+        let Ok(blobs_json) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(Default::default());
+        };
+        let serde_json::Value::Object(entries) = blobs_json else {
+            return Ok(Default::default());
+        };
+        let blobs: std::collections::BTreeMap<String, DigestOnly> = entries
+            .into_iter()
+            .filter(|(_, v)| v.get("sha256").is_some())
+            .map(|(k, v)| {
+                (
+                    k,
+                    DigestOnly {
+                        sha256: v["sha256"].as_str().unwrap_or_default().to_string(),
+                    },
+                )
+            })
+            .collect();
+        Ok(blobs
+            .into_iter()
+            .map(|(key, blob)| {
+                let hash = super::native_card_compat::upstream_digest(&key, &blob.sha256);
+                (key, hash)
+            })
+            .collect())
+    }
+    connect()?.query_row(
+        "SELECT card_name,org,description,engine_name,engine_version,size_bytes,quantization,source_repo_id,source_filename,profiles_json,deploy_topology,scripts_content_json,assets_content_json FROM store_models WHERE card_id=?1 AND card_source='store'",
+        [card_id], |row| {
+            let raw = row.get_ref("profiles_json")?;
+            let profiles: Vec<DeployProfile> = serde_json::from_str(if raw == rusqlite::types::ValueRef::Null { "[]" } else { raw.as_str()? }).map_err(json_error)?;
+            Ok(serde_json::json!({
+                "name":row.get::<_,String>("card_name")?, "org":row.get::<_,Option<String>>("org")?,
+                "description":row.get::<_,Option<String>>("description")?, "engine_name":row.get::<_,String>("engine_name")?,
+                "engine_version":row.get::<_,Option<String>>("engine_version")?, "size_bytes":row.get::<_,i64>("size_bytes")?,
+                "quantization":row.get::<_,Option<String>>("quantization")?, "source_repo_id":row.get::<_,Option<String>>("source_repo_id")?,
+                "source_filename":row.get::<_,Option<String>>("source_filename")?, "profiles":profiles,
+                "deploy_topology":row.get::<_,Option<String>>("deploy_topology")?.unwrap_or_else(|| "single".into()),
+                "scripts":digests(row,"scripts_content_json")?, "assets":digests(row,"assets_content_json")?,
+            }))
+        }
+    ).optional()
 }
 
 pub fn get_store_model(card_id: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
@@ -1367,14 +1668,21 @@ pub fn get_store_model_route_fields(
     .optional()
 }
 
-pub fn get_store_model_by_name(model_name: &str) -> rusqlite::Result<Option<StoreModelRecord>> {
+/// 按模型名查商店记录。`case_insensitive` 供设备管理的 Ollama 有效删除名臂：
+/// daemon 标签按小写归一，BINARY 精确匹配会漏掉大小写变体别名（第四轮 P3）；
+/// name 臂保持精确匹配（显示名契约）。
+pub fn get_store_model_by_name(
+    model_name: &str,
+    case_insensitive: bool,
+) -> rusqlite::Result<Option<StoreModelRecord>> {
     let conn = connect()?;
-    conn.query_row(
-        "SELECT * FROM store_models WHERE model_name = ?1",
-        params![model_name],
-        StoreModelRecord::from_row,
-    )
-    .optional()
+    let sql = if case_insensitive {
+        "SELECT * FROM store_models WHERE model_name = ?1 COLLATE NOCASE"
+    } else {
+        "SELECT * FROM store_models WHERE model_name = ?1"
+    };
+    conn.query_row(sql, params![model_name], StoreModelRecord::from_row)
+        .optional()
 }
 
 /// 原生引擎指纹提取专用的轻量行（r19 评审 P2-6）。
@@ -1484,6 +1792,7 @@ pub fn list_store_models_reconcile_columns() -> rusqlite::Result<Vec<StoreModelR
 /// 条件与 [`list_store_models_install_columns`] 同款：坏 JSON / 非 object 降级
 /// 为 NULL，对齐 from_row「serde 解析失败 = 空」的语义），运行中过滤也推进
 /// 到 SQL 里，正文一个字节不出库。
+#[derive(Debug)]
 pub struct StoreModelAdmissionColumns {
     pub card_id: String,
     pub card_name: String,
@@ -1537,27 +1846,93 @@ pub fn list_running_store_models_admission_columns()
     Ok(rows)
 }
 
+/// Distinguish a retained-version refusal from an actual database failure.
+#[derive(Debug)]
+pub enum DeleteStoreModelError {
+    RetainedVersions,
+    Database(rusqlite::Error),
+    /// 事务内刷新下载根的登记测量失败（评审第 7 轮新增的登记核算）。
+    Measurement(String),
+}
+
+impl std::fmt::Display for DeleteStoreModelError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RetainedVersions => {
+                formatter.write_str("请先在历史版本中清理保留版本，再卸载或删除当前模型。")
+            }
+            Self::Database(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Measurement(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for DeleteStoreModelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            Self::RetainedVersions | Self::Measurement(_) => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for DeleteStoreModelError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
 /// 删掉一个模型的库记录，连同它专属的 API Key。
 ///
-/// **两条 DELETE 必须在同一个事务里。** 分开执行时，第二条失败会留下一个
-/// 「模型没了、key 还在」的中间态——而那些 key 仍然能被 `find_api_key` 命中，
-/// 跟下面那句注释说的「模型卸载了 key 也跟着失效」正好相反。这种状态没有任何
-/// 界面能看见，也没有任何入口能清掉。
-pub fn delete_store_model(card_id: &str) -> rusqlite::Result<()> {
+/// 记录删除、下载目录转存及 key 删除必须在同一事务内提交。
+pub fn delete_store_model(card_id: &str) -> Result<(), DeleteStoreModelError> {
     let mut conn = connect()?;
-    // IMMEDIATE 而不是默认的 DEFERRED（本批评审 P2-7）：卸载是「下载在写 +
-    // 界面轮询在读」的高并发窗口里用户随时可触发的动作，DEFERRED 事务升级
-    // 写锁撞上并发写会立刻回 BUSY_SNAPSHOT，busy_timeout 对快照过期不重试；
-    // IMMEDIATE 把争用变成可等待的普通 BUSY，交给 connect 的 5 秒
-    // busy_timeout。与 replace_card_package / migrate_engine_identity 同款。
+    delete_store_model_on(&mut conn, card_id)
+}
+
+/// Refuse a destructive uninstall before scripts or files can change. This is
+/// only admission: deletion must repeat the same guard in its writer transaction.
+pub(super) fn check_store_model_deletion(card_id: &str) -> Result<(), DeleteStoreModelError> {
+    check_store_model_deletion_on(&connect()?, card_id)
+}
+
+fn check_store_model_deletion_on(
+    conn: &Connection,
+    card_id: &str,
+) -> Result<(), DeleteStoreModelError> {
+    // A NULL active ID does not authorize deleting any registered generation,
+    // even if the lifecycle can derive a fallback identity for display.
+    let retained: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM model_versions WHERE card_id=?1
+         AND version_id != COALESCE((SELECT active_version_id FROM store_models WHERE card_id=?1), '')",
+        [card_id],
+        |row| row.get(0),
+    )?;
+    if retained != 0 {
+        return Err(DeleteStoreModelError::RetainedVersions);
+    }
+    Ok(())
+}
+
+fn delete_store_model_on(
+    conn: &mut Connection,
+    card_id: &str,
+) -> Result<(), DeleteStoreModelError> {
+    // Obtain the writer lock before reading the retained-version guard. In WAL
+    // mode a deferred read-to-write upgrade can fail without honoring the busy
+    // timeout; waiting here also makes the guard see the preceding writer.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    check_store_model_deletion_on(&tx, card_id)?;
+    super::version_store::retire_download_on(&tx, card_id)
+        .map_err(DeleteStoreModelError::Measurement)?;
+    tx.execute("DELETE FROM model_versions WHERE card_id=?1", [card_id])?;
     tx.execute(
         "DELETE FROM store_models WHERE card_id = ?1",
         params![card_id],
     )?;
     // 模型卸载了，专属它的 key 也跟着失效，不留着占地方
     tx.execute("DELETE FROM api_keys WHERE card_id = ?1", params![card_id])?;
-    tx.commit()
+    tx.commit().map_err(DeleteStoreModelError::Database)
 }
 
 pub fn total_managed_bytes() -> rusqlite::Result<i64> {
@@ -1578,6 +1953,8 @@ pub use api_keys::{add_api_key, delete_api_key, find_api_key, list_api_keys_for_
 mod tests {
     use super::*;
 
+    mod delete_concurrency;
+
     /// db 测试用环境变量（HOME）切换各自的临时数据库目录，但环境
     /// 变量是进程全局的，而 Rust 测试默认同进程多线程并行——两个 db 测试并发
     /// 时会互相把对方的目录切走（曾真实撞出过 "no such table" 的 flaky 失败：
@@ -1591,6 +1968,62 @@ mod tests {
         let home = config::TempHome::new();
         init_db().unwrap();
         home
+    }
+
+    /// r45 P1-1：升级库形态的行为测试——存量行 `deployed` + `weights_ready_at`
+    /// NULL（新列迁移对存量行不回填的旧缺陷形态），再次 init_db 后必须回填，
+    /// 前端 libraryStateOf 据此不再降级 incomplete（三门死锁解环的落点）。
+    /// incomplete 行不回填（本来就缺凭据）。
+    #[test]
+    fn legacy_deployed_rows_get_weights_ready_at_backfilled_on_reopen() {
+        let _ctx = setup_temp_db();
+        // 造两条存量形态行：deployed+NULL（升级库）与 incomplete+NULL（真实缺凭据）。
+        let legacy_rows = [
+            ("legacy-deployed", "deployed"),
+            ("legacy-partial", "incomplete"),
+        ];
+        for (card_id, status) in legacy_rows {
+            db_add_row_for_backfill_test(card_id, status);
+        }
+        // 手动抹掉回填（模拟「列刚加上、迁移还没跑」的升级库形态）。
+        connect()
+            .unwrap()
+            .execute("UPDATE store_models SET weights_ready_at = NULL", [])
+            .unwrap();
+        // 再次 init_db（= 应用升级后的下一次启动）触发回填。
+        init_db().unwrap();
+        let deployed = get_store_model("legacy-deployed").unwrap().unwrap();
+        assert!(
+            deployed.weights_ready_at.is_some(),
+            "存量 deployed 行必须回填 weights_ready_at（r45 P1-1 死锁解环）"
+        );
+        let partial = get_store_model("legacy-partial").unwrap().unwrap();
+        assert!(
+            partial.weights_ready_at.is_none(),
+            "incomplete 行不回填——它们本来就缺凭据"
+        );
+    }
+
+    fn db_add_row_for_backfill_test(card_id: &str, status: &str) {
+        add_store_model(AddStoreModelParams {
+            card_id,
+            model_name: card_id,
+            card_name: card_id,
+            org: None,
+            description: None,
+            engine_name: "vllm",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &Default::default(),
+            status,
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
     }
 
     /// 连接必须是 WAL 模式。回滚日志模式下写阻塞读，而这个库的常态就是
@@ -1649,9 +2082,10 @@ mod tests {
         let conn = connect().unwrap();
         conn.execute(
             "INSERT INTO store_models
-                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                 (card_id, model_name, card_name, engine_name, downloaded_at, card_source,
                   scripts_content_json, assets_content_json)
              VALUES ('card-light', 'qwen-light', 'Qwen Light', 'tachyon', '2026-10-23T00:00:00Z',
+                     'store',
                      '{\"enable\":{\"content\":\"echo hi\",\"sha256\":\"aa11bb22\"}}',
                      '{\"logo.png\":{\"content\":\"x\",\"sha256\":\"cc33\"}}')",
             [],
@@ -1662,10 +2096,10 @@ mod tests {
         // 该行哈希为空、其余行照常。
         conn.execute(
             "INSERT INTO store_models
-                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                 (card_id, model_name, card_name, engine_name, downloaded_at, card_source,
                   scripts_content_json)
              VALUES ('card-broken', 'broken', 'Broken', 'tachyon', '2026-10-22T00:00:00Z',
-                     '{broken-json')",
+                     'store', '{broken-json')",
             [],
         )
         .unwrap();
@@ -1700,6 +2134,200 @@ mod tests {
         // 常规字段照常可读（顺带覆盖显式列清单没有漏列）。
         assert_eq!(rows[0].record.card_id, "card-light");
         assert!(!rows[0].record.running);
+
+        // 资产摘要同在轻量行上（card_revision 等）
+        assert_eq!(
+            rows[0].asset_hashes.get("logo.png").map(String::as_str),
+            Some("cc33"),
+        );
+
+        // 🔴 「有更新」徽标的地基：轻量行摘要构建的 manifest 必须与
+        // startup_card_manifest（启动检查的 local_revision 数据源）产出
+        // **逐字节相等**的 manifest——两条 revision 不相等，前端等值门
+        // 永远不命中，整个「有更新」通知静默失效。
+        assert_eq!(
+            super::super::card_update::notice_manifest_from_digests(
+                &rows[0].record,
+                &rows[0].script_hashes,
+                &rows[0].asset_hashes,
+            ),
+            startup_card_manifest("card-light").unwrap().unwrap(),
+            "轻量摘要 manifest 与启动 manifest 必须逐字节相等"
+        );
+        // 损坏行拿不到任何摘要：两条路都退化为同一份空 manifest（元数据
+        // 相同），revision 仍然相等——徽标对这类行也保持一致（同为不亮）。
+        let broken = rows
+            .iter()
+            .find(|r| r.record.card_id == "card-broken")
+            .unwrap();
+        assert_eq!(
+            super::super::card_update::notice_manifest_from_digests(
+                &broken.record,
+                &broken.script_hashes,
+                &broken.asset_hashes,
+            ),
+            startup_card_manifest("card-broken").unwrap().unwrap(),
+        );
+    }
+
+    /// 主线 lineage 的 version rows（record_json）没有 `resource_requirements`
+    /// 列。升级设备上反序列化缺字段必须落到默认空结构（=无可信预算），不能
+    /// 整行失败——否则版本清理与配额 admission 全部报错。钉住 serde(default)。
+    #[test]
+    fn record_json_without_resource_requirements_deserializes_to_the_default() {
+        let _ctx = setup_temp_db();
+        // 用真实落库的行序列化出 record_json 的真实形状（字段名以 serde 为准），
+        // 再摘掉 resource_requirements——模拟主线 lineage 版本登记里的旧行。
+        let scripts = std::collections::BTreeMap::new();
+        add_store_model(AddStoreModelParams {
+            card_id: "legacy-versioned",
+            model_name: "m",
+            card_name: "M",
+            org: None,
+            description: None,
+            engine_name: "tachyon",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::default(),
+            card_source: "store",
+        })
+        .unwrap();
+        let row = get_store_model("legacy-versioned").unwrap().unwrap();
+        let mut value = serde_json::to_value(&row).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_requirements");
+        let parsed: StoreModelRecord = serde_json::from_value(value).unwrap();
+        assert!(
+            parsed.resource_requirements.admission_peak_mib().is_none(),
+            "缺字段要落到默认空结构（无可信预算），而不是整行反序列化失败"
+        );
+        assert_eq!(parsed.card_id, "legacy-versioned");
+    }
+
+    /// r30 P2-4：reconcile 轻量查询的执行闸门——与上面 light 查询同族
+    /// （`db.rs:1654` 的 EXCLUDE 事故：SQL 语法错误只有真跑一遍才拦得住，
+    /// 这条与 admission 是同批四条轻量查询里唯二没有执行测试的）。
+    #[test]
+    fn reconcile_columns_query_executes_and_reads_state_fields() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        // 运行中卡：容器/端点/引擎版本全有（reconcile 消费的完整形态）。
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, engine_version,
+                  downloaded_at, running, status, container_name, endpoint_url)
+             VALUES ('card-run', 'qwen-run', 'Qwen Run', 'tachyon', '1.2.3',
+                     '2026-10-23T00:00:00Z', 1, 'deployed', 'pw-card-run',
+                     'http://127.0.0.1:9000')",
+            [],
+        )
+        .unwrap();
+        // 停用卡：可空字段全 NULL（Option 臂的 NULL 映射）。
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at,
+                  running, status)
+             VALUES ('card-stop', 'qwen-stop', 'Qwen Stop', 'ollama',
+                     '2026-10-22T00:00:00Z', 0, 'downloaded')",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_store_models_reconcile_columns()
+            .unwrap_or_else(|e| panic!("reconcile 轻量查询执行失败：{e}"));
+        assert_eq!(rows.len(), 2, "两行都该出来");
+        // ORDER BY downloaded_at DESC：新卡在前。
+        assert_eq!(rows[0].card_id, "card-run");
+        assert!(rows[0].running, "running 列的 i64→bool 映射");
+        assert_eq!(rows[0].container_name.as_deref(), Some("pw-card-run"));
+        assert_eq!(
+            rows[0].endpoint_url.as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+        assert_eq!(rows[0].engine_version.as_deref(), Some("1.2.3"));
+        assert_eq!(rows[0].status, "deployed");
+        // 停用卡：可空字段必须是 None 而不是空串（NULL 映射回归钉）。
+        let stopped = rows.iter().find(|r| r.card_id == "card-stop").unwrap();
+        assert!(!stopped.running);
+        assert!(stopped.container_name.is_none());
+        assert!(stopped.endpoint_url.is_none());
+        assert!(stopped.engine_version.is_none());
+    }
+
+    /// r30 P2-4：内存准入轻量查询的执行闸门 + json 守门 + running 过滤。
+    #[test]
+    fn admission_columns_query_executes_guards_json_and_filters_running() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        // 运行中的完整卡：两段正文可提取、资源需求可解析。
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at, running,
+                  scripts_content_json, assets_content_json, resource_requirements_json)
+             VALUES ('card-run', 'qwen-run', 'Qwen Run', 'tachyon',
+                     '2026-10-23T00:00:00Z', 1,
+                     '{\"install_engine\":{\"content\":\"#!/bin/sh\\necho run\"}}',
+                     '{\"common.sh\":{\"content\":\"#!/bin/sh\\necho common\"}}',
+                     '{\"gpu_vram_peak_mib\":16384}')",
+            [],
+        )
+        .unwrap();
+        // 停用卡：WHERE running != 0 必须把它挡在库外（不是读出来再过滤）。
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at, running)
+             VALUES ('card-stop', 'qwen-stop', 'Qwen Stop', 'ollama',
+                     '2026-10-22T00:00:00Z', 0)",
+            [],
+        )
+        .unwrap();
+        // 运行中但正文损坏/非 object 的卡：json_valid/json_type 守门后降级 NULL，
+        // 不得砸掉整个查询（与 light 查询的坏行测试同族）。
+        conn.execute(
+            "INSERT INTO store_models
+                 (card_id, model_name, card_name, engine_name, downloaded_at, running,
+                  scripts_content_json, assets_content_json)
+             VALUES ('card-bad', 'bad', 'Bad', 'tachyon',
+                     '2026-10-21T00:00:00Z', 1, '{broken-json', '5')",
+            [],
+        )
+        .unwrap();
+
+        let rows = list_running_store_models_admission_columns()
+            .unwrap_or_else(|e| panic!("admission 轻量查询执行失败：{e}"));
+        // 停用卡已被 SQL 过滤，只剩两张运行中的卡。
+        assert_eq!(
+            rows.len(),
+            2,
+            "停用卡应被 WHERE running != 0 挡住：{rows:?}"
+        );
+
+        let full = rows.iter().find(|r| r.card_id == "card-run").unwrap();
+        assert_eq!(full.install_engine.as_deref(), Some("#!/bin/sh\necho run"));
+        assert_eq!(full.common_sh.as_deref(), Some("#!/bin/sh\necho common"));
+        assert_eq!(full.resource_requirements.gpu_vram_peak_mib, Some(16384));
+
+        let bad = rows.iter().find(|r| r.card_id == "card-bad").unwrap();
+        assert!(
+            bad.install_engine.is_none(),
+            "坏 JSON 行应降级 NULL 而不是报错"
+        );
+        assert!(
+            bad.common_sh.is_none(),
+            "合法标量（'5'）不是 object，json_type 守门应降级 NULL"
+        );
+        assert!(
+            bad.resource_requirements.admission_peak_mib().is_none(),
+            "缺资源需求走默认值（无准入预算）"
+        );
     }
 
     /// 轻量路由查询必须真的能在 SQLite 上执行并读对字段（r19 评审 P2-5）。
@@ -1856,6 +2484,7 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::Single,
+            card_source: "store",
         })
         .unwrap();
         mark_engine_installed("驭光", Some("0f8a4a7c"), None, Some("legacy-script"), None).unwrap();
@@ -2072,6 +2701,39 @@ mod tests {
     }
 
     #[test]
+    fn downloaded_model_keeps_its_root_before_quota_finalization_or_later_upserts() {
+        let _ctx = setup_temp_db();
+        let scripts = Default::default();
+        let params = || AddStoreModelParams {
+            card_id: "fixed-root",
+            model_name: "fixed-root",
+            card_name: "Fixed root",
+            org: None,
+            description: None,
+            engine_name: "engine",
+            engine_version: None,
+            size_bytes: 1024,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        };
+        // No reservation-finalization UPDATE runs before these independent reads.
+        let rec = add_store_model_with_root(params(), "/fixed-download-root").unwrap();
+        assert_eq!(rec.models_root.as_deref(), Some("/fixed-download-root"));
+        assert_eq!(
+            get_store_model("fixed-root").unwrap().unwrap().models_root,
+            rec.models_root
+        );
+        let updated = add_store_model(params()).unwrap();
+        assert_eq!(updated.models_root.as_deref(), Some("/fixed-download-root"));
+    }
+
+    #[test]
     fn store_model_lifecycle() {
         let _ctx = setup_temp_db();
         let scripts = std::collections::BTreeMap::from([(
@@ -2094,6 +2756,7 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::default(),
+            card_source: "store",
         })
         .unwrap();
         assert_eq!(rec.status, "downloaded");
@@ -2137,6 +2800,7 @@ mod tests {
             status: "deployed",
             profiles: &[],
             deploy_topology: DeployTopology::Single,
+            card_source: "store",
         })
         .unwrap()
     }
@@ -2270,6 +2934,7 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::default(),
+            card_source: "store",
         })
         .unwrap();
         update_store_model_status("card-with-missing-receipt", "deployed", Some("script-hash"))
@@ -2333,6 +2998,7 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::default(),
+            card_source: "store",
         })
         .unwrap();
         update_store_model_status("card-with-missing-weights", "deployed", Some("script-hash"))
@@ -2408,6 +3074,34 @@ mod tests {
     }
 
     #[test]
+    fn migration_preserves_version_rows_and_defaults_quota_reservations_to_zero() {
+        let _ctx = setup_temp_db();
+        let conn = connect().unwrap();
+        conn.execute_batch(
+            "DROP TABLE model_versions;
+            CREATE TABLE model_versions (
+                card_id TEXT NOT NULL, version_id TEXT NOT NULL, state TEXT NOT NULL,
+                record_json TEXT, models_root TEXT, runtime_card_id TEXT NOT NULL,
+                resource_dir TEXT, managed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, error TEXT, PRIMARY KEY(card_id,version_id));
+            INSERT INTO model_versions(card_id,version_id,state,runtime_card_id,created_at)
+            VALUES('legacy-card','legacy-version','failed','legacy-runtime','2026-01-01');",
+        )
+        .unwrap();
+        drop(conn);
+        init_db().unwrap();
+        // Idempotent on subsequent launches, including databases created by
+        // the first version-store implementation before reservations existed.
+        init_db().unwrap();
+        let old = super::super::version_store::get("legacy-card", "legacy-version")
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.state, "failed");
+        assert_eq!(old.runtime_card_id, "legacy-runtime");
+        assert_eq!(old.planned_bytes, 0);
+    }
+
+    #[test]
     fn migration_adds_missing_columns() {
         let _ctx = setup_temp_db();
         let conn = connect().unwrap();
@@ -2444,38 +3138,235 @@ mod tests {
     /// 这条回归覆盖了 2026-10-13 真机上的事故：INSERT 仍列出 card_source，
     /// 但参数列表和 AddStoreModelParams 都已经不再提供它，SQLite 因而报
     /// “Got 23, needed 24”，把已经下载好的模型卡在“无法部署”的假状态。
+
+    /// `card_source` 列回归（2026-10-13 真机事故 "Got 23, needed 24"）。合并前的
+    /// PR 中间版本建出的库没有这一列（当时随内置测试商店一起删除）；合并版本里
+    /// version_store 整行回写、card_update 身份守卫和下载落库都重新需要它。
+    /// init_db 的迁移必须把缺列补回来，之后写入才不卡死。
     #[test]
-    fn add_store_model_works_with_or_without_obsolete_card_source_column() {
+    fn add_store_model_works_after_migrating_interim_schema_without_card_source() {
         let _ctx = setup_temp_db();
-        let scripts = std::collections::BTreeMap::new();
-
-        let add = |card_id: &str| {
-            add_store_model(AddStoreModelParams {
-                card_id,
-                model_name: "model",
-                card_name: "Model",
-                org: None,
-                description: None,
-                engine_name: "engine",
-                engine_version: None,
-                size_bytes: 1,
-                quantization: None,
-                source_repo_id: None,
-                source_filename: None,
-                scripts: &scripts,
-                status: "downloaded",
-                profiles: &[],
-                deploy_topology: DeployTopology::default(),
-            })
-        };
-
-        add("fresh-schema").expect("新库不应依赖已删除的 card_source 列");
-
         let conn = connect().unwrap();
-        conn.execute("ALTER TABLE store_models ADD COLUMN card_source TEXT", [])
-            .unwrap();
+        // 模拟 PR 中间版本的库：store_models 没有 card_source 等后加列。
+        conn.execute_batch("DROP TABLE store_models").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE store_models (
+                card_id TEXT PRIMARY KEY, model_name TEXT NOT NULL, card_name TEXT NOT NULL,
+                org TEXT, engine_name TEXT NOT NULL, engine_version TEXT,
+                size_bytes INTEGER NOT NULL DEFAULT 0, quantization TEXT,
+                source_repo_id TEXT, source_filename TEXT, status TEXT NOT NULL DEFAULT 'downloaded',
+                running INTEGER NOT NULL DEFAULT 0, script_install_engine TEXT, script_deploy TEXT,
+                script_download_model TEXT, script_enable TEXT, script_stop TEXT, script_uninstall TEXT,
+                downloaded_at TEXT NOT NULL, deployed_at TEXT
+            )",
+        )
+        .unwrap();
         drop(conn);
 
-        add("upgraded-schema").expect("旧库残留 card_source 列也不应改变写入参数个数");
+        init_db().unwrap();
+
+        let scripts = std::collections::BTreeMap::new();
+        add_store_model(AddStoreModelParams {
+            card_id: "upgraded-schema",
+            model_name: "model",
+            card_name: "Model",
+            org: None,
+            description: None,
+            engine_name: "engine",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &scripts,
+            status: "downloaded",
+            profiles: &[],
+            deploy_topology: DeployTopology::default(),
+            card_source: "store",
+        })
+        .expect("迁移补回 card_source 列后，下载落库必须成功");
+    }
+
+    #[test]
+    fn deployment_commit_rejects_an_absent_model() {
+        let _ctx = setup_temp_db();
+        assert!(matches!(
+            mark_deployed("missing-card", Some("hash"), Some("custom")),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+    }
+
+    fn update_fixture() -> (
+        StoreModelRecord,
+        super::super::store_client::StoreCardDetail,
+    ) {
+        let card: super::super::store_client::StoreCardDetail = serde_json::from_value(serde_json::json!({
+            "id":"update-test", "name":"Updated card", "engine_name":"engine", "engine_version":"v2",
+            "source_repo_id":"org/model", "quantization":"NVFP4", "size_bytes":1024,
+            "profiles":[{"id":"new-profile", "name":"New profile"}],
+            "scripts":{}, "script_sha256":{}, "assets":{}, "asset_sha256":{}
+        })).unwrap();
+        add_store_model(AddStoreModelParams {
+            card_id: "update-test",
+            model_name: "stable-model-name",
+            card_name: "Old card",
+            org: None,
+            description: None,
+            engine_name: "engine",
+            engine_version: Some("v1"),
+            size_bytes: 1024,
+            quantization: Some("NVFP4"),
+            source_repo_id: Some("org/model"),
+            source_filename: None,
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+        let old = ScriptBlob {
+            content: "old".into(),
+            sha256: super::super::script_runner::sha256_hex("old"),
+        };
+        set_scripts_content(
+            "update-test",
+            &std::collections::BTreeMap::from([("deploy".into(), old)]),
+            &Default::default(),
+        )
+        .unwrap();
+        set_endpoint_info(
+            "update-test",
+            Some("http://127.0.0.1:8000/v1"),
+            Some("served-model"),
+        )
+        .unwrap();
+        (get_store_model("update-test").unwrap().unwrap(), card)
+    }
+
+    #[test]
+    fn card_update_changes_metadata_and_assets_atomically_preserving_model_identity() {
+        let _ctx = setup_temp_db();
+        let (old, card) = update_fixture();
+        let key = add_api_key(&old.card_id, Some("existing-key")).unwrap();
+        let assets = std::collections::BTreeMap::from([(
+            "common.sh".into(),
+            ScriptBlob {
+                content: "new asset".into(),
+                sha256: "new-hash".into(),
+            },
+        )]);
+        // Even unchanged entry scripts need redeployment when metadata/assets change.
+        commit_card_update_package(&old, &card, &old.scripts_content, &assets).unwrap();
+        let updated = get_store_model(&old.card_id).unwrap().unwrap();
+        assert_eq!(updated.engine_version.as_deref(), Some("v2"));
+        assert_eq!(updated.profiles[0].id, "new-profile");
+        assert_eq!(updated.assets_content["common.sh"].content, "new asset");
+        assert!(updated.card_update_pending);
+        assert_eq!(updated.model_name, old.model_name);
+        assert_eq!(updated.downloaded_at, old.downloaded_at);
+        assert_eq!(updated.deployed_at, old.deployed_at);
+        assert_eq!(updated.endpoint_url, old.endpoint_url);
+        assert_eq!(updated.endpoint_model, old.endpoint_model);
+        assert_eq!(
+            list_api_keys_for_card(&old.card_id).unwrap()[0].key_value,
+            key.key_value
+        );
+        let manager = super::super::lifecycle::ModelManager::new(None, None);
+        let error = manager
+            .enable(&old.card_id, &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("重新部署"));
+    }
+
+    #[test]
+    fn card_update_db_failure_keeps_metadata_and_files_together() {
+        let _ctx = setup_temp_db();
+        let (old, card) = update_fixture();
+        connect().unwrap().execute_batch("CREATE TRIGGER reject_card_update BEFORE UPDATE OF scripts_content_json ON store_models BEGIN SELECT RAISE(ABORT,'injected write failure'); END;").unwrap();
+        assert!(
+            commit_card_update_package(&old, &card, &Default::default(), &Default::default())
+                .is_err()
+        );
+        let kept = get_store_model(&old.card_id).unwrap().unwrap();
+        assert_eq!(
+            super::super::card_update::local_manifest(&kept),
+            super::super::card_update::local_manifest(&old)
+        );
+        assert!(!kept.card_update_pending);
+    }
+
+    #[test]
+    fn card_update_rejects_a_model_that_started_after_preview() {
+        let _ctx = setup_temp_db();
+        let (old, card) = update_fixture();
+        set_running(&old.card_id, true).unwrap();
+        assert!(
+            commit_card_update_package(&old, &card, &Default::default(), &Default::default())
+                .is_err()
+        );
+        let kept = get_store_model(&old.card_id).unwrap().unwrap();
+        assert_eq!(kept.engine_version, old.engine_version);
+        assert!(kept.running);
+        assert!(!kept.card_update_pending);
+    }
+
+    #[test]
+    fn card_update_preview_detects_asset_and_metadata_only_changes() {
+        let _ctx = setup_temp_db();
+        let (old, mut card) = update_fixture();
+        card.summary.name = old.card_name.clone();
+        card.summary.engine_version = old.engine_version.clone();
+        card.profiles.clear();
+        card.script_sha256 = Some(
+            old.scripts_content
+                .iter()
+                .map(|(k, v)| (k.clone(), v.sha256.clone()))
+                .collect(),
+        );
+        let manifest = super::super::card_update::remote_manifest(&card);
+        assert_eq!(super::super::card_update::local_manifest(&old), manifest);
+        for digest in card.script_sha256.as_mut().unwrap().values_mut() {
+            *digest = digest.to_ascii_uppercase();
+        }
+        assert!(
+            !super::super::card_update::preview(&old, &card)["changed"]
+                .as_bool()
+                .unwrap()
+        );
+        card.asset_sha256 = Some(std::collections::BTreeMap::from([(
+            "common.sh".into(),
+            "a".repeat(64),
+        )]));
+        assert!(
+            super::super::card_update::preview(&old, &card)["changed"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_ne!(
+            super::super::card_update::revision(&manifest),
+            super::super::card_update::revision(&super::super::card_update::remote_manifest(&card))
+        );
+        card.asset_sha256 = Some(Default::default());
+        card.summary.engine_version = Some("v3".into());
+        assert!(
+            super::super::card_update::preview(&old, &card)["changed"]
+                .as_bool()
+                .unwrap()
+        );
+    }
+    #[test]
+    fn startup_manifest_uses_single_topology_for_legacy_null_rows() {
+        let _ctx = setup_temp_db();
+        let (old, _) = update_fixture();
+        connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET deploy_topology=NULL WHERE card_id=?1",
+                [&old.card_id],
+            )
+            .unwrap();
+        let manifest = startup_card_manifest(&old.card_id).unwrap().unwrap();
+        assert_eq!(manifest["deploy_topology"], "single");
     }
 }

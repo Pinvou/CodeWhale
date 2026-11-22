@@ -16,7 +16,7 @@ const voiceReasoningSource = rustVoiceSource + dialectSource;
 // already preserves B; voice must use that resolved name for both attempts,
 // never run the first-entry-only monitoring probe again.
 const postprocessCommand = rustVoiceSource.slice(rustVoiceSource.indexOf("pub async fn postprocess_voice_text("));
-assert.match(postprocessCommand, /let bridge = match voice_postprocess_bridge\([\s\S]*?let model_name = bridge\.model\(\);/);
+assert.match(postprocessCommand, /let \(bridge, _voice_scope\) = match voice_postprocess_bridge\([\s\S]*?let model_name = bridge\.model\(\);/);
 assert.doesNotMatch(rustVoiceSource, /probe_vllm_model_info/);
 assert.strictEqual((postprocessCommand.match(/&model_name,/g) || []).length, 2,
   "initial and retry requests must share the prepared user-selected model B, not server-first model A");

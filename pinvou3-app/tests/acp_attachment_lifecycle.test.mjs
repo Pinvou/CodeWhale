@@ -4,16 +4,7 @@ import {
   isPendingAcpAttachment,
   runAcpAttachmentTask,
 } from '../src/features/codex/acp-attachment-lifecycle.js';
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
+import { deferred } from './helpers/deferred.mjs';
 
 assert.equal(isPendingAcpAttachment({ status: 'parsing' }), true);
 assert.equal(isPendingAcpAttachment({ status: 'uploading' }), true);
@@ -26,7 +17,7 @@ assert.equal(isPendingAcpAttachment({ status: 'ready' }), false);
     { id: 'uploading-1', status: 'uploading' },
     { id: 'ready-1', status: 'ready' },
   ], cancelledIds);
-  assert.deepEqual([...cancelledIds].sort(), ['parsing-1', 'uploading-1']);
+  assert.deepEqual([...cancelledIds].sort(), ['parsing-1', 'uploading-1']); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic string order is the assertion's expectation
 }
 
 {

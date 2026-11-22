@@ -17,6 +17,19 @@ const chunkedUpload = readSource(
   'utf8',
 );
 const webBridge = readSource(path.join(root, 'src', 'platform', 'web', 'bridge.js'), 'utf8');
+const fileLimits = readSource(
+  path.join(root, 'src-tauri', 'src', 'features', 'files', 'limits.rs'),
+  'utf8',
+);
+const fileIngest = readSource(
+  path.join(root, 'src-tauri', 'src', 'features', 'files', 'file_ingest.rs'),
+  'utf8',
+);
+const limitErrors = readSource(
+  path.join(root, 'src', 'features', 'attachments', 'attachment-limit-errors.js'),
+  'utf8',
+);
+const i18nZh = readSource(path.join(root, 'src', 'shared', 'i18n', 'zh.js'), 'utf8');
 const webDomainAdapter = readSource(
   path.join(root, 'src', 'platform', 'web', 'bridge', 'domain-adapter.js'),
   'utf8',
@@ -124,6 +137,12 @@ const policy = JSON.parse(readSource(path.join(root, 'src', 'platform', 'web', '
 const allowed = new Set(policy.allowed_commands);
 const allowedEvents = new Set(policy.allowed_events);
 
+const rustForwardedEvents = remoteControlManager.match(/const RUST_FORWARDED_EVENTS: &\[&str\] = &\[([^\]]*)\];/);
+assert.ok(rustForwardedEvents, 'the Rust direct-forward deduplication contract must remain explicit');
+assert.equal(allowedEvents.has('models:changed'), true, 'store model refreshes must reach Web clients');
+assert.match(rustForwardedEvents[1], /"models:changed"/,
+  'store model refreshes use Rust forwarding and must suppress the desktop proxy duplicate');
+
 function rustCommandBlock(source, command) {
   const signature = source.indexOf(`fn ${command}(`);
   assert.notEqual(signature, -1, `missing Rust command ${command}`);
@@ -165,6 +184,7 @@ for (const command of [
   'transcribe_voice_audio',
   'save_model',
   'delete_model',
+  'delete_model_if_store_link',
   'set_active_model',
   'test_model_connection',
   'set_disabled_connectors',
@@ -230,9 +250,73 @@ for (const command of [
   // deliberately not allowlisted on the web; the web hides the whole
   // dependency section behind the dependencyInstall capability bit.
   'check_dependencies',
+  // The embedding-model install pair is desktop-only: a ~585MB native download
+  // and its cancel belong to the desktop host. The JS cancelKbModel facade
+  // exists on web as a policy-denied no-op (checkDependencies shape); keeping
+  // the commands off the policy AND in this anti-pin list means an accidental
+  // future allowlisting turns red instead of silently passing.
+  'kb_model_download',
+  'kb_model_cancel',
 ]) {
   assert.equal(allowed.has(command), false, `${command} must remain desktop-only`);
 }
+
+// Round-1 review M3 (endpoint model discovery): the probe command is
+// deliberately WEB-ALLOWED, so pin the positive half of that contract the
+// same way the desktop-only half above is anti-pinned — otherwise a policy
+// edit could silently un-allowlist it and strand the ACP/settings picker on
+// web. Rationale: probe_endpoint_models is keyring-blind — the caller
+// supplies whatever key the form holds, the command never reads the local
+// keyring or saved credentials, so probing from a paired browser leaks no
+// stored secret. That is exactly why it may ride the web RPC lane while
+// test_model_connection (resolves SAVED keys by model id → keyring access)
+// and save_model (credential writes) stay desktop-only above.
+// Round-2 review M7: the grant is wider than the keyring argument alone —
+// the OpenAI-compatible ladder short-circuits loopback/private base URLs
+// (base_url_uses_local_or_private in core/endpoint_discovery.rs), so a
+// paired page also gains a port-open/closed oracle via the transport class,
+// service identification via server_kind, and the loaded model names of
+// loopback/LAN services (ids only — the `title` field is populated only by
+// the remote anthropic/gemini native lanes; the local lanes return bare
+// ids) — silent (no desktop-side confirmation) and with no per-command rate
+// limit (only the shared MAX_RPC_IN_FLIGHT=32 window).
+// Round-3 review M5 (disclosure accuracy amendment): the reach is GLOBAL,
+// not "bounded internal-network" — the command validates only URL SHAPE,
+// not the host, and the remote ladders run unconditionally for every
+// non-local URL. A paired page can classify any PUBLIC host too (dns/
+// connect/timeout/tls per invocation, http_status for >=400/3xx), with the
+// desktop as vantage and the user's IP as source; IPv6 ULAs/link-local and
+// 169.254.169.254-style cloud-metadata addresses never hit the local
+// short-circuit at all. Accepted anyway because: keyring-blind with a
+// caller-supplied key only (saved credentials are never readable — but a
+// user-typed key transits the relay transport inside the paired page's RPC
+// frame: TLS terminates at the relay, so the relay operator and its logs
+// can observe it; the default localhost relay is unaffected; the RPC ledger
+// fingerprints args with the secret replaced by its length, so the
+// persisted hash is not an offline verifier for the key);
+// the sanitized response carries status codes, transport class, server kind,
+// and model entries, never the URL or key or body text; one caller-supplied
+// endpoint per invocation — exact on the remote ladders, which stay
+// no-redirect and are pinned, while the LOCAL lane's probes ride the shared
+// probe client, which follows redirects (reqwest default, up to 10 hops);
+// only Bearer is attached there and reqwest strips it on any host-or-port
+// change (scheme is NOT compared — a same-host scheme downgrade keeps it,
+// but that host already received the key), so no credential reaches a second
+// host, but the probe's requests may land on
+// hosts the caller-supplied URL redirects to (still a single starting
+// point; the shape is not a scanner, the page must issue its own requests);
+// and today only page JS reaches the command: the probe's UI entries stay
+// off the web lane because the web bridge never populates
+// platformCapabilities.codexAcpSupported (the ACP tab's gate) and the
+// saved-model editor additionally gates on modelManagement:false
+// (platform/web/bootstrap.js).
+// discoverLocalVllm (the multi-candidate local discovery) stays
+// desktop-only — see tests/bridge_domain_contract.mjs.
+assert.equal(
+  allowed.has('probe_endpoint_models'),
+  true,
+  'probe_endpoint_models must stay web-allowlisted (keyring-blind: caller supplies the key; no saved-credential read, unlike test_model_connection; disclosed GLOBAL reach: the command accepts any caller-supplied URL and the remote ladders classify any public host — a port/service/model oracle with the desktop as vantage, bounded only by MAX_RPC_IN_FLIGHT=32 — accepted because the sanitized response never echoes the URL or key, one caller-supplied endpoint per invocation with the remote ladders no-redirect and pinned while the local lane may follow redirects (Bearer stripped on any host-or-port change; scheme is not compared), typed keys transit the relay frame where the relay operator can observe them (saved credentials never readable; localhost default unaffected), the ledger fingerprint redacts secret-named args at any depth to their length, and only page JS reaches the command today — the probe UI stays off the web lane because the web bridge never populates platformCapabilities.codexAcpSupported, with the saved-model editor additionally gated on modelManagement:false)',
+);
 
 // 结构性互斥钉——remote_control.rs 里定义的每一个
 // web_access_* 命令必须要么在 Web 策略里(受 positive wrapper 钉约束),
@@ -503,8 +587,10 @@ assert.match(chatView, /bridge\.attachments\.pickAndAttach\(\)/,
   'the desktop-instance picker entry must keep using the existing remote browser');
 assert.match(chunkedUpload, /CHUNK_BYTES = 256 \* 1024/,
   'upload chunks must stay aligned with the desktop MAX_TRANSFER_CHUNK_BYTES limit');
-assert.match(chunkedUpload, /MAX_FILE_BYTES = 20 \* 1024 \* 1024/,
+assert.match(chunkedUpload, /MAX_FILE_BYTES = 50 \* 1024 \* 1024/,
   'the browser preflight must mirror file_ingest::MAX_FILE_BYTES');
+assert.match(fileLimits, /MAX_FILE_BYTES: u64 = 50 \* 1024 \* 1024/,
+  'the Rust ingest cap must keep the same literal the browser preflight mirrors — without this pin a Rust-only cap change leaves every test green while the browser falsely rejects files the desktop accepts');
 assert.match(webBridge, /PinvouChunkedFileUpload/,
   'Web chat uploads must use the shared chunk uploader');
 assert.doesNotMatch(webBridge, /function bytesToBase64/,
@@ -638,6 +724,120 @@ assert.equal((i18n.match(/deviceUploadDigestInvalid:/g) || []).length, 3,
 assert.equal((i18n.match(/deviceUploadIntegrityMismatch:/g) || []).length, 3,
   'the ACP mismatch copy must exist in all three i18n dictionaries');
 
+// The two size-bound rejections of the upload lane (64 MiB in-flight
+// aggregate; 32 MiB serialized parsed-result cache) are ordinary outcomes
+// since the per-file cap rose to 50 MiB (community PR #894), so they follow
+// the same stable-wire-code rule as the digest failures: defined as codes,
+// localized on every client path, raw single-language text never crossing
+// the Relay.
+assert.match(remoteControlManager, /WEB_ATTACHMENT_UPLOAD_CACHE_FULL: &str = "web_attachment_upload_cache_full"/,
+  'the upload-buffer overflow must be a stable wire code');
+assert.match(remoteControlManager, /WEB_ATTACHMENT_PARSED_CACHE_TOO_LARGE: &str =\s*"web_attachment_parsed_cache_too_large"/,
+  'the parsed-result cache overflow must be a stable wire code');
+assert.match(remoteControlManager, /WEB_ATTACHMENT_UPLOAD_CACHE_FULL\.to_string\(\)/,
+  'the aggregate-buffer gate must return the stable wire code');
+assert.match(remoteControlManager, /fn web_attachment_cache_overflow[\s\S]*?WEB_ATTACHMENT_PARSED_CACHE_TOO_LARGE/,
+  'the serialized-cache gate must return the stable wire code');
+assert.doesNotMatch(remoteControlManager, /远程控制附件上传缓存超过总容量上限/,
+  'single-language upload-buffer errors must not cross the Relay');
+assert.doesNotMatch(remoteControlManager, /解析后的附件超过远程控制桌面缓存上限/,
+  'single-language cache-overflow errors must not cross the Relay');
+// The localized copy names the bound ("32 MB"); pin the Rust literal it
+// mirrors and the number inside every language so a one-sided change —
+// the constant moved without the copy, or one language drifted — turns
+// CI red instead of shipping a lying message (same rule as the 50 MiB
+// file_ingest::MAX_FILE_BYTES mirror above).
+assert.match(remoteControlManager, /MAX_WEB_ATTACHMENT_BYTES: usize = 32 \* 1024 \* 1024/,
+  'the parsed-cache bound literal must stay in sync with the localized copy');
+assert.equal((i18n.match(/deviceParsedTooLarge:[^,\n]*32 MB/g) || []).length, 3,
+  'the parsed-cache copy must name the same 32 MB bound in all three languages');
+assert.match(acpErrors, /'web_attachment_upload_cache_full'[\s\S]*?'web_attachment_parsed_cache_too_large'/,
+  'the session-level fallback must fold both cache codes into localized copy');
+assert.match(webBridge, /rawUploadError === "web_attachment_upload_cache_full"[\s\S]*?bt\("deviceUploadCacheFull"\)/,
+  'the Web chat upload path must localize the upload-buffer code');
+assert.match(webBridge, /raw === "web_attachment_parsed_cache_too_large"[\s\S]*?bt\("deviceParsedTooLarge"\)/,
+  'the shared limit mapper must localize the parsed-cache code');
+assert.equal((webBridge.match(/deviceUploadCacheFull:/g) || []).length, 3,
+  'the upload-buffer copy must exist in all three BT_TABLE language blocks');
+assert.equal((webBridge.match(/deviceParsedTooLarge:/g) || []).length, 3,
+  'the parsed-cache copy must exist in all three BT_TABLE language blocks');
+assert.match(webBridge, /const limitError = attachmentLimitDisplayError\(e, att\.basename\)/,
+  'the desktop-picked ingest path must map limit codes instead of storing raw text');
+assert.match(codexView, /const attachmentLimitError = formatAttachmentLimitError\(err, t\.uiAttachments\)/,
+  'the ACP attachment path must localize limit codes through the shared formatter');
+assert.equal((i18n.match(/deviceUploadCacheFull:/g) || []).length, 3,
+  'the ACP upload-buffer copy must exist in all three i18n dictionaries');
+assert.equal((i18n.match(/deviceParsedTooLarge:/g) || []).length, 3,
+  'the ACP parsed-cache copy must exist in all three i18n dictionaries');
+
+// The third size-bound rejection of the same lane — the 64 MiB parsed-result
+// cache TOTAL, reachable when entries pinned by in-flight submissions block
+// eviction and ordinary ~30 MiB parsed results (routine since the per-file
+// cap rose to 50 MiB, community PR #894) fill the cache — follows the same
+// stable-wire-code rule as its two siblings above.
+assert.match(remoteControlManager, /WEB_ATTACHMENT_CACHE_FULL: &str = "web_attachment_cache_full"/,
+  'the attachment-cache overflow must be a stable wire code');
+assert.match(remoteControlManager, /Err\(transfer::WEB_ATTACHMENT_CACHE_FULL\.into\(\)\)/,
+  'the cache-total gate must return the stable wire code');
+assert.doesNotMatch(remoteControlManager, /远程控制附件缓存已满/,
+  'single-language cache-full errors must not cross the Relay');
+assert.match(webBridge, /raw === "web_attachment_cache_full"[\s\S]*?bt\("deviceCacheFull"\)/,
+  'the shared limit mapper must localize the cache-full code');
+assert.equal((webBridge.match(/deviceCacheFull:/g) || []).length, 3,
+  'the cache-full copy must exist in all three BT_TABLE language blocks');
+assert.equal((i18n.match(/deviceCacheFull:/g) || []).length, 3,
+  'the ACP cache-full copy must exist in all three i18n dictionaries');
+assert.match(acpErrors, /'web_attachment_cache_full'/,
+  'the session-level fallback must fold the cache-full code into localized copy');
+
+// The shared formatter's code table must keep mirroring the Rust wire
+// literals one-for-one: a value drift in attachment-limit-errors.js breaks
+// chip mapping while every behavioral test stays green (the tests import the
+// module and compare it against itself).
+for (const [rustSource, codes] of [
+  [fileIngest, ['attachment_file_too_large', 'attachment_archive_too_many_entries', 'attachment_archive_expanded_too_large', 'attachment_archive_unsafe_entry']],
+  [remoteControlManager, ['web_attachment_upload_cache_full', 'web_attachment_parsed_cache_too_large', 'web_attachment_cache_full']],
+]) {
+  for (const code of codes) {
+    assert.match(limitErrors, new RegExp(`'${code}'`),
+      `the shared limit formatter must map ${code}`);
+    assert.match(rustSource, new RegExp(`"${code}"`),
+      `the Rust emitter must keep the ${code} literal the shared formatter mirrors`);
+  }
+}
+
+// The BT_TABLE copy names hard bounds ("50 MB" / "32 MB"); key-presence pins
+// alone let a one-sided figure edit ship a lying notice in the web chat while
+// the shared-i18n figure pins stay green (same rule as the 32 MB i18n pin
+// above, extended to the bridge's own language blocks).
+assert.equal((webBridge.match(/deviceUploadTooLarge:[^,\n]*50 MB/g) || []).length, 3,
+  'the web chat oversize notice must name the 50 MB bound in all three BT_TABLE language blocks');
+assert.equal((webBridge.match(/deviceParsedTooLarge:[^,\n]*32 MB/g) || []).length, 3,
+  'the web chat parsed-cache notice must name the 32 MB bound in all three BT_TABLE language blocks');
+
+// The zh upload-limit copy bodies are kept identical between the bridge
+// BT_TABLE and the shared i18n dict so both surfaces translate the same
+// truth; BT rows carry a sanctioned "⚠️ " notice prefix the dict rows lack,
+// so a one-sided punctuation/wording edit (halfwidth vs fullwidth comma)
+// turns CI red instead of shipping split copy. BT blocks are ordered
+// en/ja/zh, so the last match is the zh row.
+const stripWarningPrefix = (value) => (value && value.startsWith('⚠️ ') ? value.slice('⚠️ '.length) : value);
+const zhBtValue = (key) => {
+  const matches = [...webBridge.matchAll(new RegExp(`${key}:\\s*"([^"]+)"`, 'g'))];
+  return matches.length ? matches.at(-1)[1] : null;
+};
+const zhDictValue = (key) => {
+  const match = i18nZh.match(new RegExp(`${key}:'([^']+)'`));
+  return match ? match[1] : null;
+};
+for (const key of ['deviceUploadCacheFull', 'deviceParsedTooLarge', 'deviceCacheFull']) {
+  assert.equal(stripWarningPrefix(zhBtValue(key)), zhDictValue(key),
+    `zh ${key} body must stay identical between the bridge BT_TABLE (minus its ⚠️ prefix) and the shared i18n dict`);
+}
+
+assert.match(chunkedUpload, /device attachment exceeds \$\{MAX_FILE_BYTES\} bytes/,
+  'the dev-facing oversize message must derive from the mirrored constant, not a stale literal');
+
 // After the watchdog skips a stalled predecessor, the web live stream shows
 // an envelope-seq hole; the listener must detect the jump and debounce-refetch
 // the authoritative timeline to self-heal (instead of waiting for a
@@ -760,7 +960,7 @@ assert.doesNotMatch(webSearchRestartBody, /invoke\("restart_app"/,
   'Web settings bridge must not invoke the native-only restart command');
 assert.match(main, /const saved = isWeb[\s\S]{0,180}saveSearchSettings\(search\)[\s\S]{0,180}saveSearchSettingsAndRestart\(search\)/,
   'the shared UI must save without requesting a desktop restart in WebUI');
-assert.match(webBridge, /state\.settings = await invoke\(IS_WEB \? "web_access_update_settings" : "update_settings"/,
+assert.match(webBridge, /const settings = await invoke\(IS_WEB \? "web_access_update_settings" : "update_settings", \{ patch: patch \}\);\s*window\.PinvouBridgeShared\.publishSettings\(state, settings\);/,
   'WebUI must keep the canonical settings returned by the desktop backend');
 assert.match(webBridge, /web_access_update_settings", \{ patch: \{ search: search \} \}/,
   'WebUI search saves must send a narrow patch instead of a full settings snapshot');
@@ -988,7 +1188,7 @@ assert.ok(
 );
 const toolEvents = readSource(path.join(root, 'src', 'features', 'tools', 'tool-events.js'), 'utf8');
 assert.match(toolEvents, /export \{ notifyComposerToolsChanged, notifyChatRoundCommitted \};/);
-assert.match(composerShared, /bridge\.models\.switchModel\(activeSessionId, id\)/);
+assert.match(composerShared, /bridge\.models\.switchModelRef\(activeSessionId, modelRef\)/);
 assert.match(settingsView, /\{canManageModels && editingModel && \(/);
 assert.match(toolStoreView, /if \(!can\('toolStoreMutations'\)\) \{/);
 assert.match(toolStoreView, /const canMutateToolStore = can\('toolStoreMutations'\);/);
@@ -1127,21 +1327,21 @@ assert.match(desktopRemoteControlBridge,
 assert.equal(
   (desktopRemoteControlBridge.match(/\{ last_error: String\(error\), last_error_code: null \}/g) || []).length, 2,
   'the status-refresh failure merge and the revoke failure merge must both clear the stale code');
-assert.match(remoteControlCommands, /web_access_revoke_host_workspace\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+assert.match(remoteControlCommands, /web_access_revoke_host_workspace\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'only the main desktop WebView may revoke folder consent');
-assert.match(remoteControlCommands, /web_access_enable\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+assert.match(remoteControlCommands, /web_access_enable\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'only the main desktop WebView may enable a persistent remote endpoint');
 assert.match(
   remoteControlCommands,
-  /web_access_status\([\s\S]{0,260}require_main_webview\(&window\)\?/,
+  /web_access_status\([\s\S]{0,260}require_main_webview\(&webview\)\?/,
   'web_access_status carries the token-bearing pairing URL and must stay main-WebView only',
 );
 assert.match(
   remoteControlCommands,
-  /web_access_rotate\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+  /web_access_rotate\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'rotation rewrites link credentials and must stay main-WebView only',
 );
-assert.match(remoteControlCommands, /web_access_disable\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+assert.match(remoteControlCommands, /web_access_disable\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'only the main desktop WebView may stop a persistent remote endpoint');
 assert.match(remoteControlManager, /require_host_workspace_authorization\(endpoint\.config\.allow_host_workspace\)\?/,
   'workspace capabilities must fail closed until desktop authorization is persisted');

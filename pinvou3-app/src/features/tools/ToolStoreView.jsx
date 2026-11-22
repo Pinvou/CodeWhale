@@ -4,6 +4,7 @@ import { BookOpen, Check, ChevronLeft, Download, Globe, Package, Server, Setting
 import { IosSearchField } from '../../components/IosControls.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
+import { ConfirmDialog } from '../../components/ConfirmDialog.jsx';
 import { resolveOAuthInstallOutcome } from './oauth-marketplace-logic.js';
 import { notifyComposerToolsChanged } from './tool-events.js';
 import { localizeTool, mergeConfigFields, TsActionBtn, BuiltinPluginCard, tsCategories, tsSkillIconByName, tsSkillsData, tsToolsData, tsToolWelcomeData, TOOL_TYPE_GROUPS, getToolTypeGroup, TOOL_BUSINESS_GROUPS, getToolBusinessGroup } from './tool-marketplace.jsx';
@@ -22,6 +23,12 @@ import { companionPackageMap } from '../../shared/companion-packages.js';
 // 这里的 10 分钟是 UI 兜底安全网,到时仍会显式取消后端登录,给用户一个
 // 可重试的干净状态,而不是在用户快完成时取消。
 const OAUTH_UI_TIMEOUT_MS = 600_000;
+
+// 安装成功卡上报告的远端验证清单展示上限。tools/list 完全受远端控制：名字数
+// 与单名长度都不能信任远端（React 转义防注入但不防布局灾难），展示前双重截断。
+// 单名 64 与后端展示名上限（MAX_DISPLAY_NAME_CHARS，同文件下方）对齐。
+const MAX_REPORTED_TOOLS = 8;
+const MAX_REPORTED_TOOL_NAME_CHARS = 64;
 
 const canStartExternalAuth = () => can('oauth') && can('externalAuth');
 
@@ -773,11 +780,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   <div className={`text-[17px] font-semibold mb-1.5 break-all text-slate-900 dark:text-white`}>
                     {alert.title}
                   </div>
-                  {alert.subtitle ? (
+                  {alert.subtitle && (
                     <div className={`text-[13px] leading-relaxed break-all text-slate-500 dark:text-slate-400`}>
                       {alert.subtitle}
                     </div>
-                  ) : !alert.isError && !alert.suppressHint && (
+                  )}
+                  {!alert.isError && !alert.suppressHint && (alert.showInstallHint || !alert.subtitle) && (
                     <div className={`text-[13px] leading-relaxed text-slate-500 dark:text-slate-400`}>
                       {alert.isInstall ? copy.installHint : copy.removeHint}
                     </div>
@@ -1053,32 +1061,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         </ModalBackdrop>
       );
     };
-
-    // Inline double-confirm dialog skeleton (shared by the preset skill update confirm and the trash permanent-delete
-    // confirm): backdrop click-to-close + content stopPropagation + two side-by-side buttons. confirmTone 'blue'|'rose'
-    // picks each site's confirm key color; confirmTestId is only needed by the trash permanent-delete confirm (test pin).
-    const SheetRowConfirm = ({ title, desc, cancelLabel, confirmLabel, confirmTone = 'blue', confirmTestId, onConfirm, onCancel }) => (
-      // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-close layer; the keyboard path is covered by the dialog's cancel/confirm buttons
-      // biome-ignore lint/a11y/noStaticElementInteractions: backdrop click-to-close layer, non-interactive container
-      <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onCancel}>
-        {/* biome-ignore lint/a11y/useKeyWithClickEvents: click-propagation stop layer; keyboard events need no bubbling here */}
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: click-propagation stop layer, non-interactive container */}
-        <div className="w-[300px] max-w-full rounded-[20px] overflow-hidden shadow-2xl bg-white/95 backdrop-blur-xl dark:bg-[#2C2C2E]" onClick={e => e.stopPropagation()}>
-          <div className="px-6 pt-6 pb-5 text-center">
-            <div className="text-[17px] font-semibold mb-1.5 text-slate-900 dark:text-white">{title}</div>
-            <div className="text-[13px] leading-relaxed text-slate-500 dark:text-slate-400">{desc}</div>
-          </div>
-          <div className="border-t border-slate-200 dark:border-white/10 flex">
-            <button type="button" onClick={onCancel} className="flex-1 py-3 text-[17px] text-center transition-colors text-slate-500 active:bg-slate-100 dark:text-slate-400 dark:active:bg-white/5 border-r border-slate-200 dark:border-white/10">
-              {cancelLabel}
-            </button>
-            <button type="button" data-testid={confirmTestId} onClick={onConfirm} className={`flex-1 py-3 text-[17px] font-semibold text-center transition-colors ${confirmTone === 'rose' ? 'text-rose-600 active:bg-slate-100 dark:text-rose-400 dark:active:bg-white/5' : 'text-[#007AFF] active:bg-slate-100 dark:text-[#0A84FF] dark:active:bg-white/5'}`}>
-              {confirmLabel}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
 
     /* eslint-disable sonarjs/cognitive-complexity -- tool store main view (list/detail/install/OAuth flows);legacy view; tracked separately */
     const ToolStoreView = ({ theme, t, onNewChat }) => {
@@ -2067,7 +2049,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (userConfig && Object.keys(userConfig).length > 0) {
             args.config = userConfig;
           }
-          await invokeTauri('install_marketplace_tool', args);
+          const validationReport = await invokeTauri('install_marketplace_tool', args);
           if (t?.oauthMcp) {
             if (!isCurrentOAuthRequest(backendId, oauthRequestId)) return;
             setToolAuthStates(prev => ({
@@ -2138,12 +2120,41 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             return;
           }
           await loadBackendState();
+          // The command's Ok value IS the remote validation's discovered tool
+          // inventory: report it on the success card so the validation outcome
+          // reaches the user (round-2 review P2 — the report previously had no
+          // production reader). Absent or empty (the tool declares no
+          // validation) keeps the title-only card.
+          const discoveredTools = Array.isArray(validationReport) ? validationReport : [];
+          // 清单完全受远端控制：名字数截到 MAX_REPORTED_TOOLS、余量以计数收尾，
+          // 单名再截到 MAX_REPORTED_TOOL_NAME_CHARS。React 转义防注入但不防布局
+          // 灾难——恶意/失控远端可用海量或超长名字把卡片撑成巨幕，展示长度不能
+          // 信任远端（review follow-up）。
+          const reportedTools = discoveredTools
+            .slice(0, MAX_REPORTED_TOOLS)
+            .map(toolName => (
+              toolName.length > MAX_REPORTED_TOOL_NAME_CHARS
+                ? `${toolName.slice(0, MAX_REPORTED_TOOL_NAME_CHARS)}…`
+                : toolName
+            ));
+          const overflowCount = discoveredTools.length - reportedTools.length;
           setAlert({
             visible: true,
             loading: false,
             title: hasConfig ? storeCopy.connectedQuoted(name) : storeCopy.installedQuoted(name),
+            subtitle:
+              discoveredTools.length > 0
+                ? storeCopy.validatedToolsDiscovered(
+                    overflowCount > 0 ? [...reportedTools, `+${overflowCount}`] : reportedTools,
+                  )
+                : undefined,
             isInstall: true,
             isError: false,
+            // 清单卡是唯一需要提示语与副标题并存的卡片：其余带副标题的成功卡
+            // （钉钉/腾讯会议已连接的"默认开启"提示、IMA 已连接）语义与
+            // installHint（"默认关闭"）相抵触或重复，经 showInstallHint 显式
+            // 开启，避免靠 isInstall 推断误伤（review follow-up）。
+            showInstallHint: true,
             toolId: backendId,
           });
           if (selectedTool && selectedTool.backendId === backendId) {
@@ -2735,18 +2746,20 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             }}
           />, document.body)}
           {/* 预置技能更新二次确认:覆盖为商店最新版本,本地修改会丢失(WebView2 下
-              window.confirm 不弹,应用内自绘,风格对齐 TsAlert) */}
-          {updateConfirm && createPortal((
-            <SheetRowConfirm
+              window.confirm 不弹;ConfirmDialog 自带 portal,Esc/IME 守卫与
+              backdrop 关闭由 ModalShell 统一承载;原 SheetRowConfirm 挂在
+              z-[200] 的 ModalBackdrop 上,层级显式保持 z-[200],#817 B1) */}
+          {updateConfirm && (
+            <ConfirmDialog
+              zIndexClass="z-[200]"
               title={storeCopy.updateSkillTitle(updateConfirm.name)}
-              desc={storeCopy.updateSkillOverwriteHint}
+              description={storeCopy.updateSkillOverwriteHint}
               cancelLabel={storeCopy.cancel}
               confirmLabel={(t.uiToolCommon || {}).update}
-              confirmTone="blue"
               onConfirm={doSkillUpdate}
               onCancel={() => setUpdateConfirm(null)}
             />
-          ), document.body)}
+          )}
           {/* 飞书扫码二维码已内联进 FeishuFlowCard（详情弹窗内），不再单独浮层 */}
           {/* 企微扫码弹窗由流程态派生（无独立 state）：factory 的 wecom:qr 监听把
               qr/qrUrl 写进跨视图流程卡，phase==='qr' 时弹出；取消/成功/失败都会让
@@ -2796,19 +2809,21 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             onConfirm={doEditDisplaySave}
           />, document.body)}
           {/* 回收站彻底删除二次确认:物理删除包文件与回收站条目,不可恢复
-              (自绘确认,风格对齐预置技能更新确认) */}
-          {purgeConfirm && createPortal((
-            <SheetRowConfirm
+              (ConfirmDialog destructive,层级保持原 ModalBackdrop 的 z-[200],
+              #817 B1;testid 保持回收站 pin 不变) */}
+          {purgeConfirm && (
+            <ConfirmDialog
+              zIndexClass="z-[200]"
+              destructive
               title={storeCopy.recyclePurgeTitle(purgeConfirm.name)}
-              desc={storeCopy.recyclePurgeHint}
+              description={storeCopy.recyclePurgeHint}
               cancelLabel={storeCopy.cancel}
               confirmLabel={storeCopy.recyclePurge}
-              confirmTone="rose"
               confirmTestId="recycled-purge-confirm"
               onConfirm={doPurgeRecycled}
               onCancel={() => setPurgeConfirm(null)}
             />
-          ), document.body)}
+          )}
           {/* 回收站子页面:点入口后整个插件中心内容区切换为回收站页面(非弹窗),
               返回按钮回到主列表;彻底删除二次确认仍用弹窗(见上方 purgeConfirm) */}
           {showRecycleBin && (

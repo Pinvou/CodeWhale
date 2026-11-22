@@ -1,0 +1,9 @@
+[Unit]
+Description=Pinvou weekly PostgreSQL full backup schedule
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=pinvou-postgres-backup-full.service
+[Install]
+WantedBy=timers.target

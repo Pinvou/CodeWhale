@@ -1,13 +1,14 @@
 [package]
 name = "pinvou-knowledge"
-version = "0.10.17"
+version = "0.10.18"
 description = "Pinvou 可复用知识库核心与自包含服务器"
 authors = ["pinvou"]
 license = "MIT"
 # edition 2024: aligned with the CodeWhale foundation and pinvou3-app;
-# requires rustc >= 1.85 — MSRV 1.89 unchanged.
+# requires rustc >= 1.85 — MSRV 1.90 aligned with the sibling workspaces
+# (the tauri 2.12 line sets their floor).
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.90"
 default-run = "pinvou-knowledge-server"
 
 [lib]
@@ -21,7 +22,17 @@ required-features = ["server"]
 
 [features]
 default = ["client", "local-embed", "server"]
-client = ["dep:futures-util", "dep:reqwest", "dep:rustls"]
+# base64/sha2/rand stay non-optional: lib.rs's unconditional helpers
+# (random_secret/sha256_hex, called from client and server code alike) use
+# them, so gating them would require moving code, not wiring features.
+client = [
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:url",
+]
 discovery = ["dep:mdns-sd"]
 local-embed = ["dep:fastembed"]
 server = [
@@ -38,36 +49,53 @@ server = [
     "dep:tar",
     "dep:tower-http",
     "dep:wait-timeout",
+    # Everything below is used only by server-gated modules (store/parser/
+    # backup/tls/server/service + main.rs). Declaring them optional keeps
+    # them out of this crate's own client-only builds (the CI feature-off
+    # leg) and out of the resolve of external client,discovery consumers.
+    # It does not shrink the app-facing graph: pinvou3-tauri depends on
+    # most of these directly (if-addrs arrives via mdns-sd either way).
+    "dep:anyhow",
+    "dep:calamine",
+    "dep:chrono",
+    "dep:encoding_rs",
+    "dep:if-addrs",
+    "dep:parking_lot",
+    "dep:rusqlite",
+    "dep:tempfile",
 ]
 
 [dependencies]
-anyhow = "1.0"
+anyhow = { version = "1.0", optional = true }
 # Keep 0.22 to match the app: upstreams still require 0.22; a solo 0.23 bump would add a second copy. Revisit once upstreams align.
 base64 = "0.22"
 # 0.38 修 RUSTSEC-2026-0436（CFB/OLE2 解析器 panic/无界分配），与 pinvou3-app 同步收敛单版本。
-calamine = "0.38"
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-encoding_rs = "0.8"
-parking_lot = "0.12"
+calamine = { version = "0.38", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"], optional = true }
+encoding_rs = { version = "0.8", optional = true }
+parking_lot = { version = "0.12", optional = true }
 rand = "0.10"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 sha2 = "0.11"
-tempfile = "3"
-tokio = { version = "1.49", features = ["full"] }
-url = "2"
+tempfile = { version = "3", optional = true }
+tokio = { version = "1.49", features = ["full"], optional = true }
+url = { version = "2", optional = true }
 
 axum = { version = "0.8", features = ["multipart"], optional = true }
 axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls"], optional = true }
-age = { version = "=0.12.1", default-features = false, optional = true }
+# Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
+# 0.12 unconditionally adds HPKE/P-256 with affected crypto-bigint; revisit after an upstream fixed release.
+age = { version = "=0.11.5", default-features = false, optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 flate2 = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
 mime_guess = { version = "2", optional = true }
 mdns-sd = { version = "=0.20.3", optional = true }
-# 0.15 collapses with mdns-sd's transitive if-addrs into a single version (the former =0.14.0 pin forced two).
-if-addrs = "0.15"
+# Only the server-gated tls.rs uses this crate directly; mdns-sd reads
+# interfaces at runtime through its own transitive if-addrs copy.
+if-addrs = { version = "0.15", optional = true }
 rcgen = { version = "=0.14.9", features = ["x509-parser"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "stream"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"], optional = true }
@@ -82,15 +110,30 @@ wait-timeout = { version = "0.2", optional = true }
 # cannot be target-gated); embedding.rs mirrors this gate and compiles the
 # explicit "unsupported on this platform" Embedder stub instead. Windows keeps
 # its dynamic-load wiring unchanged.
+# fastembed applies to BOTH target tables below (same version hold; only the
+# feature set differs per platform). fastembed 5+ (7.5.0 as of 2026-10) pins
+# ort 2.0.0-rc.10..rc.15 prebuilt ONNX Runtime: rc.10 macOS minos 13.3, rc.11+
+# drops the x86_64-apple-darwin prebuilt, rc.13 needs glibc 2.38, and rc.14/15
+# additionally declare rust-version 1.92 > MSRV 1.90 — all violate the macOS 11
+# / Ubuntu 22.04 (glibc 2.35) / MSRV floors. Held at 4 until ort prebuilts comply.
 [target.'cfg(windows)'.dependencies]
 fastembed = { version = "4", optional = true, default-features = false, features = ["ort-load-dynamic"] }
 
 [target.'cfg(not(any(windows, all(target_os = "linux", target_arch = "loongarch64"))))'.dependencies]
+# Same hold rationale as the windows table above.
 fastembed = { version = "4", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+# Test modules across client/server code use tempdirs; production use is
+# server-only (parser.rs staging, backup.rs snapshot/restore), so the
+# runtime dep above is optional.
+tempfile = "3"
+# model.rs's wire_compat_tests are gated by cfg(test) only — not by the
+# client feature — so client-less combos (bare/discovery/local-embed)
+# still need serde_json available to tests.
+serde_json = "1.0"
 
 # Lint gates follow the same policy as pinvou3-app/src-tauri: zero-backlog
 # lints get a deny hard gate; lints with backlog are allowed with the size

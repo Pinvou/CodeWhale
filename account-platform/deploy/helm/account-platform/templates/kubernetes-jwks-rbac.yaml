@@ -1,0 +1,22 @@
+{{- if include "pinvou.kubernetesJWKS" . }}
+{{- $name := printf "%s-%s-jwks" .Release.Namespace (include "pinvou.fullname" .) -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/openid/v1/jwks"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }} }
+subjects:
+{{- range $component := list "account-service" "identity-service" "billing-service" "token-gateway" }}
+  - { kind: ServiceAccount, name: {{ printf "%s-%s" (include "pinvou.fullname" $) $component }}, namespace: {{ $.Release.Namespace | quote }} }
+{{- end }}
+{{- end }}

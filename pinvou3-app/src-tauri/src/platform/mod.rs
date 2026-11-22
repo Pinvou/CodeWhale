@@ -1,11 +1,13 @@
 pub mod app_events;
 pub(crate) mod capabilities;
+pub(crate) mod client_version;
 pub mod connector_lock;
 pub mod connector_skills;
 pub mod connector_state;
 pub mod credential_store;
 #[cfg(target_os = "macos")]
 pub(crate) mod cursor;
+pub(crate) mod dmi;
 pub(crate) mod download;
 pub(crate) mod encoding;
 pub(crate) mod filesystem;

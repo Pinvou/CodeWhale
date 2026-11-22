@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pinvou.com/contracts/model-token-evidence-bundle.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "stage",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "stage": {
+      "enum": [
+        "INTERNAL",
+        "LIMITED",
+        "FULL"
+      ]
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "key_id",
+          "envelope",
+          "signature_base64url"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "key_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "envelope": {
+            "$ref": "https://pinvou.com/contracts/model-token-release-evidence.schema.json"
+          },
+          "signature_base64url": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{86}$"
+          }
+        }
+      },
+      "minItems": 17,
+      "maxItems": 17,
+      "uniqueItems": true
+    }
+  }
+}

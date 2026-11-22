@@ -1,0 +1,120 @@
+export const registrationBonusRecoveryCopy = {
+  zh: {
+    reauthenticationDraftCleanupFailed: '无法清理重认证草稿，请重试清理后再保存。',
+    reauthenticationDraftConflict: '草稿对应的政策已变更，请加载最新政策。',
+    reauthenticationDraftExpired: '重认证草稿已过期，已加载当前政策。',
+    reauthenticationDraftIdentityChanged: '账号或管理权限已变更，请重新载入。',
+    saveReconciled: '原请求已确认保存，并已加载服务器当前政策，请核对结果。',
+    reauthenticationDraftStorageFailed: '无法安全保存重认证草稿，请重试。',
+    reauthenticate: '重新登录验证', retryReauthentication: '重试登录验证',
+    reauthenticationDraftRecovered: '已恢复草稿，请确认后保存。',
+    reauthenticationDraftDiscarded: '已丢弃草稿并加载当前政策。',
+    loadLatestPolicy: '加载最新政策', retryDraftCleanup: '重试清理草稿',
+    unfinishedReauthenticationDraft: '发现未完成的登录验证草稿。', recoverDraft: '恢复草稿', discardDraft: '丢弃草稿',
+    outcomeUnknown: '保存结果尚未确认。请使用原请求核对，勿创建新请求。', retryUnknown: '核对原请求',
+    pendingStorageFailed: '请求恢复证据不可用，未发送新的变更请求。请先核实已有请求。',
+  },
+  en: {
+    reauthenticationDraftCleanupFailed: 'Could not clear the sign-in draft. Retry cleanup before saving.',
+    reauthenticationDraftConflict: 'The policy changed during reauthentication. Load the latest policy.',
+    reauthenticationDraftExpired: 'The sign-in draft expired. The current policy is loaded.',
+    reauthenticationDraftIdentityChanged: 'Your account or management permission changed. Reload before saving.',
+    saveReconciled: 'The save completed. The latest server policy is loaded; confirm the result.',
+    reauthenticationDraftStorageFailed: 'The sign-in draft could not be stored safely. Try again.',
+    reauthenticate: 'Sign in again', retryReauthentication: 'Retry sign-in',
+    reauthenticationDraftRecovered: 'Draft recovered. Confirm it before saving.',
+    reauthenticationDraftDiscarded: 'Draft discarded. The current policy is loaded.',
+    loadLatestPolicy: 'Load latest policy', retryDraftCleanup: 'Retry draft cleanup',
+    unfinishedReauthenticationDraft: 'An unfinished sign-in draft is available.', recoverDraft: 'Recover draft', discardDraft: 'Discard draft',
+    outcomeUnknown: 'The save outcome is unknown. Check the original request before creating another.', retryUnknown: 'Check original request',
+    pendingStorageFailed: 'Request recovery evidence is unavailable. No new change request was sent; check any existing request first.',
+  },
+  ja: {
+    reauthenticationDraftCleanupFailed: '再認証の下書きを削除できません。保存前に削除を再試行してください。',
+    reauthenticationDraftConflict: '下書きのポリシーが変更されました。最新のポリシーを読み込んでください。',
+    reauthenticationDraftExpired: '再認証の下書きは期限切れです。現在のポリシーを読み込みました。',
+    reauthenticationDraftIdentityChanged: 'アカウントまたは管理権限が変更されました。再読み込みしてください。',
+    saveReconciled: '元の要求の保存を確認し、サーバーの現在のポリシーを読み込みました。結果を確認してください。',
+    reauthenticationDraftStorageFailed: '再認証の下書きを安全に保存できません。再試行してください。',
+    reauthenticate: '再ログインして確認', retryReauthentication: '再ログインを再試行',
+    reauthenticationDraftRecovered: '下書きを復元しました。確認してから保存してください。',
+    reauthenticationDraftDiscarded: '下書きを破棄し、現在のポリシーを読み込みました。',
+    loadLatestPolicy: '最新のポリシーを読み込む', retryDraftCleanup: '下書きの削除を再試行',
+    unfinishedReauthenticationDraft: '未完了の再認証の下書きがあります。', recoverDraft: '下書きを復元', discardDraft: '下書きを破棄',
+    outcomeUnknown: '保存結果が未確認です。新しい要求を作成する前に元の要求を確認してください。', retryUnknown: '元の要求を確認',
+    pendingStorageFailed: '要求の復元情報を使用できません。新しい変更要求は送信していません。既存の要求を先に確認してください。',
+  },
+};
+
+registrationBonusRecoveryCopy.zh.policyEditor = {
+  current: '已生效策略', lastRead: '上次读取的策略', draft: '编辑策略', compare: '待保存的改动',
+  on: '已启用', off: '已关闭', before: '当前', after: '保存后', points: value => `${value} 积分`, days: value => `${value} 天`,
+  noChanges: '策略值未改动。', legacyPrecision: (current, draft) => `当前历史额度为 ${current}；按现有整数表单保存时会提交 ${draft}。`,
+  saving: '正在保存，请等待结果。', refreshingAuthorization: '正在核对管理权限，请稍候。',
+  reloadForConflict: '策略版本已变更，请先重新读取并核对。', checkValues: '请检查赠送积分和有效期。', checkReason: '请填写符合要求的变更原因。',
+  originalSavedReadFailed: '原请求已确认保存，但未能读取当前策略。请重试读取。',
+};
+registrationBonusRecoveryCopy.en.policyEditor = {
+  current: 'Active policy', lastRead: 'Last policy read', draft: 'Edit policy', compare: 'Changes to save',
+  on: 'Enabled', off: 'Off', before: 'Current', after: 'After saving', points: value => `${value} points`, days: value => `${value} days`,
+  noChanges: 'The policy values are unchanged.', legacyPrecision: (current, draft) => `The current legacy amount is ${current}. This form saves whole points and will submit ${draft}.`,
+  saving: 'Saving. Wait for the result.', refreshingAuthorization: 'Checking management permission. Please wait.',
+  reloadForConflict: 'The policy version changed. Reload it and review the values.', checkValues: 'Check the bonus points and validity period.', checkReason: 'Enter a valid reason for saving.',
+  originalSavedReadFailed: 'The original save was confirmed, but the current policy could not be read. Try loading it again.',
+};
+registrationBonusRecoveryCopy.ja.policyEditor = {
+  current: '有効なポリシー', lastRead: '最後に取得したポリシー', draft: 'ポリシーの編集', compare: '保存する変更',
+  on: '有効', off: '無効', before: '現在', after: '保存後', points: value => `${value} ポイント`, days: value => `${value} 日`,
+  noChanges: 'ポリシーの設定値に変更はありません。', legacyPrecision: (current, draft) => `現在の旧形式の付与額は ${current} です。このフォームは整数の ${draft} を送信します。`,
+  saving: '保存中です。結果をお待ちください。', refreshingAuthorization: '管理権限を確認しています。',
+  reloadForConflict: 'ポリシーのバージョンが変わりました。再読み込みして設定値を確認してください。', checkValues: '付与ポイントと有効期間を確認してください。', checkReason: '有効な保存理由を入力してください。',
+  originalSavedReadFailed: '元の保存は確認できましたが、現在のポリシーを取得できませんでした。再読み込みしてください。',
+};
+
+registrationBonusRecoveryCopy.zh.eligibilityPresentation = {
+  title: '手机号终身资格',
+  example: '例如，同一个手机号在策略关闭或启用但为 0 积分时首次成功注册，两种情况都不赠送，且都会用掉资格。之后启用或调高积分，也不会补赠。',
+  preview: '保存生效后的影响：', disabledImpact: '关闭期间首次成功注册的手机号不会获赠，仍会用掉终身资格。',
+  zeroImpact: '赠送仍启用，但首次成功注册时赠送 0 积分，手机号仍会用掉终身资格。',
+  pending: '历史手机号资格仍在回填，暂时无法启用赠送。', blocked: '历史手机号资格回填受阻，暂时无法启用赠送。',
+  blockedCount: count => `历史手机号资格回填受阻：${count} 条已匿名注册记录无法安全恢复，暂时无法启用赠送。`,
+  unconfirmed: '当前回填状态未确认，请重新读取。', unavailable: '暂时无法获取手机号资格回填状态。',
+  loadFailed: '暂时无法读取策略：手机号资格回填状态不可用。请重试。',
+};
+registrationBonusRecoveryCopy.en.eligibilityPresentation = {
+  title: 'Lifetime eligibility by mobile number',
+  example: 'For example, suppose the same mobile number completes its first registration while the policy is off, or while it is on with a zero-point bonus. In either case no points are granted, and the number uses its eligibility. Turning the bonus on or increasing it later does not grant points retroactively.',
+  preview: 'If these changes take effect:', disabledImpact: 'A number that first registers while the policy is off receives no bonus and uses its lifetime eligibility.',
+  zeroImpact: 'The bonus stays on at zero points. A number that first registers then receives no points and uses its lifetime eligibility.',
+  pending: 'Historical mobile eligibility backfill is still in progress. The bonus cannot be enabled yet.',
+  blocked: 'Historical mobile eligibility backfill is blocked. The bonus cannot be enabled yet.',
+  blockedCount: count => `Historical mobile eligibility backfill is blocked: ${count} anonymized registrations cannot be reconstructed safely. The bonus cannot be enabled yet.`,
+  unconfirmed: 'The current backfill status could not be confirmed. Try loading it again.', unavailable: 'The mobile eligibility backfill status is unavailable.',
+  loadFailed: 'The policy could not be loaded because mobile eligibility backfill status is unavailable. Try again.',
+};
+registrationBonusRecoveryCopy.ja.eligibilityPresentation = {
+  title: '携帯番号ごとの生涯資格',
+  example: 'たとえば、同じ携帯番号で初回登録が完了したときに、ポリシーが無効、または有効でも付与が 0 ポイントだったとします。どちらも付与はなく、資格を使います。その後に有効化や増額をしても、さかのぼって付与されません。',
+  preview: '保存して適用された場合：', disabledImpact: '無効な期間に初回登録を完了した携帯番号には付与されず、生涯資格を使います。',
+  zeroImpact: '付与は有効ですが、初回登録時の付与は 0 ポイントで、携帯番号の生涯資格を使います。',
+  pending: '過去の携帯番号資格を補完しています。付与はまだ有効にできません。', blocked: '過去の携帯番号資格の補完が停止しています。付与はまだ有効にできません。',
+  blockedCount: count => `過去の携帯番号資格の補完が停止しています。匿名化済みの登録 ${count} 件を安全に復元できず、付与はまだ有効にできません。`,
+  unconfirmed: '現在の補完状態を確認できません。再読み込みしてください。', unavailable: '携帯番号資格の補完状態を取得できません。',
+  loadFailed: '携帯番号資格の補完状態を取得できないため、ポリシーを読み込めませんでした。再試行してください。',
+};
+
+registrationBonusRecoveryCopy.zh.fieldGuidance = {
+  amount: max => `整数积分，范围 0–${max}。`, amountInvalid: max => `请输入 0–${max} 之间的整数积分。`,
+  days: '整数天数，范围 1–3650。', daysInvalid: '请输入 1–3650 之间的整数天数。',
+  reason: '去掉首尾空白后，原因需有 10–500 个 Unicode 字符。', reasonCount: count => `当前 ${count} / 500`,
+};
+registrationBonusRecoveryCopy.en.fieldGuidance = {
+  amount: max => `Whole points from 0 to ${max}.`, amountInvalid: max => `Enter whole points from 0 to ${max}.`,
+  days: 'Whole days from 1 to 3650.', daysInvalid: 'Enter a whole number from 1 to 3650 days.',
+  reason: 'Use 10–500 Unicode code points, excluding spaces at the start and end.', reasonCount: count => `${count} / 500 now`,
+};
+registrationBonusRecoveryCopy.ja.fieldGuidance = {
+  amount: max => `0～${max} の整数ポイント。`, amountInvalid: max => `0～${max} の整数ポイントを入力してください。`,
+  days: '1～3650 の整数日。', daysInvalid: '1～3650 の整数日を入力してください。',
+  reason: '前後の空白を除いて Unicode コードポイント 10～500 個で入力してください。', reasonCount: count => `現在 ${count} / 500`,
+};

@@ -25,6 +25,7 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { answerRun, cancelRun, fetchActiveRuns, pollRunLog } from './model-store-api.js';
 import { reduceLogChunk } from './model-store-logic.js';
+import { rememberTaskOperationResult } from './operation-results.js';
 
 // 连续多少次轮询失败才判定这次运行真的断了。单次失败很常见(命令层短暂不可用、
 // 系统挂起唤醒),直接报错会把一个还在正常下载的任务标成失败。
@@ -54,6 +55,10 @@ const activeKeys = new Set();
 const cancelWanted = new Set();
 /** 已经有轮询循环挂着的 run_id。再附着时靠它去重,不会给同一次运行建两张卡。 */
 const attachedRuns = new Set();
+/** 用户在本会话内主动关掉的任务卡对应的 run_id——reattach 不得复活它们
+ * （r29 P2：关掉=不要了）。只在内存里，页面刷新后自动清空（全新会话
+ * 重新接回所有活跃运行是正确行为）。 */
+const dismissedRuns = new Set();
 
 let nextTaskId = 1;
 
@@ -108,10 +113,10 @@ function dropTask(id) {
 
 /**
  * 建一张任务卡。
- * @param {{key:string|undefined, kind:string, title:string, reattached?:boolean}} spec - 任务描述。
+ * @param {{key:string|undefined, kind:string, title:string, cardName?:string, reattached?:boolean}} spec - 任务描述。
  * @returns {number} 任务 id。
  */
-function createTask({ key, kind, title, reattached = false }) {
+function createTask({ key, kind, title, cardName, reattached = false }) {
   const id = nextTaskId++;
   setTaskList([
     ...taskList,
@@ -124,6 +129,7 @@ function createTask({ key, kind, title, reattached = false }) {
       // 会让旁边的「启用」按钮显示成「启用中…」。
       kind,
       title,
+      cardName,
       // 是不是从后端接回来的。接回来的那些没有等在 await 上的调用方,结局要靠
       // subscribeTaskSettled 广播出去才有人管。
       reattached,
@@ -239,11 +245,16 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
     // 取消中…」，而 `.catch(() => {})` 恰好让那句话成真——补发失败时用户看到的就是
     // 一张永远「正在取消」的卡。评审没点到这处，但它跟下面那两处是同一个病。
     cancelRun(runId).catch((e) => {
-      patch(id, (task) => ({
-        status: task.status === 'cancelling' ? 'running' : task.status,
-        errorKey: 'taskCancelFailed',
-        errorDetail: String(e?.message || e),
-      }));
+      patch(id, (task) => {
+        // r43 P2：轮询可能已经把任务落成终态（error/cancelled）——这时回灌
+        // 「取消失败」会把真正的结局盖掉。终态一概不动。
+        if (task.status === 'error' || task.status === 'cancelled') return {};
+        return {
+          status: task.status === 'cancelling' ? 'running' : task.status,
+          errorKey: 'taskCancelFailed',
+          errorDetail: String(e?.message || e),
+        };
+      });
     });
   }
   return drainRun(runId, {
@@ -303,6 +314,7 @@ function settleTask(id, outcome) {
     // 成功的任务直接从面板上移除,由调用方用一条 toast 报喜。
     dropTask(id);
     const result = { ok: true, result: outcome.result };
+    rememberTaskOperationResult(task, result);
     notifySettled(task, result);
     return result;
   }
@@ -339,16 +351,16 @@ function failTask(id, error) {
  * `key` 标识「同一件事」(比如 `download:<卡片id>`):同一个 key 已经有任务在跑时
  * 直接拒掉。按钮禁用只是视觉上的第一道防线,连点和事件竞态都能绕过去,这里必须
  * 再拦一道 —— 同一张卡跑两份下载不会更快,只会让两个进程抢同一批文件的锁。
- * @param {{title:string, kind:string, key:string|undefined, start:()=>Promise<{run_id?:string}>}} options - 任务描述与发起函数。
+ * @param {{title:string, cardName?:string, kind:string, key:string|undefined, start:()=>Promise<{run_id?:string}>}} options - 任务描述与发起函数。
  * @returns {Promise<{ok:boolean, duplicate?:boolean, aborted?:boolean, cancelled?:boolean, result?:unknown, error?:string}>} 结果。
  */
 async function runTask(options) {
-  const { title, kind, key, start } = options;
+  const { title, cardName, kind, key, start } = options;
   if (key && activeKeys.has(key)) {
     return { ok: false, duplicate: true };
   }
   if (key) activeKeys.add(key);
-  const id = createTask({ key, kind, title });
+  const id = createTask({ key, kind, title, cardName });
   let runId = null;
   try {
     const started = await start();
@@ -369,7 +381,7 @@ async function runTask(options) {
  * 已经有轮询挂着的运行会被跳过,所以重复调用是安全的——每次刷新列表顺手再问一次,
  * 就能把"轮询连续失败后前端自己放弃了、后端其实还在跑"这种失联也接回来。
  * @param {Array<{run_id?:string, card_id?:string, kind?:string}>} runs - 后端给的活跃运行。
- * @param {(run:object)=>({title:string, key:string}|null)} describe - 由视图层按 i18n 词典给出标题与 key;认不出的操作返回 null。
+ * @param {(run:object)=>({title:string, cardName?:string, key:string}|null)} describe - 由视图层按 i18n 词典给出标题与 key;认不出的操作返回 null。
  * @returns {number} 这次真正接回来的数量。
  */
 function reattachRuns(runs, describe) {
@@ -377,6 +389,8 @@ function reattachRuns(runs, describe) {
   for (const run of runs || []) {
     const runId = run?.run_id;
     if (!runId || attachedRuns.has(runId)) continue;
+    // r29 P2：用户本会话关掉的任务卡不再接回（关掉=不要了）。
+    if (dismissedRuns.has(runId)) continue;
     const meta = describe(run);
     // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了取消
     // 的任务卡。
@@ -385,7 +399,7 @@ function reattachRuns(runs, describe) {
     // attachedRuns 要等 start() 返回才占上)。接回去就会给同一次操作建两张卡。
     if (meta.key && activeKeys.has(meta.key)) continue;
     if (meta.key) activeKeys.add(meta.key);
-    const id = createTask({ key: meta.key, kind: run.kind, title: meta.title, reattached: true });
+    const id = createTask({ key: meta.key, kind: run.kind, title: meta.title, cardName: meta.cardName, reattached: true });
     attached += 1;
     // 不 await:可能一次接回好几个,它们各自跑到结束。
     pumpRun(id, runId, { replayLimit: REATTACH_REPLAY_LINES })
@@ -401,7 +415,7 @@ function reattachRuns(runs, describe) {
 
 /**
  * 问一次后端有哪些运行还在跑,并把它们接回面板。
- * @param {(run:object)=>({title:string, key:string}|null)} describe - 同 reattachRuns。
+ * @param {(run:object)=>({title:string, cardName?:string, key:string}|null)} describe - 同 reattachRuns。
  * @returns {Promise<number>} 接回来的数量;问不到时返回 0。
  */
 async function reattachActiveRuns(describe) {
@@ -434,11 +448,16 @@ function cancelTask(id) {
       // 不能走 `failTask`——那会把整张卡判死并广播 settled，而运行大概率还在继续，
       // 轮询循环仍然会送回它真正的结果，两边会打架。这里只做两件事：把状态退回
       // `running` 让按钮重新可点，并把原因显示出来。
-      patch(id, (task) => ({
-        status: task.status === 'cancelling' ? 'running' : task.status,
-        errorKey: 'taskCancelFailed',
-        errorDetail: String(e?.message || e),
-      }));
+      patch(id, (task) => {
+        // r43 P2：轮询可能已经把任务落成终态（error/cancelled）——这时回灌
+        // 「取消失败」会把真正的结局盖掉。终态一概不动。
+        if (task.status === 'error' || task.status === 'cancelled') return {};
+        return {
+          status: task.status === 'cancelling' ? 'running' : task.status,
+          errorKey: 'taskCancelFailed',
+          errorDetail: String(e?.message || e),
+        };
+      });
     });
   } else {
     // run_id 还没回来。记下意图,等它落地时补发(见 pumpRun)。
@@ -469,7 +488,10 @@ function answerTask(id, value) {
         // **只在 key 仍然是它本人时才清**:这中间用户完全可能点过取消、而那次
         // 取消又失败了(errorKey 已经变成 taskCancelFailed),无条件清会把那条
         // 更晚、更要紧的错误一起抹掉。
-        patch(id, (task) => (task.errorKey === 'taskAnswerFailed' ? { errorKey: null, errorDetail: null } : {}));
+        patch(id, (task) => {
+          if (task.status === 'error' || task.status === 'cancelled') return {};
+          return task.errorKey === 'taskAnswerFailed' ? { errorKey: null, errorDetail: null } : {};
+        });
       },
       (e) => {
         // 答案没送到，而脚本还阻塞在它那次 `read` 上——600 秒后会被
@@ -478,12 +500,16 @@ function answerTask(id, value) {
         //
         // 把提示原样放回去（让用户能再答一次）并显示原因。同样不走 `failTask`：
         // 判死这张卡的权力属于轮询循环。
-        patch(id, (task) => ({
-          prompt: task.prompt ?? pendingPrompt,
-          status: task.status === 'cancelling' ? 'running' : task.status,
-          errorKey: 'taskAnswerFailed',
-          errorDetail: String(e?.message || e),
-        }));
+        patch(id, (task) => {
+          // r43 P2：同 cancelTask——终态后不再回灌输入框/错误，结局优先。
+          if (task.status === 'error' || task.status === 'cancelled') return {};
+          return {
+            prompt: task.prompt ?? pendingPrompt,
+            status: task.status === 'cancelling' ? 'running' : task.status,
+            errorKey: 'taskAnswerFailed',
+            errorDetail: String(e?.message || e),
+          };
+        });
       }
     );
   }
@@ -495,6 +521,9 @@ function answerTask(id, value) {
  * @returns {void} 无返回。
  */
 function dismissTask(id) {
+  // r29 P2：记下 run_id，reattach 不再复活这张已关掉的卡。
+  const runId = runIds.get(id);
+  if (runId) dismissedRuns.add(runId);
   dropTask(id);
 }
 

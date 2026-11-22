@@ -1,0 +1,20 @@
+[Unit]
+Description=Pinvou KMS operational checks (local status)
+Requires=docker.service
+After=docker.service systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/pinvou-security/monitor/monitor.env
+ExecStart=/usr/bin/python3 /opt/pinvou-security/monitor/account-platform-kms-monitor.py --security-directory /opt/pinvou-security --endpoint ${KMS_MONITOR_ENDPOINT} --network ${KMS_MONITOR_NETWORK}
+UMask=0077
+LimitCORE=0
+TimeoutStartSec=150
+MemoryMax=256M
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/pinvou-security/monitor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

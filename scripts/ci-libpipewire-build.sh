@@ -33,6 +33,7 @@ fi
 work="$(mktemp -d)"
 trap 'sudo rm -rf "$work"' EXIT
 
+sudo python3 "$(dirname "${BASH_SOURCE[0]}")/ci-apt-prepare.py" --apply
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends meson ninja-build ca-certificates curl
 
@@ -44,10 +45,9 @@ if [[ -n "${PINVOU_PIPEWIRE_SOURCE_ARCHIVE:-}" ]]; then
   # Preprovisioned runners may cache the source, with the same checksum gate.
   cp -- "$PINVOU_PIPEWIRE_SOURCE_ARCHIVE" "$work/pipewire.tar.gz"
 else
-  curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-    --retry 3 --retry-all-errors --max-time 300 \
+  python3 "$(dirname "${BASH_SOURCE[0]}")/ci-download.py" \
     "https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/${PW_VERSION}/pipewire-${PW_VERSION}.tar.gz" \
-    -o "$work/pipewire.tar.gz"
+    --output "$work/pipewire.tar.gz" --sha256 "$PW_SHA256" --seconds 300
 fi
 echo "$PW_SHA256  $work/pipewire.tar.gz" | sha256sum --check --status
 

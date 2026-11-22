@@ -19,7 +19,7 @@ fn persist_chat_snapshot(
     session_id: &str,
     state: &ChatEngineState,
     writer_active: &AtomicBool,
-    committed: impl FnOnce(&str, usize),
+    committed: impl FnOnce(&str, usize, usize),
 ) -> Result<Option<(SavedSession, Option<String>)>> {
     let mut revision = None;
     let saved = store.persist_chat_engine_state_with_commit(
@@ -29,7 +29,11 @@ fn persist_chat_snapshot(
         |saved| {
             revision = transcript_revision(&saved.messages).ok();
             if let Some(revision) = revision.as_deref() {
-                committed(revision, saved.messages.len());
+                committed(
+                    revision,
+                    saved.messages.len(),
+                    count_context_updates(&saved.messages),
+                );
             }
         },
     )?;
@@ -48,7 +52,7 @@ fn persist_admitted_display_snapshot(
     display_message: Message,
     edit_last: bool,
     writer_active: &AtomicBool,
-    committed: impl FnOnce(&str, usize),
+    committed: impl FnOnce(&str, usize, usize),
 ) -> Result<Option<(SavedSession, Option<String>)>> {
     let mut revision = None;
     let saved = store.persist_admitted_chat_display_with_commit(
@@ -60,7 +64,11 @@ fn persist_admitted_display_snapshot(
         |saved| {
             revision = transcript_revision(&saved.messages).ok();
             if let Some(revision) = revision.as_deref() {
-                committed(revision, saved.messages.len());
+                committed(
+                    revision,
+                    saved.messages.len(),
+                    count_context_updates(&saved.messages),
+                );
             }
         },
     )?;
@@ -339,6 +347,26 @@ pub(crate) fn spawn_event_forwarder(
         // persist failure, or hash failure clears it.
         let mut last_persisted_chat_revision: Option<String> = None;
         let mut active_transcript_seen = false;
+        // Last parent-request input the engine reported for the live turn,
+        // from this session's most recent parent `TurnUsage` event.
+        // `TurnComplete` usage is the billing aggregate
+        // (`TurnContext::add_usage` sums input_tokens over every request of
+        // the turn), so the frontend usage meter must skip it on
+        // multi-request turns and needs the per-request value to stay live:
+        // chat:usage fires once per turn, and any tool call of that turn
+        // latches the bridge's cumulative-input guard until the next send —
+        // without this field the meter only ever refreshed through a
+        // compaction. Parent requests are told apart from the other
+        // TurnUsage producers by `request_ms`: the parent emission always
+        // sets `Some`, while reviewer consults and programmatic REPL-child
+        // folds set `None` — and either can be the LAST TurnUsage of a
+        // normally-completing turn (an inline REPL FINAL fold breaks right
+        // after its fold; a guardian review of the final tool batch is left
+        // last by the terminal step-loop breaks; a cancel landing in the
+        // same window does the same on any turn), so the tracker must ignore
+        // them and keep the last parent value. Subagent usage rides
+        // SubAgentMailbox, never TurnUsage.
+        let mut latest_reported_input_tokens: Option<u32> = None;
         // A typed preflight rejection completes the admitted lifecycle without
         // changing engine history. Preserve that distinction through
         // `chat:done` so the UI rolls back its optimistic edit.
@@ -386,6 +414,11 @@ pub(crate) fn spawn_event_forwarder(
                     ..
                 } => {
                     startup_first_output_recorded = false;
+                    // New turn owns the occupancy window: a turn where the
+                    // provider never reported usage must not inherit the
+                    // previous turn's value (the payload field stays null and
+                    // the frontend keeps its last good number).
+                    latest_reported_input_tokens = None;
                     // Publish admission from the authoritative engine event,
                     // before this serial forwarder can observe any delta or
                     // terminal event for the same turn. Reclaim uses the same
@@ -465,6 +498,12 @@ pub(crate) fn spawn_event_forwarder(
                     if let Some(task_id) =
                         turn_lifecycle.take_remote_task_for_submission(submission_id.as_deref())
                     {
+                        let _ = crate::features::assistant::remote_user_input::bind_engine_turn(
+                            &session_id,
+                            &task_id,
+                            turn_lifecycle.current_turn_generation().unwrap_or(0),
+                            &turn_id,
+                        );
                         crate::features::behavior_telemetry::bind_remote_execution_turn(
                             &app,
                             &session_id,
@@ -785,6 +824,12 @@ pub(crate) fn spawn_event_forwarder(
                     });
                     // request_user_input 收口：submit/cancel 已由底座转为工具结果。
                     if name == "request_user_input" {
+                        crate::features::assistant::remote_user_input::finish_question(
+                            &session_id,
+                            turn_lifecycle.current_turn_generation().unwrap_or(0),
+                            current_turn_id.as_deref().unwrap_or(""),
+                            &id,
+                        );
                         crate::features::assistant::pending_user_input::clear(&session_id, &id);
                     }
                     let _ = app.emit("chat:tool_end", payload.clone());
@@ -795,6 +840,24 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::UserInputRequired { id, request } => {
+                    let question_record =
+                        crate::features::assistant::remote_user_input::record_for_turn(
+                            &session_id,
+                            turn_lifecycle.current_turn_generation().unwrap_or(0),
+                            current_turn_id.as_deref().unwrap_or(""),
+                            &id,
+                            json!(request.questions),
+                        );
+                    if question_record.is_err() {
+                        // Never strand an unrepresentable remote question. This
+                        // rejects the question, not the protected tool operation.
+                        let handle = approve_handle.clone();
+                        let id = id.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.cancel_user_input(id).await;
+                        });
+                        continue;
+                    }
                     if scheduled_profile.is_some() && scheduled_unattended.load(Ordering::Acquire) {
                         // 定时任务没有前台操作者；不能把底座卡在等待输入的超时上。
                         let h = approve_handle.clone();
@@ -823,6 +886,15 @@ pub(crate) fn spawn_event_forwarder(
                             &app,
                             "chat:user_input_required",
                             payload,
+                        );
+                        // Raise a desktop notification while the task parks in
+                        // the background waiting for a reply (mutable in
+                        // Settings); the unattended scheduled branch already
+                        // cancelled the input above, so it never gets here.
+                        crate::features::assistant::engine_support::maybe_notify_input_needed(
+                            &app,
+                            &session_id,
+                            &id,
                         );
                     }
                 }
@@ -895,13 +967,14 @@ pub(crate) fn spawn_event_forwarder(
                                 &session_for_save,
                                 &state,
                                 &writer_for_save,
-                                |revision, message_count| {
+                                |revision, message_count, context_updates_total| {
                                     emit_transcript_committed(
                                         &app_for_save,
                                         &session_for_save,
                                         revision.to_owned(),
                                         "engine_state_update",
                                         message_count,
+                                        context_updates_total,
                                     );
                                 },
                             )
@@ -994,6 +1067,19 @@ pub(crate) fn spawn_event_forwarder(
                 // (see stamp_steer_generation in engine_pool.rs).
                 Event::SteerCommitted { steer_id } => {
                     let steer_id = stamp_steer_generation(steer_id_generation, &steer_id);
+                    // Cross-session steered delivery finalizes in-flight only
+                    // on commit (done marker + spool removal — closes the
+                    // post-steer-Ok loss window). Fanned out through the
+                    // steer_outcomes hook; assistant never depends back on
+                    // the consumer feature. The hook runs INLINE on this
+                    // event loop and performs bounded spool IO (two capped
+                    // reads + marker write + removal, ~µs–ms on a healthy
+                    // fs) before the emit — accepted: steer terminals are
+                    // rare and one forwarder per engine keeps the stall
+                    // scoped to that engine.
+                    crate::features::assistant::steer_outcomes::resolve_steer_outcome(
+                        &steer_id, true,
+                    );
                     let payload = json!({
                         "session_id": session_id,
                         "steer_id": steer_id,
@@ -1007,6 +1093,11 @@ pub(crate) fn spawn_event_forwarder(
                 }
                 Event::SteerDropped { steer_id } => {
                     let steer_id = stamp_steer_generation(steer_id_generation, &steer_id);
+                    // The engine dropped the steer: revoke the in-flight
+                    // registration; the message stays queued for redelivery.
+                    crate::features::assistant::steer_outcomes::resolve_steer_outcome(
+                        &steer_id, false,
+                    );
                     let payload = json!({
                         "session_id": session_id,
                         "steer_id": steer_id,
@@ -1168,6 +1259,7 @@ pub(crate) fn spawn_event_forwarder(
                     usage,
                     status,
                     error,
+                    error_source,
                     tool_catalog,
                     turn_id: _,
                     submission_id: _,
@@ -1203,6 +1295,13 @@ pub(crate) fn spawn_event_forwarder(
                     // Error event's transient/fatal paths).
                     let mut terminal_error =
                         error.map(|error| crate::platform::credential_store::redact_secret(&error));
+                    // Keep the selected producer's error separate from local
+                    // persistence errors appended during settlement below.
+                    let model_diagnostic_error = (status == TurnOutcomeStatus::Failed
+                        && error_source
+                            == Some(deepseek_tui::core::events::TurnErrorSource::Model))
+                    .then(|| terminal_error.clone())
+                    .flatten();
                     if let Some(base_total_tokens) = scheduled_base_total_tokens {
                         scheduled_engine_total_tokens = scheduled_engine_total_tokens
                             .saturating_add(u64::from(usage.input_tokens))
@@ -1259,15 +1358,20 @@ pub(crate) fn spawn_event_forwarder(
                             // Failed terminal state.
                             match last_persisted_chat_revision.take() {
                                 Some(revision) => {
-                                    let message_count = latest_chat_engine_state
-                                        .as_ref()
-                                        .map_or(0, |state| state.messages.len());
+                                    let (message_count, context_updates_total) =
+                                        latest_chat_engine_state.as_ref().map_or((0, 0), |state| {
+                                            (
+                                                state.messages.len(),
+                                                count_context_updates(&state.messages),
+                                            )
+                                        });
                                     emit_transcript_committed(
                                         &app,
                                         &session_id,
                                         revision,
                                         "terminal_fallback",
                                         message_count,
+                                        context_updates_total,
                                     );
                                     None
                                 }
@@ -1282,13 +1386,14 @@ pub(crate) fn spawn_event_forwarder(
                                             &session_for_save,
                                             &state,
                                             &writer_for_save,
-                                            |revision, message_count| {
+                                            |revision, message_count, context_updates_total| {
                                                 emit_transcript_committed(
                                                     &app_for_save,
                                                     &session_for_save,
                                                     revision.to_owned(),
                                                     "terminal_fallback",
                                                     message_count,
+                                                    context_updates_total,
                                                 );
                                             },
                                         )
@@ -1309,13 +1414,14 @@ pub(crate) fn spawn_event_forwarder(
                                         fallback.display_message,
                                         fallback.operation == TranscriptOperation::EditLast,
                                         &writer_for_save,
-                                        |revision, message_count| {
+                                        |revision, message_count, context_updates_total| {
                                             emit_transcript_committed(
                                                 &app_for_save,
                                                 &session_for_save,
                                                 revision.to_owned(),
                                                 "terminal_fallback",
                                                 message_count,
+                                                context_updates_total,
                                             );
                                         },
                                     )
@@ -1415,9 +1521,17 @@ pub(crate) fn spawn_event_forwarder(
                     // 单独发 usage 给前端 token 进度条
                     let payload = json!({
                         "session_id": session_id,
+                        // Billing aggregate summed over the turn's requests;
+                        // consumers that must not see the overshooting sum read
+                        // context_input_tokens instead. Kept byte-identical for
+                        // self_metrics, scheduled-run totals and remote stats.
                         "input_tokens": usage.input_tokens,
                         "output_tokens": usage.output_tokens,
                         "context_window": bridge.usage_context_window(),
+                        // Last reported parent-request input = real context
+                        // occupancy at turn end (see the tracker declaration);
+                        // null when the provider never reported usage.
+                        "context_input_tokens": latest_reported_input_tokens,
                     });
                     let _ = app.emit("chat:usage", payload.clone());
                     crate::features::remote_control::forward_app_event(&app, "chat:usage", payload);
@@ -1624,12 +1738,20 @@ pub(crate) fn spawn_event_forwarder(
                     if let Some(turn_id) = current_turn_id.as_deref() {
                         let status =
                             behavior_task_status(terminal_status, terminal_error.as_deref());
-                        if let Some(error) = terminal_error.as_deref() {
+                        if let Some(error) = model_diagnostic_error
+                            .as_deref()
+                            .or(terminal_error.as_deref())
+                        {
                             crate::features::behavior_telemetry::capture_failure_context(
                                 &app,
                                 &session_id,
+                                turn_id,
                                 error,
-                                false,
+                                if model_diagnostic_error.is_some() {
+                                    crate::features::behavior_telemetry::FailureSource::Model
+                                } else {
+                                    crate::features::behavior_telemetry::FailureSource::AssistantRuntime
+                                },
                             );
                         }
                         crate::features::behavior_telemetry::finish_task(
@@ -1810,6 +1932,14 @@ pub(crate) fn spawn_event_forwarder(
                     // 无工具多调用轮(续跑/reprompt)逐条累加。墙钟 Instant 重测
                     // 含转发/分发延迟,仅作引擎未上报完整对时的回落。
                     // benchmark-hooks 的 eval 里程碑照旧,与 self_metrics 互不影响。
+                    // Per-request occupancy bookkeeping for the usage meter:
+                    // keep the freshest reported PARENT input (parent-only via
+                    // `request_ms` — the consult/fold producers set None and
+                    // can outlast the parent stream at turn end), and a
+                    // zero/absent report must not clobber an earlier value.
+                    if usage.input_tokens > 0 && request_ms.is_some() {
+                        latest_reported_input_tokens = Some(usage.input_tokens);
+                    }
                     if let Some(m) = &self_metrics {
                         m.on_engine_usage(
                             &session_id,
@@ -2156,7 +2286,7 @@ mod transcript_commit_tests {
                     &worker_id,
                     &state,
                     &worker_active,
-                    |revision, count| {
+                    |revision, count, _context_updates_total| {
                         written_tx.send(()).unwrap();
                         release_rx.recv().unwrap();
                         notified_tx.send((revision.to_owned(), count)).unwrap();
@@ -2211,7 +2341,7 @@ mod transcript_commit_tests {
             workspace: tmp.path().into(),
         };
         assert!(
-            persist_chat_snapshot(&store, &id, &stale, &active, |_, _| panic!(
+            persist_chat_snapshot(&store, &id, &stale, &active, |_, _, _| panic!(
                 "retired writer emitted"
             ))
             .unwrap()
@@ -2265,7 +2395,7 @@ mod transcript_commit_tests {
                 message("user", "synthetic next task"),
                 false,
                 &AtomicBool::new(false),
-                |_, _| panic!("retired fallback writer emitted"),
+                |_, _, _| panic!("retired fallback writer emitted"),
             )
             .unwrap()
             .is_none()
@@ -2281,7 +2411,7 @@ mod transcript_commit_tests {
             message("user", "synthetic next task"),
             false,
             &AtomicBool::new(true),
-            |revision, count| marker = Some((revision.to_owned(), count)),
+            |revision, count, _context_updates_total| marker = Some((revision.to_owned(), count)),
         )
         .unwrap()
         .unwrap();
@@ -2303,13 +2433,145 @@ mod transcript_commit_tests {
             message("user", "synthetic stale task"),
             false,
             &AtomicBool::new(true),
-            |revision, count| marker = Some((revision.to_owned(), count)),
+            |revision, count, _context_updates_total| marker = Some((revision.to_owned(), count)),
         )
         .unwrap()
         .unwrap();
         assert_eq!(revision.as_deref(), Some(appended_revision.as_str()));
         assert_eq!(marker, Some((appended_revision, appended.len())));
         assert_eq!(store.load(&id).unwrap().messages, appended);
+    }
+
+    /// The committed callback's context_update total must come from the
+    /// persisted messages via `count_context_updates` — zeroing the pass-through
+    /// (or dropping it from a persist arm) would silently blind the frontend's
+    /// authoritative resync while every unit test of the counter itself stays
+    /// green (review r2 M1 wiring pin).
+    #[test]
+    fn persist_snapshot_forwards_context_update_total() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _restore = EnvVarGuard::capture(&["PINVOU3_HOME"]);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK held.
+        unsafe { std::env::set_var("PINVOU3_HOME", tmp.path()) };
+        let store = SessionStore::boot_with_scheduled_root(tmp.path().join("scheduled")).unwrap();
+        let session = store
+            .create_new("/model".into(), None, tmp.path().into())
+            .unwrap();
+        let id = session.metadata.id;
+        let drift = "<context_update>\nSession context changed since it was pinned; the pinned system prompt is unchanged. Delta (+ added, - removed):\n- stale line\n</context_update>";
+        let messages = vec![
+            message("user", "synthetic task"),
+            message("user", drift),
+            message("assistant", "synthetic answer"),
+        ];
+        store.update_messages(&id, messages.clone()).unwrap();
+        let active = AtomicBool::new(true);
+        let state = ChatEngineState {
+            messages,
+            system_prompt: None,
+            model: "/model".into(),
+            workspace: tmp.path().into(),
+        };
+        let mut observed = None;
+        persist_chat_snapshot(
+            &store,
+            &id,
+            &state,
+            &active,
+            |revision, count, context_updates_total| {
+                observed = Some((revision.to_owned(), count, context_updates_total));
+            },
+        )
+        .unwrap()
+        .expect("persist succeeds");
+        let (revision, count, total) = observed.expect("committed callback must fire");
+        assert_eq!(count, 3);
+        assert_eq!(total, 1, "exactly the canonical drift delta must count");
+        assert!(!revision.is_empty());
+        // A transcript without a drift delta reports zero — the counter is the
+        // canonical-shape count, not a message tally.
+        let plain = ChatEngineState {
+            messages: vec![message("user", "synthetic task")],
+            system_prompt: None,
+            model: "/model".into(),
+            workspace: tmp.path().into(),
+        };
+        let mut plain_total = None;
+        persist_chat_snapshot(
+            &store,
+            &id,
+            &plain,
+            &active,
+            |_, _, context_updates_total| {
+                plain_total = Some(context_updates_total);
+            },
+        )
+        .unwrap()
+        .expect("plain persist succeeds");
+        assert_eq!(plain_total, Some(0));
+    }
+
+    /// Every `emit_transcript_committed` call site must forward the computed
+    /// `context_updates_total` rather than discard it: the frontend's
+    /// authoritative resync trusts that field, and an arm that renames the
+    /// callback parameter to `_...` / emits a literal 0 blinds the resync for
+    /// that arm's commits while every counter unit test stays green (r8:
+    /// mutation-proven unpinned for three of the five arms; the helper-level
+    /// pin above only covers `persist_chat_snapshot` itself). Anchored on the
+    /// per-arm origin string (unique in production source) with a window that
+    /// must carry the parameter name as the emitted argument.
+    fn assert_commit_arm_forwards_total(source: &str, origin: &str, label: &str) {
+        let mut cursor = 0;
+        let mut arms = 0;
+        while let Some(found) = source[cursor..].find(origin) {
+            let start = cursor + found;
+            let window_end = (start + origin.len() + 400).min(source.len());
+            let window = &source[start..window_end];
+            assert!(
+                // 两种合法转发形态：闭包参数直传（`context_updates_total,`）
+                // 或原地重算（`count_context_updates(...)`，reclaimed 臂）。
+                window.contains("context_updates_total,")
+                    || window.contains("count_context_updates("),
+                "{label}: the {origin} commit arm must forward the computed context_updates_total"
+            );
+            assert!(
+                !window.contains("_context_updates_total"),
+                "{label}: the {origin} commit arm must not discard the total into an ignored parameter"
+            );
+            assert!(
+                !window.contains("context_updates_total: 0"),
+                "{label}: the {origin} commit arm must not emit a hardcoded zero total"
+            );
+            arms += 1;
+            cursor = start + origin.len();
+        }
+        assert!(
+            arms > 0,
+            "{label}: expected at least one {origin} commit arm"
+        );
+    }
+
+    #[test]
+    fn all_transcript_commit_arms_forward_the_computed_total() {
+        // Forwarder: slice at the first test module (the anchors below also
+        // appear in this test module's own string literals, and the guard must
+        // bite on the real emit sites only). Engine: searched whole — its
+        // first cfg(test) block sits BEFORE the reclaimed-fallback arm, and the
+        // origin literal is unique to the production emit site.
+        let forwarder = include_str!("forwarder.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        let engine = include_str!("engine.rs");
+        // mid-turn engine_state_update arm + both terminal_fallback persist
+        // callbacks + the terminal cache-hit re-emit all carry the same origin
+        // string in forwarder.rs; the reclaimed-fallback arm lives in engine.rs.
+        // Anchors include the emit-literal quote+comma so prose comments that
+        // mention the origin name are not mistaken for arms.
+        assert_commit_arm_forwards_total(forwarder, "\"engine_state_update\",", "forwarder");
+        assert_commit_arm_forwards_total(forwarder, "\"terminal_fallback\",", "forwarder");
+        assert_commit_arm_forwards_total(engine, "\"reclaimed_fallback\",", "engine");
     }
 
     #[test]
@@ -2332,7 +2594,7 @@ mod transcript_commit_tests {
                 "missing",
                 &state,
                 &AtomicBool::new(true),
-                |_, _| panic!("failed writer emitted")
+                |_, _, _| panic!("failed writer emitted")
             )
             .is_err()
         );
@@ -2347,10 +2609,17 @@ mod transcript_persist_pins {
     //! fresh always-true atomic would ship green. Pin the plumbing instead.
 
     /// The production `spawn_event_forwarder` body with line comments
-    /// stripped, so prose that mentions a needle verbatim cannot satisfy a
-    /// pin.
-    fn forwarder_body() -> String {
-        let src = include_str!("forwarder.rs");
+    /// stripped first, then closed `/* … */` spans removed with
+    /// nesting-depth tracking (newline count preserved; an unterminated
+    /// `/*` is kept verbatim), so prose that mentions a needle verbatim
+    /// cannot satisfy a pin in either comment kind.
+    pub(super) fn forwarder_body() -> String {
+        forwarder_body_from_src(include_str!("forwarder.rs"))
+    }
+
+    /// [`forwarder_body`] against a caller-supplied source, so the strip
+    /// caliber itself is testable against mutated sources.
+    fn forwarder_body_from_src(src: &str) -> String {
         let signature = "pub(crate) fn spawn_event_forwarder(";
         let start = src.find(signature).expect("the forwarder fn must exist");
         let rest = &src[start + signature.len()..];
@@ -2359,7 +2628,7 @@ mod transcript_persist_pins {
             .filter_map(|marker| rest.find(marker))
             .min()
             .map_or(src.len(), |offset| start + signature.len() + offset);
-        src[start..end]
+        let without_line_comments = src[start..end]
             .split('\n')
             .map(|line| {
                 line.split("//")
@@ -2367,7 +2636,67 @@ mod transcript_persist_pins {
                     .expect("split always yields one item")
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        strip_block_comments(&without_line_comments)
+    }
+
+    /// Newline-preserving removal of closed `/* … */` spans, tracking
+    /// nesting depth: Rust block comments nest, so a span's balancing
+    /// close is the `*/` that returns the depth to zero, not the first
+    /// `*/` seen (review JensenChen28 4525154638, same scanner class as
+    /// the shared `comment_filtered`). Runs after the line-comment pass,
+    /// so a `//`-commented-out `/*` marker cannot make this eat live
+    /// code; the needle set of every pin below lives in code, never in a
+    /// block comment.
+    fn strip_block_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        while let Some(open) = rest.find("/*") {
+            let after_open = &rest[open + 2..];
+            let mut depth = 1usize;
+            let mut scan = 0usize;
+            let mut close_end = None;
+            while depth > 0 {
+                let next_open = after_open[scan..].find("/*").map(|rel| scan + rel);
+                let next_close = after_open[scan..].find("*/").map(|rel| scan + rel);
+                match (next_open, next_close) {
+                    (Some(open_at), Some(close_at)) if open_at < close_at => {
+                        depth += 1;
+                        scan = open_at + 2;
+                    }
+                    (_, Some(close_at)) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close_end = Some(close_at + 2);
+                        } else {
+                            scan = close_at + 2;
+                        }
+                    }
+                    (Some(open_at), None) => {
+                        depth += 1;
+                        scan = open_at + 2;
+                    }
+                    (None, None) => break,
+                }
+            }
+            match close_end {
+                Some(end) => {
+                    out.push_str(&rest[..open]);
+                    let inner = &after_open[..end - 2];
+                    for _ in 0..inner.matches('\n').count() {
+                        out.push('\n');
+                    }
+                    rest = &after_open[end..];
+                }
+                None => {
+                    // Unterminated block: keep it verbatim, scan past the marker.
+                    out.push_str(&rest[..open + 2]);
+                    rest = after_open;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     #[test]
@@ -2412,6 +2741,26 @@ mod transcript_persist_pins {
     }
 
     #[test]
+    fn nested_block_commented_forwarder_body_keeps_no_needle_alive() {
+        // Nesting depth (review JensenChen28 4525154638, same scanner class
+        // as the shared comment_filtered): Rust block comments nest, so the
+        // first `*/` must not close the outer span — a compiling mutation
+        // wrapping the persist plumbing in an outer comment with an inner
+        // `/* … */` would otherwise keep the needle alive past the inner
+        // close.
+        let mutated = "pub(crate) fn spawn_event_forwarder(\n    transcript_writer_active: Arc<AtomicBool>,\n) {\n    /* outer\n    /* inner */\n    let writer_for_save = transcript_writer_active.clone();\n    */\n}\n\n#[cfg(test)]";
+        let body = forwarder_body_from_src(mutated);
+        assert!(
+            !body.contains("let writer_for_save = transcript_writer_active.clone();"),
+            "a needle behind a nested block-comment span must be removed",
+        );
+        assert!(
+            !body.contains("*/"),
+            "the balancing close must be consumed with the span",
+        );
+    }
+
+    #[test]
     fn engine_usage_wiring_feeds_self_metrics_once() {
         // 监控 TTFT/TPS 的引擎计时接线只有这一处。self_metrics 的单元测试只覆盖
         // 累加器本体——换位突变(request_ms 当 ttft)或删掉整行调用都让它们全绿,
@@ -2428,6 +2777,145 @@ mod transcript_persist_pins {
                 .count(),
             1,
             "TurnUsage must feed SelfMetrics exactly once, args in engine field order + per-call output_tokens"
+        );
+    }
+}
+
+#[cfg(test)]
+mod usage_occupancy_pins {
+    //! The chat page's usage meter receives `chat:usage` exactly once per
+    //! turn (TurnComplete), and its cumulative-input guard skips that event
+    //! on every tool-using turn. The per-request `context_input_tokens`
+    //! field is therefore the only live occupancy source, so its plumbing —
+    //! tracker refresh on TurnUsage, reset on TurnStarted, payload emission
+    //! on TurnComplete — is pinned here (same source-pin approach as the
+    //! other forwarder wiring pins above; no test drives the event loop,
+    //! and the comment stripper keeps prose mentions from satisfying a
+    //! needle).
+
+    #[test]
+    fn turn_usage_tracks_the_freshest_reported_parent_input() {
+        let flattened: String = super::transcript_persist_pins::forwarder_body()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            flattened
+                .matches(
+                    "ifusage.input_tokens>0&&request_ms.is_some(){latest_reported_input_tokens=Some(usage.input_tokens);}"
+                )
+                .count(),
+            1,
+            "TurnUsage must refresh the occupancy tracker exactly once, gated to parent requests (`request_ms` is Some) and zero-guarded so an unreported call cannot clobber an earlier value"
+        );
+        // The TurnStarted arm owns the reset: a turn whose provider never
+        // reported usage must emit a null field, not the previous turn's
+        // value. The arm-scoped count alone cannot see a reset drifting into
+        // ANOTHER arm, so first pin the whole-body count, then scope it to
+        // exactly the TurnStarted arm (same arm-boundary caliber as
+        // input_notification_pins).
+        let reset = "latest_reported_input_tokens=None;";
+        assert_eq!(
+            flattened.matches(reset).count(),
+            1,
+            "the occupancy reset must exist exactly once in the whole forwarder body (a second reset anywhere is a semantics change)"
+        );
+        let arm_marker = "Event::TurnStarted{";
+        let arm_start = flattened
+            .find(arm_marker)
+            .expect("the TurnStarted arm must exist");
+        let body_at = arm_start + arm_marker.len();
+        let arm_end = flattened[body_at..]
+            .find("Event::")
+            .map_or(flattened.len(), |offset| body_at + offset);
+        assert_eq!(
+            flattened[arm_start..arm_end].matches(reset).count(),
+            1,
+            "exactly the TurnStarted arm may reset the occupancy tracker"
+        );
+    }
+
+    #[test]
+    fn turn_complete_payload_carries_the_occupancy_field_without_touching_billing() {
+        let flattened: String = super::transcript_persist_pins::forwarder_body()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            flattened
+                .matches(r#""context_input_tokens":latest_reported_input_tokens,"#)
+                .count(),
+            1,
+            "chat:usage must carry the per-request occupancy exactly once, sourced from the tracker"
+        );
+        // The billing aggregate keeps feeding self_metrics: swapping it for
+        // the tracker would silently reshape scheduled-run totals and remote
+        // stats (turn.usage stays the summed billing view everywhere else).
+        assert!(
+            flattened.contains("m.on_turn_complete(&session_id,usage.input_tokens"),
+            "self_metrics must keep consuming the billing aggregate, not the occupancy tracker"
+        );
+    }
+}
+
+#[cfg(test)]
+mod input_notification_pins {
+    //! The input-needed desktop notification rides the interactive
+    //! `UserInputRequired` arm only. Deleting the call leaves every suite
+    //! green (`dead_code` is allowed and no test drives the forwarder's
+    //! event loop), so the wiring shape is pinned here — same reasoning as
+    //! `transcript_persist_pins` above, reusing its comment-stripped fn-body
+    //! extraction (test code is cut off, so the pin cannot match itself).
+
+    #[test]
+    fn interactive_input_arm_fires_the_desktop_notification_once() {
+        // Match after comment-stripping and whitespace removal: prose mentions
+        // of the call shape must not satisfy the pin, and rustfmt wrapping must
+        // not matter (same approach as engine_usage_wiring_feeds_self_metrics_once).
+        let flattened: String = super::transcript_persist_pins::forwarder_body()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let call = "engine_support::maybe_notify_input_needed(";
+        assert_eq!(
+            flattened.matches(call).count(),
+            1,
+            "exactly the interactive UserInputRequired arm must fire the input-needed notification"
+        );
+        let call_at = flattened.find(call).expect("count above proves presence");
+        // Argument order is semantics: (&app, &session_id, &id) — keys are
+        // filed as (session, input), and swapping arguments would silently
+        // lose the per-session dedup pruning. Matched after whitespace
+        // removal, without relying on a trailing comma: rustfmt wrapping or
+        // collapsing to one line (which drops the trailing comma) must not
+        // change the verdict.
+        let after_args = &flattened[call_at + call.len()..];
+        assert!(
+            after_args.starts_with("&app,&session_id,&id,)")
+                || after_args.starts_with("&app,&session_id,&id)"),
+            "the wiring must pass (&app, &session_id, &id) — argument order is the dedup semantics",
+        );
+        let arm_start = flattened[..call_at]
+            .rfind("Event::UserInputRequired")
+            .expect("the notification call must live inside the UserInputRequired arm");
+        let arm_end = flattened[call_at..]
+            .find("Event::")
+            .map_or(flattened.len(), |offset| call_at + offset);
+        let arm = &flattened[arm_start..arm_end];
+        // The unattended leg cancels the input first; the attended leg emits
+        // first and notifies second: the two legs are mutually exclusive, and
+        // the notification must not fall into the unattended leg (an order
+        // swap turns this pin red).
+        let cancel_at = arm
+            .find("cancel_user_input(")
+            .expect("the unattended leg must cancel the parked input");
+        let emit_at = arm
+            .find(r#"emit("chat:user_input_required""#)
+            .expect("the attended leg must emit to the frontend");
+        let call_in_arm = call_at - arm_start;
+        assert!(
+            cancel_at < emit_at && emit_at < call_in_arm,
+            "the unattended cancel must precede the attended emit, and the notification must follow it inside the same arm"
         );
     }
 }

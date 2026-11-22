@@ -8,30 +8,18 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // pet-scheduled-notice.js imports ../../shared/i18n.js，用两层目录的临时副本保持相对路径可解析
 const dir = mkdtempSync(path.join(tmpdir(), 'pinvou3-pet-scheduled-notice-'));
 const tmp = path.join(dir, 'a', 'b', 'pet-scheduled-notice.mjs');
-mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
-mkdirSync(path.join(dir, 'shared'), { recursive: true });
-copyFileSync(path.join(here, '..', 'src', 'features', 'pet', 'pet-scheduled-notice.js'), tmp);
-// pet-scheduled-notice.js 还 import './pet-state.js'(sessionPayloadId 共用),
-// 副本需带上同目录的 pet-state.js 才能解析
-copyFileSync(
-  path.join(here, '..', 'src', 'features', 'pet', 'pet-state.js'),
-  path.join(dir, 'a', 'b', 'pet-state.js'),
-);
-copyFileSync(path.join(here, '..', 'src', 'shared', 'i18n.js'), path.join(dir, 'shared', 'i18n.js'));
-copyFileSync(path.join(here, '..', 'src', 'shared', 'connector-i18n.js'), path.join(dir, 'shared', 'connector-i18n.js'));
-// Preserve the locale modules' transitive imports as dictionaries evolve.
-cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });
-// zh moved behind i18n.js's lazy loader (startup budget): seed the staged
-// copy synchronously so the imported module reads a filled dict.zh.
-{
-  const { readFileSync, writeFileSync } = await import('node:fs');
-  const i18nCopy = path.join(dir, 'shared', 'i18n.js');
-  let staged = readFileSync(i18nCopy, 'utf8');
-  staged += "\nimport { dictZh as __zh } from './i18n/zh.js';\ndict.zh = __zh;\n";
-  writeFileSync(i18nCopy, staged);
-}
-
 try {
+  mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
+  copyFileSync(path.join(here, '..', 'src', 'features', 'pet', 'pet-scheduled-notice.js'), tmp);
+  copyFileSync(
+    path.join(here, '..', 'src', 'features', 'pet', 'pet-state.js'),
+    path.join(dir, 'a', 'b', 'pet-state.js'),
+  );
+  // Stage the production shared tree so eager and lazy i18n imports resolve together.
+  cpSync(path.join(here, '..', 'src', 'shared'), path.join(dir, 'shared'), { recursive: true });
+  const { ensureLanguage } = await import(pathToFileURL(path.join(dir, 'shared', 'i18n.js')).href);
+  assert.equal(await ensureLanguage('zh'), true);
+
 const {
   acknowledgeScheduledNotice,
   formatScheduledNoticeBody,

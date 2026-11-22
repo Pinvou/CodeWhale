@@ -90,6 +90,18 @@ MANIFEST = os.path.join(REPO_ROOT, "pinvou3-app", "src-tauri", "Cargo.toml")
 # pinned test to another module fails loud with the new location; update the
 # path in that (rare, deliberate) case.
 REQUIRED_PINS = [
+    # features/sessions (PR #835 r8/r9 waves): rollback-critical fork/import
+    # pins — a stolen `#[test]` here would let the fork binding replication,
+    # the bind-failure rollback arm (source needle; no deterministic
+    # filesystem fault injection exists between persist and bind), the
+    # three-state skip probe, or the counter-arm total forwarding regress
+    # silently (each is a silent-data-shape failure class, the guard's charter).
+    # 回流社区 #836：来源按末段匹配登记裸名；本仓守卫已演进为全路径相等，
+    # 按本仓契约改写为 registry 全路径。
+    "features::sessions::fork::tests::fork_rebinds_workspace_binding_for_branch",
+    "features::sessions::fork::tests::fork_bind_failure_rollback_arm_is_pinned",
+    "features::sessions::import::tests::import_reports_stat_fault_instead_of_overwriting_existing_record",
+    "features::assistant::engine::forwarder::transcript_commit_tests::all_transcript_commit_arms_forward_the_computed_total",
     # commands/tests.rs: the install-path consent rollback pair (round-33
     # minor 6, review #455) — exactly the consent/rollback class this guard
     # exists to protect from attribute theft.
@@ -163,25 +175,57 @@ REQUIRED_PINS = [
     # connector_cli.rs: the aggregate runs every gate and reports the first
     # error only after all finished — the caller's wrap-up-on-error contract.
     "features::connectors::connector_cli::tests::aggregate_keeps_successful_sibling_mutations_while_reporting_failure",
+    # 回流 community PR pinvou-agent#826（computer-use 虚拟显示，R16 登记）：
+    # 该 consent/redaction 关键面的 pin——gate 的 no-boot 预检（拒绝的调用
+    # 不得启动栈或注册 session）、audit 脱敏信任边界（模型自由文本不得进入
+    # audit 日志）、pid-0 receipt 语义、display-target 行生命周期
+    # （stop/revoke/stop-latch 重断言 + 受守卫的 registry 写入）、late-delta
+    # 诚实通道，以及 kill-identity gate 主体（安全 kill 依据记录的身份而非
+    # pid 数字决策）。来源为裸测试名，此处按本仓约定改写为 FULL libtest
+    # 路径；kill pin 位于 #[cfg(target_os = "linux")] 门控的
+    # linux_virtual.rs，在接线本守卫的 Linux CI 上解析。
+    "features::computer_use::tool::tests::gate_refused_input_does_not_boot_the_backend",
+    "features::computer_use::tool::tests::open_audit_target_withholds_the_model_free_text",
+    "features::computer_use::tool::tests::open_receipt_states_pid_zero_semantics",
+    "features::computer_use::tool::tests::admitted_run_reasserts_the_display_target_row_after_a_stop",
+    "features::computer_use::tool::tests::revoked_session_keeps_no_display_target_row",
+    "features::computer_use::guard::tests::revoke_session_clears_the_display_target_row",
+    "features::computer_use::guard::tests::stop_all_clears_display_target_rows",
+    "features::computer_use::guard::tests::set_session_target_if_live_refuses_stopped_and_disabled",
+    "features::computer_use::tool::tests::reassert_skips_the_row_when_a_stop_has_landed",
+    "features::computer_use::tool::tests::late_target_note_append_surfaces_as_delta",
+    "features::computer_use::tool::tests::target_note_shrink_and_regrowth_resurface_as_deltas",
+    "features::computer_use::platform::virtual_display::linux_virtual::tests::kill_verified_children_decides_on_recorded_identity",
 ]
 
 
 def list_tests():
     # Must mirror the CI rust-test leg's feature set exactly (`cargo test
-    # --lib --no-default-features --locked` in pr-check.yml): the leg builds
+    # --lib --no-default-features --features benchmark-hooks --locked` in
+    # pr-check.yml): the leg builds
     # that configuration right before this guard runs, so matching it reuses
     # the just-built artifacts instead of recompiling the whole lib. Upstream
     # lists default features + benchmark-hooks because its own legs build
-    # that way; this fork's memory-constrained leg does not, and no
-    # REQUIRED_PIN is feature-gated (two are #[cfg(unix)]-gated, which is
+    # that way; this fork keeps default features off, but includes its
+    # headless bridge contracts via benchmark-hooks. No REQUIRED_PIN is
+    # feature-gated (two are #[cfg(unix)]-gated, which is
     # expected to resolve on the Linux CI where this guard is wired).
-    cmd = [
-        "cargo",
+    # Match the CI job's process-scoped memory override without modifying the
+    # persistent Cargo home. Unset retains ordinary local/other-job behavior.
+    override = os.environ.get("PINVOU_CI_CODEWHALE_DEV_O0")
+    if override not in (None, "1"):
+        raise SystemExit("test-registry-guard: PINVOU_CI_CODEWHALE_DEV_O0 must be 1 or unset")
+    cmd = ["cargo"]
+    if override == "1":
+        cmd += ["--config", "profile.dev.package.codewhale-tui.opt-level=0"]
+    cmd += [
         "test",
         "--manifest-path",
         MANIFEST,
         "--lib",
         "--no-default-features",
+        "--features",
+        "benchmark-hooks",
         "--locked",
         "--",
         "--list",

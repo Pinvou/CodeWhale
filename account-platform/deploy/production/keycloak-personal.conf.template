@@ -1,0 +1,16 @@
+# Render in a private UID 1000 directory, not inside the repository.
+# The certificate must cover the public host and the private Keycloak DNS name.
+db=postgres
+db-url=jdbc:postgresql://__POSTGRES_HOST__:5432/__KEYCLOAK_DATABASE__?sslmode=verify-full&sslrootcert=/run/pinvou/keycloak-trust/ca.crt
+db-username=__KEYCLOAK_DATABASE_USER__
+db-password=@DATABASE_PASSWORD@
+hostname=https://__PUBLIC_HOST__:__PUBLIC_TLS_PORT__
+https-port=__PUBLIC_TLS_PORT__
+hostname-strict=true
+hostname-backchannel-dynamic=false
+http-enabled=false
+https-certificate-file=/run/pinvou/keycloak-tls/server.crt
+https-certificate-key-file=/run/pinvou/keycloak-tls/server.key
+# Controlled first bootstrap only; retire these two rendered keys afterwards.
+bootstrap-admin-username=pinvou-bootstrap-admin
+bootstrap-admin-password=@BOOTSTRAP_ADMIN_PASSWORD@

@@ -2017,7 +2017,7 @@ mod tests {
             || {
                 let bundle = Pinvou3Bundle::paths();
 
-                bundle.write_builtin_skills().unwrap();
+                bundle.write_builtin_skills(false).unwrap();
 
                 let skill_path = bundle.skills_dir.join("visual-design").join("SKILL.md");
                 let content = std::fs::read_to_string(&skill_path).unwrap();
@@ -2056,9 +2056,10 @@ mod tests {
     }
 
     /// The other divergence direction: `write_builtin_skills` must release
-    /// exactly the dirs listed in `BUILTIN_RELEASED_SKILL_DIRS` — a skill added
-    /// to the write path without extending the constant would be converged
-    /// away by self-heal step 4 on the same launch.
+    /// exactly the dirs listed in `BUILTIN_RELEASED_SKILL_DIRS` (filtered by the
+    /// MegaCube capability) — a skill added to the write path without extending
+    /// the constant would be converged away by self-heal step 4 on the same
+    /// launch.
     #[test]
     fn write_builtin_skills_releases_exactly_the_listed_dirs() {
         crate::platform::test_support::with_temp_home(
@@ -2066,8 +2067,8 @@ mod tests {
             || {
                 let bundle = Pinvou3Bundle::paths();
 
-                bundle.write_builtin_skills().unwrap();
-
+                // MegaCube（true）：释放面 == 全部内嵌常量。
+                bundle.write_builtin_skills(true).unwrap();
                 let mut written: Vec<String> = std::fs::read_dir(&bundle.skills_dir)
                     .unwrap()
                     .flatten()
@@ -2083,6 +2084,25 @@ mod tests {
                 assert_eq!(
                     written, listed,
                     "write_builtin_skills 的释放面与 BUILTIN_RELEASED_SKILL_DIRS 不一致"
+                );
+
+                // 非 MegaCube（false）：device-doctor 不释放——技能清单可见性是非
+                // MegaCube 平台的用户可见面，设计 §10 零变化承诺由此成立（五轮评审 P2）。
+                for dir in listed {
+                    let _ = std::fs::remove_dir_all(bundle.skills_dir.join(&dir));
+                }
+                bundle.write_builtin_skills(false).unwrap();
+                let mut written_non_megacube: Vec<String> = std::fs::read_dir(&bundle.skills_dir)
+                    .unwrap()
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                written_non_megacube.sort_unstable();
+                assert_eq!(
+                    written_non_megacube,
+                    vec!["visual-design".to_string()],
+                    "非 MegaCube 上 device-doctor 必须不释放"
                 );
             },
         );
@@ -2953,6 +2973,110 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test]
+    fn work_mcp_profiles_route_bundled_pptx_to_each_session_artifact_directory() {
+        crate::platform::test_support::with_temp_home("pinvou3-work-pptx-output", || {
+            let bundle = Pinvou3Bundle::paths();
+            std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+            let package = paths::bundle_mcp_package_dir("pptx");
+            let script = package.join("server.py");
+            let site_packages = paths::marketplace_python_envs_dir()
+                .join("a".repeat(64))
+                .join("site-packages");
+            let base = serde_json::json!({"servers": {
+                "pptx": {"command": paths::python_command(), "url": null, "args": ["-I", "-S", "-B", paths::bundle_mcp_python_runner(), site_packages, script], "env": {"OTHER": "preserved"}},
+                "other": {"command": "other", "env": {"PINVOU3_SESSION_ARTIFACTS": "unchanged"}}
+            }});
+            std::fs::write(&bundle.mcp_json, base.to_string()).unwrap();
+
+            let mut configs = Vec::new();
+            for id in ["controlled-chat-a", "controlled-chat-b"] {
+                let profile = bundle.work_mode_mcp_config_path_for_session(id);
+                assert_ne!(profile, bundle.mcp_json);
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+                let args = config["servers"]["pptx"]["args"].as_array().unwrap();
+                assert_eq!(
+                    &args[..6],
+                    base["servers"]["pptx"]["args"].as_array().unwrap()
+                );
+                assert_eq!(
+                    args[6],
+                    format!(
+                        "--session-artifacts-dir={}",
+                        paths::session_artifacts_dir(id).display()
+                    )
+                );
+                assert_eq!(
+                    config["servers"]["pptx"]["env"],
+                    base["servers"]["pptx"]["env"]
+                );
+                assert_eq!(config["servers"]["other"], base["servers"]["other"]);
+                configs.push(profile);
+            }
+            assert_ne!(configs[0], configs[1]);
+            assert_eq!(
+                std::fs::read_to_string(&bundle.mcp_json).unwrap(),
+                base.to_string()
+            );
+
+            let mut custom = base;
+            custom["servers"]["pptx"]["args"] = serde_json::json!([script]);
+            std::fs::write(&bundle.mcp_json, custom.to_string()).unwrap();
+            let profile = bundle.work_mode_mcp_config_path_for_session("controlled-chat-a");
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(profile).unwrap()).unwrap();
+            assert_eq!(
+                config["servers"]["pptx"]["args"][1],
+                format!(
+                    "--session-artifacts-dir={}",
+                    paths::session_artifacts_dir("controlled-chat-a").display()
+                )
+            );
+
+            custom["servers"]["pptx"]["command"] = serde_json::json!("custom-ppt-launcher");
+            std::fs::write(&bundle.mcp_json, custom.to_string()).unwrap();
+            let profile = bundle.work_mode_mcp_config_path_for_session("controlled-chat-a");
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(profile).unwrap()).unwrap();
+            assert_eq!(config["servers"]["pptx"], custom["servers"]["pptx"]);
+        });
+    }
+
+    #[test]
+    fn work_mcp_rejects_global_pptx_fallback_when_session_profile_is_unwritable() {
+        crate::platform::test_support::with_temp_home("pinvou3-work-pptx-unwritable", || {
+            let bundle = Pinvou3Bundle::paths();
+            std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+            let base = serde_json::json!({"servers": {"pptx": {
+                "command": paths::python_command(),
+                "args": [paths::bundle_mcp_package_dir("pptx").join("server.py")],
+            }}});
+            std::fs::write(&bundle.mcp_json, base.to_string()).unwrap();
+            let profile_dir = paths::browser_session_mcp_dir();
+            std::fs::create_dir_all(profile_dir.parent().unwrap()).unwrap();
+            std::fs::write(&profile_dir, b"blocked profile directory").unwrap();
+            let profile = bundle.work_mode_mcp_config_path_for_session("controlled-chat-a");
+            assert_eq!(profile, bundle.mcp_json);
+            assert!(
+                bundle
+                    .resolve_work_mode_mcp_fallback("controlled-chat-a", &profile)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&bundle.mcp_json).unwrap(),
+                base.to_string()
+            );
+            let mut disabled = base;
+            disabled["servers"]["pptx"]["enabled"] = serde_json::json!(false);
+            std::fs::write(&bundle.mcp_json, disabled.to_string()).unwrap();
+            assert_eq!(
+                bundle.resolve_work_mode_mcp_fallback("controlled-chat-a", &profile),
+                Ok(None)
+            );
+        });
     }
 
     /// Verifies the Browser MCP gate defined by the ADR:

@@ -1,0 +1,3378 @@
+import importlib.util
+import contextlib
+import io
+import json
+import re
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+SPEC = importlib.util.spec_from_file_location(
+    "token_financial_postgres", Path(__file__).resolve().parents[1] / "test-token-financial-postgres.py"
+)
+RUNNER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(RUNNER)
+
+
+# Explicit, reviewed cardinality; do not derive the expectation from the runner.
+EXPECTED_RETAINED_ROOT_COUNT = 95
+EXPECTED_SCHEMA_ROOT_COUNT = 31
+
+# Fixed identities independently checked against each actual -run selector.
+EXPECTED_SCHEMA_ROOTS = {"TestLatePaymentQueryGenerationsMigrationIdentity", "TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestLatePaymentArchiveQueryAdmissionPublicMigration"}
+EXPECTED_SCHEMA_ROOTS |= {'TestF02CommerceClaimWaitStartsFreshLease', 'TestCommerceClosureCallbacksRespectSubjectFence', 'TestF02CommerceOriginal15LateUpgradePreservesFacts', 'TestCommerceClaimSubjectLockKeepsLeaseLive', 'TestCommerceClaimMappingLockKeepsLeaseLive', 'TestF02PublicCommerceCustomerLifecycle', 'TestF02CommerceSupersededGenerationCannotDispatch', 'TestF02CommerceLeaseExpiresWhileWaitingForMappingLock', 'TestF02CommerceConfirmedProducersPreserveStatuses'}
+EXPECTED_SCHEMA_ROOTS |= {"TestChargebackPrincipalRegisteredIdentity"}
+EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+
+
+CHECKPOINT_LEAF_ROOTS = {
+    "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+    "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+    "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+    "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+    "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
+}
+CHECKPOINT_FOREIGN_ROOT = "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration"
+CHECKPOINT_FOREIGN_CHILDREN = {"unbound-existing-facts", "foreign-key-before-finalize"}
+
+
+class PostgresQuiescenceTests(unittest.TestCase):
+    @staticmethod
+    def snapshot(**changes):
+        return json.dumps({"databases": ["postgres", "template0", "template1"],
+                           "roles": ["postgres"], "objects": 0, "clients": 0, **changes})
+
+    def observe(self, query, *, budget=15, clock=None):
+        clock = [0.0] if clock is None else clock
+        pauses = []
+        def pause(delay):
+            pauses.append(delay)
+            clock[0] += delay
+        RUNNER.require_exclusive_instance(query, ["postgres", "template0", "template1"], {"postgres"},
+                                         timeout_seconds=budget, now=lambda: clock[0], pause=pause)
+        return pauses
+
+    def test_zero_clients_requires_one_complete_observation_without_waiting(self):
+        calls = []
+        def query(sql, *, timeout):
+            calls.append((sql, timeout))
+            return self.snapshot()
+        self.assertEqual(self.observe(query), [])
+        self.assertEqual(calls, [(RUNNER.INSTANCE_SNAPSHOT_SQL, 15)])
+
+    def test_backend_exit_is_observed_before_accepting_and_query_budget_decreases(self):
+        responses = iter([self.snapshot(clients=2), self.snapshot(clients=1), self.snapshot()])
+        budgets = []
+        def query(sql, *, timeout):
+            budgets.append(timeout)
+            return next(responses)
+        self.assertEqual(self.observe(query), [0.05, 0.05])
+        self.assertEqual(len(budgets), 3)
+        self.assertGreater(budgets[0], budgets[1])
+        self.assertGreater(budgets[1], budgets[2])
+
+    def test_active_client_does_not_become_success_at_the_deadline(self):
+        calls = []
+        def query(sql, *, timeout):
+            calls.append((sql, timeout))
+            return self.snapshot(clients=1)
+        with self.assertRaisesRegex(RuntimeError, "another client"):
+            self.observe(query, budget=0.12)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(0 < timeout <= 0.12 for _, timeout in calls))
+
+    def test_catalog_and_observation_shape_are_rechecked_while_clients_drain(self):
+        bad = [self.snapshot(databases=["postgres", "template0", "template1", "other"]),
+               self.snapshot(roles=["postgres", "foreign"]), self.snapshot(roles=["postgres", "postgres"]),
+               self.snapshot(roles=None), self.snapshot(objects=1), self.snapshot(objects=False),
+               self.snapshot(clients=-1), self.snapshot(clients=False), self.snapshot(clients="0"),
+               self.snapshot(extra="unknown"), '{}', '[]', 'not-json']
+        for value in bad:
+            with self.subTest(observation=value):
+                replies = iter([self.snapshot(clients=1), value]); calls = []
+                def query(sql, *, timeout):
+                    calls.append(sql)
+                    return next(replies)
+                with self.assertRaises(RuntimeError):
+                    self.observe(query)
+                self.assertEqual(len(calls), 2)
+
+    def test_identity_or_transport_failure_is_not_retried_or_converted_to_idle(self):
+        import subprocess
+        for error in [RuntimeError("identity changed"), subprocess.TimeoutExpired("owned-psql", 1)]:
+            calls = []
+            def query(sql, *, timeout):
+                calls.append(sql)
+                raise error
+            with self.subTest(error=type(error).__name__), self.assertRaises(RuntimeError) as caught:
+                self.observe(query)
+            if type(error) is RuntimeError:
+                self.assertIs(caught.exception, error)
+            self.assertEqual(len(calls), 1)
+        clock = [0.0]
+        def too_late(sql, *, timeout):
+            clock[0] = 15
+            return self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "another client"):
+            self.observe(too_late, clock=clock)
+
+    def test_budget_cannot_be_disabled_or_extended_and_role_order_is_not_authority(self):
+        from unittest.mock import Mock
+        for budget in (0, -1, True, "15", 16, float("inf"), float("nan")):
+            query = Mock()
+            with self.subTest(budget=budget), self.assertRaises(ValueError):
+                self.observe(query, budget=budget)
+            query.assert_not_called()
+        RUNNER.require_exclusive_instance(lambda sql, **options: self.snapshot(roles=["postgres", "billing_migrator"]),
+            ["postgres", "template0", "template1"], {"billing_migrator", "postgres"})
+
+
+class FinancialPostgresRunnerTests(unittest.TestCase):
+    @staticmethod
+    def f12_phase_events():
+        return [{"Action": "output", "Package": "github.com/Pinvou/pinvou3/account-platform/internal/billingschema",
+                 "Test": "TestPaymentCreditF12DeployedCarriersUpgradePostgres",
+                 "Output": "    payment_credit_f12_upgrade_integration_test.go:148: PINVOU_F12_UPGRADE_PHASE_RESULT "
+                 + json.dumps({"schema": 1, "phase": phase, "root": "TestF12PaymentCreditUpgradeChildPostgres",
+                               "package": "github.com/Pinvou/pinvou3/account-platform/internal/billing",
+                               "runs": 1, "passes": 1, "package_pass": True, "skips": 0}) + "\n"}
+                for phase in ("historical", "current")]
+
+    def test_f12_upgrade_roots_are_selected_in_their_real_actor_phases(self):
+        parent = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
+        billing = {"TestF12PaymentRepairOrderLookupPostgres", "TestF12PaymentRepairDeployedBaselineUpgradePostgres"}
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
+        self.assertIn(parent, RUNNER.SCHEMA_REQUIRED)
+        self.assertIn("TestLatePaymentArchiveQueryAdmissionPublicMigration", RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.SCHEMA_CHILD_REQUIRED, RUNNER.SCHEMA_REQUIRED - RUNNER.SCHEMA_LEAF_REQUIRED - {parent})
+        self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
+        self.assertTrue(billing <= RUNNER.BILLING_LEAF_REQUIRED)
+        self.assertNotIn("TestF12PaymentCreditUpgradeChildPostgres", RUNNER.RETAINED_REQUIRED)
+        self.run_main_fixture()
+        schema = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        retained = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(parent, schema[schema.index("-run") + 1])
+        for name in billing:
+            self.assertIn(name, retained[retained.index("-run") + 1])
+            events = self.events({name}, RUNNER.BILLING_PACKAGE)
+            options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                       "children_required": set(), "exact_roots": True}
+            RUNNER.verify_results(events, {name}, **options)
+            for action in ("skip", "fail"):
+                with self.subTest(name=name, action=action), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events + [{"Action": action, "Test": name, "Package": RUNNER.BILLING_PACKAGE}], {name}, **options)
+
+    def test_f12_upgrade_requires_two_unique_exact_parent_owned_phase_results(self):
+        parent = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True,
+                   "children_required": set(), "exact_roots": True}
+        valid = self.events({parent}, RUNNER.SCHEMA_PACKAGE)
+        RUNNER.verify_results(valid, {parent}, **options)
+        markers = self.f12_phase_events()
+        roots = [event for event in valid if event.get("Action") != "output"]
+        invalid = [roots, roots + markers[:1], roots + markers[1:], valid + markers[:1],
+                   valid + [{"Action": "run", "Package": RUNNER.SCHEMA_PACKAGE, "Test": parent}],
+                   valid + [{"Action": "pass", "Package": RUNNER.SCHEMA_PACKAGE, "Test": parent}],
+                   [event for event in valid if event.get("Test")],
+                   [event for event in valid if not (event.get("Action") == "run" and event.get("Test") == parent)],
+                   [event for event in valid if not (event.get("Action") == "pass" and event.get("Test") == parent)]]
+        for field, value in (("Test", parent + "/spoof"), ("Test", ""),
+                             ("Package", RUNNER.BILLING_PACKAGE), ("Action", "pass")):
+            invalid.append(roots + [dict(markers[0], **{field: value}), markers[1]])
+        for action in ("skip", "fail"):
+            for name in (parent, parent + "/child"):
+                invalid.append(valid + [{"Action": action, "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}])
+        invalid.append(valid + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE}])
+        for events in invalid:
+            with self.subTest(events=events), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events, {parent}, **options)
+
+    def test_f12_upgrade_phase_json_rejects_wrong_values_types_and_duplicate_fields(self):
+        parent = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
+        prefix = "PINVOU_F12_UPGRADE_PHASE_RESULT "
+        valid = self.events({parent}, RUNNER.SCHEMA_PACKAGE)
+        marker = self.f12_phase_events()[0]
+        original = json.loads(marker["Output"].split(prefix, 1)[1])
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "children_required": set(), "exact_roots": True}
+        for field, values in {"schema": (True, 1.0, "1", 2), "phase": (None, [], "other"),
+                              "root": (parent, "other"), "package": (RUNNER.SCHEMA_PACKAGE, "other"),
+                              "runs": (True, 1.0, "1", 0, 2), "passes": (True, 1.0, 0, 2),
+                              "package_pass": (1, False, "true"), "skips": (False, 0.0, 1, "0"),
+                              "extra": (1,)}.items():
+            for value in values:
+                payload = dict(original, **{field: value})
+                events = [event for event in valid if event != marker] + [dict(marker, Output=prefix + json.dumps(payload))]
+                with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events, {parent}, **options)
+        payloads = [json.dumps({key: value for key, value in original.items() if key != omitted}) for omitted in original]
+        for payload in [*payloads, "{}", "[]", "invalid", json.dumps(original)[:-1] + ',"runs":1}']:
+            events = [event for event in valid if event != marker] + [dict(marker, Output=prefix + payload)]
+            with self.subTest(payload=payload), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events, {parent}, **options)
+
+    def test_adjustment_proof_rollback_requires_empty_and_retained_public_entries(self):
+        root = "TestBillingManualAdjustmentProofRollbackPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_commerce_account_roots_and_each_required_case_cannot_be_faked(self):
+        expected = {
+            "TestCommerceManualCompletionMigrationPostgres": {
+                "late-catalog-collision-rolls-back",
+                "nonempty-upgrade-and-forward-only",
+            },
+            "TestCommerceManualCompletionPostgres": {
+                "audit-cancellation-rolls-back-completion",
+                "callback-evidence-invalidates-old-proposal",
+                "closed-identity-keeps-retired-facts",
+                "closed-job-can-open-evidence-only-case",
+                "concurrent-reviewers-write-one-receipt",
+                "current-success-http-and-receipt-replay",
+                "startup-wait-rechecks-committed-quarantine",
+                "busy-discovery-preserves-sla-and-next-candidate",
+                "expired-lease-quarantines-without-redispatch",
+                "no-effect-is-not-sync-success",
+                "observation-id-replay-and-payload-conflict",
+                "operator-wire-boundaries-preserve-original-facts",
+                "proposer-expiry-during-mapping-wait", "proposer-expiry-during-sla-wait",
+                "retired-active-lifecycle-keeps-business-facts",
+                "reviewer-expiry-during-mapping-wait", "reviewer-expiry-during-sla-wait",
+                "reviewer-revocation-during-role-wait",
+                "self-and-unprivileged-confirmations-block",
+                "stale-mapping-keeps-new-generation",
+                "unknown-and-superseded-observation-block",
+            },
+        }
+        self.assertTrue(set(expected) <= RUNNER.ACCOUNT_REQUIRED)
+        for root, children in expected.items():
+            if children:
+                self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=bool(children))
+            options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True, "children_required": {root} if children else set()}
+            RUNNER.verify_results(events, {root}, **options)
+            for name in {root} | {root + "/" + child for child in children}:
+                invalid = [
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+                    events + [{"Action": "fail", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+                ]
+                for rejected in invalid:
+                    with self.subTest(root=root, missing_or_failed=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(rejected, {root}, **options)
+
+    def test_commerce_schema_roots_and_each_required_case_cannot_be_faked(self):
+        expected = {
+            "TestCommerceClaimMappingLockKeepsLeaseLive": set(),
+            "TestCommerceClaimSubjectLockKeepsLeaseLive": set(),
+            "TestCommerceClosureCallbacksRespectSubjectFence": {
+                "complete-after-anonymize",
+                "complete-user-wait",
+                "retry-after-anonymize",
+                "retry-user-wait",
+            },
+            "TestF02CommerceClaimWaitStartsFreshLease": {
+                "mapping",
+                "user",
+            },
+            "TestF02CommerceConfirmedProducersPreserveStatuses": {
+                "confirmed-mobile-ACTIVE",
+                "confirmed-mobile-DISABLED",
+                "confirmed-mobile-PROVISIONING",
+                "confirmed-mobile-REPAIR_REQUIRED",
+                "real-registration-provisioning",
+            },
+            "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock": {
+                "complete",
+                "retry",
+            },
+            "TestF02CommerceOriginal15LateUpgradePreservesFacts": set(),
+            "TestF02CommerceSupersededGenerationCannotDispatch": {
+                "confirmed-mobile-wins-lock",
+                "expired-lease",
+                "inflight-complete",
+                "inflight-retry",
+            },
+            "TestF02PublicCommerceCustomerLifecycle": {
+                "bootstrap-wallet-ack-and-get-me",
+                "current-schema-with-subject-lifecycle",
+                "detached-current-mapping-cannot-resume",
+                "disabled-user-cannot-claim-or-complete",
+                "mapping-generation-and-adapter-fence",
+                "quarantined-lease-rejects-previous-worker",
+                "quarantined-lease-rejects-previous-worker/complete",
+                "quarantined-lease-rejects-previous-worker/retry",
+                "startup-ensure-claim-retry-complete",
+            },
+        }
+        self.assertTrue(set(expected) <= RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.SCHEMA_LEAF_REQUIRED, {
+            "TestCommerceClaimMappingLockKeepsLeaseLive",
+            "TestCommerceClaimSubjectLockKeepsLeaseLive",
+            "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+        })
+        self.assertEqual(RUNNER.SCHEMA_CHILD_REQUIRED, RUNNER.SCHEMA_REQUIRED - RUNNER.SCHEMA_LEAF_REQUIRED - {RUNNER.F12_UPGRADE_PARENT})
+        for root, children in expected.items():
+            if children:
+                self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=bool(children))
+            options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True, "children_required": {root} if children else set()}
+            RUNNER.verify_results(events, {root}, **options)
+            for name in {root} | {root + "/" + child for child in children}:
+                invalid = [
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+                    events + [{"Action": "fail", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+                ]
+                for rejected in invalid:
+                    with self.subTest(root=root, missing_or_failed=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(rejected, {root}, **options)
+    def test_payment_credit_direct_guards_and_resolver_cases_are_mandatory(self):
+        required = {
+            "TestPaymentCreditJournalAdmissionGuardPostgres": {
+                f"{entry}-{mode}"
+                for entry in ("RECHARGE", "REPAIR_CREDIT")
+                for mode in ("missing", "wrong-order", "wrong-payer", "already-applied")
+            },
+            "TestPaymentCreditResolverIntegrityPostgres": {
+                "applied-without-effects", "prepared-with-effects",
+                "missing-transaction", "fingerprint-mismatch",
+            },
+        }
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        for root, children in required.items():
+            self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+            self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+            events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+            RUNNER.verify_results(events, {root}, **options)
+            for child in children:
+                for invalid in (
+                    [event for event in events if event.get("Test") != root + "/" + child],
+                    events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                ):
+                    with self.subTest(root=root, child=child), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, {root}, **options)
+        self.assertIn("pending-subject-dml-and-closed-admission-boundaries", RUNNER.EXACT_REQUIRED_CHILDREN["TestPaymentCreditClosureBoundaryPostgres"])
+
+    def test_direct_repair_requires_historical_model_isolation_and_exact_prefix_down(self):
+        root = "TestDirectPaymentRepairCommandReceiptPostgres"
+        children = {"pre-admission-fixture-rejects-current-schema", "runtime-immutable-command-and-exact-prefix-down"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_stream_state_polling_requires_public_delivery_and_replay_children(self):
+        root = "TestStreamStatePollingPublicPostgres"
+        children = {"complete", "cancel", "disconnect",
+                    "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
+                    "external-committed", "external-released"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+                            events + [{"Action": "fail", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_financial_completion_requires_actual_receipts_and_conflict_guards(self):
+        root = "TestEscalatedPaymentFinancialCompletionPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {
+            "lost-ack-replays-exact-committed-result",
+            "concurrent-reviewers-complete-once",
+            "actual-full-refund-receipt", "confirmation-audit-failure-rolls-back",
+            "payment-repair-late", "payment-repair-duplicate",
+            "no-effect-failed-evidence", "no-effect-legacy-order-only",
+            "new-payment-evidence-keeps-blocked",
+            "conflicting-original-amount", "conflicting-original-currency",
+            "conflicting-original-customer", "conflicting-original-sku",
+            "conflicting-original-channel",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_orphan_order_index_public_migration_is_mandatory(self):
+        root = "TestOrphanPaidOrderIndexPublicMigration"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], {
+            "fresh-failure-atomicity-and-retry",
+            "populated-upgrade-replay-and-own-ddl-rollback",
+        })
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[root]:
+            invalid = [event for event in events if event.get("Test") != root + "/" + child]
+            with self.subTest(child=child), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_terminal_recovery_requires_public_account_root_and_every_child(self):
+        root = "TestApprovalDeliveryTerminalRecoveryPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {
+            "public-migration-rollback-and-upgrade",
+            "ack-success-terminal-write-failure-worker-and-redelivery",
+            "bounded-batches-replay-and-negative-states",
+            "locked-row-and-concurrent-workers-then-next-pass",
+            "permission-fault-zero-effect-and-restoration",
+            "batch-sql-failure-is-atomic-and-next-call-recovers",
+            "populated-rollback-retains-frozen-and-terminal-history",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [e for e in events if e.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_registration_outbox_index_requires_both_actual_install_shapes(self):
+        root="TestRegistrationOutboxAggregateLookupPostgres"
+        self.assertIn(root,RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root,RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command=self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root,command[command.index("-run")+1])
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root],{"fresh-install","retained-upgrade"})
+        events=self.events({root},RUNNER.ACCOUNT_PACKAGE,children=True)
+        options={"package":RUNNER.ACCOUNT_PACKAGE,"exact_roots":True,"require_children":True}
+        RUNNER.verify_results(events,{root},**options)
+        for child in (root,root+"/fresh-install",root+"/retained-upgrade"):
+            for invalid in (
+                [event for event in events if event.get("Test")!=child],
+                events+[{"Action":"skip","Package":RUNNER.ACCOUNT_PACKAGE,"Test":child}],
+            ):
+                with self.subTest(child=child),self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid,{root},**options)
+
+    def test_catalog_rollback_requires_all_historical_versions_and_actual_cli(self):
+        self.assert_billing_rollback_requires_historical_versions("TestBillingHistoricalCatalogRollbackPostgres", (35, 36, 37, 51))
+
+    def test_state_rollback_requires_all_historical_versions_and_actual_cli(self):
+        self.assert_billing_rollback_requires_historical_versions(
+            "TestBillingHistoricalStateRollbackPostgres", (10, 14, 27, 49),
+            {
+                "version14/repair-only", "version14/repair-only/actual-cli",
+                "version27/revoked-only", "version27/revoked-only/actual-cli",
+                "version49/advanced-after-expiry", "version49/advanced-after-expiry/actual-cli",
+                "version10/seeded=true/archived-cli", "version14/seeded=true/archived-cli",
+                "version27/seeded=true/archived-cli", "version49/seeded=true/archived-cli",
+            },
+        )
+
+    def assert_billing_rollback_requires_historical_versions(self, root, versions, additional=()):
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {
+            f"version{version}/seeded={seeded}{suffix}"
+            for version in versions
+            for seeded in ("false", "true")
+            for suffix in ("", "/actual-cli")
+        } | set(additional)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_price_fallback_requires_missing_binding_fault_rollback_and_replay(self):
+        root = "TestPriceFallbackMissingBindingPostgres"
+        required = {
+            "missing-binding-and-rollback", "permission-denied-before-mutation",
+            "binding-read-fault-and-later-retry", "valid-binding-fallback-and-receipt-replay",
+        }
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_organization_startup_diagnostics_require_actual_process_cases(self):
+        root = "TestOrganizationStartupDiagnosticsPostgres"
+        package = RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        children = {"profile", "token", "billing-earlier-wallet-guard"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for child in children:
+            name = root + "/" + child
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if event.get("Test") != name],
+                events + [{"Action": "skip", "Package": package, "Test": name}],
+                events + [{"Action": "fail", "Package": package, "Test": name}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_pinned_ledger_phase_requires_original_and_new_pg_evidence(self):
+        root = "TestPinnedMigrationLedgerPostgresIntegration"
+        roots, package = RUNNER.MIGRATIONS_REQUIRED, RUNNER.MIGRATIONS_PACKAGE
+        self.assertEqual(roots, {root, "TestRestrictedMigrationLedgerPostgresIntegration"})
+        required = {
+            "up-path-change-keeps-original-ledger",
+            "verify-rejects-original-drift-despite-shadow",
+            "down-path-change-removes-only-original-row",
+            "actual-cli-retains-bound-namespace",
+            "binding-cannot-cross-connections",
+            "missing-search-path-schema-rejects-before-preparation",
+            "another-workflow-selects-its-own-visible-ledger",
+            "temporary-shadow-does-not-hide-later-permanent-ledger",
+            "temporary-shadow-does-not-capture-creation-schema",
+            "temporary-only-path-rejects-before-preparation",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        restricted = "TestRestrictedMigrationLedgerPostgresIntegration"
+        restricted_children = {
+            "existing_ledger_upgrade_and_down", "checksum_remains_closed",
+            "existing_ledger_without_permission", "trusted_owner_switch_keeps_ledger_identity",
+            "after_hook_starts_as_migration_role_and_rolls_back",
+            "down_hooks_pin_roles_and_rollback_atomically", "empty_schema_without_create",
+            "advisory_lock_still_serializes",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[restricted], restricted_children)
+        self.run_main_fixture()
+        self.assertEqual(self.fixture_phases[0], "owner-ledger")
+        command = self.fixture_commands[0]
+        self.assertEqual(command[-1], "./internal/platform/migrations")
+        self.assertEqual(command[command.index("-run") + 1], "^(" + "|".join(sorted(roots)) + ")$")
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, roots, **options), 0)
+        for name in roots:
+            invalid = [event for event in events if event.get("Test", "").split("/", 1)[0] != name]
+            with self.subTest(missing=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+        for parent, children in ((root, required), (restricted, restricted_children)):
+            for child in children:
+                name = parent + "/" + child
+                for invalid in (
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": package, "Test": name}],
+                    events + [{"Action": "fail", "Package": package, "Test": name}],
+                ):
+                    with self.subTest(parent=parent, child=child), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_payment_cleanup_boundary_and_clearance_are_selected_with_real_cases(self):
+        boundary = "TestPaymentCreditClosureBoundaryPostgres"
+        retention = "TestPaymentCreditRetentionPublicPostgres"
+        self.assertTrue({boundary, retention} <= RUNNER.SCHEMA_REQUIRED)
+        self.assertIn(boundary, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.assertIn(retention, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        for root in (boundary,retention):
+            self.assertIn(root,command[command.index("-run")+1])
+        roots = {boundary,retention}
+        events = self.events(roots,RUNNER.SCHEMA_PACKAGE,children=True)
+        options = {"package":RUNNER.SCHEMA_PACKAGE,"exact_roots":True,"require_children":True,"children_required":{boundary,retention}}
+        RUNNER.verify_results(events,roots,**options)
+        for root in roots:
+            for invalid in ([event for event in events if event.get("Test","").split("/",1)[0]!=root],events+[{"Action":"skip","Package":RUNNER.SCHEMA_PACKAGE,"Test":root}]):
+                with self.subTest(root=root),self.assertRaises(RuntimeError):RUNNER.verify_results(invalid,roots,**options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[boundary]:
+            missing=[event for event in events if event.get("Test")!=boundary+"/"+child]
+            with self.subTest(child=child),self.assertRaises(RuntimeError):RUNNER.verify_results(missing,roots,**options)
+
+
+    def test_published_rollback_package_requires_real_completed_boundaries(self):
+        root = "TestPublishedRollbackPackageIntegrityPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        required = {"published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history", "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF", "forward-only-history-cannot-authorize-rollback"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_historical_waiver_conversion_requires_current_rollback_boundaries(self):
+        root = "TestUsageWaiverHistoricalSchemaPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        required = {"fresh-exact-history-append-only-runtime-and-forward-only", "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify", "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify", "unknown-checksum", "wrong-legacy-shape"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
+        root = "TestPasswordPreparationAuthorizationPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        required = {
+            "retention-redacts-expired-mobiles-without-changing-grant-facts/expired",
+            "retention-redacts-expired-mobiles-without-changing-grant-facts/young",
+            "retention-redacts-expired-mobiles-without-changing-grant-facts/valid",
+            "retention-keeps-issued-grant-and-continues-later-artifact-cleanup",
+            "retention-skips-locked-expired-captcha-and-rejects-late-grant",
+            "retention-FK-protects-inflight-reference-and-subsequent-passes",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_organization_policy_requires_input_rejection_and_original_receipt_paths(self):
+        root = "TestOrganizationModelPolicyPublicPostgres"
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        expected = {
+            "initial-default-is-not-a-stored-policy",
+            "invalid-input-preserves-original-policy-and-next-write",
+            "nil-and-explicit-empty-model-sets-have-identical-meaning",
+            "immutable-replay-after-later-revision-and-actor-or-facts-conflict",
+            "same-key-first-writers-replay-one-version",
+            "different-key-initial-CAS-has-one-winner",
+            "stale-CAS-and-unavailable-model-do-not-write",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertEqual(command[-1], "./internal/token")
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_token_public_upgrade_phase_requires_retained_cleanup_and_publication_stages(self):
+        root = "TestManagementPublicMigrationInstallation"
+        self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
+        self.assertIn("installed-published-42-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-dispatch-index-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-publication-41-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-published-42-upgrade/retry-forward-only-public-prefix", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-emergency-retry-40-upgrade/retry-forward-only-public-prefix", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.run_main_fixture()
+        index = self.fixture_phases.index("owner-token-schema")
+        command = self.fixture_commands[index]
+        self.assertEqual(command[-1], "./internal/tokenschema")
+        self.assertEqual(command[command.index("-run") + 1], "^" + root + "$")
+        self.assertLess(index, self.fixture_phases.index("owner-provisioning"))
+        events = self.events({root}, RUNNER.TOKEN_SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[root]:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+        for option in ("empty_phase", "skipped_phase", "go_fail_phase"):
+            with self.subTest(option=option), self.assertRaises(RuntimeError):
+                self.run_main_fixture(**{option: "owner-token-schema"})
+            self.assertEqual(self.fixture_phases[-1], "owner-token-schema")
+            self.assertEqual(self.fixture_writes, [])
+
+    def test_pending_expiry_requires_owner_windows_and_historical_fallback(self):
+        required = {
+            "TestUserUnusedIntentCancellationOwnerPostgres": {
+                "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
+            },
+            "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres": {
+                "infinity", "tomorrow", "zero-time", "invalid-calendar",
+                "bad-first-valid-later", "wrong-identity-first-valid-later", "valid-first-later-bad",
+            },
+            "TestPendingUnusedExpiryCancellationOwnerPostgres": {
+                "model-claim-race",
+                "user-first-and-retry",
+                "model-after-user-command",
+                "model-review-after-lost-release-ack",
+                "prior-user-stop",
+                "no-intent-control",
+                "waiting-owner-does-not-starve-later-target",
+            },
+            "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres": {
+                "model-origin", "user-local-pre-dispatch",
+            },
+        }
+        for root, children in required.items():
+            with self.subTest(root=root):
+                self.assertIn(root, RUNNER.REQUIRED)
+                self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+                self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+                events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+                options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+                RUNNER.verify_results(events, {root}, **options)
+                for invalid in (
+                    [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                    events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root}],
+                ):
+                    with self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, {root}, **options)
+                for child in children:
+                    for invalid in (
+                        [event for event in events if event.get("Test") != root + "/" + child],
+                        events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+                    ):
+                        with self.subTest(child=child), self.assertRaises(RuntimeError):
+                            RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_model_terminal_observation_requires_all_windows_and_negative_probes(self):
+        required = {
+            "TestEmergencyCancellationDurableRetryPostgres": {
+                "failure-backoff-and-manual-case", "expired-claim-and-stale-result",
+                "late-financial-review-is-independent", "settlement-does-not-close-emergency-case",
+                "unstarted-tail-does-not-spend-budget",
+            },
+            "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+            "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
+            "TestModelTerminalObservationPreservesExpiryProofPostgres": {
+                "hold-attempted",
+                "hold-converged",
+                "hold-requested",
+                "intent-attempted",
+                "intent-converged",
+                "intent-requested",
+                "user-intent-attempted",
+                "user-intent-converged",
+                "user-intent-requested",
+            },
+            "TestModelTerminalObservationRejectsUntrustedEvidencePostgres": {
+                "attempt-aborts",
+                "attempt-provider-success",
+                "attempt-releases",
+                "converged-extra-field",
+                "convergence-wrong-source",
+                "extra-field",
+                "missing-field",
+                "not-terminal",
+                "orphan-request",
+                "pre-dispatch",
+                "provider-reference",
+                "provider-success",
+                "unknown-capability",
+                "upstream-reference",
+                "wrong-adapter",
+            },
+        }
+        for root, children in required.items():
+            with self.subTest(root=root):
+                self.assertIn(root, RUNNER.REQUIRED)
+                self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+                self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+                events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+                options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+                RUNNER.verify_results(events, {root}, **options)
+                for child in children:
+                    for invalid in (
+                        [event for event in events if event.get("Test") != root + "/" + child],
+                        events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+                    ):
+                        with self.subTest(child=child), self.assertRaises(RuntimeError):
+                            RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_terminal_receipt_requires_model_and_expiry_replay_interleavings(self):
+        root = "TestCancellationFirstUserPreservesConfirmedReceiptPostgres"
+        children = {"model-before-attempt", "expiry-proof-ack-replay"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_cancellation_confirmation_requires_both_reservation_ack_interleavings(self):
+        root = "TestCancellationReceivedReadRechecksReservationPostgres"
+        children = {"not-started", "reserve-ack-pending", "reserve-ack-attached", "wrong-hold-then-original"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_forced_completion_roots_and_failure_children_are_required(self):
+        children = {
+            "TestEscalatedForcedRefundAtomicRollbackPostgres": {
+                "terminal-statement", "receipt-statement", "deferred-commit",
+            },
+            "TestEscalatedForcedRefundEvidenceAndReceiptGuardsPostgres": {
+                "manual-status", "manual-link", "order-link", "transaction-link",
+                "evidence-link", "receipt-identity-and-terminal-replay",
+            },
+        }
+        roots = set(children) | {
+            "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+            "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
+        }
+        self.assertTrue(roots <= RUNNER.RETAINED_REQUIRED)
+        for root in roots:
+            self.assertEqual(root in RUNNER.BILLING_CHILD_REQUIRED, root in children)
+        for root, required_children in children.items():
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required_children)
+            events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+            options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True}
+            RUNNER.verify_results(events, {root}, **options)
+            for child in required_children:
+                for invalid in (
+                    [event for event in events if event.get("Test") != root + "/" + child],
+                    events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                    events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                ):
+                    with self.subTest(root=root, child=child), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, {root}, **options)
+
+    def setUp(self):
+        # Mock local-fixture tests must not inherit the live consumer's CI binding.
+        environment = patch.dict(RUNNER.os.environ, {"GITHUB_ACTIONS": "",
+            "PINVOU_ACCOUNT_CI_PG_PORT": "", "PINVOU_ACCOUNT_CI_PG_SYSTEM_ID": "",
+            "PINVOU_ACCOUNT_CI_PG_DIRECTORY": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_orphan_order_requires_fresh_and_upgrade_persistence(self):
+        root = "TestReconciliationOrphanPaidOrderPostgres"
+        children = {"fresh-install", "historical-upgrade"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_remote_cancellation_requires_owner_loop_transport_cases(self):
+        root = "TestRemoteModelCancellationOwnerLoopTransport"
+        children = {"remote_emergency", "remote_emergency_then_user", "user_only",
+                    "read_failure", "lease_failure", "natural_terminal",
+                    "initial_requested", "initial_read_failure", "initial_lease_failure"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertNotIn("-run", command)
+        self.assertIsNone(re.fullmatch(command[command.index("-skip") + 1], root))
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_local_cancellation_handshake_requires_all_http_interleavings(self):
+        root = "TestLocalModelCancellationHandshakeHTTP"
+        children = {"before_registration", "during_persistent_read", "after_persistent_read",
+                    "read_failure_preserves_funds", "normal", "user_stop_preserves_generation",
+                    "emergency_then_user_before_registration"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertNotIn("-run", command)
+        self.assertIsNone(re.fullmatch(command[command.index("-skip") + 1], root))
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_lifecycle_reconciliation_has_an_exclusive_exact_account_phase(self):
+        root = "TestLifecycleV3ApprovalReconciliationPostgres"
+        required = {"wrong_durable_fail_closed", "safe_v3_false_true_and_v2_dry_apply_next_tick",
+                    "expired_approved_v3_missing_history", "expired_execution_failed_v3_missing_history",
+                    "unknown_version_fail_closed"}
+        self.assertEqual(RUNNER.LIFECYCLE_RECONCILIATION_REQUIRED, {root})
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        self.assertNotIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.run_main_fixture()
+        index = self.fixture_phases.index("lifecycle-reconciliation")
+        command = self.fixture_commands[index]
+        self.assertEqual(command[-1], "./internal/account")
+        self.assertEqual(command[command.index("-run") + 1], "^" + root + "$")
+        self.assertLess(self.fixture_trace.index("lifecycle-reconciliation"), self.fixture_trace.index("create"))
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "exact_roots": True, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [e for e in events if e.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+        for option in ("empty_phase", "skipped_phase", "go_fail_phase"):
+            with self.subTest(option=option), self.assertRaises(RuntimeError):
+                self.run_main_fixture(**{option: "lifecycle-reconciliation"})
+            self.assertEqual(self.fixture_phases[-1], "lifecycle-reconciliation")
+            self.assertEqual(self.fixture_writes, [])
+
+    def test_lifecycle_approval_requires_both_protocols_and_force_variant(self):
+        root = "TestLifecycleForceCancelApprovalPostgres"
+        variants = {"v2-false-compatibility", "v3-false", "v3-true-removed",
+                    "v3-true-removed/emergency-then-user-origin-retains-authority",
+                    "v3-true-removed/emergency-then-user-origin-retains-authority/owner-heartbeat-observes-remote-request"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN.get(root), variants)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertNotIn("-run", command)
+        self.assertIsNone(re.fullmatch(command[command.index("-skip") + 1], root))
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in variants:
+            for invalid in (
+                [e for e in events if e.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(variant=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_registration_compensation_selects_every_database_and_business_case(self):
+        root = "TestRegistrationCompensationDatabaseErrorIdentityPostgres"
+        required = {
+            "operation-read", "absence-proof-read", "completion-write",
+            "missing-completion-remains-business-rejection",
+            "noncompensable-registration-remains-rejected",
+        }
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN.get(root), required)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        package = RUNNER.ACCOUNT_PACKAGE
+        events = self.events({root}, package, children=True)
+        options = {"package": package, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        invalid_events = [
+            [],
+            [e for e in events if not (e.get("Test") == root and e.get("Action") == "run")],
+            [e for e in events if "/" not in e.get("Test", "")],
+            events + [{"Action": "skip", "Package": package, "Test": root}],
+            events + [{"Action": "skip", "Package": package, "Test": root + "/operation-read"}],
+            events + [{"Action": "fail", "Package": package, "Test": root + "/operation-read"}],
+        ]
+        invalid_events.extend([e for e in events if e.get("Test") != root + "/" + child] for child in required)
+        for invalid in invalid_events:
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_restored_reads_require_real_public_migration_postgres_execution(self):
+        name = "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor"
+        self.assertIn(name, RUNNER.ACCOUNT_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, RUNNER.ACCOUNT_REQUIRED, **options), 0)
+        for action in ["skip", "fail"]:
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}], RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def test_manual_grant_recovery_roots_and_actual_scenarios_are_required(self):
+        expected = {
+            "TestManualGrantRecoverySchemaPostgres": {"official-schema-runtime-and-migration-identities"},
+            "TestManualGrantRecoveryWorkflowPostgres": {"expired-grant-dual-human-recovery"},
+        }
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        valid = self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = dict(package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True, children_required=RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.ACCOUNT_REQUIRED, **options), 0)
+        for root, children in expected.items():
+            self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+            self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+            self.assertIn(root, command[command.index("-run") + 1])
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            for bad in (
+                [e for e in valid if e.get("Test", "").split("/", 1)[0] != root],
+                [e for e in valid if not e.get("Test", "").startswith(root + "/")],
+                [e for e in valid if e.get("Test") != root + "/" + next(iter(children))],
+                valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root}],
+                valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + next(iter(children))}],
+            ):
+                with self.subTest(root=root), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(bad, RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def test_financial_json_contract_roots_and_each_dirty_column_are_required(self):
+        account = "TestAccountFinancialJSONObjectsPostgres"
+        billing = "TestBillingFinancialJSONObjectsPostgres"
+        for root, roots, package, children, expected in (
+            (account, RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, RUNNER.ACCOUNT_CHILD_REQUIRED,
+             {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"}),
+            (billing, RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, RUNNER.BILLING_CHILD_REQUIRED,
+             {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"}),
+        ):
+            self.assertIn(root, roots)
+            self.assertIn(root, children)
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+            events = self.events({root}, package, children=True)
+            options = dict(package=package, require_children=True, exact_roots=True)
+            RUNNER.verify_results(events, {root}, **options)
+            for name in [root] + [root + "/" + child for child in expected]:
+                for broken in (
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": package, "Test": name}],
+                    events + [{"Action": "fail", "Package": package, "Test": name}],
+                ):
+                    with self.subTest(root=root, name=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(broken, {root}, **options)
+
+    def test_unstarted_grant_actual_leaf_is_required_without_synthetic_children(self):
+        root = "TestUnstartedApprovalGrantInventoryPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root, RUNNER.ACCOUNT_LEAF_REQUIRED)
+        self.assertNotIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        valid = self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True)
+        valid = [e for e in valid if not e.get("Test", "").startswith(root + "/")]
+        options = dict(package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True, children_required=RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.ACCOUNT_REQUIRED, **options), 0)
+        for bad in (
+            [e for e in valid if e.get("Test") != root],
+            valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root}],
+            valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/unexpected"}],
+            [{**e, "Package": RUNNER.BILLING_PACKAGE} if e.get("Test") == root else e for e in valid],
+        ):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(bad, RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def test_registration_bonus_checkpoint_roots_are_mandatory(self):
+        names = CHECKPOINT_LEAF_ROOTS | {CHECKPOINT_FOREIGN_ROOT}
+        self.assertTrue(names <= RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.ACCOUNT_LEAF_REQUIRED, CHECKPOINT_LEAF_ROOTS | {"TestUnstartedApprovalGrantInventoryPostgres"})
+        self.assertEqual(RUNNER.ACCOUNT_CHILD_REQUIRED, RUNNER.ACCOUNT_REQUIRED - CHECKPOINT_LEAF_ROOTS - {"TestUnstartedApprovalGrantInventoryPostgres"})
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[CHECKPOINT_FOREIGN_ROOT], CHECKPOINT_FOREIGN_CHILDREN)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        pattern = command[command.index("-run") + 1]
+        events = self.account_checkpoint_shape(self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True))
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "exact_roots": True, "require_children": True,
+                   "children_required": RUNNER.ACCOUNT_CHILD_REQUIRED}
+        RUNNER.verify_results(events, RUNNER.ACCOUNT_REQUIRED, **options)
+        for leaf in CHECKPOINT_LEAF_ROOTS:
+            self.assertFalse(any(e.get("Test", "").startswith(leaf + "/") for e in events))
+        for name in names:
+            self.assertIn(name, pattern)
+            for invalid in (
+                [e for e in events if e.get("Test", "").split("/", 1)[0] != name],
+                [e for e in events if not (e.get("Test") == name and e.get("Action") == "run")],
+                [e for e in events if not (e.get("Test") == name and e.get("Action") == "pass")],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+                events + [{"Action": "fail", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}],
+            ):
+                with self.subTest(root=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, RUNNER.ACCOUNT_REQUIRED, **options)
+        for child in CHECKPOINT_FOREIGN_CHILDREN:
+            for invalid in (
+                [e for e in events if e.get("Test") != CHECKPOINT_FOREIGN_ROOT + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": CHECKPOINT_FOREIGN_ROOT + "/" + child}],
+                events + [{"Action": "fail", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": CHECKPOINT_FOREIGN_ROOT + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, RUNNER.ACCOUNT_REQUIRED, **options)
+        invalid = [e for e in events if not e.get("Test", "").startswith(CHECKPOINT_FOREIGN_ROOT + "/")]
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(invalid, RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def account_checkpoint_shape(self, events):
+        # The five real Go roots are leaves. The sixth has these two real children,
+        # never the generic helper's invented /actual child.
+        return [e for e in events
+                if not (e.get("Test", "").split("/", 1)[0] in CHECKPOINT_LEAF_ROOTS and "/" in e.get("Test", ""))
+                and e.get("Test") != CHECKPOINT_FOREIGN_ROOT + "/actual"]
+
+    def test_duplicate_forced_refund_requires_all_four_order_and_proof_cases(self):
+        root = "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres"
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        RUNNER.verify_results(events, RUNNER.RETAINED_REQUIRED, **options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[root]:
+            reduced = [e for e in events if e.get("Test") != root + "/" + child]
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(reduced, RUNNER.RETAINED_REQUIRED, **options)
+
+    def test_preparation_ack_pg_evidence_is_required(self):
+        name = "TestPreparationFailurePreservesAcceptedUsagePostgres"
+        self.assertIn(name, RUNNER.REQUIRED)
+        self.assertIn(name, RUNNER.TOKEN_CHILD_REQUIRED)
+        events = self.events(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True,
+                   "children_required": RUNNER.TOKEN_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(events, **options), 0)
+        for invalid in (
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": name}],
+            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": name + "/actual"}],
+        ):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, **options)
+
+    def test_cumulative_forced_refund_audit_is_selected_and_requires_child(self):
+        name = "TestF03CumulativeForcedRefundReceiptAudit"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], name))
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events({name}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {name}}
+        self.assertGreater(RUNNER.verify_results(events, {name}, **options), 0)
+        for invalid in ([], [e for e in events if "/" not in e.get("Test", "")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+    def test_reconciliation_ledger_repair_pg_leaf_is_selected_and_cannot_skip(self):
+        for name in ("TestLedgerRepairProofHistoricalUpgradePostgres", "TestReconciliationLedgerRepairPublicPostgres", "TestReconciliationLedgerRepairForcedPeerPostgres", "TestLedgerRepairAuthorityMixedBatchPostgres", "TestLedgerRepairHistoryCapabilityPostgres"):
+            with self.subTest(name=name):
+                self._assert_reconciliation_repair_leaf(name)
+
+    def _assert_reconciliation_repair_leaf(self, name):
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], name))
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_LEAF_REQUIRED)
+        events = self.events({name}, RUNNER.BILLING_PACKAGE)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": set()}
+        self.assertEqual(RUNNER.verify_results(events, {name}, **options), 1)
+        for invalid in ([], [e for e in events if e.get("Test") != name],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+    def test_callback_http_admission_pg_leaf_is_selected_and_cannot_skip(self):
+        name = "TestCallbackHTTPAdmissionPersistsPostgres"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        selection = command[command.index("-run") + 1]
+        self.assertIsNotNone(re.fullmatch(selection, name),
+                             "callback PG root absent from retained-billing -run selection")
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_LEAF_REQUIRED)
+        self.assertNotIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events({name}, RUNNER.BILLING_PACKAGE)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": set()}
+        # This real Go test is a named leaf: run + pass + package completion is
+        # necessary, while fabricated child-case evidence is not required.
+        self.assertEqual(RUNNER.verify_results(events, {name}, **options), 1)
+        for invalid in (
+                [],
+                [event for event in events if event.get("Action") != "run"],
+                [event for event in events if event.get("Test") != name],
+                [event for event in events if event.get("Test")],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/unexpected"}],
+                events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in events]):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+    def test_circuit_failure_pg_evidence_is_required(self):
+        name = "TestCircuitFailureBeforeDispatchPostgres"
+        self.assertIn(name, RUNNER.REQUIRED)
+        self.assertIn(name, RUNNER.TOKEN_CHILD_REQUIRED)
+        events = self.events(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True,
+                   "children_required": RUNNER.TOKEN_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(events, **options), 0)
+        invalid_sets = [
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": name}],
+            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": name + "/actual"}],
+        ]
+        for invalid in invalid_sets:
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, **options)
+
+    def test_credential_failure_pg_roots_cannot_disappear_or_skip(self):
+        roots = {
+            "TestCredentialRotationWindowReceiptPostgres",
+            "TestCredentialRotationOtherActorEffectPostgres",
+            "TestCredentialFailurePersistenceBoundariesPostgres",
+            "TestCredentialFailurePreparationFencePostgres",
+            "TestCredentialFailureExistingEventsPostgres",
+        }
+        children = {"TestCredentialRotationWindowReceiptPostgres",
+                    "TestCredentialFailurePersistenceBoundariesPostgres"}
+        self.assertTrue(roots <= RUNNER.REQUIRED)
+        self.assertTrue(children <= RUNNER.TOKEN_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        # This phase already runs the whole package with its PostgreSQL URL.
+        # Required sets enforce evidence; they are not a -run selection filter.
+        self.assertNotIn("-run", command)
+        self.assertIn("-skip", command)
+        self.assertEqual(command[command.index("-skip") + 1],
+                         "^(" + "|".join(sorted(RUNNER.PROVISIONING_REQUIRED)) + ")$")
+        package = RUNNER.TOKEN_PACKAGE
+        events = self.events(RUNNER.REQUIRED, package, children=True)
+        options = {"package": package, "require_children": True,
+                   "children_required": RUNNER.TOKEN_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(events, **options), 0)
+        for name in roots:
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+                [event for event in events if not (event.get("Test") == name and event.get("Action") == "run")],
+                events + [{"Action": "skip", "Package": package, "Test": name}],
+                events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+                [{**event, "Package": RUNNER.BILLING_PACKAGE}
+                 if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+            ):
+                with self.subTest(name=name, events=len(invalid)), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, **options)
+        for name in children:
+            with self.subTest(no_children=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([event for event in events
+                                       if not event.get("Test", "").startswith(name + "/")], **options)
+
+    def test_price_batch_requires_scale_snapshot_and_database_fault_children(self):
+        root = "TestPostgresManagedPricePagination"
+        required = {
+            "bounded-batch-queries",
+            *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
+            "bounded-batch-queries/empty-page", "bounded-batch-queries/absent-namespace",
+            "bounded-batch-queries/model-zero-and-inherited-units",
+            "bounded-batch-queries/snapshot-and-next-read",
+            "bounded-batch-queries/database-faults-and-recovery",
+            *{f"bounded-batch-queries/database-faults-and-recovery/{table}" for table in ("pricing_versions", "pricing_version_unit_configs", "pricing_space_versions")},
+            "bounded-batch-queries/cancelled-and-next-read",
+            "bounded-batch-queries/abnormal-read-shapes",
+            "bounded-batch-queries/abnormal-read-shapes/empty-units",
+            "bounded-batch-queries/abnormal-read-shapes/missing-namespace",
+        }
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertNotIn(root, RUNNER.BILLING_LEAF_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_financial_phase_budgets_preserve_all_commands_and_cleanup(self):
+        self.run_main_fixture()
+        self.assertEqual(self.fixture_phases, [
+            "owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
+            "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing",
+        ])
+        for phase, command in zip(self.fixture_phases, self.fixture_commands, strict=True):
+            with self.subTest(phase=phase):
+                budgets = [arg for arg in command if arg.startswith("-timeout=")]
+                expected = "75m" if phase == "retained-billing" else "40m" if phase == "retained-token" else "20m"
+                self.assertEqual(budgets, ["-timeout=" + expected])
+                self.assertIn("-race", command)
+                self.assertIn("-count=1", command)
+        billing = self.fixture_commands[-1]
+        self.assertEqual(billing[-1], "./internal/billing")
+        self.assertEqual(billing[billing.index("-run") + 1],
+                         "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
+        self.assertEqual(self.fixture_writes, ["create", "drop"])
+        self.assertEqual(self.fixture_trace, [
+            "owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning",
+            "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop",
+        ])
+
+    def test_schema_batches_select_every_complete_root_once_with_separate_20m_budgets(self):
+        self.run_main_fixture(group="owners")
+        commands = [command for command in self.fixture_commands if command[-1] == "./internal/billingschema"]
+        self.assertEqual(len(commands), 2)
+        selections = [command[command.index("-run") + 1] for command in commands]
+        historical = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+        self.assertEqual(selections[0], "^" + historical + "$")
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
+        for root in RUNNER.SCHEMA_REQUIRED:
+            matches = [bool(re.fullmatch(selection, root)) for selection in selections]
+            self.assertEqual(matches, [root == historical, root != historical], root)
+        for command in commands:
+            self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
+            for flag in ("-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-json"):
+                self.assertIn(flag, command)
+            self.assertNotIn("-skip", command)
+        self.assertFalse(any(re.fullmatch(selection, "TestUnknownSchemaRoot") for selection in selections))
+        self.assertEqual(self.fixture_writes, [])
+
+    def test_new_required_schema_root_joins_second_batch_without_repeating_history(self):
+        future = "TestFutureRequiredSchemaContract"
+        with patch.object(RUNNER, "SCHEMA_REQUIRED", RUNNER.SCHEMA_REQUIRED | {future}):
+            self.run_main_fixture(group="owners")
+        commands = [command for command in self.fixture_commands if command[-1] == "./internal/billingschema"]
+        self.assertEqual(len(commands), 2)
+        self.assertFalse(re.fullmatch(commands[0][commands[0].index("-run") + 1], future))
+        self.assertTrue(re.fullmatch(commands[1][commands[1].index("-run") + 1], future))
+
+    def test_invalid_schema_partition_is_rejected_instead_of_running_empty_or_unknown_batch(self):
+        for required in (set(), {"TestSomeOtherSchemaRoot"}, {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}):
+            with self.subTest(required=required), patch.object(RUNNER, "SCHEMA_REQUIRED", required):
+                with self.assertRaisesRegex(RuntimeError, "two nonempty complete-root batches"):
+                    RUNNER.schema_batches()
+
+    def test_account_financial_jobs_keep_retained_budgets_and_independent_closure(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
+        job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  account-closure-test:\n", 1)[0]
+        closure = workflow.split("\n  account-closure-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
+        self.assertIn("\n    timeout-minutes: 180\n", job)
+        financial = workflow.split("\n  account-financial-test:\n", 1)[1].split("\n  account-platform-test:\n", 1)[0]
+        self.assertIn("\n    timeout-minutes: 180\n", financial)
+        self.assertIn('python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"', financial)
+        self.assertIn("\n    needs: changes\n", financial)
+        self.assertNotIn("python3 scripts/test-financial-parallel.py", job)
+        self.assertNotIn("python3 scripts/test-account-closure-postgres.py", job)
+        self.assertIn("python3 scripts/test-account-closure-postgres.py", closure)
+        self.assertIn("\n    needs: changes\n", closure)
+
+    def test_withdrawal_original_receipt_is_selected_and_requires_real_children(self):
+        name = "TestApprovalWithdrawalOriginalReceiptPostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, roots, **options), 0)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            [event for event in events if not (event.get("Test", "") == name and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": package, "Test": name}],
+            events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_query_command_and_actual_client_roots_are_strongly_selected(self):
+        roots = {"TestLatePaymentQueryCommandPostgres", "TestLatePaymentQueryClientHTTPPostgres"}
+        self.assertTrue(roots <= RUNNER.RETAINED_REQUIRED)
+        self.assertTrue(roots <= RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        for root in roots:
+            self.assertIn(root, command[command.index("-run") + 1])
+        package = RUNNER.BILLING_PACKAGE
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, **options), 0)
+        for root in roots:
+            for invalid in (
+                [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+                valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+                valid + [{"Action": "fail", "Package": package, "Test": root + "/actual"}],
+            ):
+                with self.subTest(root=root, invalid=invalid), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_query_forward_identity_is_in_schema_selection(self):
+        root = "TestLatePaymentQueryRegisteredIdentity"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+
+    def test_query_command_requires_complete_identity_and_generation_children(self):
+        root = "TestLatePaymentQueryCommandPostgres"
+        children = {
+            "lost_ACK_original_receipt_new_review_and_terminal_projection",
+            "missing_marker_readonly_and_crash_after_marker_never_dispatch",
+            "concurrent_same_identity_has_one_actual_Provider_dispatch",
+            "actor_case_facts_and_current_owner_cannot_disclose_original_receipt",
+            "record_and_receipt_failure_roll_back_together_and_retry_stays_unknown",
+            "uncertain_marker_commit_grants_zero_external_dispatch",
+            "marker_commit_failure_and_missing_result_do_not_dispatch",
+            "Provider_IO_holds_no_query_or_case_transaction_lock",
+            "exact_900030_direct_Down_refuses_and_retains_marker",
+            "PAY12_committed_before_receipt_fault_is_not_reexecuted_or_forged",
+            "concurrent_legal_terminal_case_is_not_overwritten_by_completion",
+            "cancellation_after_Get_preserves_original_unknown",
+            "reachable_Close_interruption_never_recloses_on_recovery",
+            "runtime_identity_and_completed_receipts_are_immutable",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            name = root + "/" + child
+            for invalid in ([event for event in events if event.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_query_generation_identity_requires_every_frozen_child(self):
+        root = "TestLatePaymentQueryGenerationsMigrationIdentity"
+        children = {
+            "up", "down", "checksum", "version", "reserved-admission-version", "name", "metadata-forged",
+            "up-reserved-version-before-db", "down-reserved-version-before-db", "verify-reserved-version-before-db",
+            "up-before-db", "down-before-db", "verify-before-db",
+        }
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "exact_roots": True, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            name = root + "/" + child
+            for invalid in (
+                [event for event in events if event.get("Test") != name],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+                events + [{"Action": "fail", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+            ):
+                with self.subTest(child=child, events=len(invalid)), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_late_schedule_receipt_root_is_selected_and_requires_completed_children(self):
+        root = "TestLatePaymentScheduleCommandReplayPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        RUNNER.verify_results(events, {root}, **options)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test") != root],
+            [event for event in events if "/" not in event.get("Test", "")],
+            [event for event in events if not (event.get("Test") == root and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_hold_acknowledgement_recovery_root_and_children_are_mandatory(self):
+        root = "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres"
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        events = self.events(required={root}, package=RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        RUNNER.verify_results(events, {root}, **options)
+        for rejected in ([event for event in events if event.get("Test") != root],
+                         [event for event in events if "/" not in event.get("Test", "")],
+                         [dict(event, Action="skip") if "/" in event.get("Test", "") and event.get("Action") == "pass" else event for event in events],
+                         [dict(event, Action="fail") if "/" in event.get("Test", "") and event.get("Action") == "pass" else event for event in events]):
+            with self.subTest(events=rejected), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(rejected, {root}, **options)
+
+
+    def test_reconciliation_fair_retry_is_selected_and_requires_real_children(self):
+        root = "TestReconciliationFairRetryRuntimePostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events(required={root}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        RUNNER.verify_results(events, {root}, **options)
+        for rejected in ([],
+                         [event for event in events if event.get("Test") != root],
+                         [event for event in events if "/" not in event.get("Test", "")],
+                         [event for event in events if not (event.get("Test") == root and event.get("Action") == "run")],
+                         events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+                         events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+                         [dict(event, Package=RUNNER.TOKEN_PACKAGE) for event in events]):
+            with self.subTest(events=len(rejected)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(rejected, {root}, **options)
+
+
+    def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
+        root = "TestReconciliationFairRetryRegisteredIdentity"
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+        valid = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(valid, roots, **options), 0)
+        for invalid in (
+            [],
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            [event for event in valid if not (event.get("Test") == root and event["Action"] == "run")],
+            valid + [{"Action": "skip", "Package": package, "Test": root}],
+            valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            valid + [{"Action": "fail", "Package": package, "Test": root}],
+            valid + [{"Action": "fail", "Package": package, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == root else event for event in valid],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_refund_network_boundary_requires_completed_children(self):
+        root = "TestRefundProviderNetworkOutsideFinancialTransactionPostgres"
+        self.assertIn(root, RUNNER.REFUND_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED, **options)
+        for invalid in ([e for e in valid if e.get("Test", "").split("/", 1)[0] != root],
+                        [e for e in valid if not e.get("Test", "").startswith(root + "/")],
+                        valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}]):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+
+
+    def test_approval_list_pool_root_is_selected_and_requires_real_children(self):
+        name = "TestApprovalListPoolRuntimePostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, roots, **options), 0)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            [event for event in events if not (event.get("Test", "") == name and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": package, "Test": name}],
+            events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_approval_pagination_source_real_children_and_job_selection(self):
+        name = "TestApprovalPaginationSourcePostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True,
+                   "children_required": RUNNER.ACCOUNT_CHILD_REQUIRED}
+        RUNNER.verify_results(events, roots, **options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[name]:
+            full = name + "/" + child
+            for invalid in ([e for e in events if e.get("Test") != full],
+                            events + [{"Action": "skip", "Package": package, "Test": full}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, **options)
+
+    def test_forced_refund_member_terminal_root_and_children_are_mandatory(self):
+        name = "TestForcedRefundMemberGrantTerminalStatePostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        RUNNER.verify_results(events, {name}, package=RUNNER.BILLING_PACKAGE, require_children=True)
+        for rejected in ([x for x in events if x.get("Test") != name],
+                         [x for x in events if "/" not in x.get("Test", "")],
+                         [dict(x, Action="skip") if "/" in x.get("Test", "") and x.get("Action") == "pass" else x for x in events],
+                         [dict(x, Action="fail") if "/" in x.get("Test", "") and x.get("Action") == "pass" else x for x in events]):
+            with self.subTest(events=rejected), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(rejected, {name}, package=RUNNER.BILLING_PACKAGE, require_children=True)
+
+    def test_review_regression_roots_are_required_on_real_postgres(self):
+        billing = {
+            "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+            "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+            "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+            "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+            "TestRefundExceptionDisprovedHistoryPostgres",
+            "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
+        }
+        self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
+        schema = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+        self.assertIn(schema, RUNNER.SCHEMA_REQUIRED)
+        for required, package in [(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE),
+                                  (RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE)]:
+            events = self.events(required=required, package=package, children=True)
+            RUNNER.verify_results(events, required, package=package)
+            for missing in (billing if package == RUNNER.BILLING_PACKAGE else {schema}):
+                with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results([event for event in events if not event.get("Test", "").startswith(missing)], required, package=package)
+
+    def test_zero_budget_release_and_cancellation_roots_are_selected_and_fail_closed(self):
+        for root, required, package, children in [
+            ("TestPersonalZeroBudgetHoldReleasePostgres", RUNNER.RETAINED_REQUIRED,
+             RUNNER.BILLING_PACKAGE, RUNNER.BILLING_CHILD_REQUIRED),
+            ("TestPersonalZeroBudgetCancellationAndExpiryPostgres", RUNNER.REQUIRED,
+             RUNNER.TOKEN_PACKAGE, RUNNER.TOKEN_CHILD_REQUIRED),
+        ]:
+            self.assertIn(root, required)
+            self.assertIn(root, children)
+            events = self.events(required, package, children=True)
+            options = {"package": package, "exact_roots": True,
+                       "require_children": True, "children_required": children}
+            RUNNER.verify_results(events, required, **options)
+            for invalid in [
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if not event.get("Test", "").startswith(root + "/")],
+                events + [{"Action": "skip", "Package": package, "Test": root}],
+                events + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            ]:
+                with self.subTest(root=root), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, required, **options)
+
+
+    def test_payment_instruction_projection_requires_actual_root_and_children(self):
+        root = "TestPaymentInstructionProjectionPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED, **options)
+        for invalid in (
+            [],
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+            valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            valid + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+
+
+    def test_organization_chargeback_deletion_evidence_is_required_and_cannot_skip(self):
+        self.run_main_fixture()
+        root = "TestOrganizationChargebackDeletionEvidencePostgres"
+        roots, package = RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE
+        self.assertIn(root, roots)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        valid = self.events(roots, package, children=True)
+        options = {"package": package, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(valid, roots, **options), 0)
+        for invalid in (
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": root}],
+            valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in valid],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_recharge_product_atomic_commands_root_and_children_cannot_skip(self):
+        name = "TestRechargeProductCommandAtomicityPostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {name}}
+        RUNNER.verify_results(events, {name}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != name],
+                        [event for event in events if not event.get("Test", "").startswith(name + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+
+    def test_negative_adjustment_member_bucket_root_and_children_are_required(self):
+        root = "TestNegativeAdjustmentMemberBucketConservationPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        events = self.events(required={root}, package=RUNNER.BILLING_PACKAGE, children=True)
+        RUNNER.verify_results(events, {root}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != root],
+                        [event for event in events if not event.get("Test", "").startswith(root + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/case"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/case"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_product_admission_retirement_binding_root_and_children_cannot_skip(self):
+        name = "TestProductAdmissionRetirementBindingPostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {name}}
+        RUNNER.verify_results(events, {name}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != name],
+                        [event for event in events if not event.get("Test", "").startswith(name + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+
+    def test_product_resume_default_provider_root_and_children_cannot_skip(self):
+        name = "TestProductResumeDefaultProviderPostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {name}}
+        RUNNER.verify_results(events, {name}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != name],
+                        [event for event in events if not event.get("Test", "").startswith(name + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+
+    def test_provider_blind_command_receipt_root_and_children_cannot_skip(self):
+        name = "TestProviderBlindCommandReceiptPostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {name}}
+        RUNNER.verify_results(events, {name}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != name],
+                        [event for event in events if not event.get("Test", "").startswith(name + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+    def test_disposable_loopback_url(self):
+        raw = "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable"
+        self.assertEqual(RUNNER.local_database_url(raw), raw)
+
+    def test_deployed_or_ambiguous_connections_rejected(self):
+        for raw in (
+            "postgres://postgres@db.example:5433/postgres?sslmode=disable",
+            "postgres://postgres@localhost:5433/postgres?sslmode=disable",
+            "postgres://postgres@127.0.0.1:5433/customer?sslmode=disable",
+            "postgres://postgres:secret@127.0.0.1:5433/postgres?sslmode=disable",
+            "postgres://postgres@127.0.0.1/postgres?sslmode=disable",
+            "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable&host=db.example",
+            "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable#other",
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                RUNNER.local_database_url(raw)
+
+    def test_manual_admission_cli_selection_and_completed_cases_fail_closed(self):
+        manual = "TestProductManualAdmissionPostgres"
+        expiry = "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot"
+        materials = {
+            "TestProductAdmissionMaterialStorePostgres",
+            "TestProductAdmissionMaterialPurgePostgres",
+            "TestProductAdmissionMaterialHTTPPostgres",
+        }
+        roots = {manual, expiry, *materials}
+        self.assertEqual(RUNNER.BILLING_LEAF_REQUIRED & roots, {expiry, *materials})
+        self.run_main_fixture()
+        command = self.fixture_commands[-1]
+        selected = re.compile(command[command.index("-run") + 1])
+        for root in roots:
+            self.assertIsNotNone(selected.fullmatch(root))
+        self.assertEqual(set().union(*(RUNNER.billing_roots(group) for group in RUNNER.BILLING_GROUPS)) & roots, roots)
+        self.assertFalse(RUNNER.billing_roots("billing-0") & RUNNER.billing_roots("billing-1"))
+        cases = {
+            "two-explicit-humans-first-publish-and-immutable-replay",
+            "runtime-cannot-rewrite-frozen-manual-facts",
+            "concurrent-second-votes-issue-once-and-audit-failure-rolls-back",
+            "reject-retains-original-and-no-evidence",
+            "stale-product-and-foreign-original-rejected",
+            "retention-purges-submission-snapshot-and-review-reason",
+        }
+        events = []
+        for root in sorted(roots):
+            children = cases if root == manual else set()
+            events.append({"Action": "run", "Package": RUNNER.BILLING_PACKAGE, "Test": root})
+            for child in sorted(children):
+                for action in ("run", "pass"):
+                    events.append({"Action": action, "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child})
+            events.append({"Action": "pass", "Package": RUNNER.BILLING_PACKAGE, "Test": root})
+        events.append({"Action": "pass", "Package": RUNNER.BILLING_PACKAGE})
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {manual}}
+        self.assertEqual(RUNNER.verify_results(events, roots, **options), 11)
+        for missing in [*roots, *(manual + "/" + child for child in cases)]:
+            incomplete = [event for event in events if event.get("Test") != missing
+                          and not event.get("Test", "").startswith(missing + "/")]
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(incomplete, roots, **options)
+        for root in roots:
+            for action in ("skip", "fail"):
+                rejected = events + [{"Action": action, "Package": RUNNER.BILLING_PACKAGE,
+                                      "Test": root}]
+                with self.subTest(root=root, action=action), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(rejected, roots, **options)
+        skipped = events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE,
+                             "Test": manual + "/retention-purges-submission-snapshot-and-review-reason"}]
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(skipped, roots, **options)
+
+    def events(self, required=None, package=None, children=False):
+        result = [{"Action": "start", "Package": package}] if package is not None else []
+        for name in RUNNER.REQUIRED if required is None else required:
+            result += [{"Action": "run", "Package": package, "Test": name}]
+            if children:
+                result += [{"Action": "run", "Package": package, "Test": name + "/actual"},
+                           {"Action": "pass", "Package": package, "Test": name + "/actual"}]
+            for child in RUNNER.EXACT_REQUIRED_CHILDREN.get(name, ()):
+                result += [{"Action": "run", "Package": package, "Test": name + "/" + child},
+                           {"Action": "pass", "Package": package, "Test": name + "/" + child}]
+            result += [{"Action": "pass", "Package": package, "Test": name}]
+        if "TestPaymentCreditF12DeployedCarriersUpgradePostgres" in (RUNNER.REQUIRED if required is None else required):
+            result += self.f12_phase_events()
+        if package is not None:
+            result.append({"Action": "pass", "Package": package})
+        return result
+
+    def test_actual_required_suites(self):
+        self.assertEqual(RUNNER.verify_results(self.events()), len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED))
+
+    def test_context_and_reconciliation_storage_regressions_are_required(self):
+        required = {
+            "TestContextEligibilityUsesCurrentScopedProductionRoutes",
+            "TestOrganizationOriginalOwnerCancellationPublicPostgres",
+    "TestRuntimeProtocolPublicationPublicPostgres",
+            "TestReconciliationEvidenceMatchesPublicSchema",
+            "TestReconciliationSequentialClaimsPublicPostgres",
+            "TestReplayRetentionBoundedCleanupPublicPostgres",
+            "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
+            "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
+            "TestDispatchCircuitRecoveryDoesNotRequireSharedHealthClaimPostgres",
+            "TestF06OrganizationAdmissionBoundariesPublicPostgres",
+        }
+        self.assertTrue(required <= RUNNER.REQUIRED)
+        for name in required:
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([event for event in self.events() if event["Test"] != name])
+
+    def test_expired_hold_budget_and_healthy_progress_cases_are_required(self):
+        root = "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "children_required": {root}}
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        RUNNER.verify_results(events, {root}, **options)
+        for child in ("first-RPC-release-crash-keeps-durable-intent",
+                      "slow-proof-exhaustion-persists-backoff-and-next-healthy-progress"):
+            name = root + "/" + child
+            with self.subTest(child=child), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([event for event in events if event.get("Test") != name], {root}, **options)
+        for action in ("skip", "fail"):
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.BILLING_PACKAGE, "Test": root}], {root}, **options)
+
+    def test_zero_cases_is_not_success(self):
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results([{"Action": "pass", "Package": "token"}])
+
+    def test_retention_batch_lock_and_atomic_retirement_children_are_required(self):
+        root = "TestReplayRetentionBoundedCleanupPublicPostgres"
+        names = {
+            "one-large-unsettled-stream-is-row-bounded-and-retryable",
+            "actual-worker-drains-full-batch-without-hourly-wait",
+            "locked-oldest-is-skipped-and-next-cycle-resumes",
+            "settled-stream-delete-is-bounded",
+            "active-case-parent-lock-serializes-copy-with-cleanup",
+            "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+            "case-delete-and-payload-cascade-are-bounded",
+            "capacity-sample-10000-live-frames-plan-and-single-batch",
+            "content-lock-timeout-rolls-back-and-next-worker-tick-recovers",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], names)
+        for name in names:
+            full = root + "/" + name
+            for bad in (None, "skip", "fail"):
+                events = [event for event in self.events() if event.get("Test") != full]
+                if bad:
+                    events.append({"Action": bad, "Test": full})
+                with self.subTest(child=name, bad=bad), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events)
+
+    def test_missing_suite_is_not_success(self):
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(self.events()[1:])
+
+    def test_skipped_required_subcase_fails_even_when_parent_passes(self):
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(self.events() + [{"Action": "skip", "Test": sorted(RUNNER.REQUIRED)[0] + "/funds"}])
+
+    def test_package_failure_is_not_success(self):
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(self.events() + [{"Action": "fail", "Package": "token"}])
+
+    def test_optional_external_skip_is_disclosed_and_allowed(self):
+        self.assertEqual(
+            RUNNER.verify_results(self.events() + [{"Action": "skip", "Test": "TestLiveExternalIssuer"}]),
+            len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED),
+        )
+
+    def run_main_fixture(self, *, group="all", owner_lane=None, existing_roles=False, user_objects=False, leftover=False,
+                         owner_leftover=False, account_leftover=False, schema_leftover=False, schema_leftover_phase=None, provisioning_leftover=False, active_client=False, external_dependency=False,
+                         go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None,
+                         schema_missing_children_phase=None, schema_fail_event_phase=None, schema_residual_phase=None):
+        writes, commands, phases, trace = [], [], [], []
+        schema_observations = []
+        state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "provisioning_done": False, "retained_done": False, "schema_phase": None, "schema_pending_observation": None}
+
+        def run(argv, **kwargs):
+            if argv[0] == "go":
+                commands.append(argv)
+                if argv[-1] == "./internal/account" and "-run" in argv and argv[argv.index("-run") + 1] == "^TestLifecycleV3ApprovalReconciliationPostgres$":
+                    phase, required, package = "lifecycle-reconciliation", RUNNER.LIFECYCLE_RECONCILIATION_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                elif argv[-1] == "./internal/account":
+                    phase, required, package = "owner-account", RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                    state["account_done"] = True
+                elif argv[-1] == "./internal/billing" and not state["bootstrapped"]:
+                    phase, required, package = "owner-wallet", RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                    state["owner_done"] = True
+                elif argv[-1] == "./internal/token" and not state["bootstrapped"]:
+                    phase, required, package = "owner-provisioning", RUNNER.PROVISIONING_REQUIRED, RUNNER.TOKEN_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                    state["provisioning_done"] = True
+                elif argv[-1] == "./internal/token":
+                    phase, required, package = "retained-token", RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE
+                    self.assertTrue(state["bootstrapped"])
+                    state["retained_done"] = True
+                elif argv[-1] == "./internal/platform/migrations":
+                    phase, required, package = "owner-ledger", RUNNER.MIGRATIONS_REQUIRED, RUNNER.MIGRATIONS_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                elif argv[-1] == "./internal/tokenschema":
+                    phase, required, package = "owner-token-schema", RUNNER.TOKEN_SCHEMA_REQUIRED, RUNNER.TOKEN_SCHEMA_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                elif argv[-1] == "./internal/billingschema":
+                    # Model the actual Go root selection, independently of the
+                    # runner's partition helper, so omitted/duplicate selection
+                    # cannot be hidden by always fabricating all schema events.
+                    selection = argv[argv.index("-run") + 1]
+                    required = {name for name in RUNNER.SCHEMA_REQUIRED if re.fullmatch(selection, name)}
+                    phase = ("owner-schema-legacy-expiry" if required == {
+                        "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+                    } else "owner-schema")
+                    expected_selection = ("^TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres$" if phase == "owner-schema-legacy-expiry"
+                                          else "^(" + "|".join(sorted(RUNNER.SCHEMA_REQUIRED - {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"})) + ")$")
+                    self.assertEqual(selection, expected_selection)
+                    package = RUNNER.SCHEMA_PACKAGE
+                    self.assertFalse(state["bootstrapped"])
+                    state["schema_done"] = True
+                    state["schema_phase"] = state["schema_pending_observation"] = phase
+                else:
+                    phase, required, package = "retained-billing", RUNNER.billing_roots(group), RUNNER.BILLING_PACKAGE
+                    self.assertTrue(state["bootstrapped"])
+                    state["retained_done"] = True
+                phases.append(phase)
+                trace.append(phase)
+                if phase in {"owner-schema-legacy-expiry", "owner-schema"}:
+                    self.assertEqual(kwargs["env"]["PINVOU_TEST_SCHEMA_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
+                    self.assertNotIn("PINVOU_TEST_BILLING_DATABASE_URL", kwargs["env"])
+                else:
+                    self.assertNotIn("PINVOU_TEST_SCHEMA_DATABASE_URL", kwargs["env"])
+                self.assertIn("-race", argv)
+                self.assertEqual(kwargs["env"]["GOFLAGS"], "-trimpath -race -tags=nomsgpack -mod=readonly")
+                if phase == "owner-account":
+                    self.assertEqual(kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
+                    self.assertNotIn("PINVOU_TEST_BILLING_DATABASE_URL", kwargs["env"])
+                elif phase in {"retained-token", "lifecycle-reconciliation"}:
+                    self.assertEqual(kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"], kwargs["env"]["PINVOU_TEST_BILLING_DATABASE_URL"])
+                    self.assertEqual(kwargs["env"]["PINVOU_TEST_TOKEN_DATABASE_URL"], kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"])
+                elif phase not in {"owner-ledger", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema"}:
+                    self.assertNotIn("PINVOU_TEST_ACCOUNT_DATABASE_URL", kwargs["env"])
+                    self.assertEqual(kwargs["env"]["PINVOU_TEST_BILLING_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
+                if phase in {"owner-schema-legacy-expiry", "owner-schema"}:
+                    self.assertNotIn("PINVOU_TEST_ACCOUNT_DATABASE_URL", kwargs["env"])
+                if phase in {"owner-token-schema", "owner-provisioning", "retained-token", "lifecycle-reconciliation", "owner-ledger"}:
+                    self.assertIn("PINVOU_TEST_TOKEN_DATABASE_URL", kwargs["env"])
+                else:
+                    self.assertNotIn("PINVOU_TEST_TOKEN_DATABASE_URL", kwargs["env"])
+                events = self.events(required, package, children=phase != "retained-token")
+                if phase == "owner-account":
+                    events = self.account_checkpoint_shape(events)
+                if phase == "retained-token" and missing_token_children:
+                    events = [event for event in events if "/" not in event.get("Test", "")]
+                if phase == "retained-token" and not missing_token_children:
+                    for name in RUNNER.TOKEN_CHILD_REQUIRED:
+                        events += [{"Action": "run", "Package": package, "Test": name + "/actual"},
+                                   {"Action": "pass", "Package": package, "Test": name + "/actual"}]
+                        for child in RUNNER.EXACT_REQUIRED_CHILDREN.get(name, ()):
+                            events += [{"Action": "run", "Package": package, "Test": name + "/" + child},
+                                       {"Action": "pass", "Package": package, "Test": name + "/" + child}]
+                if phase == "owner-account" and platform_role_evidence:
+                    name = "TestPlatformRoleManagementRuntimePostgres"
+                    if platform_role_evidence == "missing-root":
+                        events = [event for event in events if event.get("Test", "").split("/", 1)[0] != name]
+                    elif platform_role_evidence == "missing-children":
+                        events = [event for event in events if not event.get("Test", "").startswith(name + "/")]
+                    elif platform_role_evidence in {"skipped-root", "skipped-child"}:
+                        events.append({"Action": "skip", "Package": package, "Test": name + ("/actual" if platform_role_evidence == "skipped-child" else "")})
+                    else:
+                        raise AssertionError("unknown platform role evidence mutation")
+                if schema_missing_children_phase == phase:
+                    events = [event for event in events if "/" not in event.get("Test", "")]
+                if schema_fail_event_phase == phase:
+                    events.append({"Action": "fail", "Package": package, "Test": sorted(required)[0] + "/actual"})
+                if empty_phase == phase:
+                    events = [{"Action": "pass", "Package": package}]
+                if skipped_phase == phase:
+                    events.append({"Action": "skip", "Package": package, "Test": sorted(required)[0] + "/actual"})
+                return SimpleNamespace(returncode=7 if phase == go_fail_phase else 0,
+                                       stdout="\n".join(json.dumps(x) for x in events), stderr="")
+            sql = argv[-1]
+            if "CREATE ROLE" in sql:
+                writes.append("create")
+                trace.append("create")
+                state["bootstrapped"] = True
+                value = ""
+            elif "DROP ROLE" in sql:
+                writes.append("drop")
+                trace.append("drop")
+                state["bootstrapped"] = False
+                value = ""
+            elif sql == RUNNER.INSTANCE_SNAPSHOT_SQL:
+                if state["schema_pending_observation"] is not None:
+                    schema_observations.append(state["schema_pending_observation"])
+                    state["schema_pending_observation"] = None
+                databases = ["postgres", "template0", "template1"]
+                if leftover and state["retained_done"]:
+                    databases.append("unknown_fixture")
+                roles = {"postgres"}
+                if schema_residual_phase is not None and state["schema_phase"] == schema_residual_phase:
+                    roles.add("billing_schema_owner")
+                if existing_roles:
+                    roles.add("existing_runtime")
+                elif account_leftover and state["account_done"]:
+                    roles.add("account_service")
+                elif state["schema_done"] and (schema_leftover or schema_leftover_phase == state["schema_phase"]):
+                    roles.add("billing_schema_owner")
+                elif provisioning_leftover and state["provisioning_done"]:
+                    roles.add("token_gateway")
+                elif state["bootstrapped"] or owner_leftover and state["owner_done"]:
+                    roles.update(RUNNER.ACTORS)
+                value = json.dumps({"databases": databases, "roles": sorted(roles),
+                                    "objects": 1 if user_objects else 0, "clients": 1 if active_client else 0})
+            elif "FROM pg_database" in sql:
+                value = "postgres\ntemplate0\ntemplate1"
+                if leftover and state["retained_done"]:
+                    value += "\nunknown_fixture"
+            elif "SELECT current_user" in sql:
+                value = "postgres"
+            elif "FROM pg_roles" in sql and "pg_shdepend" not in sql:
+                value = "postgres"
+                if existing_roles:
+                    value += "\nexisting_runtime"
+                elif account_leftover and state["account_done"]:
+                    value += "\naccount_service"
+                elif state["schema_done"] and (schema_leftover or schema_leftover_phase == state["schema_phase"]):
+                    value += "\nbilling_schema_owner"
+                elif provisioning_leftover and state["provisioning_done"]:
+                    value += "\ntoken_gateway"
+                elif state["bootstrapped"] or owner_leftover and state["owner_done"]:
+                    value = "\n".join(sorted(RUNNER.ACTORS | {"postgres"}))
+            elif "FROM pg_class" in sql:
+                value = "1" if user_objects else "0"
+            elif "FROM pg_stat_activity" in sql:
+                value = "1" if active_client else "0"
+            elif "SHOW server_version_num" in sql:
+                value = "170000"
+            elif "pg_shdepend" in sql:
+                value = "t" if external_dependency else "f"
+            else:
+                raise AssertionError("unexpected SQL")
+            return SimpleNamespace(returncode=0, stdout=value, stderr="")
+        clock = [0.0]
+        observe = RUNNER.require_exclusive_instance
+        def observation(*args, **kwargs):
+            return observe(*args, now=lambda: clock[0], pause=lambda delay: clock.__setitem__(0, clock[0]+delay), **kwargs)
+        with patch.dict(RUNNER.os.environ, {
+            "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL": "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable",
+            "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
+            "GOFLAGS": "-trimpath",
+        }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), \
+                patch.object(RUNNER, "run_go_phase", side_effect=lambda command, env: run(command, env=env)), \
+                patch.object(RUNNER, "require_exclusive_instance", side_effect=observation), contextlib.redirect_stdout(io.StringIO()):
+            try:
+                RUNNER.main(group=group, owner_lane=owner_lane)
+            finally:
+                self.fixture_writes = writes
+                self.fixture_commands = commands
+                self.fixture_phases = phases
+                self.fixture_trace = trace
+                self.fixture_schema_observations = schema_observations
+
+    def test_parallel_groups_preserve_complete_contract_and_exclusive_cleanup(self):
+        phases = []
+        shards = []
+        for group in RUNNER.GROUPS:
+            self.run_main_fixture(group=group)
+            phases.extend(self.fixture_phases)
+            if group == "owners":
+                self.assertEqual(self.fixture_writes, [])
+            else:
+                self.assertEqual(self.fixture_writes, ["create", "drop"])
+            if group.startswith("billing-"):
+                command = self.fixture_commands[0]
+                roots = RUNNER.billing_roots(group)
+                self.assertTrue(roots)
+                for root in RUNNER.RETAINED_REQUIRED:
+                    self.assertEqual(bool(re.fullmatch(command[command.index("-run") + 1], root)), root in roots)
+                shards.append(roots)
+            for command in self.fixture_commands:
+                self.assertIn("-race", command)
+                self.assertIn("-count=1", command)
+        self.assertEqual(len(phases), 13)  # Ledger ownership and two schema batches; four complete Billing shards.
+        self.assertEqual(set(phases), {"owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"})
+        self.assertFalse(shards[0] & shards[1])
+        self.assertEqual(set().union(*shards), RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(sum(map(len, shards)), len(RUNNER.RETAINED_REQUIRED))
+        for group in RUNNER.GROUPS:
+            phase = "owner-account" if group == "owners" else "retained-token" if group == "token" else "retained-billing"
+            for option in ("empty_phase", "skipped_phase", "go_fail_phase"):
+                with self.subTest(group=group, option=option), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(group=group, **{option: phase})
+            with self.assertRaises(RuntimeError):
+                self.run_main_fixture(group=group, existing_roles=True)
+            self.assertEqual(self.fixture_commands, [])
+        with patch.object(RUNNER.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "^unknown financial execution group$"):
+            RUNNER.main(group="billing-4")
+        run.assert_not_called()
+
+    def test_owner_lanes_execute_all_original_phases_without_bootstrapping_shared_actors(self):
+        completed = []
+        for lane, expected in RUNNER.OWNER_LANES.items():
+            self.run_main_fixture(group="owners", owner_lane=lane)
+            self.assertEqual(self.fixture_phases, list(expected))
+            self.assertEqual(self.fixture_writes, [])
+            completed.extend(self.fixture_phases)
+            for phase in expected:
+                with self.subTest(lane=lane, phase=phase), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(group="owners", owner_lane=lane, skipped_phase=phase)
+        self.assertCountEqual(completed, RUNNER.OWNER_ORDER)
+
+    def test_existing_roles_prevent_bootstrap(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(existing_roles=True)
+        self.assertEqual(self.fixture_writes, [])
+
+    def test_user_objects_prevent_bootstrap(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(user_objects=True)
+        self.assertEqual(self.fixture_writes, [])
+
+    def test_unknown_remaining_database_prevents_next_phase_and_actor_cleanup(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(leftover=True)
+        self.assertEqual(self.fixture_writes, ["create"])
+        self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token"])
+
+    def test_public_entry_executes_account_then_owner_token_and_retained(self):
+        self.run_main_fixture()
+        self.assertEqual(len(self.fixture_commands), 10)
+        command = self.fixture_commands[self.fixture_phases.index("owner-wallet")]
+        selection = command[command.index("-run") + 1]
+        self.assertIn("TestF06OrganizationWalletRequiresLifecycleEvidence", selection)
+        self.assertIn("TestTokenWalletReceiptSignedClientRecoveryPostgres", selection)
+        self.assertIn("TestTokenWalletReceiptConservationAndLifecyclePostgres", selection)
+        for phase, package in (
+            ("owner-account", "./internal/account"), ("owner-schema-legacy-expiry", "./internal/billingschema"),
+            ("owner-schema", "./internal/billingschema"), ("owner-token-schema", "./internal/tokenschema"),
+            ("owner-provisioning", "./internal/token"), ("lifecycle-reconciliation", "./internal/account"),
+            ("retained-token", "./internal/token"), ("retained-billing", "./internal/billing"),
+        ):
+            self.assertEqual(self.fixture_commands[self.fixture_phases.index(phase)][-1], package)
+        self.assertEqual([argv[-1] for argv in self.fixture_commands], [
+            "./internal/platform/migrations", "./internal/account", "./internal/billing",
+            "./internal/billingschema", "./internal/billingschema", "./internal/tokenschema",
+            "./internal/token", "./internal/account", "./internal/token", "./internal/billing",
+        ])
+
+    def test_schema_restoration_is_required_between_batches_and_before_later_phases(self):
+        for phase, expected in (
+            ("owner-schema-legacy-expiry", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry"]),
+            ("owner-schema", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"]),
+        ):
+            with self.subTest(phase=phase), self.assertRaises(RuntimeError):
+                self.run_main_fixture(schema_leftover_phase=phase)
+            self.assertEqual(self.fixture_writes, [])
+            self.assertEqual(self.fixture_phases, expected)
+
+    def test_unknown_provider_api_and_append_migration_roots_are_mandatory(self):
+        self.run_main_fixture()
+        for phase, root, roots, package in (
+            ("owner-wallet", "TestReconciliationUnknownProviderEntryPublicPostgres", RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE),
+            ("owner-schema", "TestUnknownProviderEntryPublicMigrationPostgres", RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE),
+        ):
+            self.assertIn(root, roots)
+            command = self.fixture_commands[self.fixture_phases.index(phase)]
+            self.assertIn(root, command[command.index("-run") + 1])
+            valid = self.events(roots, package, children=True)
+            options = {"package": package, "require_children": True, "exact_roots": True}
+            self.assertGreater(RUNNER.verify_results(valid, roots, **options), 0)
+            for invalid in (
+                [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+                valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+                [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in valid],
+            ):
+                with self.subTest(root=root, invalid=invalid), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, **options)
+
+    def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
+        self.run_main_fixture()
+        roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+        self.assertEqual(roots, EXPECTED_SCHEMA_ROOTS)
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        selection = command[command.index("-run") + 1]
+        self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
+        self.assertIn("TestTokenWalletReceiptSchemaPostgres", selection)
+        self.assertIn("TestLegacyEntitlementUpgradeAdmissionPostgres", selection)
+        self.assertIn("TestUsageWaiverHistoricalSchemaPostgres", selection)
+        self.assertIn("TestBillingOrdinaryReplayOriginalMigrationPostgres", selection)
+        self.assertIn("TestF04PublicTokenUserOwnerAuthorityAndDirectory", selection)
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        owner_root = "TestF04PublicTokenUserOwnerAuthorityAndDirectory"
+        for invalid in (
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != owner_root],
+            [event for event in valid if not event.get("Test", "").startswith(owner_root + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": owner_root}],
+            valid + [{"Action": "skip", "Package": package, "Test": owner_root + "/actual"}],
+        ):
+            with self.subTest(owner_root=owner_root, invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+        for invalid in (
+            [event for event in valid if "/" not in event.get("Test", "")],
+            [event for event in valid if event.get("Test")],
+            [{**event, "Package": RUNNER.BILLING_PACKAGE} for event in valid],
+            valid + [{"Action": "skip", "Package": package, "Test": next(iter(roots)) + "/actual"}],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_ordinary_billing_replay_root_is_selected_and_requires_real_children(self):
+        self.run_main_fixture()
+        root = "TestBillingOrdinaryReplayOriginalMigrationPostgres"
+        roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+        self.assertIn(root, roots)
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        for invalid in (
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": root}],
+            valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == root else event for event in valid],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_pre016_admission_root_is_real_scoped_and_cannot_skip(self):
+        root = "TestLegacyEntitlementUpgradeAdmissionPostgres"
+        roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+        self.assertIn(root, roots)
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        for invalid in (
+            [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+            [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": root}],
+            valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == root else event for event in valid],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_owner_stage_restoration_is_required_before_retained_bootstrap(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(owner_leftover=True)
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account", "owner-wallet"])
+
+    def test_account_roles_must_be_restored_before_wallet_fixture(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(account_leftover=True)
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account"])
+
+    def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
+        self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
+            "TestOrganizationStartupDiagnosticsPostgres",
+            "TestManualGrantRecoverySchemaPostgres",
+            "TestManualGrantRecoveryWorkflowPostgres",
+            "TestApprovalDeliveryTerminalRecoveryPostgres",
+            "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+            "TestAccountFinancialJSONObjectsPostgres",
+            "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
+            "TestF06OrganizationStatusProjectionVersionPublicPostgres",
+            "TestF06OrganizationDeletionVersionAndTerminalScope",
+            "TestF06Review5566377593PublicPostgres",
+            "TestOrganizationEvidenceTruncatePublicPostgres",
+            "TestProviderQuotaConcurrentBoundary",
+            "TestOrdinaryDeadLetterReplayRuntimePostgres",
+            "TestIdentityRecoveryClaimsRuntimePostgres",
+            "TestProfileSessionRevocationRecoveryRuntimePostgres",
+            "TestProfileRevocationDurableAdmissionRuntimePostgres",
+            "TestProfileRevocationClosureRuntimePostgres",
+            "TestRegistrationCreateDispatchRuntimePostgres",
+    "TestRegistrationUnknownInspectionPostgres",
+            "TestCommerceManualCompletionMigrationPostgres",
+            "TestCommerceManualCompletionPostgres",
+            "TestRegistrationIdentityRejectionRuntimePostgres",
+            "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
+            "TestRegistrationOutboxAggregateLookupPostgres",
+            "TestPlatformRoleManagementRuntimePostgres",
+            "TestUserCodeLookupRuntimePostgres",
+            "TestAuditSearchOriginalMigrationRuntimePostgres",
+            "TestDeliveredPlatformPermissionsPostgres",
+            "TestTokenApprovalRecentAuthenticationPostgres",
+            "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
+            "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
+            "TestOwnerCombinedActualHTTPPostgres",
+            "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+            "TestUnstartedApprovalGrantInventoryPostgres",
+            "TestApprovalRecoveryQueryForwardMigrationPostgres",
+            "TestApprovalAuthorizationWallClockPostgres",
+            "TestApprovalMutationWallClockPostgres",
+            "TestApprovalProofWallClockPostgres",
+            "TestApprovalWithdrawalOriginalReceiptPostgres",
+            "TestApprovalDecisionOriginalReceiptPostgres",
+            "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
+            "TestOrganizationUnitAuthorityWallClockPostgres",
+            "TestApprovalListPoolRuntimePostgres",
+            "TestApprovalPaginationSourcePostgres",
+            "TestPasswordPreparationAuthorizationPostgres",
+            "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
+            "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
+            "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
+            "TestRegistrationBonusCheckpointForeignFactsPostgresIntegration",
+            "TestRegistrationBonusEligibilityReadyAndLifetimePostgresIntegration",
+            "TestRegistrationBonusEligibilityBlockedConsumesNewMobilesPostgresIntegration",
+        })
+        for name in RUNNER.ACCOUNT_REQUIRED:
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([e for e in self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, True) if e.get("Test", "").split("/")[0] != name], RUNNER.ACCOUNT_REQUIRED, package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True)
+
+    def test_account_roots_are_selected_with_real_children(self):
+        self.run_main_fixture()
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        valid = self.events(roots, package, children=True)
+        for root in (
+            "TestUserCodeLookupRuntimePostgres",
+            "TestAuditSearchOriginalMigrationRuntimePostgres",
+            "TestDeliveredPlatformPermissionsPostgres",
+            "TestTokenApprovalRecentAuthenticationPostgres",
+            "TestTokenApprovalRecentAuthenticationLegacyWriterPostgres",
+            "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
+            "TestOwnerCombinedActualHTTPPostgres",
+            "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+            "TestApprovalRecoveryQueryForwardMigrationPostgres",
+            "TestApprovalAuthorizationWallClockPostgres",
+            "TestApprovalMutationWallClockPostgres",
+            "TestApprovalProofWallClockPostgres",
+            "TestApprovalWithdrawalOriginalReceiptPostgres",
+            "TestApprovalDecisionOriginalReceiptPostgres",
+            "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
+            "TestOrganizationUnitAuthorityWallClockPostgres",
+            "TestApprovalListPoolRuntimePostgres",
+            "TestApprovalPaginationSourcePostgres",
+            "TestPasswordPreparationAuthorizationPostgres",
+        ):
+            with self.subTest(root=root):
+                self.assertIn(root, roots)
+                self.assertIn(root, command[command.index("-run") + 1])
+                self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+                for invalid in (
+                    [event for event in valid if event.get("Test", "").split("/", 1)[0] != root],
+                    [event for event in valid if not event.get("Test", "").startswith(root + "/")],
+                    valid + [{"Action": "skip", "Package": package, "Test": root}],
+                    valid + [{"Action": "skip", "Package": package, "Test": root + "/actual"}],
+                    [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == root else event for event in valid],
+                ):
+                    with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_review_governance_and_batch_are_selected_with_mandatory_child_evidence(self):
+        required = {
+            "owner-account": ("TestF06Review5566377593PublicPostgres", RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE),
+            "retained-billing": ("TestMemberQuotaBatchPersistedFactsAndFinancialReplay", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE),
+        }
+        self.run_main_fixture()
+        for phase, (name, roots, package) in required.items():
+            with self.subTest(phase=phase):
+                command = self.fixture_commands[self.fixture_phases.index(phase)]
+                self.assertIn(name, command[command.index("-run") + 1])
+                self.assertIn(name, roots)
+                valid = self.events(roots, package, children=True)
+                self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+                for missing in (
+                    [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                    [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                    valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                ):
+                    with self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_governance_usage_prechecks_require_all_fact_cases(self):
+        root = "TestGovernanceUsageResourcePrechecksPostgres"
+        children = {"all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
+                    "historical-only-preserves-other-dependencies"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root+"/"+child],
+                            events+[{"Action":"skip", "Package":RUNNER.TOKEN_PACKAGE, "Test":root+"/"+child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_actual_main_requires_token_waiver_children(self):
+        self.assertEqual(
+            RUNNER.TOKEN_CHILD_REQUIRED,
+            {
+                "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
+                "TestCancellationReceivedReadRechecksReservationPostgres",
+                "TestCircuitFailureBeforeDispatchPostgres",
+                "TestCredentialFailurePersistenceBoundariesPostgres",
+                "TestCredentialRotationWindowReceiptPostgres",
+                "TestEmergencyCancellationClaimOwnershipPostgres",
+                "TestEmergencyCancellationDurableRetryPostgres",
+                "TestEmergencyCancellationRequestLocksClaimPostgres",
+                "TestGovernanceUsageResourcePrechecksPostgres",
+                "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
+                "TestLifecycleForceCancelApprovalPostgres",
+                "TestLocalModelCancellationHandshakeHTTP",
+                "TestModelTerminalObservationPreservesExpiryProofPostgres",
+                "TestModelTerminalObservationRejectsUntrustedEvidencePostgres",
+                "TestOrganizationModelPolicyPublicPostgres",
+                "TestPendingUnusedExpiryCancellationOwnerPostgres",
+                "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
+                "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
+                "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
+                "TestPreparationFailurePreservesAcceptedUsagePostgres",
+                "TestRemoteModelCancellationOwnerLoopTransport",
+                "TestStreamStatePollingPublicPostgres",
+                "TestUsageWaiverCoordinatorRecoveryPostgres",
+                "TestUserUnusedIntentCancellationOwnerPostgres",
+            },
+        )
+        with self.assertRaisesRegex(RuntimeError, "no completed child"):
+            self.run_main_fixture(missing_token_children=True)
+        self.assertEqual(self.fixture_phases[-1], "retained-token")
+
+    def test_usage_waiver_roots_require_real_scoped_child_evidence(self):
+        self.run_main_fixture()
+        for phase, roots, package, required in (
+            ("owner-schema", RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE, {"TestUsageWaiverHistoricalSchemaPostgres"}),
+            ("retained-token", RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE, {"TestUsageWaiverCoordinatorRecoveryPostgres"}),
+            ("retained-billing", RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, {
+                "TestUsageWaiverFinancialConservationPostgres", "TestUsageWaiverCommitWinnerPostgres",
+                "TestUsageWaiverMemberReservationPostgres", "TestUsageWaiverExpiryRepairWinnerPostgres",
+            }),
+        ):
+            command = self.fixture_commands[self.fixture_phases.index(phase)]
+            valid = self.events(roots, package, children=True)
+            for name in required:
+                with self.subTest(phase=phase, root=name):
+                    self.assertIn(name, roots)
+                    if phase != "retained-token":
+                        self.assertIn(name, command[command.index("-run") + 1])
+                    self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True), 0)
+                    for invalid in (
+                        [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                        [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                        valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            RUNNER.verify_results(invalid, roots, package=package, require_children=True)
+
+    def test_platform_role_root_is_selected_and_requires_real_scoped_children(self):
+        name = "TestPlatformRoleManagementRuntimePostgres"
+        for evidence in ("missing-root", "missing-children", "skipped-root", "skipped-child"):
+            with self.subTest(main_evidence=evidence), self.assertRaises(RuntimeError):
+                self.run_main_fixture(platform_role_evidence=evidence)
+            self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account"])
+            self.assertEqual(self.fixture_writes, [])
+        self.run_main_fixture()
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, roots)
+        self.assertIn(name, command[command.index("-run") + 1])
+        self.assertEqual(command[-1], "./internal/account")
+        valid = self.events(roots, package, children=True)
+        self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+        invalid_cases = {
+            "missing-root": [event for event in valid if event.get("Test", "").split("/", 1)[0] != name],
+            "missing-children": [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+            "skipped-root": valid + [{"Action": "skip", "Package": package, "Test": name}],
+            "skipped-child": valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            "wrong-package": [{**event, "Package": RUNNER.BILLING_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in valid],
+        }
+        for label, invalid in invalid_cases.items():
+            with self.subTest(case=label), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_registration_dispatch_root_requires_actual_completed_children(self):
+        for name in (
+            "TestRegistrationCreateDispatchRuntimePostgres",
+            "TestRegistrationUnknownInspectionPostgres",
+            "TestRegistrationIdentityRejectionRuntimePostgres",
+        ):
+            roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+            self.run_main_fixture()
+            command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+            self.assertIn(name, command[command.index("-run") + 1])
+            valid = self.events(roots, package, children=True)
+            self.assertGreater(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 0)
+            for invalid in (
+                [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            ):
+                with self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_expiry_restore_root_is_selected_and_requires_completed_children(self):
+        name = "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry"
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        roots, package = RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE
+        valid = self.events(roots, package, children=True)
+        for missing in (
+            [event for event in valid if event.get("Test", "").split("/")[0] != name],
+            [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+            valid + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+        ):
+            with self.assertRaises(RuntimeError):
+                RUNNER.verify_results(missing, roots, package=package, require_children=True, exact_roots=True)
+
+    def test_active_client_prevents_any_fixture_execution(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(active_client=True)
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_commands, [])
+
+    def test_external_role_dependencies_prevent_cleanup(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(external_dependency=True)
+        self.assertEqual(self.fixture_writes, ["create"])
+
+    def test_any_failed_phase_stops_later_phases(self):
+        for phase, expected in [("owner-ledger", ["owner-ledger"]),
+                                ("owner-account", ["owner-ledger", "owner-account"]),
+                                ("owner-wallet", ["owner-ledger", "owner-account", "owner-wallet"]),
+                                ("owner-schema-legacy-expiry", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry"]),
+                                ("owner-schema", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"]),
+                                ("owner-provisioning", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning"]),
+                                ("lifecycle-reconciliation", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"]),
+                                ("retained-token", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token"]),
+                                ("retained-billing", ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"])]:
+            with self.subTest(phase=phase), self.assertRaises(RuntimeError):
+                self.run_main_fixture(go_fail_phase=phase)
+            self.assertEqual(self.fixture_phases, expected)
+            self.assertEqual(self.fixture_writes, [] if phase in {"owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
+
+    def test_schema_phase_partition_preserves_all_fixed_identities_and_boundaries(self):
+        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), EXPECTED_SCHEMA_ROOT_COUNT)
+        self.assertEqual(RUNNER.SCHEMA_REQUIRED, EXPECTED_SCHEMA_ROOTS)
+        for group in ("owners", "all"):
+            with self.subTest(group=group):
+                self.run_main_fixture(group=group)
+                selected = []
+                for phase, expected in (
+                    ("owner-schema-legacy-expiry", {EXPECTED_SCHEMA_EXPIRY_ROOT}),
+                    ("owner-schema", EXPECTED_SCHEMA_ROOTS - {EXPECTED_SCHEMA_EXPIRY_ROOT}),
+                ):
+                    self.assertEqual(self.fixture_phases.count(phase), 1)
+                    command = self.fixture_commands[self.fixture_phases.index(phase)]
+                    selection = command[command.index("-run") + 1]
+                    actual = {root for root in EXPECTED_SCHEMA_ROOTS if re.fullmatch(selection, root)}
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(command[-1], "./internal/billingschema")
+                    self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
+                    selected.append(actual)
+                self.assertEqual([len(roots) for roots in selected], [1, EXPECTED_SCHEMA_ROOT_COUNT - 1])
+                self.assertFalse(selected[0] & selected[1])
+                self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
+                self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))
+                self.assertLess(self.fixture_phases.index("owner-schema-legacy-expiry"), self.fixture_phases.index("owner-schema"))
+                self.assertEqual(self.fixture_schema_observations, ["owner-schema-legacy-expiry", "owner-schema"])
+
+    def test_each_schema_phase_requires_evidence_and_restoration_before_next_phase(self):
+        for group in ("owners", "all"):
+            for phase in ("owner-schema-legacy-expiry", "owner-schema"):
+                expected = ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry"]
+                if phase == "owner-schema":
+                    expected.append(phase)
+                for option in ("go_fail_phase", "empty_phase", "skipped_phase", "schema_missing_children_phase",
+                               "schema_fail_event_phase", "schema_residual_phase"):
+                    with self.subTest(group=group, phase=phase, option=option), self.assertRaises(RuntimeError):
+                        self.run_main_fixture(group=group, **{option: phase})
+                    self.assertEqual(self.fixture_phases, expected)
+                    self.assertEqual(self.fixture_writes, [])
+                    self.assertEqual(self.fixture_schema_observations, expected[3:])
+
+    def test_each_phase_rejects_zero_or_skipped_required_tests(self):
+        for phase in ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
+            for option in ["empty_phase", "skipped_phase"]:
+                with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(**{option: phase})
+                self.assertEqual(self.fixture_phases[-1], phase)
+
+    def test_actual_provisioning_consumer_owns_absent_actors_before_bootstrap(self):
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-provisioning")]
+        roots, package = RUNNER.PROVISIONING_REQUIRED, RUNNER.TOKEN_PACKAGE
+        self.assertEqual(roots, {"TestTokenWalletSupplierActualProvisioningConsumerPostgres"})
+        self.assertEqual(command[command.index("-run") + 1], "^" + next(iter(roots)) + "$")
+        self.assertEqual(command[-1], "./internal/token")
+        self.assertNotIn("-skip", command)
+        retained = self.fixture_commands[self.fixture_phases.index("retained-token")]
+        self.assertNotIn("-run", retained)
+        self.assertEqual(retained[retained.index("-skip") + 1], "^(" + next(iter(roots)) + ")$")
+        self.assertEqual(retained[-1], "./internal/token")
+        for phase, argv in zip(self.fixture_phases, self.fixture_commands):
+            if phase != "retained-token":
+                self.assertNotIn("-skip", argv)
+        valid = self.events(roots, package, children=True)
+        self.assertEqual(RUNNER.verify_results(valid, roots, package=package, require_children=True, exact_roots=True), 2)
+        for invalid in (
+            [{"Action": "pass", "Package": package}],
+            [event for event in valid if "/" not in event.get("Test", "")],
+            [{**event, "Package": RUNNER.ACCOUNT_PACKAGE} for event in valid],
+            valid + [{"Action": "skip", "Package": package, "Test": next(iter(roots)) + "/actual"}],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, package=package, require_children=True, exact_roots=True)
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(provisioning_leftover=True)
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning"])
+
+    def test_scoped_evidence_requires_exact_package_and_children_and_completion(self):
+        valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        self.assertEqual(RUNNER.verify_results(valid, RUNNER.OWNER_REQUIRED, package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True), 2 * len(RUNNER.OWNER_REQUIRED))
+        mutations = [
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in valid],
+            [event for event in valid if event.get("Test")],
+            [event for event in valid if "/" not in event.get("Test", "")],
+            [event for event in valid if event["Action"] != "run"],
+            valid + [{"Action": "pass", "Package": RUNNER.BILLING_PACKAGE, "Test": "TestUnrelated"}],
+        ]
+        for events in mutations:
+            with self.subTest(events=events), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events, RUNNER.OWNER_REQUIRED, package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True)
+
+    def test_wallet_receipt_roots_cannot_be_omitted_or_skipped(self):
+        self.assertEqual(RUNNER.OWNER_REQUIRED, {
+            "TestPaymentActionAdmissionPostgres",
+            "TestF06OrganizationWalletRequiresLifecycleEvidence",
+            "TestTokenWalletReceiptSignedClientRecoveryPostgres",
+            "TestTokenWalletReceiptConservationAndLifecyclePostgres",
+            "TestOrganizationPlanPurchaseActualClientPostgres",
+            "TestOrganizationPlanPurchaseLifecycleFencePostgres",
+            "TestBillingLedgerAuditReadOnlyPublicPostgres",
+            "TestBillingFinancialEventOutboxContractsPostgres",
+            "TestUsageWaiverOriginal828HTTPReplayPostgres",
+            "TestReconciliationUnknownProviderEntryPublicPostgres",
+        })
+        valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        for name in RUNNER.OWNER_REQUIRED:
+            mutations = [
+                [event for event in valid if event.get("Test", "").split("/")[0] != name],
+                [event for event in valid if not event.get("Test", "").startswith(name + "/")],
+                valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+            ]
+            for events in mutations:
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events, RUNNER.OWNER_REQUIRED, package=RUNNER.BILLING_PACKAGE, require_children=True, exact_roots=True)
+
+    def test_owned_fixture_restores_only_its_actors(self):
+        self.run_main_fixture()
+        self.assertEqual(self.fixture_writes, ["create", "drop"])
+        self.assertEqual(self.fixture_trace, ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop"])
+
+    def test_ledger_activation_read_failure_regression_is_mandatory(self):
+        root = "TestLedgerRepairClaimActivationReadErrorsPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, RUNNER.RETAINED_REQUIRED, **options), 0)
+        missing = [event for event in events if event.get("Test", "").split("/", 1)[0] != root]
+        no_child = [event for event in events if not event.get("Test", "").startswith(root + "/")]
+        wrong_package = [dict(event, Package="unexpected/billing")
+                         if event.get("Test", "").split("/", 1)[0] == root else event
+                         for event in events]
+        skipped = events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}]
+        for invalid in (missing, no_child, wrong_package, skipped):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+
+    def test_positive_extension_suites_are_mandatory(self):
+        self.assertIn("TestF05AdditionalReservationProjectionPublicPostgres", RUNNER.REQUIRED)
+        billing = {"TestHoldExtensionIdempotencePostgres", "TestPersonalUsageHoldBoundaries",
+                   "TestPersonalUsageHoldClockBoundaries", "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved"}
+        self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
+        self.assertIn("TestMemberHoldIdentityMutationBoundaries", RUNNER.RETAINED_REQUIRED)
+        for required, package in [(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE),
+                                  (RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE)]:
+            for name in required:
+                events = [event for event in self.events(required, package) if event.get("Test") != name]
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events, required, package=package)
+
+    def test_only_explicit_original_and_refund_leaves_can_omit_children(self):
+        leaves = {
+            "TestF12PaymentRepairOrderLookupPostgres",
+            "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
+            "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
+            "TestProductAdmissionMaterialStorePostgres",
+            "TestProductAdmissionMaterialPurgePostgres",
+            "TestProductAdmissionMaterialHTTPPostgres",
+            "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
+            "TestEscalatedForcedRefundWalletLockOrderPostgres",
+            "TestOrdinaryForcedRefundAppliedReceiptRecoveryPostgres",
+            "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
+            "TestLedgerRepairProofHistoricalUpgradePostgres",
+            "TestLedgerRepairAuthorityMixedBatchPostgres",
+            "TestLedgerRepairHistoryCapabilityPostgres",
+            "TestReconciliationLedgerRepairForcedPeerPostgres",
+            "TestReconciliationLedgerRepairPublicPostgres",
+            "TestCallbackHTTPAdmissionPersistsPostgres",
+            "TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback",
+            "TestPaymentNotificationWorkerKeepsUnverifiedCallbacksOnRetry",
+            "TestPaymentNotificationWorkerRollsBackAndRetriesManualCase",
+            "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+            "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+            "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+            "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+            "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
+            "TestF05ExpiredHoldRenewalIsConflictAndUnprovenFundsStayReserved",
+            "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
+            "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
+            "TestRefundNeverDispatchedReviewCannotBecomeNewProviderRequestPostgres",
+            "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
+            "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+        }
+        self.assertEqual(RUNNER.BILLING_LEAF_REQUIRED, leaves)
+        self.assertEqual(RUNNER.BILLING_CHILD_REQUIRED, RUNNER.RETAINED_REQUIRED - leaves)
+        valid = [event for event in self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+                 if event.get("Test", "").split("/", 1)[0] not in leaves or "/" not in event.get("Test", "")]
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.RETAINED_REQUIRED, **options), 0)
+        for name in RUNNER.BILLING_CHILD_REQUIRED:
+            without_child = [event for event in valid if not event.get("Test", "").startswith(name + "/")]
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(without_child, RUNNER.RETAINED_REQUIRED, **options)
+        for leaf in leaves:
+            for name in [leaf, leaf + "/unexpected"]:
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                                          RUNNER.RETAINED_REQUIRED, **options)
+
+    def test_all_refund_fund_paths_are_selected_and_each_missing_or_skipped_root_is_rejected(self):
+        expected = {
+            "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
+            "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
+            "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
+            "TestPaymentSharedProviderTransactionRejectsOtherOrderAndRepairPostgres",
+            "TestRefundExceptionHistoryWithoutChargebackRepairFacilityPostgres",
+            "TestRefundExceptionDisprovedHistoryPostgres",
+            "TestRefundPersistedSuccessReferenceUsesPublishedCanonicalIdentityPostgres",
+            "TestReviewRefundReconcileRequiresTerminalProviderEvidence",
+            "TestReviewRefundReconcileRejectsMismatchedEvidence",
+            "TestRefundRejectsExistingSuspendedGrantsBeforeReservationPostgres",
+            "TestRefundLegacySuspendedDispatchNeverCallsProviderPostgres",
+            "TestRefundVerifiedSuccessRepairsOriginalSuspendedGrantPostgres",
+            "TestRefundRepairRetainsZeroHistoricalCorrectionSourcePostgres",
+            "TestRefundCorrectedZeroSourceAndPriorSuspensionRecoverTogetherPostgres",
+            "TestRefundPriorSuspensionRepairFrozenGrantChangesFailWithoutEffectsPostgres",
+            "TestRefundUnknownQueryCannotInventSuccessOrDispatchPostgres",
+            "TestRefundOriginalSuccessQueryRetainsCompetingFinancialFreezePostgres",
+            "TestRefundNeverDispatchedReviewCannotBecomeNewProviderRequestPostgres",
+            "TestRefundLegacyUnknownSuccessQueriesOriginalSimulatorThenRepairsPostgres",
+            "TestRefundUnknownMissingSimulatorResultNeverCreatesRefundPostgres",
+            "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
+            "TestRefundProviderNetworkOutsideFinancialTransactionPostgres",
+        }
+        self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
+        self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
+        valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
+                   "children_required": RUNNER.BILLING_CHILD_REQUIRED}
+        for root in expected:
+            missing = [event for event in valid if event.get("Test", "").split("/", 1)[0] != root]
+            for invalid in [missing, valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+                            valid + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}]]:
+                with self.subTest(root=root), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, RUNNER.RETAINED_REQUIRED, **options)
+    def test_required_suites_cannot_be_supplied_by_another_package(self):
+        for required, package in [(RUNNER.REQUIRED, RUNNER.TOKEN_PACKAGE),
+                                  (RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE)]:
+            wrong = self.events(required, "unrelated/package", children=True)
+            with self.subTest(package=package), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(wrong, required, package=package)
+
+
+    def test_late_archive_receipt_root_is_selected_and_requires_completed_children(self):
+        root = "TestLatePaymentArchiveCommandReplayPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "require_children": True, "children_required": {root}}
+        RUNNER.verify_results(events, {root}, **options)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test") != root],
+            [event for event in events if "/" not in event.get("Test", "")],
+            [event for event in events if not (event.get("Test") == root and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root}],
+            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_direct_payment_repair_command_receipt_root_and_children_cannot_skip(self):
+        name = "TestDirectPaymentRepairCommandReceiptPostgres"
+        self.assertIn(name, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(name, RUNNER.BILLING_CHILD_REQUIRED)
+        events = self.events(required={name}, package=RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True,
+                   "exact_roots": True, "children_required": {name}}
+        RUNNER.verify_results(events, {name}, **options)
+        for invalid in ([],
+                        [event for event in events if event.get("Test") != name],
+                        [event for event in events if not event.get("Test", "").startswith(name + "/")],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                        events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}],
+                        events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name + "/actual"}]):
+            with self.subTest(events=invalid), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {name}, **options)
+
+
+    def test_decision_legacy_concurrent_receipt_is_selected_and_requires_real_children(self):
+        name = "TestApprovalDecisionLegacyConcurrentReceiptPostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, roots, **options), 0)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            [event for event in events if not (event.get("Test", "") == name and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": package, "Test": name}],
+            events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_decision_original_receipt_is_selected_and_requires_real_children(self):
+        name = "TestApprovalDecisionOriginalReceiptPostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True, "require_children": True}
+        self.assertGreater(RUNNER.verify_results(events, roots, **options), 0)
+        for invalid in (
+            [],
+            [event for event in events if event.get("Test", "").split("/", 1)[0] != name],
+            [event for event in events if not event.get("Test", "").startswith(name + "/")],
+            [event for event in events if not (event.get("Test", "") == name and event.get("Action") == "run")],
+            events + [{"Action": "skip", "Package": package, "Test": name}],
+            events + [{"Action": "skip", "Package": package, "Test": name + "/actual"}],
+            events + [{"Action": "fail", "Package": package, "Test": name + "/actual"}],
+            [{**event, "Package": RUNNER.TOKEN_PACKAGE} if event.get("Test", "").split("/", 1)[0] == name else event for event in events],
+        ):
+            with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, roots, **options)
+
+
+    def test_provider_quota_requires_migration_send_and_verify(self):
+        root = "TestProviderQuotaConcurrentBoundary"
+        self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        expected = {"migration-round-trip", "send", "verify", "login-registration", "login-profile"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_account_evidence_guard_requires_both_installation_paths_and_every_table(self):
+        root = "TestOrganizationEvidenceTruncatePublicPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        expected = {scenario + suffix
+                    for scenario in ("fresh-install", "retained-upgrade")
+                    for suffix in ("", "/organization_creation_requests", "/organization_unit_commands",
+                                   "/membership_commands", "/legal-replay-after-rejection", "/forward-only-public-down")}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_package_expiry_index_requires_both_real_installation_scenarios(self):
+        root = "TestPackageExpiryCrossWalletIndexPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"fresh-install", "retained-upgrade"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_provider_health_read_failure_requires_all_three_streams(self):
+        root = "TestProviderHealthReadFailurePostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"discovery", "latest-five", "failure-rate"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_provider_health_index_requires_both_real_installation_scenarios(self):
+        root = "TestProviderHealthGlobalWindowIndexPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"fresh-install", "retained-upgrade"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_billing_evidence_guard_requires_both_original_relations(self):
+        root = "TestClosedGrantEvidenceCurrentRoleGuardsPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"account_closure_grant_isolations", "account_closed_grant_reclaim_commands"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_retained_order_history_requires_both_pagination_cases(self):
+        root = "TestRetainedOrganizationOrderHistoryPagination"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"same-timestamp-cursor-and-owner-isolation", "concurrent-new-order-does-not-shift-older-pages"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            incomplete = [event for event in events if event.get("Test") != root + "/" + child]
+            with self.subTest(child=child), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(incomplete, {root}, **options)
+
+
+    def test_archive_current_query_public_migration_is_required_with_exact_children(self):
+        root = "TestLatePaymentArchiveQueryAdmissionPublicMigration"
+        children = {"fresh-public-cli", "previous-full-upgrade-and-forward-only", "production-900038-version-set-upgrade-and-forward-only"}
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "exact_roots": True, "require_children": True}
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for name in children:
+            missing = [event for event in events if event.get("Test") != root + "/" + name]
+            with self.subTest(missing=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(missing, {root}, **options)
+        for action in ("skip", "fail"):
+            invalid = events + [{"Action": action, "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/fresh-public-cli"}]
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_archive_current_query_runtime_children_are_registered_and_cannot_be_omitted(self):
+        root = "TestLatePaymentArchiveCommandReplayPostgres"
+        children = {
+            "lost-ack-recovers-exact-original-terminal-receipt",
+            "current-auth-owner-and-changed-case-identity",
+            "no-receipt-terminal-and-provider-blind-are-not-success",
+            "new-command-retains-original-authority-and-claim-admission",
+            "receipt-insert-failure-rolls-back-original-archive",
+            "concurrent-same-key-archives-once",
+            "key-admission-and-permanent-immutable-receipt",
+            "accepted-unfinished-query-blocks-new-archive-without-changing-facts",
+            "archive-sql-cancellation-retains-database-error-not-business-conflict",
+            "prepare-commit-invalidates-old-archive-snapshot",
+            "new-Prepare-fences-a-previously-completed-current-command",
+            "current-query-real-producer",
+            "current-query-real-producer/real-CLOSED-then-failure-PENDING-and-identical-CLOSED",
+            "current-query-real-producer/latest-canceled-query-stays-UNKNOWN-and-never-redispatches",
+            "current-query-real-producer/completion-fault-keeps-current-pending-until-new-explicit-success",
+            "current-query-real-producer/committed-authority-ACK-loss-failed-completion-current",
+            "current-query-real-producer/committed-authority-ACK-loss-failed-completion-stale",
+            "current-query-real-producer/older-failure-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-PENDING-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-CLOSED-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-CLOSED",
+            "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-SUBJECT_UNAVAILABLE",
+            "current-query-real-producer/older-CLOSED-cannot-clear-newer-failure",
+            "current-query-real-producer/older-CLOSED-cannot-clear-newer-PENDING",
+        }
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True, "require_children": True}
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        missing = [event for event in events if event.get("Test") != root + "/current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED"]
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(missing, {root}, **options)
+
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_query_generation_upgrade_is_required_with_its_complete_recovery_child(self):
+        root = "TestLatePaymentQueryGenerationUpgradePostgres"
+        children = {"published-pre48-UNKNOWN-and-new-explicit-recovery"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_profile_revocation_requires_every_closure_child(self):
+        root = "TestProfileRevocationClosureRuntimePostgres"
+        children = {"reserved-closure-seals-no-dispatch-and-releases-capacity",
+                    "confirmed-replays-after-anonymization", "late-confirmation-replays-after-anonymization"}
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_profile_revocation_requires_every_durable_admission_child(self):
+        root = "TestProfileRevocationDurableAdmissionRuntimePostgres"
+        children = {
+            "capacity-before-grant-confirmed-replay-and-unknown-retention",
+            "cancel-before-authority-preserves-reservation",
+            "dispatch-token-and-legacy-command-cannot-regrant",
+            "concurrent-global-admission-across-profiles",
+            "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+            "capacity-public-complete-resumes-original-operation",
+            "lease-expiry-during-global-admission-wait",
+        }
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_schema_restoration_is_required_before_retained_bootstrap(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(schema_leftover_phase="owner-schema")
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"])
+
+    def test_unknown_date_orphan_requires_cross_date_lifecycle(self):
+        root = "TestReconciliationUnknownDateOrphanLifecyclePostgres"
+        children = {"cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "resolved-cross-date-recurrence", "observation-rollback", "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+if __name__ == "__main__":
+    unittest.main()

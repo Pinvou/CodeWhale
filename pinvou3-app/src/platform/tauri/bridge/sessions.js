@@ -75,6 +75,8 @@ function pinvouSharedtauriSessions() {
     // readers so a durable-data defect cannot pose as "no data".
     function loadPersonaEventsForSession(sid) { return pinvouSharedtauriSessions().loadPersonaEventsForSession(sid); }
     function loadPinvouReviewsForSession(sid) { return pinvouSharedtauriSessions().loadPinvouReviewsForSession(sid); }
+    /** @param {any[]} reviews */
+    function raisePinvouSummonHighwater(reviews) { return pinvouSharedtauriSessions().raisePinvouSummonHighwater(reviews); }
     var MAX_SCHEDULED_SESSION_BUFFERS = 64;
     var MAX_SCHEDULED_RUN_SESSION_OWNERS = 64;
     // All-session buffer cap: each sessionStates entry holds the full
@@ -140,6 +142,8 @@ function isProtectedScheduledBuffer(id, buf) { return pinvouSharedtauriSessions(
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      delete state.compactingSessions[id];
+      delete state.compactionStarts[id];
       // personaPlaceholderTitles is lightweight session metadata (the marker
       // for placeholder titles that auto-rename may override); rehydration
       // never restores it, so capacity eviction must keep it and only real
@@ -172,6 +176,8 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedtauriSessio
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      delete state.compactingSessions[id];
+      delete state.compactionStarts[id];
       // personaPlaceholderTitles survives capacity eviction (see the comment
       // at the scheduled eviction site); only purgeSessionBuffer (real
       // deletion) cleans it.
@@ -186,6 +192,8 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedtauriSessio
     delete evictedSessionDrafts[id];
     if (onSessionBufferPurged) onSessionBufferPurged(id, "delete");
     delete turnUsageDirty[id];
+    delete state.compactingSessions[id];
+    delete state.compactionStarts[id];
     delete personaPlaceholderTitles[id];
     delete scheduledRunSessionOwners[id];
     if (state.scheduledRunContext && state.scheduledRunContext.sessionId === id) {
@@ -279,6 +287,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
     hydrateWorkingSetFromSaved(buf, saved);
     buf.personaEvents = await loadPersonaEventsForSession(sid);
     buf.pinvouReviews = await loadPinvouReviewsForSession(sid);
+    raisePinvouSummonHighwater(buf.pinvouReviews); // 后台缓冲提交即验收抬底(r5 审 M1)
     buf.pinvouSceneEvents = await syncPinvouSceneEventsForSession(sid);
     buf.steeredMessages = await syncSteeredMessagesForSession(sid);
     try { buf.turnTimeline = await invoke("get_session_timeline", { sessionId: sid }) || []; } catch (e) { buf.turnTimeline = []; }
@@ -297,6 +306,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
   function switchActiveTo(id, opts) {
     // 离开草稿（无论物化还是切去既有会话），未消费的开关寄存意图作废。
     state.pendingDraftMultiAgent = false;
+    state.pendingDraftModelRef = null;
     // Set the new active before touching the old buffer: the LRU
     // eviction triggered by touch relies on activeSessionId as the
     // backstop protecting the target session; touching the old one first
@@ -431,6 +441,12 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
     // 新草稿从关闭状态开始：寄存意图作废，开关行显示同步复位。
     state.pendingDraftMultiAgent = false;
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
+    if (state.modeState && state.modeState.multiAgent) {
+      state.modeState = { mode: state.modeState.mode || "yolo", multiAgent: false };
+    }
     // The staged explicit mode of a bound draft is registered intent too and is
     // invalidated together with the draft.
     state.pendingDraftMode = null;
@@ -466,7 +482,57 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
 
   // 团队接力等显式工作入口需要立即获得稳定 session id 以建立本机关联；
   // 这类用户动作已经确认要开始工作，不适用侧边栏空草稿的 lazy 语义。
-  async function materializeSession() {
+  // 前台物化的草稿内容保护（round-38 review P2，诊断直达）：protectUserDraft
+  // 供「等待窗口之后才晚到」的物化调用方（设备页排查动作在 prompt 采样
+  // resolve 后才物化）使用——窗口里用户新建对话并输入未发送文本 / 选了工作
+  // 目录时，下面 enterDraft 的工作集清空会把这份内容原地吞掉。此刻活动目标
+  // 仍是未物化草稿（activeSessionId 为空）且草稿带用户内容（输入文本或目录
+  // 绑定）时直接返回 null，调用方按守卫语义放弃发送、内容原地保留；无参
+  // 调用保持原语义（点击即时的显式工作入口，如团队接力，仍按「用户已确认
+  // 开始工作」覆盖旧草稿）。
+  //
+  // 后台物化（round-39 review P2，zhuowp：切到既有会话后不得前台物化）：
+  // prompt 窗口决算发现用户已切到既有会话 B 时，晚到的物化调用方改走
+  // background——B 非空使 protectUserDraft 拦不住，前台路径 enterDraft 的工作
+  // 集清空 + switchActiveTo 会把活动工作集切到新会话并 notify，订阅快照随之
+  // 携带诊断会话的 chatItems/activeSessionId，B 的正文在 ChatView 被顶掉。
+  // 本路径只做创建与登记：后端 create_session（无目录绑定的普通新会话，与
+  // 前台空草稿物化同参）+ 空 buffer 登记 sessionStates（sendMessageToSession
+  // 的存在性第二把尺子，与 ensureSession 导航中止分支同款）+
+  // refreshHistoryList 入侧栏历史（其 notify 只刷列表，不动
+  // activeSessionId/chatItems）；不 enterDraft、不切工作集、不抢活动会话，
+  // 返回真实 sid 供调用方后台发送。创建失败静默返回 null（addSystemItem 会
+  // 把报错卡写进用户当前会话的正文，后台路径不得污染），由调用方按发送失败
+  // 契约处理；materializeSession 无 background 选项的调用方不受影响。
+  async function createBackgroundSession() {
+    try {
+      const meta = await invoke("create_session", {
+        workspacePath: null,
+        workspaceRoots: null,
+        projectId: null,
+        // 后台诊断会话不得抢占后端活动会话（review P2，zhuowp）：前端工作集
+        // 已保持停在 B，但 create_session 的 set_active 后端缺省
+        // unwrap_or(true)，缺省调用会静默把 SessionStore.active 切到诊断会话
+        // ——按活动会话键控的后端操作（定时记忆压缩等）随之改道。显式
+        // setActive:false 与 Web 宿主 web_access_create_session（Some(false)）
+        // 契约对齐；前台物化路径保持缺省激活不变。
+        setActive: false,
+      });
+      sessionStates[meta.id] = freshBuffer();
+      sessionStates[meta.id].loadedFromDisk = true;
+      await refreshHistoryList();
+      return meta.id;
+    } catch (e) {
+      console.warn("background create_session failed", e);
+      return null;
+    }
+  }
+  async function materializeSession(options) {
+    if (options && options.protectUserDraft && !state.activeSessionId
+      && (String(state.composerDraft || "").length > 0 || state.draftWorkspacePath)) {
+      return null;
+    }
+    if (options && options.background) return createBackgroundSession();
     if (!enterDraft()) return null;
     return ensureSession();
   }
@@ -649,25 +715,81 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
           draftOutcome.createdSessionId = meta.id;
           return null;
         }
-        // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
-        // 清：switchActiveTo 会把寄存意图当作已消费。
+        // Keep this session unpublished until its explicit model is confirmed.
+        // Otherwise a second send can bypass ensureSession and use the default
+        // model while selection is pending, then lose its session on rollback.
+        var pendingModelRef = state.pendingDraftModelRef;
+        if (pendingModelRef) {
+          try {
+            if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+              await invoke("account_platform_select_session_model", {
+                input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+              });
+            } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+              await invoke("set_session_model", {
+                sessionId: meta.id,
+                modelId: pendingModelRef.saved_model_id,
+              });
+            } else {
+              throw new Error("unsupported model selection source");
+            }
+          } catch (modelError) {
+            if (!state.activeSessionId && draftOutcome.navToken === sessionSwitchRequestToken) {
+              draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            }
+            // A newer navigation or model choice owns its own state. In
+            // particular, never delete a session adopted by a newer navigation.
+            if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+              || state.pendingDraftModelRef !== pendingModelRef) return null;
+            try {
+              await invoke("delete_session", { id: meta.id });
+            } catch (cleanupError) {
+              // 空会话残留可手动删除，不掩盖模型选择失败。
+            }
+            draftOutcome.createdSessionId = null;
+            if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+              || state.pendingDraftModelRef !== pendingModelRef) return null;
+            // Nothing was consumed or published: keep the current draft and
+            // retry ownership rather than resetting its epoch or newer edits.
+            draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            addSystemItem(bt("newChatFailed"));
+            await refreshHistoryList();
+            notify();
+            return null;
+          }
+        }
+        const currentBinding = captureDraftWorkspaceBinding();
+        const workspaceChanged = pendingModelRef && (
+          currentBinding.boundWorkspace !== boundWorkspace
+          || currentBinding.boundProjectId !== boundProjectId
+          || JSON.stringify(currentBinding.boundRoots) !== JSON.stringify(boundRoots));
+        if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+          || state.pendingDraftModelRef !== pendingModelRef || workspaceChanged) {
+          if (!sessionStates[meta.id]) {
+            sessionStates[meta.id] = freshBuffer();
+            sessionStates[meta.id].loadedFromDisk = true;
+          }
+          // A navigation may recover its original message in the background
+          // session. A newer model choice in the same draft keeps that draft.
+          if (draftOutcome.navToken !== sessionSwitchRequestToken) draftOutcome.createdSessionId = meta.id;
+          else if (!state.activeSessionId) draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+          return null;
+        }
         var pendingMultiAgent = state.pendingDraftMultiAgent === true;
-        state.pendingDraftMultiAgent = false;
-        // The bound draft's staged explicit mode is read-then-cleared the
-        // same way (an explicit switch during the await is user intent too).
         const stagedDraftMode = state.pendingDraftMode;
         state.pendingDraftMode = null;
-        // Materialization committed: clear the draft directory; on
-        // create_session failure (outer catch) it is kept for retry.
         state.draftWorkspacePath = null;
         state.draftWorkspaceRoots = [];
         state.draftProjectId = null;
+        // Read after model confirmation: edits during the await belong to this
+        // draft and must follow it, not the pre-confirmation composer snapshot.
+        composerDraft = state.composerDraft || "";
         switchActiveTo(meta.id, { fresh: true });
         draftOutcome.createdSessionId = meta.id;
-        // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
-        // 跟随迁移；这不是用户主动切换到另一个已有会话。
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
+        if (pendingModelRef) state.currentSessionModelRef = pendingModelRef;
+        if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
         if (pendingMultiAgent) {
           try {
             await invoke("set_multi_agent_mode", { sessionId: meta.id, enabled: true });
@@ -687,6 +809,7 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
             var rollbackComposerDraft = state.composerDraft || "";
             enterDraft();
             state.composerDraft = rollbackComposerDraft;
+            state.pendingDraftModelRef = pendingModelRef;
             // This rollback is still the same logical draft, not user navigation.
             draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
             // Restore the registered intent captured before the failure: the
@@ -990,6 +1113,7 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     var turnTimeline = [];
     try { turnTimeline = await invoke("get_session_timeline", { sessionId: id }) || []; } catch (_) {}
     if (!switchStillCurrent()) return false;
+    raisePinvouSummonHighwater(pinvouReviews); // 验收后才抬底:被拒导航不得抬账目底(JensenChen28 审 P2)
 
     // load_session 与必要的直接会话数据均成功后，才一次性提交 active/context。
     if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
@@ -1487,8 +1611,6 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
 
 
   async function restoreArchivedSession(id) { return pinvouSharedtauriSessions().restoreArchivedSession(id); }
-
-  // 实时态有专属气泡的工具（方案卡），重建时要还原成原卡而非普通工具卡。
 
     return {
       freshBuffer: freshBuffer,

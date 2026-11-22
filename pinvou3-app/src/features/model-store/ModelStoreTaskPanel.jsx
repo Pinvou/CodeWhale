@@ -15,6 +15,8 @@ import {
   formatBytes,
   layerSummary,
   missingFormFields,
+  operationErrorText,
+  progressPercent,
   taskProgressView,
   etaSeconds,
   splitDuration,
@@ -236,10 +238,12 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   // 要显示的错误文本。`errorKey` 是 useLmmTasks 回灌的结构化错误（那个模块按本
   // feature 的分层约定不拼文案，只给键和原文），在这里过词典；`task.error` 是
   // 轮询循环写进来的后端原文，照旧直接显示。
+  const isError = task.status === 'error';
   const errorText = task.errorKey && copy[task.errorKey]
     ? copy[task.errorKey](task.errorDetail || '')
-    : task.error;
-  const isError = task.status === 'error';
+    : isError
+      ? operationErrorText(copy, task.error)
+      : task.error;
   // 终态 = 不会再变了。取消完成的任务也留在面板上（用户要看得见自己停了什么），
   // 它和失败一样需要一个「关闭」按钮，也一样不该再显示进度条——只判 isError
   // 会让取消掉的卡片渲染出「取消」按钮，点一下变 cancelling 就被 disabled，
@@ -289,11 +293,19 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
       // 就是用户要复制的东西。只复制**后端生成的同步错误字段**（errorKey 的译文
       // + errorDetail）；task.error 可能嵌脚本输出尾（运行失败的落点），不进
       // 剪贴板；task.lines 更是脚本原文，永远不走这里。
+      // r28 P2：errorKey 对应的 copy 值是**模板函数**不是字符串——必须调用
+      // 取返回值，否则 join 把函数源码写进剪贴板。
       const fields = [
-        task.errorKey && copy[task.errorKey],
+        task.errorKey && typeof copy[task.errorKey] === 'function'
+          ? copy[task.errorKey](task.errorDetail || '')
+          : task.errorKey,
         task.errorDetail,
       ].filter(Boolean).join(String.fromCharCode(10));
-      const ok = fields.length > 0 && await copyClipboardText(fields);
+      // r43 P2：同步失败只落 task.error（无 errorKey/errorDetail）时上面的拼装
+      // 是空的——用户点「复制详情」得到 copyFailed。这里没有运行记录，
+      // task.error 不可能是脚本输出尾，回落到展示用的 errorText 同源文本。
+      const payload = fields || (task.error ? errorText : '');
+      const ok = payload.length > 0 && await copyClipboardText(payload);
       setCopied(ok ? 'ok' : 'fail');
       setLogNotice(ok
         ? { tone: 'ok', text: copy.copied }
@@ -350,7 +362,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
               商店视图**会被替换成「页面加载失败」。守卫见
               tests/model_store_task_panel_render.test.mjs。 */}
           {errorText ? (
-            <div className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
+            <div data-testid="model-store-task-error" className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
           ) : (
             <div className={`mt-0.5 truncate text-[11px] ${TEXT_SECONDARY}`}>{taskSubtitle(task, copy)}</div>
           )}
@@ -378,10 +390,18 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
               aria-label={view.awaitingCompletion ? copy.taskAwaitingCompletion : copy.taskRunning}
               aria-valuenow={view.awaitingCompletion ? undefined : view.percent}
               className={`h-full rounded-full bg-[#0B57D0] transition-[width] duration-500 dark:bg-[#A8C7FA] ${view.awaitingCompletion ? 'animate-pulse' : ''}`}
-              style={{ width: view.awaitingCompletion ? '60%' : `${view.percent}%` }}
+              style={{ width: view.awaitingCompletion ? '60%' : `${Math.max(view.percent, view.kind === 'bytes' && view.percent < 1 ? 2 : 0)}%` }}
             />
           </div>
-          <div className={`mt-1 text-right text-[10px] ${TEXT_SECONDARY}`}>{view.awaitingCompletion ? copy.taskAwaitingCompletion : `${view.percent.toFixed(1)}%`}</div>
+          {/* 字节进度时 0%–1% 显示「已下载 X」而非误导性的「0.0%」——
+              客户现场反馈：下载 168GB 模型时长时间停在 0% 看起来像卡死。 */}
+          <div className={`mt-1 text-right text-[10px] ${TEXT_SECONDARY}`}>
+            {view.awaitingCompletion
+              ? copy.taskAwaitingCompletion
+              : view.kind === 'bytes' && view.percent < 1 && view.done > 0
+                ? `${copy.taskProgress(formatBytes(view.done), formatBytes(view.total))}`
+                : `${view.percent.toFixed(1)}%`}
+          </div>
         </div>
       )}
 

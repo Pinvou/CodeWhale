@@ -1,0 +1,309 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Reconciliation financial repair owner precheck",
+    "version": "1"
+  },
+  "paths": {
+    "/admin/v2/approval-command-prechecks": {
+      "post": {
+        "operationId": "accountReconciliationFinancialRepairPrecheck",
+        "description": "current Account actor + platform.billing.repairs.request; read-only closed unique-key JSON; 65536-byte bound and existing 2-second transport deadline. No claim, approval or effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed facts"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Authority refused"
+          },
+          "503": {
+            "description": "Owner unavailable; INACTIVE permits read-only precheck preparation"
+          },
+          "422": {
+            "description": "Closed owner projection unavailable for selected facts"
+          },
+          "504": {
+            "description": "Existing read-only precheck deadline expired"
+          }
+        }
+      }
+    },
+    "/internal/v1/approval-command-prechecks": {
+      "post": {
+        "operationId": "billingReconciliationFinancialRepairPrecheck",
+        "description": "Account workload + internal.billing.approval-proof.read; read-only closed unique-key JSON; 65536-byte bound and existing 2-second transport deadline. No claim, approval or effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed facts"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Authority refused"
+          },
+          "503": {
+            "description": "Owner unavailable; INACTIVE permits read-only precheck preparation"
+          },
+          "422": {
+            "description": "Closed owner projection unavailable for selected facts"
+          },
+          "504": {
+            "description": "Existing read-only precheck deadline expired"
+          }
+        }
+      }
+    },
+    "/api/admin/account/admin/v2/approval-command-prechecks": {
+      "post": {
+        "operationId": "portalReconciliationFinancialRepairPrecheck",
+        "description": "current OIDC session + CSRF, forwards Account actor only; read-only closed unique-key JSON; 65536-byte bound and existing 2-second transport deadline. No claim, approval or effect.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner frozen projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid closed facts"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Authority refused"
+          },
+          "503": {
+            "description": "Owner unavailable; INACTIVE permits read-only precheck preparation"
+          },
+          "422": {
+            "description": "Closed owner projection unavailable for selected facts"
+          },
+          "504": {
+            "description": "Existing read-only precheck deadline expired"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PrecheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "target_resource_id",
+          "payment_evidence_id",
+          "reason_code",
+          "business_date"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "RECONCILIATION_FINANCIAL_REPAIR"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_evidence_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "const": "PROVIDER_REFUND_CONFIRMED"
+          },
+          "business_date": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      },
+      "NormalizedCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reconciliation_case_id",
+          "payment_evidence_id",
+          "business_date",
+          "resolution_code"
+        ],
+        "properties": {
+          "reconciliation_case_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_evidence_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "business_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "resolution_code": {
+            "const": "PROVIDER_REFUND_CONFIRMED"
+          }
+        }
+      },
+      "CriticalResourceVersions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "case_id",
+          "provider_snapshot_digest",
+          "facts_digest",
+          "policy_version"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "case_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_snapshot_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "facts_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "policy_version": {
+            "const": 1
+          }
+        }
+      },
+      "FinancialSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "amount_fen",
+          "currency",
+          "provider_transaction_id",
+          "ledger_effect"
+        ],
+        "properties": {
+          "amount_fen": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "currency": {
+            "type": "string"
+          },
+          "provider_transaction_id": {
+            "type": "string"
+          },
+          "ledger_effect": {
+            "const": "NONE"
+          }
+        }
+      },
+      "PrecheckProjection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "policy_version",
+          "snapshot_schema_version",
+          "target_resource_type",
+          "target_resource_id",
+          "normalized_command",
+          "critical_resource_versions",
+          "financial_snapshot"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "RECONCILIATION_FINANCIAL_REPAIR"
+          },
+          "policy_version": {
+            "const": 1
+          },
+          "snapshot_schema_version": {
+            "const": 1
+          },
+          "target_resource_type": {
+            "const": "RECONCILIATION_CASE"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "normalized_command": {
+            "$ref": "#/components/schemas/NormalizedCommand"
+          },
+          "critical_resource_versions": {
+            "$ref": "#/components/schemas/CriticalResourceVersions"
+          },
+          "financial_snapshot": {
+            "$ref": "#/components/schemas/FinancialSnapshot"
+          }
+        }
+      }
+    }
+  }
+}

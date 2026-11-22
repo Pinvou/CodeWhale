@@ -67,6 +67,34 @@ function pinvouSharedtauriChatEvents() {
     // publication covers all pending streams in the visible host snapshot.
     const STREAM_NOTIFY_MAX_WAIT_MS = 32;
     const pendingStreamNotifications = Object.create(null);
+    var pendingBillingNotices = Object.create(null);
+    // Keep only deleted scheduled IDs until this bridge instance restarts.
+    // A bare sched-* prefix stays valid for unloaded sessions, but cannot
+    // override a deletion already observed by this notice consumer.
+    var deletedScheduledBillingNoticeSessions = new Set();
+
+    function billingNoticeKey(sessionId, generation) {
+      return String(sessionId || "") + ":" + String(Number(generation || 0));
+    }
+
+    function billingUserError(notice) {
+      if (!notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL") return null;
+      var completed = notice.turn_outcome === "COMPLETED";
+      var contextType = notice.context_type || "";
+      var organizationId = String(notice.organization_id || "").trim();
+      var action = notice.action === "OPEN_RECHARGE" ? "OPEN_RECHARGE" : "";
+      return {
+        kind: "wallet_insufficient",
+        severity: completed ? "warning" : "error",
+        stage: notice.stage || "",
+        turnOutcome: notice.turn_outcome || "",
+        settlementStatus: notice.settlement_status || "",
+        action: action,
+        contextType: contextType,
+        organizationId: organizationId,
+        errorCode: notice.code,
+      };
+    }
 
     function cancelPendingStreamNotify(sid) { return pinvouSharedtauriChatEvents().cancelPendingStreamNotify(sid); }
 
@@ -77,6 +105,28 @@ function pinvouSharedtauriChatEvents() {
     function notify() {
       cancelPendingStreamNotify(state.activeSessionId);
       immediateNotify();
+      // 直发（无合并帧）路径的派发标记；仅对有探针条目的流式 session 生效，
+      // 其它事件是空操作。
+      // r5 P2-2：抑制态 notify 不盖章——后台路由期间（runSyncOnSession 翻转
+      // activeSessionId + suppressNotify），此处没有任何渲染发布发生，盖章
+      // 会产出假 stall 记录（recv→dispatch≈201ms 实测）或系统性量快（漏报）。
+      // 发布侧（publish 内）**同样有门控**（r13 P2-2 修复；本行为注释为 r14
+      // 勘误）：rAF/定时器腿虽在路由 finally 后才 fire，但 init 启动批处理窗内
+      // 基座 notify 直接丢弃（suppressNotify || startupNotificationBatching），
+      // publish 按**发射时刻**的 isNotifySuppressed() 分流：抑制→markThrottled
+      // （零发布不能量成健康派发），否则 markDispatched。
+      // r9 P1-A：抑制态**取消**掉的 pending 条目也不能就这么滞留——它已无
+      // 发布者（合并帧被杀、抑制态又无直发），下一个无关事件终会把它盖章成
+      // 假 stall（recv→dispatch= 整段工具执行时间）。按节流收口：markThrottled
+      // 诚实地声明「我们主动选择不发布」，finalize 不上报。配 markThrottled 的
+      // t_dispatch 守卫（r9 P2），对已盖章条目安全退化为 no-op。
+      if (window.RenderStageProbe) {
+        if (!isNotifySuppressed()) {
+          try { window.RenderStageProbe.markDispatched(state.activeSessionId); } catch (_) {}
+        } else {
+          try { window.RenderStageProbe.markThrottled(state.activeSessionId); } catch (_) {}
+        }
+      }
     }
 
     function scheduleStreamNotify(sid, firstDelta) {
@@ -95,7 +145,22 @@ function pinvouSharedtauriChatEvents() {
       pendingStreamNotifications[sid] = pending;
       function publish() {
         if (pendingStreamNotifications[sid] !== pending) return;
+        // r8 P1：cancel-all 置换的**其它**会话的武装条目也要补章——它的内容
+        // 已随本次 immediateNotify() 一同发布上屏（一次发布覆盖全部快照），
+        // 滞留不章的话：活跃会话的条目会被 180ms 渲染腿补章成假 stall
+        // （recv_to_dispatch≈180ms，真实派发在 16ms）并烧掉该会话的 10s
+        // 节流配额——同窗口的真实冻结被静默丢弃（受控时钟亲证）。
+        // 只补**活跃**会话（displaced === activeSessionId）的条目（r14 勘误：
+        // 旧注释称「后台会话补 markThrottled」，实现从未盖过后台条目——
+        // 后台 displaced 条目不在此处收口，由 5s 新鲜度上界/刷新节流章/
+        // begin supersede/终态章封死，伪造出口已复核封死）；活跃补章随
+        // r13 分流：抑制窗内 markThrottled、窗外 markDispatched。
+        var displaced = Object.keys(pendingStreamNotifications).filter(
+          function (other) { return other !== sid && pendingStreamNotifications[other]; }
+        );
         Object.keys(pendingStreamNotifications).forEach(cancelPendingStreamNotify);
+        // r13 P2-2：displaced 补章移入 immediateNotify 后的抑制分流块——
+        // 此处（发布前）无法知道这次发布是否被批处理窗丢弃。
         // The synchronous event router has already saved every affected
         // buffer and restored the visible working set before this callback.
         // Publish that coherent host snapshot once, even if one of the
@@ -103,6 +168,31 @@ function pinvouSharedtauriChatEvents() {
         // working set merely to issue a suppressed notification.
         try {
           immediateNotify();
+          // r13 P2-2：批处理窗内合并腿盖章按**发射时刻** isNotifySuppressed
+          // 分流——窗内基座 notify 直接丢弃（bridge suppressNotify ||
+          // startupNotificationBatching），零发布不能量成健康派发（假
+          // 健康章方向）。与 notify() :119-125 的直发臂同构：抑制→
+          // markThrottled（诚实声明「主动不发布」），否则 markDispatched。
+          // displaced 活跃臂同理（r8 P1 的补章语义在抑制窗内同样不成立）。
+          if (window.RenderStageProbe) {
+            var fireSuppressed = isNotifySuppressed();
+            try {
+              if (fireSuppressed) {
+                try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+              } else {
+                try { window.RenderStageProbe.markDispatched(sid); } catch (_) {}
+              }
+              for (var d = 0; d < displaced.length; d++) {
+                if (displaced[d] === state.activeSessionId) {
+                  if (fireSuppressed) {
+                    try { window.RenderStageProbe.markThrottled(displaced[d]); } catch (_) {}
+                  } else {
+                    try { window.RenderStageProbe.markDispatched(displaced[d]); } catch (_) {}
+                  }
+                }
+              }
+            } catch (_) {}
+          }
         } catch (error) {
           console.error("[chat] coalesced stream notify failed", error);
         }
@@ -111,6 +201,9 @@ function pinvouSharedtauriChatEvents() {
         pending.frame = window.requestAnimationFrame(publish);
       }
       pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+      if (window.RenderStageProbe) {
+        try { window.RenderStageProbe.markScheduled(sid); } catch (_) {}
+      }
     }
 
     function refreshEffectiveModelConfigAfterAuthError(error) {
@@ -136,9 +229,47 @@ function pinvouSharedtauriChatEvents() {
 
     function latestOpenTimelineStart() { return pinvouSharedtauriChatEvents().latestOpenTimelineStart(); }
 
-    function recordTurnStarted() { return pinvouSharedtauriChatEvents().recordTurnStarted(); }
+    function recordTurnStarted() {
+      if (state.activeTurnTimelineId) return;
+      var timestamp = Date.now();
+      var turnIndex = visibleUserTurnIndex();
+      var existing = latestOpenTimelineStart();
+      if (existing && Math.abs(timestamp - Number(existing.timestamp || 0)) < 60000) {
+        existing.ui_turn_index = turnIndex;
+        state.activeTurnTimelineId = existing.turn_id;
+        return;
+      }
+      var timelineOwner = sessionStates[state.activeSessionId];
+      if (timelineOwner) timelineOwner.timelineTurnSeq = (timelineOwner.timelineTurnSeq || 0) + 1;
+      var turnId = "ui_" + String(state.activeSessionId || "session") + "_" + timestamp + "_" + turnIndex + "_" + String(timelineOwner && timelineOwner.timelineTurnSeq || 0);
+      if (timelineOwner) {
+        timelineOwner.timelineTurnAnchor = {
+          knownStartIds: (state.turnTimeline || []).filter(function (event) { return event && event.event === "user_start"; }).map(function (event) { return event.turn_id; }),
+          // This is a received server event, not a pre-IPC clock boundary.
+          submittedAt: null, localTurnId: turnId,
+        };
+      }
+      state.activeTurnTimelineId = turnId;
+      state.turnTimeline = (state.turnTimeline || []).concat([{
+        turn_id: turnId,
+        event: "user_start",
+        timestamp: timestamp,
+        ts: new Date(timestamp).toISOString(),
+        ui_turn_index: turnIndex,
+      }]);
+    }
 
     function recordTurnCompleted(payload) {
+      if (payload && payload.error && !(payload.user_error || payload.userError)) {
+        var messages = bridgeMessages();
+        var userError = typeof messages.modelServiceUserError === "function"
+          ? messages.modelServiceUserError(payload, state)
+          : null;
+        if (userError) {
+          payload.user_error = userError;
+          payload.userError = userError;
+        }
+      }
       var openStart = latestOpenTimelineStart();
       // F-FE13-2：构建器统一在 shared/bridge-shared-helpers.js（web
       // turn-terminal.js 同源），此处仅保留 openStart 取样与转发。
@@ -169,25 +300,103 @@ function pinvouSharedtauriChatEvents() {
       });
     }
 
+    // A unchanged during the read is insufficient: B may already have started.
+    // Distinguish UI timing ids from Rust ids with the pre-submit old-id set and
+    // the pre-IPC timestamp, rather than requiring synthetic ids to match.
+    function authoritativeTimelineCoversCurrentTurn(local, authoritative, turnAnchor) {
+      var localStarts = (local || []).filter(function (event) { return event && event.event === "user_start"; });
+      var current = localStarts[localStarts.length - 1];
+      if (!current && !turnAnchor) return true;
+      var starts = authoritative.filter(function (event) { return event && event.event === "user_start"; });
+      var incoming = starts[starts.length - 1];
+      if (!incoming || !incoming.turn_id) return false;
+      var priorIds = (turnAnchor && turnAnchor.knownStartIds || []).concat(localStarts.slice(0, -1).map(function (event) { return event.turn_id; }));
+      if (priorIds.indexOf(incoming.turn_id) >= 0) return false;
+      if (turnAnchor && Number.isFinite(turnAnchor.submittedAt)
+          && (!Number.isFinite(Number(incoming.timestamp)) || Number(incoming.timestamp) < turnAnchor.submittedAt)) return false;
+      var incomingTerminal = authoritative.slice().reverse().find(function (event) {
+        return event && event.event === "assistant_done" && event.turn_id === incoming.turn_id;
+      });
+      if (incomingTerminal && incomingTerminal.model_rejection && (!current || current.turn_id !== incoming.turn_id)) {
+        // SID-only remote starts do not bind a UI id to a Rust timing id. An
+        // unfamiliar id or an equal millisecond cannot establish typed B.
+        var knownPredecessors = priorIds.filter(function (id) { return id && !/^ui(?:_|-)/.test(String(id)); });
+        var predecessor = knownPredecessors[knownPredecessors.length - 1];
+        var positions = starts.map(function (event, index) { return event.turn_id === predecessor ? index : -1; })
+          .filter(function (index) { return index >= 0; });
+        var orderedIdentity = !!predecessor && positions.length === 1 && positions[0] < starts.length - 1;
+        var laterThanSubmission = turnAnchor && Number.isFinite(turnAnchor.submittedAt)
+          && Number(incoming.timestamp) > turnAnchor.submittedAt;
+        if (!orderedIdentity && !laterThanSubmission) return false;
+      }
+      // A rollback may leave only an old start; it cannot impose A's terminal
+      // on B. A retained UI terminal for B does require a terminal for new B.
+      if (current && priorIds.indexOf(current.turn_id) < 0) {
+        var terminal = (local || []).some(function (event) { return event && event.event === "assistant_done" && event.turn_id === current.turn_id; });
+        if (terminal && !authoritative.some(function (event) { return event && event.event === "assistant_done" && event.turn_id === incoming.turn_id; })) return false;
+      }
+      return true;
+    }
+
+    function mergeLocalTimelineBusinessState(local, authoritative) {
+      var localCompletions = Object.create(null);
+      (Array.isArray(local) ? local : []).forEach(function (event) {
+        if (!event || event.event !== "assistant_done" || !event.turn_id) return;
+        if (event.user_error || event.billing_notice) localCompletions[event.turn_id] = event;
+      });
+      return (Array.isArray(authoritative) ? authoritative : []).map(function (event) {
+        var localEvent = event && localCompletions[event.turn_id];
+        if (!localEvent || event.event !== "assistant_done") return event;
+        return Object.assign({}, event, {
+          user_error: event.user_error || localEvent.user_error || null,
+          billing_notice: event.billing_notice || localEvent.billing_notice || null,
+        });
+      });
+    }
+
     // chat:done 可能来自后台、页面恢复或切换后的会话，本地 buffer 不一定见过
     // 对应的 turn_started。后端保证先落 timing_events 再发终态；这里重新读取
     // 权威时间线，避免明明已完成却漏掉状态徽标与耗时。读取失败时保留本地投影。
     function refreshAuthoritativeTurnTimeline(sessionId) {
-      if (!sessionId) return Promise.resolve(false);
+      var owner = sessionId && sessionStates[sessionId];
+      if (!owner) return Promise.resolve(false);
+      var readToken = owner.timelineReadToken = (owner.timelineReadToken || 0) + 1;
+      var epoch = owner.timelineReadEpoch || 0;
+      function latestStart(events) {
+        for (var i = (events || []).length - 1; i >= 0; i--) {
+          if (events[i] && events[i].event === "user_start") return events[i].turn_id;
+        }
+        return null;
+      }
+      function liveTimeline() {
+        return state.activeSessionId === sessionId ? state.turnTimeline : owner.turnTimeline;
+      }
+      var anchor = latestStart(liveTimeline());
+      var deleted = false;
+      var unsubscribe = typeof context.onSessionDeleted === "function"
+        ? context.onSessionDeleted(function (id) { if (id === sessionId) deleted = true; })
+        : function () {};
+      function current() {
+        return !deleted && sessionStates[sessionId] === owner
+          && owner.timelineReadToken === readToken && (owner.timelineReadEpoch || 0) === epoch
+          && latestStart(liveTimeline()) === anchor;
+      }
       return invoke("get_session_timeline", { sessionId: sessionId })
         .then(function (authoritative) {
-          if (!Array.isArray(authoritative) || authoritative.length === 0) return false;
+          if (!current() || !Array.isArray(authoritative) || authoritative.length === 0) return false;
           var changed = false;
           runSyncOnSession(sessionId, function () {
+            if (!current()) return;
             // 不允许一次短暂的旧磁盘快照把刚收到的本地终态倒退回“执行中”。
             // 正常后端已保证先落盘再发事件；这层同时保护旧版本和异常 I/O 时序。
+            if (!authoritativeTimelineCoversCurrentTurn(state.turnTimeline, authoritative, owner.timelineTurnAnchor)) return;
             if (authoritativeTimelineMissesKnownCompletion(state.turnTimeline, authoritative)) return;
             var localLatest = latestTimelineCompletion(state.turnTimeline);
             var authoritativeLatest = latestTimelineCompletion(authoritative);
             // timing sidecar 是 best-effort；若权威快照明显旧于刚收到的本地终态，
             // 不用旧数据覆盖当前可见状态。
             if (localLatest && authoritativeLatest + 5000 < localLatest) return;
-            state.turnTimeline = authoritative;
+            state.turnTimeline = mergeLocalTimelineBusinessState(state.turnTimeline, authoritative);
             changed = true;
           });
           if (changed) notify();
@@ -199,7 +408,7 @@ function pinvouSharedtauriChatEvents() {
             error: String(error || ""),
           });
           return false;
-        });
+        }).finally(unsubscribe);
     }
 
     function preserveInterruptedAssistantPresentation() { return pinvouSharedtauriChatEvents().preserveInterruptedAssistantPresentation(); }
@@ -310,9 +519,18 @@ function pinvouSharedtauriChatEvents() {
       userBuffer.remoteAdmissionKeys.push(admissionKey);
       if (userBuffer.remoteAdmissionKeys.length > 32) userBuffer.remoteAdmissionKeys.shift();
     }
-    var lastUserText = "";
-    for (var messageIndex = userBuffer.messages.length - 1; messageIndex >= 0; messageIndex--) {
-      var candidate = userBuffer.messages[messageIndex];
+    // 引擎 <context_update> 运行时消息（pinned 上下文漂移）：投影层不产生
+    // turn 但后端 era 口径计 turn 边界——计入 buffer 的待消费计数，下一个
+    // 用户气泡随气泡下发（fork/rewind 入口表序号前移，forkTurnEntries.js）。
+    // 必须在 admission 去重之后累加：同一事件的重复投递在上面就已返回，
+    // 不得二次计数（漂移残差由 chat:transcript_committed 的
+    // context_updates_total 权威重同步兜底，见下方监听器）。
+    if (hideInternalRuntimeMessage && window.PinvouBridgeMessages?.isContextUpdateRuntimeMessage(content)) {
+      userBuffer.runtimeContextUpdatesPending = (userBuffer.runtimeContextUpdatesPending || 0) + 1;
+    }
+    let lastUserText = "";
+    for (let messageIndex = userBuffer.messages.length - 1; messageIndex >= 0; messageIndex--) {
+      const candidate = userBuffer.messages[messageIndex];
       if (candidate && candidate.role === "user") {
         lastUserText = userMessageDisplayText(candidate.content || [], false);
         break;
@@ -354,13 +572,14 @@ function pinvouSharedtauriChatEvents() {
           flushPendingStreamRender();
           resetPendingAssistant();
         }
-        var userItem = { type: "user", text: content, time: timeStr() };
+        var userItem = { type: "user", text: content, time: timeStr(), runtimeContextUpdatesBefore: userBuffer.runtimeContextUpdatesPending || 0 };
         var remoteLogic = window.__PINVOU_REMOTE_CONTROL_STATE__;
         var controlledIdentity = remoteLogic && remoteLogic.controlledTaskAdmissionIdentity
           ? remoteLogic.controlledTaskAdmissionIdentity(state.controlledTasks, sid, content)
           : null;
         if (controlledIdentity) Object.assign(userItem, controlledIdentity);
         addChatItem(userItem);
+        userBuffer.runtimeContextUpdatesPending = 0;
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();
@@ -422,6 +641,20 @@ function pinvouSharedtauriChatEvents() {
     if (revision) {
       committedBuffer.sessionRevision = revision;
       committedBuffer.remoteCommittedRevision = revision;
+    }
+    // <context_update> 边界计数的权威重同步。live 通道从不播报引擎
+    // 漂移增量（它们不产生 chat:user_message），提交负载里的累计总数是
+    // 唯一可信的 live 来源：pending = 总数 − 已随气泡下发的消费量。一次
+    // 重算同时收敛所有 live 残差（漂移增量、重复投递、发送失败、deferred
+    // 丢弃、edit_last 拼接），重载回放路径的重放计数与此口径一致。
+    if (payload.context_updates_total != null) {
+      runSyncOnSession(sid, function () {
+        window.PinvouBridgeMessages?.resyncRuntimeContextUpdatesPending?.(
+          committedBuffer,
+          state.chatItems,
+          payload.context_updates_total,
+        );
+      });
     }
     recordAuthoritySyncDiagnostic("transcript_committed_event_received", Object.assign({
       event_revision: revision,
@@ -559,6 +792,8 @@ function pinvouSharedtauriChatEvents() {
   });
 
   listen("chat:turn_started", function (e) { onSessionEvent(e, function () {
+    var timelineOwner = sessionStates[state.activeSessionId];
+    if (timelineOwner) timelineOwner.timelineReadEpoch = (timelineOwner.timelineReadEpoch || 0) + 1;
     state.busy = true;
     if (!state.thinking.active) startThinking();
     recordTurnStarted();
@@ -599,6 +834,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
     item.text = context.currentStreamText;
     if (renderedStreamText.get(item) === context.currentStreamText) return false;
     item.html = renderMarkdown(context.currentStreamText);
+    item.htmlSource = context.currentStreamText;
     renderedStreamText.set(item, context.currentStreamText);
     return true;
   }
@@ -638,6 +874,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
     }
     lastForegroundSessionId = sid;
     cancelPendingStreamNotify(sid);
+    // r9 P1-B：切会话取消掉的合并帧同样无主了——紧随的真实发布本 tick 上屏
+    // 或已不可达，滞留条目会被后续事件盖章成假 stall（recv→dispatch= 纯等待
+    // 时间）。提前打节流章远比迟到数秒的假冻结诚实。
+    if (window.RenderStageProbe) {
+      try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+    }
   }
 
   function scheduleStreamRender(sid) {
@@ -663,13 +905,30 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
         // Keep the visible preview's existing immediate publication after
         // parsing; only background render completions share a later frame.
         if (sid === state.activeSessionId) notify();
-        else scheduleStreamNotify(sid, false);
+        else {
+          // r7 P2-2：这条 publish 走后台 1s 预览腿——该条目的 recv→dispatch
+          // 间隔是应用自己的合并节流（生成停顿 ≥1s 时 ~1032ms 实测），不是
+          // 主线程冻结。给探针条目打标，finalize 不上报（snapshot 保留）。
+          if (window.RenderStageProbe) {
+            try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+          }
+          scheduleStreamNotify(sid, false);
+        }
       }
     }, isNotifySuppressed() ? BACKGROUND_STREAM_RENDER_THROTTLE_MS : STREAM_RENDER_THROTTLE_MS);
   }
 
-  function cancelStreamRenderTimers(purgedSid) {
+  function cancelStreamRenderTimers(purgedSid, reason) {
     cancelPendingStreamNotify(purgedSid);
+    if (purgedSid && reason === "delete" &&
+        typeof isScheduledRunSession === "function" && isScheduledRunSession(purgedSid)) {
+      deletedScheduledBillingNoticeSessions.add(purgedSid);
+    }
+    var billingPrefix = String(purgedSid || "") + ":";
+    // Idle buffer eviction retains the session and its pending turn notice.
+    if (purgedSid && reason === "delete") Object.keys(pendingBillingNotices).forEach(function (key) {
+      if (key.startsWith(billingPrefix)) delete pendingBillingNotices[key];
+    });
     if (purgedSid && streamRenderTimers[purgedSid]) {
       clearTimeout(streamRenderTimers[purgedSid]);
       delete streamRenderTimers[purgedSid];
@@ -746,6 +1005,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
         type: "assistant",
         text: context.currentStreamText,
         html: renderMarkdown(context.currentStreamText),
+        htmlSource: context.currentStreamText,
         time: timeStr(),
         streaming: true,
       };
@@ -1028,6 +1288,25 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
         !knownDoneSession && !scheduledDoneSession) {
       return;
     }
+    var billingKey = billingNoticeKey(sid, e.payload && e.payload.generation);
+    var billingNotice = sid && pendingBillingNotices[billingKey];
+    if (billingNotice) {
+      delete pendingBillingNotices[billingKey];
+      var billingError = billingUserError(billingNotice);
+      if (billingError) {
+        e.payload = e.payload || {};
+        e.payload.billing_notice = billingNotice;
+        e.payload.user_error = billingError;
+        e.payload.userError = billingError;
+      }
+    }
+    var completedGeneration = Number(e.payload && e.payload.generation || 0);
+    var billingPrefix = String(sid || "") + ":";
+    Object.keys(pendingBillingNotices).forEach(function (key) {
+      if (key.startsWith(billingPrefix) && Number(key.slice(billingPrefix.length)) <= completedGeneration) {
+        delete pendingBillingNotices[key];
+      }
+    });
     safeConsoleInfo("[pinvou3][chat-ui] chat done event", {
       sid: sid,
       error: e.payload && e.payload.error || null,
@@ -1054,6 +1333,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       markRemoteTurn(sid, doneBuffer, true, "chat_done_without_local_owner");
     }
     if (!requiresAuthorityReconcile) markScheduledInitialTurnTerminal(sid);
+    // r12 P2-1：终态的前台/后台判定必须在进 runSyncOnSession **之前**取——
+    // 路由内部会把 activeSessionId 临时翻成 sid（:104 harness 同款语义），
+    // 闭包内再比就是恒等。前台终态的合并帧虽被取消，但路由恢复后的真实
+    // notify 会发布并补章；打节流标会让 throttledOrigin 否决补章后的
+    // finalize，用户看着会话完成时的真实主线程冻结零上报。
+    var terminalForeground = sid === state.activeSessionId;
     runSyncOnSession(sid, function () {
       var error = e.payload && e.payload.error;
       var terminalRecord = recordTurnCompleted(e.payload || {});
@@ -1109,6 +1394,16 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       // background session's terminal must cancel its own pending frame or a
       // redundant late round fires within 32ms.
       cancelPendingStreamNotify(sid);
+      // r9 P1-C：后台终态取消的合并帧是滞留条目（引擎 delta+done 背靠背时
+      // 终态总在 +16ms rAF 之前到——每次后台会话完成都会滞留）。切回后下一
+      // 个事件会把它盖章成假 stall（recv→dispatch= 纯阅读时间）。按节流收口。
+      // r12 P2-1：**仅后台会话**（terminalForeground 在 runSyncOnSession 之前
+      // 捕获，见上方声明处注释）——前台终态的补偿发布真实存在，节流标会否决
+      // 会话完成时刻的真实冻结上报。后台条目无补偿发布（其内容已随活跃会话
+      // 的发布上屏），维持节流收口不变。
+      if (window.RenderStageProbe && !terminalForeground) {
+        try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+      }
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = ["interrupted", "cancelled", "canceled"].includes(terminalStatus);
       if (interrupted) preserveInterruptedAssistantPresentation();
@@ -1221,6 +1516,21 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       state.tokens.max = windowTok; // 云端真实窗口，替代 32K 假分母
       notify(); // 窗口变化也要通知 UI（即使本轮 input 不可信）
     }
+    // 逐请求占用口径（context_input_tokens：本轮最后一次父请求的 reported
+    // input = 回合结束时真实上下文占用）。chat:usage 每轮只在 TurnComplete
+    // 发一次，而本轮任意 tool_start 都会把 turnUsageDirty 锁到下一轮发送才
+    // 解——只消费累计口径意味着工具轮的读数永远冻结在「— / … · 0%」，只有
+    // 手动压缩的 post_tokens 能刷新。逐请求值不是累加值，dirty 口径保护不
+    // 适用：先于 dirty guard 消费，且消费后不得再让累计口径覆写。
+    const ctxInput = Number(e.payload && e.payload.context_input_tokens || 0);
+    if (ctxInput > 0) {
+      // 超窗同累计口径的守卫：分母声明失真时不透出超上限数字，保留上个准确值。
+      if (ctxInput <= state.tokens.max) {
+        state.tokens = { input: ctxInput, max: state.tokens.max };
+        notify();
+      }
+      return;
+    }
     if (sid && turnUsageDirty[sid]) return; // 本轮多请求，累加 input 不可信，保留上个准确值
     var input = Number(e.payload && e.payload.input_tokens || 0);
     // 累加值超过窗口说明仍有多请求（内部重试等无事件轮），跳过避免显示超上限
@@ -1230,6 +1540,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
     }
   }); });
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- 终态分支（start/prune-done/rewrite-done/fail/cancel）本就贴着 30 上限；r7 M2 的计数基线重置以单个条件位并入 done 腿（实现在 bridge-messages 的计数器原语旁），内聚高于拆分
   listen("chat:compaction", function (e) { onSessionEvent(e, function () {
     if (e.payload && e.payload.session_id) turnUsageDirty[e.payload.session_id] = true; // 压缩轮 usage 含摘要请求
     var phase = e.payload && e.payload.phase;
@@ -1246,11 +1557,69 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       before === after &&
       looksLikePruneOnly &&
       msg.indexOf("Emergency compaction") !== 0;
+    // The compaction in-flight marker: start sets it, a terminal
+    // (done/fail/cancel) clears it, and the main lane's compact entry
+    // disables off it (the same mechanism as the code lane's
+    // lane.compacting). start stores a timestamp: the terminal event may
+    // never arrive (evicting the engine aborts its forwarder — see the
+    // reclaim_engine_entry comment in engine_pool.rs; a desktop restart on
+    // the web side loses it the same way), so the read side heals after 15
+    // minutes, the same fallback as Rust's MAX_COMPACTION_LATCH_AGE, and
+    // the entry is not disabled forever. The fallback reads the wall clock
+    // (Date.now), not a Rust-side monotonic Instant: a clock jump or resume
+    // from sleep re-enables early, and a compaction running past 15 minutes
+    // re-enables the entry before the engine finishes — the cost of a
+    // duplicate enqueue equals the Rust latch expiring (pool.compact_now
+    // does not coalesce enqueues), which is accepted; no extra
+    // monotonic-clock alignment machinery is introduced for it.
+    // The post_tokens carried by done is a post-compaction usage estimate
+    // (the forwarder gained it to refresh the usage bar; the Rust side
+    // computes it as a conservative estimated_input_tokens). The compaction
+    // turn already set turnUsageDirty, so subsequent usage accumulations
+    // are untrustworthy and the usage bar can only be refreshed by this
+    // post_tokens — it must not be swallowed by the dirty semantics.
+    const sid = e.payload && e.payload.session_id;
+    // The compactionStarts signal is persistent BY DESIGN: it survives the
+    // terminal and prune-only merges, so the UI can reconcile a manual
+    // compact marker whose start and terminal coalesced before any render
+    // (review 5874108926 follow-up) — cleared with the session.
+    // The compactionStarts signal carries the bridge's monotonic
+    // compaction sequence (NOT a wall-clock time — review 5876783763:
+    // timestamp ordering of persistent events breaks on
+    // same-millisecond collisions and clock rollbacks). It survives
+    // the terminal and prune-only merges, so the UI can reconcile a
+    // manual compact marker whose start and terminal coalesced before
+    // any render (review 5874108926 follow-up) — cleared with the
+    // session.
+    if (sid) {
+      if (phase === "start") {
+        state.compactingSessions[sid] = Date.now();
+        state.compactionSeq = (state.compactionSeq || 0) + 1;
+        state.compactionStarts[sid] = state.compactionSeq;
+      } else delete state.compactingSessions[sid];
+      notify();
+    }
     if (phase === "start") addSystemItem(bt("compactStart") + auto + " " + msg, { compactId: compactId, compactPhase: "start" });
     else if (phase === "done" && pruneOnlyAuto) addOrMergePruneCompaction(compactId);
     else if (phase === "done") addSystemItem(bt("compactDone") + auto + " " + msg);
     else if (phase === "fail") addSystemItem(bt("compactFail") + auto + ": " + msg);
     else if (phase === "cancel") addSystemItem(bt("compactCancel") + auto + (msg ? ": " + msg : ""), { compactId, compactPhase: "cancel" });
+    if (phase === "done") {
+      // <context_update> 计数基线在真重写（after < before）后重置（r7 M2）：
+      // 压缩把旧漂移增量从磁盘转写里摘除，而客户端气泡仍携带压缩前的
+      // 老 vintage——不重置的话权威重同步会被老消费量钳在 0（序号整体
+      // 低计）。实现与 prune-only 语义见 bridge-messages 的
+      // healRuntimeContextUpdatesVintageAfterCompaction；返回是否有改动。
+      const sid = e.payload && e.payload.session_id; // 来源 #836 以 payload 绑定会话
+      if (sid && window.PinvouBridgeMessages?.healRuntimeContextUpdatesVintageAfterCompaction?.(getBuffer(sid), state.chatItems, before, after)) {
+        notify();
+      }
+      const postTokens = Number(e.payload && e.payload.post_tokens);
+      if (Number.isFinite(postTokens) && postTokens > 0 && postTokens <= state.tokens.max) {
+        state.tokens = { input: postTokens, max: state.tokens.max };
+        notify();
+      }
+    }
   }); });
 
   // Sub-agent tool gates happen inside the foundation and do not produce an
@@ -1315,6 +1684,23 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       }
     }
   }); });
+
+  // The account-platform proxy observes the exact Billing contract before the
+  // model engine sees the terminal. Keep it by session and attach it to the
+  // authoritative chat:done record so successful overage settlement can show
+  // a turn-scoped warning card without turning the completed answer into an error.
+  listen("chat:billing_notice", function (e) {
+    var payload = e && e.payload || {};
+    var sid = payload.session_id;
+    var notice = payload.billing_notice;
+    if (!sid || !notice || notice.code !== "WALLET_INSUFFICIENT" || notice.context_type !== "PERSONAL" ||
+        deletedScheduledBillingNoticeSessions.has(sid)) return;
+    // A late event must not recreate state after the session was purged.
+    if (sid !== state.activeSessionId && !sessionStates[sid] &&
+        !(state.sessions || []).some(function (session) { return session.id === sid; }) &&
+        !(typeof isScheduledRunSession === "function" && isScheduledRunSession(sid))) return;
+    pendingBillingNotices[billingNoticeKey(sid, payload.turn_generation)] = notice;
+  });
 
   // File watcher 推送的产物事件：session workspace 下新文件/修改/删除。
   // 路由到对应 session 的产物列表(后台 session 的产物也跟踪)。

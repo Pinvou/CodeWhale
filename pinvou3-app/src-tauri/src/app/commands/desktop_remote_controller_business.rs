@@ -14,8 +14,8 @@ use crate::features::remote_control::controller::controlled::{
     ControlledCleanupScope, ControlledCleanupSink, ControlledDeviceManager,
 };
 use crate::features::remote_control::controller::permission::{
-    DecisionAuthority, DecisionOutcome, DispatchCommit, DispatchState, PermissionAuthority,
-    PermissionDecision,
+    DecisionAuthority, DecisionOutcome, PermissionAuthority, PermissionDecision,
+    PermissionDecisionOwner,
 };
 use crate::features::remote_control::controller::ports::{
     ControlledExecutionPort, RemotePortError, RemotePortFuture,
@@ -29,7 +29,7 @@ use crate::features::remote_control::controller::relay_runtime::{
     ControlledBusinessPort, controlled_monotonic_millis, log_controlled_port_error,
 };
 use crate::features::remote_control::controller::task::{
-    RemoteTaskLedger, RemoteTaskState, TaskLeaseBinding,
+    RemoteTaskLedger, RemoteTaskService, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::task::{
     RemoteTaskRequest, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,
@@ -53,38 +53,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
 
-/// A same-value allow retry observes the original dispatch, never dispatches twice.
-fn commit_effective_permission_allow(
-    authority: &PermissionAuthority,
-    request_id: &str,
-    outcome: &DecisionOutcome,
-) -> Result<(), String> {
-    match outcome {
-        DecisionOutcome::Decided {
-            decision: PermissionDecision::Allow,
-            dispatch_state,
-        }
-        | DecisionOutcome::Replayed {
-            decision: PermissionDecision::Allow,
-            dispatch_state,
-        } => {
-            if *dispatch_state == DispatchState::Dispatched {
-                return Ok(());
-            }
-            match authority
-                .commit_dispatch(request_id, authority.now_ms())
-                .map_err(|error| error.code.to_owned())?
-            {
-                DispatchCommit::Committed
-                | DispatchCommit::Rejected {
-                    code: "permission_already_dispatched",
-                } => Ok(()),
-                DispatchCommit::Rejected { code } => Err(code.to_owned()),
-            }
-        }
-        _ => Ok(()),
-    }
-}
+#[path = "desktop_remote_controller_business/permission_decision.rs"]
+mod permission_decision;
+#[path = "desktop_remote_controller_business/user_input_action.rs"]
+mod user_input_action;
 
 /// E2E-06：B 端清理端口。`ControlledDeviceManager` 在 stop / refresh / 远端断开 /
 /// 恢复失败等任何终态都会触发它；这里用同一代的任务登记表中断本代远端任务，
@@ -133,11 +105,17 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
             return;
         };
         let now_b = controlled_monotonic_millis();
-        let _ = runtime.service().interrupt_generation_and_clear_sessions(
+        let report = runtime.service().interrupt_generation_and_clear_sessions(
             generation,
             "remote_control_stopped",
             now_b,
         );
+        if let Some((_, failure)) = report.failed.first() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_interrupt_persistence_failed",
+                failure.code,
+            );
+        }
     }
 }
 
@@ -889,97 +867,34 @@ impl DesktopControlledBusiness {
         body: &Value,
     ) -> Result<Value, String> {
         let controlled = self.app.state::<ControlledDeviceManager>();
-        let (owner, request_id, decision) = controlled
-            .with_current_business_lease(lease, || {
-                let field = |key: &str| -> Result<&str, String> {
-                    body.get(key)
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "remote_action_invalid".to_owned())
-                };
-                let task_id = field("task_id")?;
-                let request_id = field("permission_request_id")?;
-                let decision = PermissionDecision::parse(field("decision")?)
-                    .ok_or_else(|| "permission_decision_invalid".to_owned())?;
-                let tasks = self
-                    .app
-                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
-                let session_id = tasks
-                    .service()
-                    .session_for(session_ref, &lease.remote_control_generation)
-                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
-                let record = self
-                    .app
-                    .state::<Arc<RemoteTaskLedger>>()
-                    .record(task_id)
-                    .map_err(|error| error.code.to_owned())?;
-                if record.session_id != session_id
-                    || record.lease != TaskLeaseBinding::from_context(lease)
-                    || record.is_terminal()
-                {
-                    return Err("task_session_binding_mismatch".to_owned());
-                }
-                let authority = self.app.state::<Arc<PermissionAuthority>>();
-                let outcome = authority
-                    .decide(
-                        DecisionAuthority::ControllerA,
-                        lease,
-                        task_id,
-                        request_id,
-                        decision,
-                        authority.now_ms(),
-                    )
-                    .map_err(|error| error.code.to_owned())?;
-                commit_effective_permission_allow(&authority, request_id, &outcome)?;
-                Ok((
-                    RemotePermissionOwner {
-                        task_sequence: record.sequence,
-                        session_id,
-                        task_id: task_id.to_owned(),
-                        lease: lease.clone(),
-                    },
-                    request_id.to_owned(),
-                    if matches!(outcome, DecisionOutcome::Expired) {
-                        PermissionDecision::Deny
-                    } else {
-                        decision
-                    },
-                ))
-            })
-            .map_err(|error| error.code.to_owned())??;
-
-        super::desktop_remote_permission::respond_remote_permission_via_acp(
-            &self.app.state::<AcpPool>(),
-            &owner,
-            &request_id,
-            decision,
-        )
-        .await?;
-        controlled
-            .with_current_business_lease(lease, || {
-                let record = self
-                    .app
-                    .state::<Arc<RemoteTaskLedger>>()
-                    .record(&owner.task_id)
-                    .map_err(|error| error.code.to_owned())?;
-                if record.sequence != owner.task_sequence
-                    || record.session_id != owner.session_id
-                    || record.lease != TaskLeaseBinding::from_context(lease)
-                    || !matches!(
-                        record.state,
-                        RemoteTaskState::Running | RemoteTaskState::WaitingPermission
-                    )
-                {
-                    return Err("task_session_binding_mismatch".to_owned());
-                }
-                Ok(())
-            })
-            .map_err(|error| error.code.to_owned())??;
-        let view = self
+        let tasks = self
             .app
-            .state::<Arc<PermissionAuthority>>()
-            .view(&request_id)
-            .map_err(|error| error.code.to_owned())?;
-        Ok(json!({"state": view.state}))
+            .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+            .service();
+        let authority = self.app.state::<Arc<PermissionAuthority>>();
+        let pool = self.app.state::<AcpPool>();
+        let response_authority = Arc::clone(&authority);
+        permission_decision::PermissionDecisionHandler {
+            controlled: &controlled,
+            tasks: tasks.as_ref(),
+            authority: &authority,
+        }
+        .handle(
+            lease,
+            session_ref,
+            body,
+            |owner, request_id, decision| async move {
+                super::desktop_remote_permission::respond_remote_permission_via_acp(
+                    &pool,
+                    &response_authority,
+                    &owner,
+                    &request_id,
+                    decision,
+                )
+                .await
+            },
+        )
+        .await
     }
 
     /// Resolve the A reference only through the current authenticated B
@@ -1058,13 +973,8 @@ impl DesktopControlledBusiness {
                         let views = self.app.state::<Arc<PermissionAuthority>>()
                             .pending_for_task(field("task_id")?);
                         if views.len() > 8 { return Err("permission_capacity".to_owned()); }
-                        let permissions: Vec<Value> = views.into_iter().map(|view| json!({
-                            "permission_request_id":view.permission_request_id,"task_id":view.task_id,
-                            "operation_type":view.operation_type,"risk_level":view.risk_level,
-                            "target_scope":view.target_scope,"preview":view.preview,
-                            "expires_at_ms":view.expires_at_ms.to_string(),"state":view.state,
-                            "decision":view.decision,"dispatch_state":view.dispatch_state,
-                        })).collect();
+                        let permissions: Vec<Value> = views.into_iter()
+                            .map(|view| view.into_remote_action_payload()).collect();
                         Ok(json!({"permissions": permissions}))
                     }
                     "permission_decide" => {
@@ -1082,6 +992,13 @@ impl DesktopControlledBusiness {
                         let begun = runtime.uploads().begin(context, metadata, now)?;
                         Ok(json!({"transfer_id": begun.handle_id, "chunk_bytes": begun.chunk_bytes.to_string(),
                             "total_bytes": begun.total_bytes.to_string()}))
+                    }
+                    "attachment_abort_confirmed" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        runtime.uploads().abort_confirmed(
+                            field("transfer_id")?, lease, &session_id, field("task_id")?,
+                        )?;
+                        Ok(json!({"transfer_id":field("transfer_id")?,"cleanup_confirmed":true}))
                     }
                     "attachment_chunk" | "attachment_abort" => {
                         let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
@@ -1179,7 +1096,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         operation: &str,
         body: &Value,
     ) -> Result<Value, String> {
-        if operation == "permission_decide" {
+        if matches!(operation, "user_input_list" | "user_input_respond") {
+            user_input_action::handle(&self.app, lease, session_ref, operation, body).await
+        } else if operation == "permission_decide" {
             self.handle_remote_permission_decision(lease, session_ref, body)
                 .await
         } else {
@@ -1952,7 +1871,9 @@ mod submit_boundary_tests {
     #[test]
     fn same_allow_retries_and_concurrent_dispatch_are_idempotent() {
         use super::*;
-        use crate::features::remote_control::controller::permission::PermissionRequest;
+        use crate::features::remote_control::controller::permission::{
+            DispatchCommit, DispatchState, PermissionRequest,
+        };
         let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 9_001_000)));
         let lease = LeaseContext {
             connection_id: "connection-1".into(),
@@ -1978,14 +1899,16 @@ mod submit_boundary_tests {
             .permission_request_id;
         // Both callers observe allow before either crosses the dispatch CAS.
         let barrier = Arc::new(std::sync::Barrier::new(2));
+        let deliveries = Arc::new(AtomicUsize::new(0));
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let authority = Arc::clone(&authority);
                 let barrier = Arc::clone(&barrier);
+                let deliveries = Arc::clone(&deliveries);
                 let lease = lease.clone();
                 let id = id.clone();
                 std::thread::spawn(move || {
-                    let outcome = authority
+                    authority
                         .decide(
                             DecisionAuthority::ControllerA,
                             &lease,
@@ -1996,13 +1919,25 @@ mod submit_boundary_tests {
                         )
                         .unwrap();
                     barrier.wait();
-                    commit_effective_permission_allow(&authority, &id, &outcome)
+                    authority
+                        .dispatch_bound_allow(&lease, "task-1", &id, || {
+                            deliveries.fetch_add(1, Ordering::SeqCst);
+                            true
+                        })
+                        .unwrap()
+                        .0
                 })
             })
             .collect();
-        for handle in handles {
-            assert_eq!(handle.join().unwrap(), Ok(()));
-        }
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(outcomes.contains(&DispatchCommit::Committed));
+        assert!(outcomes.contains(&DispatchCommit::Rejected {
+            code: "permission_already_dispatched"
+        }));
+        assert_eq!(deliveries.load(Ordering::SeqCst), 1);
         let retry = authority
             .decide(
                 DecisionAuthority::ControllerA,
@@ -2021,11 +1956,10 @@ mod submit_boundary_tests {
             }
         );
         assert_eq!(
-            commit_effective_permission_allow(&authority, &id, &retry),
-            Ok(())
-        );
-        assert_eq!(
-            authority.commit_dispatch(&id, authority.now_ms()).unwrap(),
+            authority
+                .dispatch_bound_allow(&lease, "task-1", &id, || panic!("retry dispatched again"))
+                .unwrap()
+                .0,
             DispatchCommit::Rejected {
                 code: "permission_already_dispatched"
             }

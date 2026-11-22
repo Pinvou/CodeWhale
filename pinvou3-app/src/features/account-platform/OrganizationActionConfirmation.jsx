@@ -1,0 +1,33 @@
+import { usePortalDialogScope } from './portal-dialog-scope.jsx';
+import React, { useLayoutEffect, useId, useRef } from 'react';
+import { createPortal } from 'react-dom';
+
+// Feature-local confirmation does not depend on native dialog commands.
+export function OrganizationActionConfirmation({ copy, title, tone, target, description = '', context, details, onCancel, onConfirm, canRestoreFocus, appearance = 'default', dangerous = false, className = '' }) {
+ const visible = usePortalDialogScope();
+ const titleID = useId(), descriptionID = useId(), dialog = useRef(null), cancelButton = useRef(null), restoreAllowed = useRef(canRestoreFocus);
+ restoreAllowed.current = canRestoreFocus;
+ useLayoutEffect(() => {
+    if (!visible) return undefined;
+  const previous = document.activeElement, element = dialog.current;
+  cancelButton.current?.focus();
+  return () => { if (previous?.isConnected && element?.contains(document.activeElement) && !previous.closest('[hidden]') && restoreAllowed.current()) previous.focus(); };
+ }, [visible]);
+ const contextID = context ? descriptionID + '-context' : undefined;
+ const keyDown = event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel(); return; }
+  if (event.key !== 'Tab') return;
+  const buttons = [...dialog.current.querySelectorAll('button:not(:disabled)')], first = buttons[0], last = buttons[buttons.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+ };
+ if (!visible) return null;
+  return createPortal(<div className="ap-org-confirm-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+  <div className={`ap-org-confirm-dialog${appearance === 'admin' ? ' ap-admin-org-confirm' : ''}${appearance === 'admin' && dangerous ? ' ap-admin-org-confirm-danger' : ''}${className ? ' ' + className : ''}`} ref={dialog} role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={contextID ? descriptionID + ' ' + contextID : descriptionID} onKeyDown={keyDown}>
+   <h3 id={titleID}>{title}</h3><p id={descriptionID}>{copy.confirm}{description && <> {description}</>}</p>
+   <dl>{target && <><dt>{copy.confirmationTarget}</dt><dd>{target}</dd></>}{details.map(item => <React.Fragment key={item.name}><dt>{item.label}</dt><dd>{item.value}</dd></React.Fragment>)}</dl>
+   {context && <div id={contextID}>{context}</div>}
+   <footer><button type="button" ref={cancelButton} onClick={onCancel}>{copy.cancelConfirmation}</button><button type="button" className={appearance === 'admin' ? undefined : tone === 'danger' ? 'ap-danger' : 'ap-primary'} onClick={onConfirm}>{appearance === 'admin' && copy.confirmActionTemplate ? copy.confirmActionTemplate.replace('{action}', () => title) : copy.confirmAction}</button></footer>
+  </div>
+ </div>, document.body);
+}

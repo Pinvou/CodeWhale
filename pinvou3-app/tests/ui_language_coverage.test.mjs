@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import test from 'node:test';
+import * as sharedCopyExports from '../src/shared/i18n.js';
+import * as connectorCopyExports from '../src/shared/connector-i18n.js';
 import { readFileSync } from 'node:fs';
+import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 import { dict } from './helpers/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
 import { errorCode, localizedErrorMessage } from '../src/shared/user-facing-error.js';
 import {
@@ -11,7 +15,7 @@ import {
   localizeConnectorAlert,
 } from '../src/features/tools/connector-ui-state.js';
 
-const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
+const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 // Shape pins must not match text inside comments: a guard commented out in
 // the source would otherwise still satisfy every anchor. Round-23 should-fix
 // 2 dropped full-line `//` comments (live-verified — commenting out the
@@ -60,6 +64,40 @@ function assertContainsTranslationKeys(reference, candidate, path) {
   }
 }
 
+// Independent copy exports do not join the lazy main dict. Discover their
+// public entry points so future locale objects join this gate automatically.
+// Keep dict's historical one-way key coverage/fallback contract below intact.
+const copyLanguages = ['zh', 'en', 'ja'];
+const copyNodeType = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+function assertCopyShape(reference, candidate, path) {
+  const type = copyNodeType(reference);
+  assert.equal(copyNodeType(candidate), type, `${path} must have ${type} type`);
+  if (type !== 'object' && type !== 'array') return;
+  assert.deepEqual(Object.keys(candidate).sort(), Object.keys(reference).sort(), `${path} translation keys must match`);
+  if (type === 'array') assert.equal(candidate.length, reference.length, `${path} array length must match`);
+  for (const key of Object.keys(reference)) assertCopyShape(reference[key], candidate[key], `${path}.${key}`);
+}
+const independentCopies = [
+  ['shared', sharedCopyExports],
+  ['connector', connectorCopyExports],
+].flatMap(([entry, exports]) => Object.entries(exports)
+  .filter(([name, value]) => name !== 'dict' && (
+    /(?:Copy|_COPY)$/i.test(name) || isRecord(value) && copyLanguages.some(language => isRecord(value[language]))
+  ))
+  .map(([name, copy]) => ({ name: `${entry}.${name}`, copy })));
+assert.ok(independentCopies.length > 0, 'public independent locale copy exports must be covered');
+for (const { name, copy } of independentCopies) {
+  test(`independent locale parity: ${name}`, () => {
+    assert.ok(isRecord(copy), `${name} must be a locale object`);
+    for (const language of copyLanguages) {
+      assert.ok(Object.hasOwn(copy, language), `${name}.${language} locale must exist`);
+      assert.ok(isRecord(copy[language]), `${name}.${language} locale must be an object`);
+      assert.ok(Object.keys(copy[language]).length > 0, `${name}.${language} locale must not be empty`);
+    }
+    for (const language of ['en', 'ja']) assertCopyShape(copy.zh, copy[language], `${name}.${language}`);
+  });
+}
+
 assertContainsTranslationKeys(dict.zh, dict.en, 'en');
 assertContainsTranslationKeys(dict.zh, dict.ja, 'ja');
 
@@ -68,6 +106,7 @@ for (const language of ['zh', 'en', 'ja']) {
   for (const section of [
     'uiRemote',
     'uiMonitor',
+    'uiDeviceMgr',
     'uiSettings',
     'uiSettingsDetail',
     'uiPetSettings',
@@ -177,6 +216,131 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
+    // All 125 uiDeviceMgr keys are pinned (PR #1661 评审跟进：三语**同时**删掉一个
+    // key 时 parity 检查全绿、视图渲染 undefined——uiAuxChat round-14 事故的同款
+    // 洞；chipGpuTemp→chipMaxTemp 与评审新增键（servicesStale 随 round-6；
+    // peakLabel/linkReasonBridge/linkReasonUnknown/registerNoId 随 round-7）随本
+    // 清单一起钉死。任何键面变更必须同提交更新此清单与计数)。
+    for (const key of [
+      'loading', 'bridgeNotReady', 'errorBanner', 'retry', 'updatedAtLabel',
+      'chipDisk', 'chipMemory', 'chipMaxTemp', 'chipDriver', 'chipCuda',
+      'sectionOverview', 'sectionSensors', 'sectionStorage', 'sectionNetwork',
+      'sectionProcesses', 'sectionModels', 'sectionDoctor',
+      'sensorEmpty', 'chipNvme', 'chipWifi', 'chipFan', 'chipBoard', 'chipPower',
+      'sensorWarnAdvice', 'sensorCritAdvice', 'critLimit', 'peakLabel',
+      // round-30 评审 P3：非温度量的 crit 建议不得误指温度（sensorCritAdviceNonTemp）；
+      // 旧行在场的刷新失败常驻陈旧行提示（externalStaleRowsHint）。
+      'sensorCritAdviceNonTemp', 'externalStaleRowsHint',
+      'storageEmpty', 'diskSystemBadge', 'diskWarnAdvice', 'diskCritAdvice',
+      'networkEmpty', 'netTypeEthernet', 'netTypeWifi', 'netTypeLoopback',
+      'netTypeBridge', 'netTypeVirtual', 'netTypeOther',
+      'procCpuTitle', 'procMemTitle', 'procGpuTitle', 'procGpuUnavailable', 'procNote',
+      'modelsTitle', 'storeSubtitle', 'externalSubtitle', 'refresh', 'install',
+      'servicesLoading', 'servicesFailed', 'servicesStale', 'svcOllama', 'svcVllm', 'svcLmStudio', 'svcDocker',
+      'storeManaged', 'gotoModelStore', 'statusRunning', 'statusDeployed', 'statusPending',
+      'kindOllama', 'kindEndpoint', 'kindWeights', 'kindOther',
+      'registeredBadge', 'statusAvailable', 'statusUnreachable',
+      'linked', 'link', 'linkDone', 'linkDisabledRemote', 'linkFailed',
+      // round-31 评审 P2：商店归属未知（读取中/失败）时接入禁用的说明文案。
+      'linkDisabledStoreUnknown',
+      'remove', 'removeArmed', 'removeCancel', 'removeConfirmIntro', 'deleteWeights',
+      'removeWeightsPath', 'removeIrreversible', 'linkDisabledUnreachable',
+      // round-33 评审 P2：改属保留行的 toast 文案（条件删除返回 false）。
+      'linkRowKept',
+      'doctorSendFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale', 'linkRowRecycled', 'removeDone', 'removeFailed', 'warn',
+      'linkReasonBridge', 'linkReasonUnknown', 'registerNoId',
+      // Store/device shared deletion boundary owns four localized failures.
+      'weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable',
+      'ollamaOfflineHint', 'localSourceHint',
+      'doctorPackages', 'doctorPackagesDesc', 'doctorDependencies', 'doctorDependenciesDesc',
+      'doctorCuda', 'doctorCudaDesc', 'doctorServices', 'doctorServicesDesc',
+      'doctorHogs', 'doctorHogsDesc', 'doctorCustomPlaceholder', 'doctorCharCounter', 'doctorSend',
+      // round-21: 快照陈旧旗 / 无模型标识的接入占位 / 服务失败原因码（后端
+      // ServiceStatus.reason 的机器码 → 三语文案，替代中文 detail 直出 tooltip）。
+      'dataStale', 'linkDisabledNoModel',
+      'svcReasonTimeout', 'svcReasonRefused', 'svcReasonNetwork', 'svcReasonClientInit',
+      'svcReasonHttp', 'svcReasonNotDetected', 'svcReasonDockerExit', 'svcReasonDockerUnavailable',
+      'svcReasonDockerTaskFailed',
+    ]) {
+      assert.ok(dict[language].uiDeviceMgr[key], `${language}.uiDeviceMgr.${key} must exist`);
+    }
+    // Count guard：清单看不到新增——加键必须同步更新计数（见 uiAuxChat round-36 同款）。
+    assert.equal(
+      Object.keys(dict[language].uiDeviceMgr).length,
+      125,
+      `${language}.uiDeviceMgr must hold exactly the 125 pinned keys`,
+    );
+    // Single-language whole-section loss guard（十九轮评审 P2）：dictJa 以
+    // `...dictEn` 铺底，整段删掉 `jaBase.uiDeviceMgr` / `jaBase.deviceMgr` 时
+    // 上面的逐键存在/计数/typeof 钉全部照绿（回落英文），而 ja 用户看到整页
+    // 英文。kbEmbedOn 的 notEqual 先例补两枚 ja≠en 探针。
+    assert.notEqual(
+      dict.ja.uiDeviceMgr.loading, dict.en.uiDeviceMgr.loading,
+      'ja.uiDeviceMgr must not silently fall back to the en section',
+    );
+    assert.notEqual(
+      dict.ja.deviceMgr, dict.en.deviceMgr,
+      'ja.deviceMgr must not silently fall back to the en nav key',
+    );
+    // Interpolation keys must stay functions in all three languages (round-7
+    // review P3): a fn→string flip in one language passes the existence and
+    // count loops while rendering literal text at the call site — the typed
+    // pins below close that hole (same pattern as uiMultiAgent).
+    for (const key of [
+      'updatedAtLabel', 'critLimit', 'peakLabel', 'servicesFailed', 'removeConfirmIntro',
+      'removeWeightsPath', 'linkFailed', 'doctorFailed', 'refreshFailed', 'linkRowStale',
+      'linkRowRecycled', 'removeDone', 'removeFailed', 'warn', 'doctorCharCounter',
+      'svcReasonHttp', 'svcReasonDockerExit',
+      // round-33 新增的改属保留 toast 也是插值函数（copy.linkRowKept(name)）：
+      // 缺这枚钉时单语翻成字符串全套件照绿、运行时 TypeError（三十五轮评审 P2）。
+      'linkRowKept',
+      'weightRemovalLockFailed', 'weightRemovalPathUnavailable',
+    ]) {
+      assert.equal(
+        typeof dict[language].uiDeviceMgr[key],
+        'function',
+        `${language}.uiDeviceMgr.${key} must be an interpolation function`,
+      );
+    }
+    for (const key of ['weightRemovalBusy', 'weightRemovalPathInvalid']) {
+      assert.equal(typeof dict[language].uiDeviceMgr[key], 'string', `${language}.uiDeviceMgr.${key} must be text`);
+    }
+    for (const key of ['weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable']) {
+      const render = locale => {
+        const value = dict[locale].uiDeviceMgr[key];
+        return typeof value === 'function' ? value('native diagnostic') : value;
+      };
+      const rendered = render(language);
+      assert.equal(typeof rendered, 'string', `${language}.uiDeviceMgr.${key} must render text`);
+      assert.ok(rendered.trim().length > 0, `${language}.uiDeviceMgr.${key} must not be empty`);
+      if (language !== 'zh') assert.notEqual(rendered, render('zh'), `${language}.uiDeviceMgr.${key} must not fall back to zh`);
+      if (language === 'ja') assert.notEqual(rendered, render('en'), `ja.uiDeviceMgr.${key} must not fall back to en`);
+    }
+    // Value-language + arity guard (round-21 review P3 mutation evidence: an en
+    // value flipped to Chinese used to pass every check). en string leaves must
+    // carry no Han characters — ja is exempt because Japanese legitimately uses
+    // kanji; the ja-vs-en non-fallback probes above cover ja's direction. Every
+    // interpolation fn must have the same arity as zh (the interpolation contract
+    // is keyed, so a fn/1 vs fn/2 drift in one language breaks the call site
+    // silently).
+    for (const [key, value] of Object.entries(dict[language].uiDeviceMgr)) {
+      if (language === 'en' && typeof value === 'string') {
+        assert.ok(
+          !/\p{Script=Han}/u.test(value),
+          `en.uiDeviceMgr.${key} must not contain Han characters`,
+        );
+      }
+      if (typeof value === 'function') {
+        assert.equal(
+          value.length,
+          dict.zh.uiDeviceMgr[key].length,
+          `${language}.uiDeviceMgr.${key} arity must match zh`,
+        );
+      }
+    }
+    // Nav key pin: uiDeviceMgr pins cannot see the sibling nav key — deleting
+    // `deviceMgr` from all three dicts would render an undefined entry label.
+    assert.ok(dict[language].deviceMgr, `${language}.deviceMgr must exist`);
   assert.ok(dict[language].uiSettings.providers, `${language}.uiSettings.providers must exist`);
   for (const key of [
     'addProvider', 'switch', 'official', 'current', 'export', 'import',
@@ -234,10 +398,9 @@ for (const language of ['zh', 'en', 'ja']) {
   );
   assert.ok(dict[language].uiChatExtra.draftingScheduled, `${language}.uiChatExtra.draftingScheduled must exist`);
   assert.ok(dict[language].uiChatScenes.attachmentPrompt, `${language}.uiChatScenes.attachmentPrompt must exist`);
-  assert.ok(dict[language].uiAccount.availableQuota, `${language}.uiAccount.availableQuota must exist`);
-  assert.ok(dict[language].uiAccount.settingsLoadFailed, `${language}.uiAccount.settingsLoadFailed must exist`);
-  assert.ok(dict[language].uiAccount.settingsLoadFailedDetail, `${language}.uiAccount.settingsLoadFailedDetail must exist`);
-  assert.ok(dict[language].uiAccount.errors.service_unreachable, `${language}.uiAccount.errors.service_unreachable must exist`);
+  assert.ok(accountPlatformCopy[language].availableCredits, `${language}.uiAccountPlatform.balance must exist`);
+  assert.ok(accountPlatformCopy[language].requestFailed, `${language}.uiAccountPlatform.requestFailed must exist`);
+  assert.ok(accountPlatformCopy[language].errors.oidc_credentials_invalid, `${language}.uiAccountPlatform.errors.oidc_credentials_invalid must exist`);
   assert.ok(dict[language].uiToolStore.toolNames.eip, `${language}.uiToolStore.toolNames.eip must exist`);
   assert.ok(dict[language].uiToolStore.toolNames.zhidao, `${language}.uiToolStore.toolNames.zhidao must exist`);
   assert.ok(dict[language].uiToolStore.sso, `${language}.uiToolStore.sso must exist`);
@@ -255,7 +418,6 @@ for (const language of ['zh', 'en', 'ja']) {
     }
     assert.equal(tool.welcomeQueries.length, 4, `${language}.uiToolDetails.tools.${toolId}.welcomeQueries must contain four prompts`);
   }
-  assert.ok(dict[language].uiPlatformMisc.tauriBridge.builtinModelUnavailable, `${language}.uiPlatformMisc.tauriBridge.builtinModelUnavailable must exist`);
   assert.ok(dict[language].uiSettingsDetail.settingsLoadFailed, `${language}.uiSettingsDetail.settingsLoadFailed must exist`);
   // uiMultiAgent 收缩为活键集（ADR-0006）：开关行 + 行内专家卡 + 只读面板。
   // 确认卡/审批链/台账时代的键已随旧入口退役，不再断言存在。
@@ -426,11 +588,190 @@ for (const language of ['zh', 'en', 'ja']) {
     return out;
   };
   const zhTypes = new Map(typedLeafKeys(dict.zh.uiComputerUse));
-  assert.ok(zhTypes.size >= 37, `uiComputerUse leaf count looks wrong: ${zhTypes.size}`);
+  // Count guard (R8: this section previously had only a `>= 37` lower
+  // bound, so deleting a key from all three dictionaries at once — or from
+  // zh alone, breaking parity — passed the whole suite). Any key change
+  // must update this count in the same commit; the section currently holds
+  // 68 leaves including the three platform consent caveats (mac/linux/
+  // windows), the unknown-platform honesty line (R16 adds its settings-note
+  // twin, `virtualNoteUnknownPlatform`), and the R12 pair (the
+  // live-physical fact reworded + the new gated future-isolation promise).
+  assert.equal(zhTypes.size, 68, `uiComputerUse must hold exactly the 68 pinned leaves (found ${zhTypes.size})`);
   for (const language of ['en', 'ja']) {
     const types = new Map(typedLeafKeys(dict[language].uiComputerUse));
+    assert.equal(
+      types.size,
+      zhTypes.size,
+      `${language}.uiComputerUse must hold exactly as many leaves as zh`,
+    );
     for (const [key, type] of zhTypes) {
+      assert.ok(types.has(key), `${language}.uiComputerUse.${key} must exist (parity with zh)`);
       assert.equal(types.get(key), type, `${language}.uiComputerUse.${key} must be a ${type} like zh`);
+    }
+  }
+  // The platform consent caveats are the honest-isolation surface: each
+  // must exist in every language or the grant dialog silently renders no
+  // caveat for that platform. The unknown-platform honesty line also gets
+  // a content anchor (R14): presence-only typing let a single-language
+  // drop to empty/placeholder text pass the whole suite.
+  for (const key of ['grantMacCaveat', 'grantLinuxCaveat', 'grantWindowsCaveat', 'grantUnknownPlatformCaveat', 'virtualNoteUnknownPlatform']) {
+    for (const language of ['zh', 'en', 'ja']) {
+      assert.equal(
+        typeof dict[language].uiComputerUse[key],
+        'string',
+        `${language}.uiComputerUse.${key} must be a string`,
+      );
+    }
+  }
+  const unknownPlatformAnchors = ['isolation', '分離', '隔离'];
+  for (const [index, language] of ['en', 'ja', 'zh'].entries()) {
+    const line = dict[language].uiComputerUse.grantUnknownPlatformCaveat;
+    assert.ok(
+      line.length > 20 && line.includes(unknownPlatformAnchors[index]),
+      `${language}.grantUnknownPlatformCaveat must carry the real honesty line \
+       (anchor "${unknownPlatformAnchors[index]}", got ${JSON.stringify(line)})`,
+    );
+  }
+  // R16: the settings-note twin of the honesty line — the settings row
+  // renders it when the platform capability is absent, so the absolute
+  // "never shows on your screen" hint never stands on the page unqualified.
+  const settingsUnknownAnchors = ['could not be verified', '検証できなかった', '无法验证'];
+  for (const [index, language] of ['en', 'ja', 'zh'].entries()) {
+    const line = dict[language].uiComputerUse.virtualNoteUnknownPlatform;
+    assert.ok(
+      line.length > 20 && line.includes(settingsUnknownAnchors[index]),
+      `${language}.uiComputerUse.virtualNoteUnknownPlatform must carry the \
+       honesty line (anchor "${settingsUnknownAnchors[index]}", got ${JSON.stringify(line)})`,
+    );
+  }
+  // The per-OS disclosure is maintained TWICE per platform (settings note +
+  // grant caveat) and must not drift apart: both copies of a platform's
+  // residual share anchor phrases in every language (R9: nothing compared
+  // the two copies before).
+  const disclosureAnchors = [
+    ['virtualNoteMacos', 'grantMacCaveat', ['best-effort', 'できる限り', '尽力']],
+    // R12 (M2): the R11 en settings note silently dropped the
+    // session-scope rearrangement disclosure the ja/zh notes carry — the
+    // single generic anchor above could not see it. Anchor the
+    // rearrangement + overlap-free-verification sentences specifically.
+    ['virtualNoteMacos', 'grantMacCaveat', ['top-left corner', '画面の左上へ', '屏幕左上角']],
+    // R14: the remaining consent-critical sentences get their own anchors —
+    // a single-language drop of any of them passed the suite before (the
+    // exact-leaf count cannot see content, only keys).
+    ['virtualNoteMacos', 'grantMacCaveat', ['keep running', 'し続け', '继续运行']],
+    ['virtualNoteMacos', 'grantMacCaveat', ['mirror set', 'ミラーセット', '镜像集合']],
+    // R15: the macOS clipboard channel is consent-critical (the R9 Windows
+    // precedent) and the pre-consent construction ordering is the honest
+    // framing for the placement sentence — both disclosures exist in both
+    // keys of the mac pair in every language, anchored so a single-language
+    // drop fails the suite.
+    ['virtualNoteMacos', 'grantMacCaveat', ['clipboard', 'クリップボード', '剪贴板']],
+    [
+      'virtualNoteMacos',
+      'grantMacCaveat',
+      ['even if you deny', 'この要求を拒否した場合でも', '即使你拒绝'],
+    ],
+    [
+      'virtualNoteMacos',
+      'grantMacCaveat',
+      ['without the Accessibility permission', 'アクセシビリティ権限がない', '未授予辅助功能权限'],
+    ],
+    // R16: the macOS Stop-does-not-close + wedged-press truths reach the
+    // user-facing pair too (they used to live only in the model-facing
+    // target note) — anchored so a single-language drop fails the suite.
+    [
+      'virtualNoteMacos',
+      'grantMacCaveat',
+      ['Pressing Stop does not close', '停止を押しても', '按下“停止”不会关闭'],
+    ],
+    // R17: the wedged-press clause is a SEPARATE sentence in the same
+    // pair — the Stop anchor above still matched with the clause dropped
+    // (in one language or all), so the clause gets its own row. Same for
+    // the overlap-free-verification sentence the R12 comment claimed was
+    // anchored: only the top-left-corner anchor existed.
+    [
+      'virtualNoteMacos',
+      'grantMacCaveat',
+      ['mid-gesture', '押されたまま', '保持按下'],
+    ],
+    [
+      'virtualNoteMacos',
+      'grantMacCaveat',
+      ['overlap-free', '重なり', '不重叠'],
+    ],
+    ['virtualNoteLinux', 'grantLinuxCaveat', ['raw Wayland', 'raw Wayland', 'raw Wayland']],
+    // R18: the Linux wind-down abruptness (group SIGKILL at Stop, unsaved
+    // work lost) reached the model-facing note in R15 but never the
+    // user-facing pair — both sibling platforms carry their Stop semantics
+    // here, so the Linux pair gets its own anchor.
+    [
+      'virtualNoteLinux',
+      'grantLinuxCaveat',
+      ['Pressing Stop ends', '「停止」を押すと', '按下“停止”会立即'],
+    ],
+    [
+      'virtualNoteLinux',
+      'grantLinuxCaveat',
+      ['unsaved work in them is lost', '未保存の作業は失われ', '未保存的工作会丢失'],
+    ],
+    ['virtualNoteWindows', 'grantWindowsCaveat', ['broker', 'ブローカー', '系统中转']],
+    ['virtualNoteWindows', 'grantWindowsCaveat', ['clipboard', 'クリップボード', '剪贴板']],
+    [
+      'virtualNoteWindows',
+      'grantWindowsCaveat',
+      ['session is fully closed', 'セッションを完全に閉じた', '会话完全关闭'],
+    ],
+    ['virtualNoteWindows', 'grantWindowsCaveat', ['Alt+Tab', 'Alt+Tab', 'Alt+Tab']],
+  ];
+  for (const [noteKey, caveatKey, anchors] of disclosureAnchors) {
+    for (const [index, language] of ['en', 'ja', 'zh'].entries()) {
+      const anchor = anchors[index];
+      const note = dict[language].uiComputerUse[noteKey];
+      const caveat = dict[language].uiComputerUse[caveatKey];
+      assert.ok(
+        note.includes(anchor),
+        `${language}.${noteKey} must keep the platform residual anchor "${anchor}"`,
+      );
+      assert.ok(
+        caveat.includes(anchor),
+        `${language}.${caveatKey} must keep the platform residual anchor "${anchor}"`,
+      );
+    }
+  }
+  // The virtual grant description's device-reach sentence (audio/camera) is
+  // a single key (no note/caveat pair) — anchor it per language too (R14).
+  const deviceReachAnchors = ['audio and camera', 'オーディオ/カメラ', '音频/摄像头'];
+  for (const [index, language] of ['en', 'ja', 'zh'].entries()) {
+    assert.ok(
+      dict[language].uiComputerUse.grantDescVirtual.includes(deviceReachAnchors[index]),
+      `${language}.grantDescVirtual must keep the audio/camera device-reach \
+       anchor "${deviceReachAnchors[index]}"`,
+    );
+  }
+  // R15: the remaining consent-critical sentences without a note/caveat
+  // pair get their own single-key anchors — a single-language drop of any
+  // of them passed the suite before (the exact-leaf count cannot see
+  // content, only keys). The base isolation claim, the screening-inactivity
+  // clause on the virtual grant, and the physical arm's best-effort
+  // screening clause are all honesty-load-bearing.
+  const singleKeyAnchors = [
+    ['grantDescVirtual', 'never shows on your screen', 'あなたの画面には表示されない', '画面不会出现在你的屏幕上'],
+    ['grantDescVirtual', 'its apps cannot be screened', '内部のアプリは検査できないため', '其中的应用无法被筛查'],
+    ['grantDesc', 'screening is best-effort', '確認はベストエフォートであり', '确认是尽力而为的'],
+    // R17: the Screen Recording sharing sentence lives only in the macOS
+    // settings note (no caveat twin), so it rides the single-key scheme.
+    ['virtualNoteMacos', 'Screen Recording', '画面収録', '屏幕录制'],
+  ];
+  for (const [key, enAnchor, jaAnchor, zhAnchor] of singleKeyAnchors) {
+    for (const [language, anchor] of [
+      ['en', enAnchor],
+      ['ja', jaAnchor],
+      ['zh', zhAnchor],
+    ]) {
+      assert.ok(
+        dict[language].uiComputerUse[key].includes(anchor),
+        `${language}.uiComputerUse.${key} must keep the consent anchor "${anchor}"`,
+      );
     }
   }
   assert.match(source('features/chat/ChatView.jsx'), /t\.uiComputerUse/);
@@ -443,21 +784,25 @@ const viewLoaders = source('app/view-loaders.js');
 assert.match(viewLoaders, new RegExp("toolStore: \\(\\) => import\\('\\.\\./features/tools/ToolStoreView\\.jsx'\\)"));
 assert.match(main, /<LazyToolStoreView[^>]*t=\{t\}/);
 assert.match(main, /<WebConnectionStatus[^>]*t=\{t\}/);
-assert.match(main, /<AccountPopover[\s\S]{0,300}t=\{t\}/);
-assert.match(main, /const accountCopy = t\.uiAccount/);
-assert.match(main, /accountCopy\.availableQuota/);
-assert.match(main, /accountCopy\.loginAndSync/);
-assert.match(main, /setLoginErrorCode\(errorCode\(err\) \|\| 'unknown'\)/);
-assert.match(main, /localizedErrorMessage\(\{ code: loginErrorCode \}, accountCopy\.errors, accountCopy\.builtinLoginFailed\)/);
-assert.match(main, /localizedErrorMessage\(\{ code: accountErrorCode \}, accountCopy\.errors, accountCopy\.syncFailed\)/);
-assert.doesNotMatch(main, /setLoginError\(err && err\.message/);
-assert.doesNotMatch(main, /setLlmApiError\(e && e\.message/);
-assert.doesNotMatch(main, /console\.error\('llm api (?:quota refresh|login) failed:', e\)/);
-assert.match(main, /const refreshLlmApiStatus = useCallback\(async \(\) => \{[\s\S]{0,1000}\}, \[\]\);/);
-assert.doesNotMatch(main, /\}, \[t\.uiAccount\.syncFailed\]\);/);
-assert.match(main, /formatQuotaTokens\(limit, t\.langTag\)/);
-assert.match(main, /t\.uiAccount\.viewQuota/);
-assert.doesNotMatch(main, />查看可用额度</);
+assert.match(main, /<LazyAccountPlatformPopover[\s\S]{0,400}copy=\{accountPlatformCopy\[language\]\}/);
+assert.match(main, /title=\{accountPlatformCopy\[language\]\.title\}/);
+assert.doesNotMatch(main, /<AccountPopover/);
+const accountPlatformPopover = source('features/account-platform/AccountPlatformPopover.jsx');
+assert.match(accountPlatformPopover, /<AccountPlatformView \{\.\.\.props\}/);
+const accountPlatformView = source('features/account-platform/AccountPlatformView.jsx');
+assert.match(accountPlatformView, /copy\.availableCredits/);
+assert.match(accountPlatformView, /center\.reserved/);
+const desktopAccountCenter = source('features/account-platform/DesktopAccountCenter.jsx');
+assert.match(desktopAccountCenter, /copy\.availableCredits/);
+assert.match(desktopAccountCenter, /copy\.reservedCredits/);
+assert.match(accountPlatformView, /localizedAccountPlatformError/);
+assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|modelSelectionSaved/);
+assert.doesNotMatch(accountPlatformPopover, />可用余额</);
+assert.equal(accountPlatformCopy.zh.availableCredits, '可用积分');
+assert.equal(accountPlatformCopy.zh.reservedCredits, '已预留积分');
+assert.match(accountPlatformView, /localizedAccountPlatformError\(copy, reason\)/);
+assert.match(accountPlatformView, /copy\.retry/);
+assert.doesNotMatch(main, /refreshLlmApiStatus/);
 assert.match(main, /<ViewErrorBoundary[^>]*heading=\{t\.uiSettingsDetail\.settingsLoadFailed\}[^>]*detail=\{t\.uiSettingsDetail\.settingsLoadFailedDetail\}[^>]*t=\{t\}/);
 assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
 // The main window renders codex through the LazyCodexAcpView wrapper (which
@@ -471,7 +816,6 @@ assert.match(viewErrorBoundary, /this\.props\.detail \|\| message/);
 assert.doesNotMatch(viewErrorBoundary, />设置页加载失败</);
 assert.match(main, /t\.uiScheduled\.runStatus\[value\]/);
 assert.doesNotMatch(main, /queued:\s*'等待中'/);
-assert.match(main, /window\.PinvouTauriBridgeStrings = misc\.tauriBridge/);
 
 const petWindow = source('features/pet/PetWindow.jsx');
 // The language follow (get_settings seed + ui:language_changed listener)
@@ -484,6 +828,16 @@ assert.match(followHook, /listen\(['"]ui:language_changed['"]/);
 assert.match(petWindow, /const petCopy = t\.uiPet/);
 
 assert.match(source('features/monitor/MonitorView.jsx'), /t\.uiMonitor/);
+// MegaCube 设备管理页：整页文案走 uiDeviceMgr（含嵌入式 MonitorView 复用）。
+const deviceManagerView = source('features/device-manager/DeviceManagerView.jsx');
+assert.match(deviceManagerView, /const copy = t\.uiDeviceMgr/);
+assert.doesNotMatch(deviceManagerView, /[\u{3000}-\u{30ff}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{ff00}-\u{ffef}]/u, 'device-manager view must stay free of CJK literals incl. kana/fullwidth punctuation (i18n only)');
+const deviceRemovalErrors = source('features/device-manager/removal-errors.js');
+assert.match(stripComments(deviceManagerView), /deviceModelRemovalError\(/);
+for (const key of ['weightRemovalBusy', 'weightRemovalLockFailed', 'weightRemovalPathInvalid', 'weightRemovalPathUnavailable']) {
+  assert.match(stripComments(deviceRemovalErrors), new RegExp(`copy\\.${key}\\b`), `device removal must consume the pinned ${key} copy`);
+}
+assert.doesNotMatch(deviceRemovalErrors, /[\u{3000}-\u{30ff}\u{4e00}-\u{9fff}\u{f900}-\u{faff}\u{ff00}-\u{ffef}]/u, 'device removal helper must keep owned copy in shared i18n');
 const scheduledTasks = source('features/scheduled/ScheduledTasksView.jsx');
 assert.match(scheduledTasks, /const scheduledCopy = t\.uiScheduled/);
 assert.match(scheduledTasks, /scheduledCopy\.taskName/);
@@ -550,27 +904,30 @@ assert.doesNotMatch(chatRaw, /:\s*'描述你想生成或调整的内容'/);
 assert.doesNotMatch(chatRaw, />下载语音识别模型</);
 assert.match(auxChatPanel, /const copy = t\.uiAuxChat/);
 assert.match(auxChatPanel, /copy=\{conversationCopy\}/);
-const tauriSettingsBridge = source('platform/tauri/bridge/settings.js');
-assert.match(tauriSettingsBridge, /root\.PinvouTauriBridgeStrings/);
+// Account Platform replaces the retired LLMAPI availability messages;
+// localized account failures are pinned below through localizedErrorMessage.
+const tauriBridge = source('platform/tauri/bridge.js');
+assert.match(tauriBridge, /var lang = state\.settings && state\.settings\.language;/);
+assert.match(tauriBridge, /lang === "en" \? BT_TABLE\.en : lang === "ja" \? BT_TABLE\.ja : BT_TABLE\.zh/);
 
 assert.equal(errorCode({ code: 'sso_timeout', message: '原始诊断' }), 'sso_timeout');
-assert.equal(errorCode(new Error('service_unreachable: raw backend detail')), 'service_unreachable');
+assert.equal(errorCode(new Error('oidc_credentials_invalid: raw backend detail')), 'oidc_credentials_invalid');
 assert.equal(errorCode(new Error('raw backend detail')), '');
 assert.equal(
   localizedErrorMessage(
-    new Error('service_unreachable: raw backend detail'),
-    dict.ja.uiAccount.errors,
-    dict.ja.uiAccount.syncFailed,
+    new Error('oidc_credentials_invalid: raw backend detail'),
+    accountPlatformCopy.ja.errors,
+    accountPlatformCopy.ja.requestFailed,
   ),
-  dict.ja.uiAccount.errors.service_unreachable,
+  accountPlatformCopy.ja.errors.oidc_credentials_invalid,
 );
 assert.equal(
   localizedErrorMessage(
     new Error('未知的底层诊断'),
-    dict.en.uiAccount.errors,
-    dict.en.uiAccount.syncFailed,
+    accountPlatformCopy.en.errors,
+    accountPlatformCopy.en.requestFailed,
   ),
-  dict.en.uiAccount.syncFailed,
+  accountPlatformCopy.en.requestFailed,
 );
 assert.equal(connectorErrorCodeForStep('runtime'), 'runtime_prepare_failed');
 assert.equal(connectorErrorCodeForStep('cli'), 'cli_install_failed');
@@ -599,19 +956,19 @@ assert.equal(failedAuthorizationFlow.steps.cli, 'done');
 assert.equal(failedAuthorizationFlow.steps.qr, 'error');
 assert.equal(Object.hasOwn(failedAuthorizationFlow.steps, 'authorize'), false);
 assert.equal(Object.hasOwn(failedAuthorizationFlow, 'errorDetail'), false);
-const storedAccountErrorCode = errorCode(new Error('service_unreachable: raw backend detail'));
+const storedAccountErrorCode = errorCode(new Error('oidc_credentials_invalid: raw backend detail'));
 const englishAccountError = localizedErrorMessage(
   { code: storedAccountErrorCode },
-  dict.en.uiAccount.errors,
-  dict.en.uiAccount.syncFailed,
+  accountPlatformCopy.en.errors,
+  accountPlatformCopy.en.requestFailed,
 );
 const japaneseAccountError = localizedErrorMessage(
   { code: storedAccountErrorCode },
-  dict.ja.uiAccount.errors,
-  dict.ja.uiAccount.syncFailed,
+  accountPlatformCopy.ja.errors,
+  accountPlatformCopy.ja.requestFailed,
 );
-assert.equal(englishAccountError, dict.en.uiAccount.errors.service_unreachable);
-assert.equal(japaneseAccountError, dict.ja.uiAccount.errors.service_unreachable);
+assert.equal(englishAccountError, accountPlatformCopy.en.errors.oidc_credentials_invalid);
+assert.equal(japaneseAccountError, accountPlatformCopy.ja.errors.oidc_credentials_invalid);
 assert.notEqual(englishAccountError, japaneseAccountError);
 const semanticAlert = { visible: true, connectorAlert: 'failed', errorCode: 'auth_failed', toolId: 'wecom' };
 const englishAlert = localizeConnectorAlert(semanticAlert, dict.en.uiToolStore, dict.en.uiToolDetails);
@@ -881,4 +1238,4 @@ assert.equal(connectorUiStep({ active: 'cli' }), 'cli');
   assert.match(source('features/settings/SettingsView.jsx'), /item\.title \|\| presetProviderLabel\(p, t\)/);
 }
 
-console.log('UI language coverage tests passed');
+console.log('UI language legacy assertions passed');

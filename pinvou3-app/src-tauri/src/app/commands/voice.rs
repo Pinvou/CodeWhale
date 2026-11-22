@@ -34,6 +34,7 @@ pub struct VoicePostprocessRequest {
     pub session_id: Option<String>,
     /// Only used before a session exists; existing sessions retain their authoritative model.
     pub model_id: Option<String>,
+    pub model_ref: Option<crate::platform::prefs::ModelSelectionRef>,
     pub draft_text: Option<String>,
     /// Raw ASR transcript (before rule-based correction). When present and
     /// different from `text`, it is sent along in the prompt so the model can
@@ -108,18 +109,22 @@ pub(crate) async fn set_voice_shortcut_enabled(enabled: bool) -> Result<(), Stri
 /// arbitrary window as the recording window and hijack the global Alt gesture.
 /// The returned bool tells whether the claim/release landed; a failed claim
 /// fails the recording start before any microphone is opened.
+///
+/// The handle is injected as a `Webview`, not a `WebviewWindow`: the main
+/// window hosts browser-tab child WebViews (agent-browser-*), and Tauri's
+/// single-WebView `WebviewWindow` injection fails once any tab exists.
 #[tauri::command]
 pub(crate) fn set_voice_shortcut_recording(
-    window: tauri::WebviewWindow,
+    webview: tauri::Webview,
     label: Option<String>,
     token: String,
 ) -> Result<bool, String> {
     if let Some(label) = &label {
-        if label != window.label() {
+        if label != webview.label() {
             return Err("voice shortcut recording label must match the calling window".to_string());
         }
     }
-    crate::features::voice_shortcut::set_recording_owner(window.label(), &token, label.is_some())
+    crate::features::voice_shortcut::set_recording_owner(webview.label(), &token, label.is_some())
 }
 
 impl VoiceCommandError {
@@ -540,8 +545,9 @@ fn voice_postprocess_changed(mode: &str, text: &str, draft_text: Option<&str>) -
 }
 
 /// voice 域的推理控制薄壳：dialect 判定与请求体写入统一委托
-/// `core::reasoning_dialect`（与 review/memory 同一实现；本域的 preset 分发
-/// 保留 memory 同款的 model-name 回退，见下方函数注释）。
+/// `core::reasoning_dialect`（与 memory 同一实现；review 自 2026-11-06 起改走
+/// 永不关闭的 features/review::apply_review_thinking_controls，不再经本模块。
+/// 本域的 preset 分发保留 memory 同款的 model-name 回退，见下方函数注释）。
 fn apply_voice_reasoning_controls(
     body: &mut Value,
     preset: crate::platform::prefs::ModelPreset,
@@ -650,9 +656,13 @@ fn voice_chat_message_text(value: &Value) -> String {
 async fn voice_postprocess_bridge(
     session_id: Option<&str>,
     model_id: Option<&str>,
+    model_ref: Option<&crate::platform::prefs::ModelSelectionRef>,
     pool: &EnginePool,
     store: &SessionStore,
-) -> AnyResult<crate::features::assistant::platform::bridge::Pinvou3Bridge> {
+) -> AnyResult<(
+    crate::features::assistant::platform::bridge::Pinvou3Bridge,
+    crate::features::assistant::runtime_model::AuxiliaryModelScope,
+)> {
     if let Some(sid) = session_id.filter(|sid| !sid.trim().is_empty()) {
         // The error chain reaches the local log and the frontend diagnostics
         // verbatim (summarize_voice_postprocess_error), so keep the session
@@ -663,11 +673,11 @@ async fn voice_postprocess_bridge(
             .load(sid)
             .map_err(|_| anyhow!("session snapshot is unavailable"))?;
         return pool
-            .fresh_bridge_for(sid)
+            .fresh_bridge_for_voice(sid)
             .await
             .context("prepare session model for voice postprocess");
     }
-    pool.fresh_bridge_for_draft(model_id)
+    pool.fresh_bridge_for_draft(model_id, model_ref)
         .await
         .context("prepare draft model for voice postprocess")
 }
@@ -735,28 +745,63 @@ async fn call_voice_postprocess_model(
     let max_tokens = voice_postprocess_max_tokens(mode, retry);
     let mut body = voice_postprocess_request_body(model_name, &system, &user, max_tokens);
     apply_voice_reasoning_controls(&mut body, preset, &bridge.provider(), &base_url, model_name);
-    let resp = crate::core::model_endpoint::with_opencode_session_header(
+    let mut request = crate::core::model_endpoint::with_opencode_session_header(
         client.post(format!(
             "{}/chat/completions",
             base_url.trim_end_matches('/')
         )),
         &base_url,
         bridge.opencode_conversation_key("voice-postprocess"),
-    )
-    .bearer_auth(bridge.api_key())
-    .json(&body)
-    .send()
-    .await
-    .context("post voice postprocess chat/completions")?;
+    );
+    // A keyless-declared endpoint receives no Authorization header at all —
+    // an empty `Bearer ` would contradict the toggle's "no credentials are
+    // sent" contract (keyed records keep the bearer; undeclared empty-key
+    // records keep the historical empty-bearer shape).
+    if !bridge.effective_model_declares_no_auth() {
+        request = request.bearer_auth(bridge.api_key());
+    }
+    let request = request.json(&body);
+    // One ID per actual generation. The proxy reuses it for transport/401
+    // retries; a content retry changes facts and therefore enters here anew.
+    let request = match bridge
+        .runtime_model_credential
+        .as_ref()
+        .and_then(|credential| credential.request_idempotency_header())
+    {
+        Some(header) => request.header(header, uuid::Uuid::new_v4().to_string()),
+        None => request,
+    };
+    let resp = request
+        .send()
+        .await
+        .context("post voice postprocess chat/completions")?;
     let resp = crate::core::model_endpoint::error_for_status_with_body(
         resp,
         "voice postprocess chat/completions status",
     )
     .await?;
+    if resp.status() == reqwest::StatusCode::ACCEPTED {
+        anyhow::bail!("voice model invocation is still reconciling");
+    }
     let value: Value = resp
         .json()
         .await
         .context("parse voice postprocess response json")?;
+    let content = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"));
+    if bridge
+        .runtime_model_credential
+        .as_ref()
+        .and_then(|credential| credential.request_idempotency_header())
+        .is_some()
+        && !content.is_some_and(|content| content.is_string() || content.is_array())
+    {
+        anyhow::bail!("voice model returned no completion result");
+    }
     let content = voice_chat_message_text(&value);
     let truncated = value
         .get("choices")
@@ -851,9 +896,10 @@ pub async fn postprocess_voice_text(
             truncated: false,
         });
     }
-    let bridge = match voice_postprocess_bridge(
+    let (bridge, _voice_scope) = match voice_postprocess_bridge(
         request.session_id.as_deref(),
         request.model_id.as_deref(),
+        request.model_ref.as_ref(),
         &pool,
         &store,
     )
@@ -1038,9 +1084,12 @@ use voice_asr_domain::*;
 
 /// 麦克风权限重置命令：feature 侧为裸 fn（原 microphone_permission 转发壳已扁平化），
 /// 不适用 domain 模块的 passthrough 宏，直接薄转发。
+/// The handle is injected as a `Webview`, not a `WebviewWindow`: the main
+/// window hosts browser-tab child WebViews (agent-browser-*), and Tauri's
+/// single-WebView `WebviewWindow` injection fails once any tab exists.
 #[tauri::command]
-pub async fn reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String> {
-    crate::features::voice::reset_microphone_permission(window).await
+pub async fn reset_microphone_permission(webview: tauri::Webview) -> Result<bool, String> {
+    crate::features::voice::reset_microphone_permission(webview).await
 }
 async_command_passthrough!(voice_asr_domain, voice_asr_status() -> VoiceAsrStatus);
 async_command_passthrough!(
@@ -1292,3 +1341,7 @@ mod voice_postprocess_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "voice_model_delivery_tests.rs"]
+mod voice_model_delivery_tests;

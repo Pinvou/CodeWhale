@@ -1,3 +1,4 @@
+pub(crate) mod account_platform;
 pub mod assistant;
 pub(crate) mod behavior_telemetry;
 pub(crate) mod browser;
@@ -39,24 +40,25 @@ pub use connectors::tmeet::{TMEET_MIN_VERSION, TMEET_NPM_SPEC};
 pub use connectors::wecom::WECOM_MIN_VERSION;
 // The CLI's connectors ima lanes and the plugins readiness table consume the
 // app's status computation instead of re-deriving it (the CLI keeps only its
-// documented credential-store degrade wrapper): the skill id, the status
-// struct and the store-parameterized status read were crate-private, which
-// forced a hand mirror of both the constant and the readiness predicate.
-pub use connectors::ima::{IMA_SKILL_ID, IMA_SKILL_VERSION, ImaConnectorStatus, status_with_store};
-// `pub` for the headless CLI (`pinvou artifacts list`): the deliverable
-// extension whitelist and the category mapping must be ONE table shared
-// with the GUI surface — a copy there drifts silently (the CLI's forced
-// mirror predated the widening).
+// documented credential-store degrade wrapper): the skill id and the
+// store-parameterized status read were crate-private, which forced a hand
+// mirror of both the constant and the readiness predicate.
+pub use connectors::ima::{IMA_SKILL_ID, IMA_SKILL_VERSION, status_with_store};
+// `pub` for the headless CLI (`pinvou artifacts list`): the shared
+// `deliverable_index` fn (with its `DeliverableIndex`/`DeliverableItem`
+// result types) is the CLI-consumed surface — one implementation shared
+// with the GUI instead of the drifting hand-copy the CLI carried before
+// the consolidation.
 pub mod deliverables;
 pub mod dependencies;
+pub(crate) mod device;
 pub mod feedback;
 pub mod files;
 pub(crate) mod global_shortcut;
 pub mod knowledge;
-pub mod llmapi_hub;
 pub mod marketplace;
 pub mod memory;
-pub mod messaging;
+pub(crate) mod messaging;
 pub(crate) mod model_store;
 pub mod monitor;
 pub mod multiagent;

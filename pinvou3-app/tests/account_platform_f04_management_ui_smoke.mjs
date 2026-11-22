@@ -1,0 +1,318 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import react from '@vitejs/plugin-react';
+import * as puppeteer from './helpers/puppeteer-fixture.mjs';
+import { createServer } from './helpers/vite-fixture.mjs';
+
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const chrome=process.env.CHROME||['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','/usr/bin/chromium','/usr/bin/google-chrome'].find(fs.existsSync);
+assert.ok(chrome,'Browser unavailable; UI validation not performed');
+const profile=fs.mkdtempSync(path.join(os.tmpdir(),'pinvou-f04-management-'));const ownedProfile=fs.realpathSync(profile);
+let vite,browser,page,passed=0;const errors=[];
+try{
+ vite=await createServer({root,configFile:false,appType:'mpa',logLevel:'error',plugins:[react()],server:{host:'127.0.0.1',port:0,watch:null}});await vite.listen();
+ browser=await puppeteer.launch({executablePath:chrome,headless:'new',userDataDir:profile,args:['--disable-gpu','--no-first-run']});page=await browser.newPage();page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(e.message));
+ const url=`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f04-management.html`;
+ // Runs inside the browser page, where Web Storage is supported.
+ // eslint-disable-next-line n/no-unsupported-features/node-builtins
+ const fresh=async()=>{errors.length=0;await page.goto(url);await page.waitForFunction(()=>window.f04);await page.evaluate(()=>{window.sessionStorage.clear();window.f04.render();});await page.waitForSelector('.adm-pricing-workspace');};
+ const click=async key=>{assert.ok(await page.evaluate(key=>{const label=key.split('.').reduce((value,part)=>value?.[part],window.f04.labels());const button=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===label&&!b.disabled&&b.getClientRects().length);if(!button)return false;button.click();return true;},key),`Unavailable ${key}`);};
+ const fill=async(selector,value)=>page.$eval(selector,(input,value)=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));},value);
+ const submit=async selector=>page.$eval(selector,form=>form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+ const waitUnknown=()=>page.waitForFunction(()=>document.body.textContent.includes(window.f04.labels().resultUnknown));
+ const caseRun=async(name,fn)=>{await fn();assert.deepEqual(errors,[],'Unexpected React errors');passed++;console.log(`PASS ${name}`);};
+ const createDraft=async()=>{await click('createDraft');await page.waitForSelector('.adm-pricing-editor');await fill('.adm-pricing-editor input[type=date]','2099-01-01');await fill('.adm-pricing-editor input[type=number]','9007199254740993');await submit('.adm-pricing-editor');};
+ await caseRun('Draft lost acknowledgement keeps exact price and original key across language change',async()=>{
+  await fresh();await page.evaluate(()=>{window.f04.unknownOnce=true;});await createDraft();await waitUnknown();
+  assert.ok(await page.$eval('.adm-pricing-fieldset',el=>el.disabled));await page.evaluate(()=>{window.f04.language='ja';window.f04.render();});await waitUnknown();await click('verifyResult');await page.waitForFunction(()=>document.body.textContent.includes(window.f04.labels().recoveryConfirmed));
+  assert.ok(await page.evaluate(()=>{const calls=window.f04.calls.filter(c=>c.path.endsWith('/pricing/drafts'));return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body&&calls[0].body.includes('"fixed_price_per_denominator":9007199254740993')&&calls[0].body.includes('"expected_etag":9007199254740993');}));
+ });
+ await caseRun('Unit invalid input releases the lock and corrected int64 retry preserves facts',async()=>{
+  await fresh();await click('meteringUnits');await click('createUnitVersion');await page.waitForSelector('.adm-pricing-unit-form');await fill('.adm-pricing-unit-form input[maxlength]','CONTROLLED');const inputs=await page.$$('.adm-pricing-unit-form input[type=number]');await inputs[0].evaluate(input=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'1.5');input.dispatchEvent(new Event('input',{bubbles:true}));});await submit('.adm-pricing-unit-form');await page.waitForSelector('[role=alert]');
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+  await fill('.adm-pricing-unit-form input[type=number]','1');await inputs[1].evaluate(input=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'9007199254740993');input.dispatchEvent(new Event('input',{bubbles:true}));});await page.evaluate(()=>{window.f04.unknownOnce=true;});await submit('.adm-pricing-unit-form');await waitUnknown();await click('verifyResult');await page.waitForFunction(()=>document.body.textContent.includes(window.f04.labels().recoveryConfirmed));
+  assert.ok(await page.evaluate(()=>{const calls=window.f04.calls.filter(c=>c.path.endsWith('/metering-units')&&c.method==='POST');return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body&&calls[0].body.includes('"price_denominator":9007199254740993');}));
+ });
+ await caseRun('Unknown invocation is scoped to its owner and recovered when that owner returns',async()=>{
+  await fresh();await page.evaluate(()=>{window.f04.unknownOnce=true;});await createDraft();await waitUnknown();await page.evaluate(()=>{window.f04.owner=window.f04.other;window.f04.render();});await page.waitForFunction(()=>!document.body.textContent.includes(window.f04.labels().resultUnknown));await page.evaluate(()=>{window.f04.owner=window.f04.id;window.f04.render();});await waitUnknown();await click('verifyResult');await page.waitForFunction(()=>document.body.textContent.includes(window.f04.labels().recoveryConfirmed));
+ });
+ for(const [action,derived,pathEnd]of [['publish','DRAFT','/publish'],['cancelFuture','PUBLISHED','/transition'],['deactivate','DRAFT','/deactivate']])await caseRun(`${action} lost response recovers the exact frozen invocation`,async()=>{
+  await fresh();await page.evaluate(derived=>{window.f04.prices=[{...window.f04.price,lifecycle_status:derived,derived_status:derived}];},derived);
+  // Reload source facts through the actual refresh control rather than mutating React state.
+  await page.evaluate(()=>{document.querySelector('.adm-pricing-panel-head button').click();});await page.waitForFunction(()=>document.querySelector('tbody')?.textContent.includes('CONTROLLED'));if(action==='deactivate')await click('meteringUnits');await click(action);await page.waitForSelector('.adm-pricing-action');
+  if(action==='cancelFuture')await page.$eval('.adm-pricing-action textarea',input=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'Controlled cancellation reason');input.dispatchEvent(new Event('input',{bubbles:true}));});
+  await page.evaluate(()=>{window.f04.unknownOnce=true;});await submit('.adm-pricing-action');await waitUnknown();await click('verifyResult');await page.waitForFunction(()=>document.body.textContent.includes(window.f04.labels().recoveryConfirmed));
+  assert.ok(await page.evaluate(pathEnd=>{const calls=window.f04.calls.filter(c=>c.path.endsWith(pathEnd)&&c.method==='POST');return calls.length===2&&calls[0].key===calls[1].key&&calls[0].body===calls[1].body;},pathEnd));
+ });
+ await caseRun('Actual approval deep link edits only reason while retaining complete typed planned intent',async()=>{
+  await fresh();await page.evaluate(()=>{history.replaceState({},'',`${location.pathname}?approval_request_id=${window.f04.id}`);window.f04.surface='management';window.f04.render();});await page.waitForSelector('article textarea');
+  await page.type('article textarea','Controlled reason edit');await page.evaluate(()=>{const button=[...document.querySelectorAll('article button')].find(b=>b.textContent.includes('submit')&&!b.disabled);if(!button)throw new Error('Missing draft edit');button.click();});await page.waitForFunction(()=>window.f04.approvalStatus==='SUBMITTED');
+  assert.ok(await page.evaluate(()=>{const edit=window.f04.calls.find(c=>c.method==='PUT');const body=edit&&JSON.parse(edit.body);const submit=window.f04.calls.find(c=>c.path.endsWith('/actions/submit'));return edit.body.includes('"lifecycle_plan_version":9007199254740993')&&body.normalized_command.effective_at==='2099-01-01T00:00:00+08:00'&&body.normalized_command.existing_session_cutoff_at==='2099-01-02T00:00:00+08:00'&&body.normalized_command.lifecycle_plan_id===window.f04.id&&JSON.parse(submit.body).expected_version===2;}));
+ });
+ for (const language of ['zh', 'en', 'ja']) await caseRun(`${language}: named pricing tables retain keyboard horizontal scrolling`, async () => {
+  await fresh(); await page.setViewport({ width: 640, height: 800 });
+  await page.evaluate(language => { window.f04.language = language; window.f04.render(); }, language);
+  for (const label of ['priceVersions', 'meteringUnits']) {
+   await click(label);
+   const handle = await page.evaluateHandle(label => [...document.querySelectorAll('.adm-pricing-workspace .adm-table-wrap[role=region]')].find(element => element.getAttribute('aria-label') === window.f04.labels()[label] && element.getClientRects().length), label);
+   const wrapper = handle.asElement();
+   assert.ok(wrapper, `Missing visible pricing scroll region ${label}`);
+   assert.ok(await wrapper.evaluate((element, label) => element.getAttribute('role') === 'region' && element.getAttribute('aria-label') === window.f04.labels()[label] && element.tabIndex === 0, label));
+   // Force overflow using viewport constraints, leaving production table CSS
+   // and native keyboard scrolling intact. No synthetic scroll event/write.
+   await wrapper.evaluate(element => { element.style.maxWidth = '300px'; element.querySelector('table').style.minWidth = '900px'; });
+   await wrapper.focus();
+   assert.ok(await wrapper.evaluate(element => document.activeElement === element && element.scrollWidth > element.clientWidth && getComputedStyle(element).overflowX === 'auto'));
+   await page.keyboard.press('ArrowRight');
+   await page.waitForFunction(label => [...document.querySelectorAll('.adm-pricing-workspace .adm-table-wrap[role=region]')].some(element => element.getAttribute('aria-label') === window.f04.labels()[label] && element.scrollLeft > 0), {}, label);
+   await handle.dispose();
+  }
+ });
+ for(const language of ['zh','en','ja']) await caseRun(`${language}: actual credential page has a named heading and safety explanation`,async()=>{
+  await fresh();await page.evaluate(language=>{window.history.replaceState({},'',`${location.pathname}?token_detail_tab=credentials`);window.f04.language=language;window.f04.surface='credentials';window.f04.render();},language);
+  await page.waitForSelector('#token-credentials-heading');
+  assert.ok(await page.$eval('#token-credentials-heading',el=>el.textContent.trim().length>0));
+  assert.ok(await page.$eval('#token-credentials-heading',el=>el.closest('section').querySelector('.adm-source-lead').textContent.trim().length>0));
+ });
+ for(const type of ['TOKEN_CREDENTIAL_VALIDATE','TOKEN_MODEL_PUBLISH','TOKEN_MODEL_CATALOG_SYNC']) await caseRun(`${type}: lost ACK recovers original key without another write and allows closing terminal receipt`,async()=>{
+  await fresh();await page.evaluate(type=>{window.f04.surface='command';window.f04.commandType=type;window.f04.unknownOnce=true;window.f04.render();},type);await page.waitForSelector('.adm-high-risk-dialog');await submit('.adm-high-risk-dialog');
+  await page.waitForSelector('.adm-command-unknown');assert.ok(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled));
+  await submit('.adm-high-risk-dialog');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog header button').disabled);
+  assert.ok(await page.evaluate(()=>{const calls=window.f04.calls.filter(c=>c.path.includes('/commands'));return calls.filter(c=>c.method==='POST').length===1&&calls.filter(c=>c.method==='GET').length===1&&calls[0].key===calls[1].key;}));
+  if(type==='TOKEN_CREDENTIAL_VALIDATE') assert.ok(await page.evaluate(()=>document.body.textContent.includes(window.f04.credentialProbeLabel())));
+  await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
+ });
+ await caseRun('Known entry expiry permits closing without treating an arbitrary timeout as safe',async()=>{
+  await fresh();await page.evaluate(()=>{window.f04.surface='command';window.f04.commandType='TOKEN_CREDENTIAL_VALIDATE';window.f04.expiredEntryOnce=true;window.f04.render();});await page.waitForSelector('.adm-high-risk-dialog');await submit('.adm-high-risk-dialog');
+  await page.waitForFunction(()=>document.body.textContent.includes(window.f04.expiredEntryLabel()));
+  assert.equal(await page.$('.adm-command-unknown'),null);assert.equal(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled),false);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.path.endsWith('/commands')&&c.method==='POST').length),1);
+  await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
+ });
+ for(const language of ['zh','en','ja']) await caseRun(`${language}: missing source and published lifecycle remain distinct`,async()=>{
+  await fresh();await page.evaluate(language=>{window.f04.language=language;window.f04.models=[{model_id:window.f04.id,display_name:'Controlled missing source',lifecycle_status:'PUBLISHED',protocol_code:'CONTROLLED',protocol_version:1,context_length:4096,source_available:false,catalog_version:1}];window.f04.surface='management';window.f04.render();},language);
+  await page.waitForFunction(()=>document.body.textContent.includes('Controlled missing source'));
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-source-missing-policy').textContent===window.f04.sourceMissingPolicyLabel()));
+  assert.ok(await page.evaluate(()=>{const row=[...document.querySelectorAll('tr')].find(el=>el.textContent.includes('Controlled missing source'));const labels=window.f04.modelStatusLabels();return row.textContent.includes(labels.PUBLISHED)&&row.textContent.includes(labels.UNAVAILABLE)&&!row.textContent.includes(labels.DEPRECATED);}));
+  await page.$eval('.adm-name-link',button=>button.click());await page.waitForSelector('#model-overview-heading');
+  assert.ok(await page.$eval('.adm-model-detail .adm-source-missing-policy',el=>el.textContent===window.f04.sourceMissingPolicyLabel()));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
+
+ const listedPrice=async()=>{await fresh();await page.evaluate(()=>{window.f04.prices=[window.f04.price];window.f04.render();});await click('panePresentation.refreshAll');await page.waitForSelector('.adm-pricing-pane:not([hidden]) tbody tr');};
+ const refreshPricing=async()=>{const label=await page.evaluate(()=>window.f04.labels().panePresentation.refreshAll);assert.ok(await page.evaluate(label=>{const button=[...document.querySelectorAll('.adm-section-tools button')].find(button=>button.textContent===label&&!button.disabled);button?.click();return !!button;},label));};
+ const settleRetiredPreview=async()=>{await page.evaluate(async()=>{window.f04.releasePreview();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});};
+ for (const [action, derived, pathEnd] of [['publish', 'DRAFT', '/publish'], ['cancelFuture', 'PUBLISHED', '/transition']]) {
+  for (const previewStatus of [200, 503]) for (const previewFirst of [true, false]) {
+   await caseRun(`${action} definite rejection restores preview after ${previewStatus}; preview settles ${previewFirst ? 'first' : 'last'}`, async () => {
+    await listedPrice();
+    if (derived === 'PUBLISHED') {
+     await page.evaluate(() => { window.f04.prices = [{ ...window.f04.price, lifecycle_status: 'PUBLISHED', derived_status: 'PUBLISHED' }]; });
+     await refreshPricing();
+     await page.waitForFunction(() => document.querySelector('.adm-pricing-pane:not([hidden]) tbody tr')?.textContent.includes(window.f04.labels().cancelFuture));
+    }
+    const before = await page.evaluate(() => ({ reads: window.f04.calls.filter(call => call.path.endsWith('/pricing')).length, price: window.f04.prices[0] }));
+    await page.evaluate(({ status, action }) => { window.f04.previewReadStatus = status; window.f04.delayPreview = true; window.f04.rejectPriceActionOnce = true; window.f04.priceRejectionStatus = action === 'publish' ? 409 : 412; }, { status: previewStatus, action });
+    await click('preview');
+    await page.waitForFunction(() => typeof window.f04.releasePreview === 'function');
+    await click(action);
+    await page.waitForSelector('.adm-pricing-action');
+    if (action === 'cancelFuture') await page.type('.adm-pricing-action textarea', 'Controlled cancellation conflict');
+    await submit('.adm-pricing-action');
+    await page.waitForFunction(() => typeof window.f04.releasePriceRejection === 'function');
+    if (previewFirst) {
+     await settleRetiredPreview();
+     await page.waitForFunction(() => !document.querySelector('.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button').disabled, { timeout: 5000 }).catch(() => assert.fail('Preview cleanup remains blocked while mutation is DISPATCHED'));
+     assert.equal(await page.$eval('.adm-pricing-action button[type=submit]', button => button.disabled), true, 'the mutation has not been released before the preview cleanup assertion');
+    }
+    await page.evaluate(() => window.f04.releasePriceRejection());
+    await page.waitForSelector('.adm-pricing-action [role=alert]');
+    await page.waitForFunction(() => !document.querySelector('.adm-pricing-action button[type=submit]').disabled);
+    if (!previewFirst) await settleRetiredPreview();
+    const previewButton = '.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button';
+    assert.equal(await page.$eval(previewButton, button => button.disabled), false, 'a completed preview must not require a price reload to unlock');
+    if (previewFirst) {
+     assert.equal(await page.$('.adm-pricing-preview'), null, 'results completed during DISPATCHED stay retired');
+     assert.equal(await page.$('.adm-pricing-pane:not([hidden]) [role=alert]'), null, 'errors completed during DISPATCHED stay retired');
+    } else if (previewStatus === 200) {
+     await page.waitForSelector('.adm-pricing-preview');
+     await page.click('.adm-pricing-preview header button');
+    }
+    await page.click('.adm-pricing-action header button');
+    await page.waitForFunction(() => !document.querySelector('.adm-pricing-action'));
+    assert.equal(await page.evaluate(() => window.f04.calls.filter(call => call.path.endsWith('/pricing')).length), before.reads, 'definite rejection does not reload prices to hide a stuck preview');
+    assert.deepEqual(await page.evaluate(() => window.f04.prices[0]), before.price, 'the rejected command has no controlled owner effect');
+    assert.equal(await page.evaluate(() => window.f04.receipts.size), 0);
+    const writes = await page.evaluate(() => window.f04.calls.filter(call => call.method !== 'GET'));
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0].path.endsWith(pathEnd));
+    assert.ok(writes[0].key);
+    if (action === 'publish') assert.match(writes[0].body, /"expected_etag":9007199254740993(?:[,}])/);
+    else assert.deepEqual(JSON.parse(writes[0].body), { action: 'CANCEL', reason: 'Controlled cancellation conflict' });
+    await page.evaluate(() => { window.f04.previewReadStatus = 200; });
+    await click('preview'); await page.waitForSelector('.adm-pricing-preview');
+    assert.equal(await page.$eval('.adm-pricing-preview header code', code => code.textContent), await page.evaluate(() => window.f04.id));
+    assert.equal(await page.evaluate(() => window.f04.calls.filter(call => call.path.endsWith('/preview')).length), 2, 'only explicit preview requests are issued');
+    assert.equal(await page.evaluate(() => window.f04.calls.filter(call => call.method !== 'GET').length), 1, 'preview recovery does not retry the rejected command');
+   });
+  }
+ }
+ await caseRun('pricing permission denial and recovery cannot revive a delayed preview; next preview remains usable',async()=>{
+  // A completed preview has no outstanding SDK request to cancel. Its local
+  // projection must still retire across a denial and subsequent recovery.
+  await listedPrice();await click('preview');await page.waitForSelector('.adm-pricing-preview');
+  await page.evaluate(()=>{window.f04.priceReadStatus=403;});await refreshPricing();await page.waitForFunction(()=>!document.querySelector('.adm-pricing-pane:not([hidden]) tbody tr')&&!document.querySelector('.adm-pricing-preview'));
+  await page.evaluate(()=>{window.f04.priceReadStatus=0;});await refreshPricing();await page.waitForSelector('.adm-pricing-pane:not([hidden]) tbody tr');
+  assert.equal(await page.$('.adm-pricing-preview'),null,'a previously displayed preview must not revive after permission recovery');
+  await listedPrice();await page.evaluate(()=>{window.f04.delayPreview=true;});await click('preview');await page.waitForFunction(()=>typeof window.f04.releasePreview==='function');
+  await page.evaluate(()=>{window.f04.priceReadStatus=403;});await refreshPricing();await page.waitForFunction(()=>!document.querySelector('.adm-pricing-pane:not([hidden]) tbody tr')&&!!document.querySelector('[role=alert]'));
+  await page.evaluate(()=>{window.f04.priceReadStatus=0;});await refreshPricing();await page.waitForSelector('.adm-pricing-pane:not([hidden]) tbody tr');await settleRetiredPreview();
+  assert.equal(await page.$('.adm-pricing-preview'),null);await click('preview');await page.waitForSelector('.adm-pricing-preview');
+  assert.ok(await page.$eval('.adm-pricing-preview',node=>node.textContent.includes('9007199254740993')),'resolved preview retains exact int64 price');
+ });
+ await caseRun('pricing UNKNOWN archival retires a delayed preview without dispatching a replacement operation',async()=>{
+  await listedPrice();await page.evaluate(()=>{window.f04.delayPreview=true;});await click('preview');await page.waitForFunction(()=>typeof window.f04.releasePreview==='function');
+  await page.evaluate(()=>{window.f04.unknownOnce=true;});await createDraft();await waitUnknown();await click('unknownReload');
+  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(button=>button.textContent===window.f04.labels().unknownStartNew&&!button.disabled));await click('unknownStartNew');
+  await page.waitForSelector('.adm-unknown-history');await settleRetiredPreview();assert.equal(await page.$('.adm-pricing-preview'),null);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.method!=='GET').length),1,'archival does not retry or dispatch stale intent');
+  await click('preview');await page.waitForSelector('.adm-pricing-preview');
+ });
+ for(const oldStatus of [200,503])await caseRun(`new price query retires old preview ${oldStatus} without affecting the next preview`,async()=>{
+  await listedPrice();await page.evaluate(status=>{window.f04.delayPreview=true;window.f04.previewReadStatus=status;},oldStatus);await click('preview');await page.waitForFunction(()=>typeof window.f04.previewGates?.[window.f04.id]==='function');
+  await page.evaluate(()=>{window.f04.prices=[{...window.f04.price,price_version_id:window.f04.other,version:2}];});await refreshPricing();
+  await page.waitForFunction(()=>document.querySelector('.adm-pricing-pane:not([hidden]) tbody tr')?.textContent.includes(window.f04.other));
+  assert.equal(await page.$eval('.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button',button=>button.disabled),false,'the accepted new query releases the retired preview loading state');
+  await page.evaluate(()=>{window.f04.delayPreview=true;window.f04.previewReadStatus=200;});await click('preview');await page.waitForFunction(()=>typeof window.f04.previewGates?.[window.f04.other]==='function');
+  await page.evaluate(async()=>{window.f04.previewGates[window.f04.id]();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  assert.equal(await page.$('.adm-pricing-preview'),null);assert.equal(await page.$('.adm-pricing-pane:not([hidden]) [role=alert]'),null,'old query errors cannot populate the new query');
+  assert.equal(await page.$eval('.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button',button=>button.disabled),true,'a retired finally cannot unlock a newer preview');
+  await page.evaluate(()=>window.f04.previewGates[window.f04.other]());await page.waitForSelector('.adm-pricing-preview');
+  assert.equal(await page.$eval('.adm-pricing-preview header code',code=>code.textContent),await page.evaluate(()=>window.f04.other));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.method!=='GET').length),0);
+ });
+ await caseRun('a pending price query blocks previews from retained old rows and the accepted next row stays usable',async()=>{
+  await listedPrice();await page.evaluate(()=>{window.f04.prices=[{...window.f04.price,price_version_id:window.f04.other,version:2}];window.f04.delayPriceList=true;});await refreshPricing();await page.waitForFunction(()=>typeof window.f04.releasePriceList==='function');
+  const selector='.adm-pricing-pane:not([hidden]) tbody .adm-row-actions button';
+  assert.equal(await page.$eval(selector,button=>button.disabled),true,'pending price query must block old-row preview');
+  await page.click(selector);assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.path.endsWith('/preview')).length),0);
+  await page.evaluate(()=>window.f04.releasePriceList());await page.waitForFunction(()=>document.querySelector('.adm-pricing-pane:not([hidden]) tbody tr')?.textContent.includes(window.f04.other));
+  await click('preview');await page.waitForSelector('.adm-pricing-preview');assert.equal(await page.$eval('.adm-pricing-preview header code',code=>code.textContent),await page.evaluate(()=>window.f04.other));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.method!=='GET').length),0);
+ });
+ await caseRun('pane URL changes keep ID copying available and browser Back keeps one visible confirmation',async()=>{
+  await fresh();await page.evaluate(()=>{history.replaceState({},'',`${location.pathname}?pricing_pane=prices`);window.f04.routePricing=true;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.f04.copied=value;}}});window.f04.render();});
+  const unitsLabel=await page.evaluate(()=>window.f04.labels().meteringUnits);await page.evaluate(label=>[...document.querySelectorAll('.adm-pricing-panes button')].find(button=>button.textContent===label).click(),unitsLabel);
+  await page.waitForFunction(()=>new URLSearchParams(location.search).get('pricing_pane')==='units');await page.waitForSelector('.adm-pricing-pane:not([hidden]) tbody tr');
+  await page.click('.adm-pricing-pane:not([hidden]) .adm-price-identifiers summary');assert.equal(await page.$eval('.adm-pricing-pane:not([hidden]) .adm-identifier-copy',button=>button.disabled),false);
+  await page.click('.adm-pricing-pane:not([hidden]) .adm-identifier-copy');await page.waitForFunction(()=>window.f04.copied===window.f04.id);
+  await click('deactivate');await page.waitForSelector('.adm-pricing-action');await page.goBack();await page.waitForFunction(()=>new URLSearchParams(location.search).get('pricing_pane')==='prices');
+  assert.equal(await page.$$('.adm-pricing-action').then(nodes=>nodes.length),1);assert.equal(await page.$eval('.adm-pricing-action',node=>node.closest('[hidden]')),null);
+  await page.click('.adm-pricing-action header button');await page.goForward();await page.waitForFunction(()=>new URLSearchParams(location.search).get('pricing_pane')==='units');assert.equal(await page.$('.adm-pricing-action'),null);assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.method!=='GET').length),0);
+ });
+ for(const language of ['zh','en','ja'])for(const runtime of [undefined,null,'','   ','OPENAI_CHAT'])await caseRun(`${language}: runtime protocol ${JSON.stringify(runtime)} is consistent across header, overview and capabilities`,async()=>{
+  await fresh();await page.evaluate(({language,runtime})=>{
+   window.f04.language=language;window.f04.models=[{model_id:window.f04.id,display_name:'Controlled runtime model',lifecycle_status:'PUBLISHED',protocol_code:'CONTROLLED',protocol_version:1,source_available:true,catalog_version:1,runtime_protocol:runtime}];
+   window.f04.modelDraft={draft_version:1,base_catalog_version:1,protocol_code:'CONTROLLED',protocol_version:1,runtime_protocol:runtime};window.f04.surface='management';window.f04.render();
+  },{language,runtime});await page.waitForSelector('.adm-name-link');await page.click('.adm-name-link');await page.waitForSelector('#model-overview-heading');
+  const expected=await page.evaluate(runtime=>{const copy=window.f04.governanceWords();return runtime===''?copy.modelCallProtocolUnset:typeof runtime==='string'&&runtime.trim()?runtime:copy.modelCallProtocolUnknown;},runtime);
+  const checkFacts=async selector=>{const facts=await page.$$eval(`${selector} dl > div`,nodes=>nodes.filter(node=>node.querySelector('dt')?.textContent===window.f04.governanceWords().runtimeProtocol).map(node=>node.querySelector('dd').textContent));assert.deepEqual(facts,[expected]);};
+  await checkFacts('#model-detail-panel-overview');
+  assert.equal(await page.$eval('.adm-model-call-summary',node=>node.classList.contains('is-blocked')),runtime==='','unknown facts must not be reported as an explicit blocked mapping');
+  await page.click('#model-detail-tab-capabilities');await page.waitForSelector('#model-current-capability-heading');
+  await checkFacts('[aria-labelledby=model-current-capability-heading]');await checkFacts('[aria-labelledby=model-draft-heading]');
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.method!=='GET').length),0);
+ });
+ for(const language of ['zh','en','ja'])for(const facts of [{status:'ACTIVE',active_credential_count:2,route_count:3},{status:'DISABLED',active_credential_count:0,route_count:0},{status:'FROZEN'},{status:'FUTURE',active_credential_count:9007199254740992,route_count:-1}])await caseRun(`${language}: Token detail and list agree for ${facts.status} and exact or unknown counts`,async()=>{
+  await fresh();await page.evaluate(({language,facts})=>{history.replaceState({},'',location.pathname);window.f04.language=language;window.f04.surface='summaries';window.f04.summaryFacts=facts;window.f04.summaryRevision=1;window.f04.render();},{language,facts});
+  await page.waitForSelector('[data-summary-list] tbody tr');await page.waitForSelector('#token-overview-heading');
+  const observed=await page.evaluate(()=>{
+   const copy=window.f04.governanceWords(),row=document.querySelector('[data-summary-list] tbody tr');
+   const keys=[copy.tokenAccountStatus,copy.tokenAccountActiveCredentials,copy.tokenAccountResolvedRoutes];
+   return {list:keys.map(key=>[...row.querySelectorAll('td')].find(cell=>cell.dataset.label===key)?.textContent),detail:keys.map(key=>[...document.querySelectorAll('[data-summary-detail] dl > div')].find(node=>node.querySelector('dt')?.textContent===key)?.querySelector('dd')?.textContent),expected:[copy.tokenAccountStatuses[window.f04.summaryFacts.status]||copy.tokenAccountStatusUnknown,...['active_credential_count','route_count'].map(key=>Number.isSafeInteger(window.f04.summaryFacts[key])&&window.f04.summaryFacts[key]>=0?String(window.f04.summaryFacts[key]):copy.tokenAccountMetricUnknown)]};
+  });assert.deepEqual(observed.list,observed.expected);assert.deepEqual(observed.detail,observed.expected);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(call=>call.method!=='GET').length),0);
+ });
+ const governanceFresh=async(permissions)=>{await fresh();await page.evaluate(permissions=>{history.replaceState({},'',`${location.pathname}?token_account_id=${window.f04.id}&token_detail_tab=routes`);window.f04.surface='governance';window.f04.governancePermissions=permissions;window.f04.render();},permissions);await page.waitForSelector('#token-routes-heading');};
+ const governanceClick=async key=>page.waitForFunction(key=>{const label=window.f04.governanceWords()[key];const button=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===label&&!b.disabled);if(!button)return false;button.click();return true;},{},key);
+ for(const [command,button] of [['TOKEN_ACCOUNT_STATUS_CHANGE','disableTokenAccount'],['TOKEN_ROUTE_UPSERT','configureStableRoute'],['TOKEN_ROUTE_DELETE','deleteRoute']])await caseRun(`${command}: production detail preserves routes and recovers the original invocation`,async()=>{
+  await governanceFresh();await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.$('.adm-model-detail .adm-model-token-filters') || await page.$('.adm-model-detail select'));
+  await governanceClick(button);await page.waitForSelector('.adm-high-risk-dialog');
+  if(command==='TOKEN_ROUTE_UPSERT'){
+   await page.waitForFunction(()=>[...document.querySelectorAll('.adm-high-risk-fields select option')].some(o=>o.value===window.f04.id));
+   await page.select('.adm-high-risk-fields select',await page.evaluate(()=>window.f04.id));
+   const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+  }
+  await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog .adm-source-state'));
+  await page.type('.adm-high-risk-dialog textarea','Controlled route governance reason');
+  if(command!=='TOKEN_ROUTE_UPSERT')await page.click('.adm-high-risk-dialog input[type=checkbox]');
+  await page.evaluate(()=>{window.f04.unknownOnce=true;});await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-command-unknown');
+  assert.ok(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled));
+  await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');await page.click('.adm-high-risk-dialog header button');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog'));
+  assert.ok(await page.$('#token-routes-heading'));
+  assert.ok(await page.evaluate(command=>{const writes=window.f04.calls.filter(c=>c.method==='POST'&&c.path==='commands');const reads=window.f04.calls.filter(c=>c.path==='by-key');return writes.length===1&&JSON.parse(writes[0].body).command_type===command&&reads.length===1&&reads[0].key===writes[0].key&&reads[0].type===command;},command));
+  assert.ok(await page.evaluate(()=>{const w=window.f04.httpCalls.find(c=>c.method==='POST'&&c.path.endsWith('/commands'));const r=window.f04.httpCalls.find(c=>c.path.endsWith('/commands/by-idempotency-key'));return w.headers['X-CSRF-Token']==='CONTROLLED_SYNTHETIC_CSRF'&&w.headers['Idempotency-Key']===r.headers['Idempotency-Key'];}));
+  await governanceClick('next');await page.waitForFunction(()=>window.f04.calls.some(c=>c.path==='routes'&&c.filters.cursor==='controlled-next'));
+  await page.select('.adm-model-token-filters select','HEALTHY');await submit('.adm-model-token-filters');await page.waitForFunction(()=>window.f04.calls.some(c=>c.path==='routes'&&c.filters.health_status==='HEALTHY'&&!c.filters.cursor));
+ });
+
+ const openRouteSelection=async(mode,model)=>{
+  await governanceFresh();await page.evaluate(mode=>{window.f04.lookupMode=mode;window.f04.lookupStarted=false;},mode);await governanceClick('configureStableRoute');await page.waitForSelector('.adm-high-risk-fields select');
+  await page.waitForFunction(()=>[...document.querySelectorAll('.adm-high-risk-fields select option')].some(o=>o.value===window.f04.id));
+  await page.select('.adm-high-risk-fields select',model||await page.evaluate(()=>window.f04.id));const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+ };
+ await caseRun('Existing route outside the displayed page and health filter retains 77/UNIT',async()=>{
+  await governanceFresh();await page.evaluate(()=>{window.f04.lookupMode='outside';});await page.select('.adm-model-token-filters select','HEALTHY');await submit('.adm-model-token-filters');await governanceClick('next');
+  await governanceClick('configureStableRoute');await page.waitForFunction(()=>[...document.querySelectorAll('.adm-high-risk-fields select option')].some(o=>o.value===window.f04.id));await page.select('.adm-high-risk-fields select',await page.evaluate(()=>window.f04.id));const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+  await page.waitForFunction(()=>document.querySelector('.adm-high-risk-fields input[type=number]')?.value==='77');
+  assert.equal(await page.$$eval('.adm-high-risk-fields select',ss=>ss[2].value),'UNIT');
+  await page.type('.adm-high-risk-dialog textarea','Keep existing routing policy');await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  assert.ok(await page.evaluate(()=>{const w=window.f04.calls.find(c=>c.method==='POST'&&c.path==='commands');const b=JSON.parse(w.body);return b.command.priority===77&&b.command.default_scope==='UNIT'&&b.expected_versions.expected_route_version===1;}));
+  await page.click('.adm-high-risk-dialog header button');await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.evaluate(()=>{const reads=window.f04.calls.filter(c=>c.path==='routes');return reads.some(c=>Object.keys(c.filters).length===1&&c.filters.cursor==='lookup-second')&&reads.at(-1).filters.health_status==='HEALTHY'&&reads.at(-1).filters.cursor==='controlled-next';}));
+ });
+ for(const mode of ['error','cycle','asof','foreign'])await caseRun(`Incomplete ${mode} route evidence never permits an upsert`,async()=>{
+  await openRouteSelection(mode);await page.waitForSelector('.adm-high-risk-fields .adm-source-error');await page.type('.adm-high-risk-dialog textarea','Controlled reason for no dispatch');await submit('.adm-high-risk-dialog');
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='PRE'&&c.command_type==='TOKEN_ROUTE_UPSERT').length),0);
+  if(mode==='error'){await page.evaluate(()=>{window.f04.lookupMode='outside';});await page.click('.adm-high-risk-fields .adm-source-error button');await page.waitForFunction(()=>document.querySelector('.adm-high-risk-fields input[type=number]').value==='77');assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);}
+ });
+ await caseRun('Complete absent route evidence permits new defaults',async()=>{
+  await openRouteSelection('absent');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-fields input[type=number]').disabled);assert.equal(await page.$eval('.adm-high-risk-fields input[type=number]',el=>el.value),'100');
+  await page.type('.adm-high-risk-dialog textarea','Controlled new route reason');await submit('.adm-high-risk-dialog');await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  assert.ok(await page.evaluate(()=>{const w=window.f04.calls.find(c=>c.method==='POST');const b=JSON.parse(w.body);return b.command.priority===100&&b.command.default_scope==='NONE'&&b.expected_versions.expected_route_version===0;}));
+ });
+ await caseRun('Late old selection evidence cannot overwrite the next model route',async()=>{
+  await openRouteSelection('late');await page.waitForFunction(()=>typeof window.f04.releaseLookup==='function');await page.select('.adm-high-risk-fields select',await page.evaluate(()=>window.f04.other));const selects=await page.$$('.adm-high-risk-fields select');await selects[1].select(await page.evaluate(()=>window.f04.id));
+  await page.waitForFunction(()=>document.querySelector('.adm-high-risk-fields input[type=number]').value==='23');
+  await page.evaluate(async()=>{window.f04.releaseLookup();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  assert.ok(await page.evaluate(()=>{const ss=[...document.querySelectorAll('.adm-high-risk-fields select')];return ss[0].value===window.f04.other&&ss[2].value==='ORG'&&document.querySelector('.adm-high-risk-fields input[type=number]').value==='23';}));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='PRE'&&c.command?.model_id===window.f04.id).length),0);
+ });
+ for(const permissions of [['platform.tokens.read'],['platform.tokens.read','platform.tokens.manage']])await caseRun(`Detail permission boundary ${permissions.join(',')}`,async()=>{
+  await governanceFresh(permissions);await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.evaluate(()=>![...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f04.governanceWords().configureStableRoute)));
+  if(!permissions.includes('platform.tokens.manage'))assert.ok(await page.evaluate(()=>!['disableTokenAccount','deleteRoute'].some(key=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f04.governanceWords()[key]))));
+  else assert.ok(await page.evaluate(()=>document.body.textContent.includes(window.f04.governanceWords().modelPermissionRequired)));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
+ await caseRun('Disabled action rollout preserves the production detail read surface',async()=>{
+  await fresh();await page.evaluate(()=>{history.replaceState({},'',`${location.pathname}?token_account_id=${window.f04.id}&token_detail_tab=routes`);window.f04.surface='governance-disabled';window.f04.render();});await page.waitForSelector('.adm-model-detail tbody tr');
+  assert.ok(await page.evaluate(()=>!['configureStableRoute','disableTokenAccount','deleteRoute'].some(key=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f04.governanceWords()[key]))));
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.method==='POST').length),0);
+ });
+ for(const language of ['zh','en','ja'])await caseRun(`${language}: pricing controls render translated save, cancel, reason and update labels`,async()=>{
+  await fresh();await page.evaluate(language=>{window.f04.language=language;window.f04.render();},language);await click('createDraft');await page.waitForSelector('.adm-pricing-editor');
+  for(const key of ['save','cancel'])assert.ok(await page.evaluate(key=>{const label=window.f04.labels()[key];return typeof label==='string'&&label.length>0&&[...document.querySelectorAll('.adm-pricing-editor button')].some(b=>b.textContent===label);},key));
+  await page.evaluate(()=>[...document.querySelectorAll('.adm-pricing-editor button')].find(b=>b.textContent===window.f04.labels().cancel).click());
+  await page.evaluate(()=>{window.f04.prices=[{...window.f04.price,lifecycle_status:'PUBLISHED',derived_status:'PUBLISHED'}];document.querySelector('.adm-pricing-panel-head button').click();});await page.waitForFunction(()=>document.querySelector('tbody')?.textContent.includes('CONTROLLED'));await click('cancelFuture');await page.waitForSelector('.adm-pricing-action textarea');
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-pricing-action textarea').closest('label').textContent===window.f04.labels().reason));
+  assert.ok(await page.evaluate(()=>document.querySelector('.adm-pricing-panel-head small').textContent.includes(window.f04.labels().lastUpdated)));
+ });
+ console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
+}catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({text:document.body.textContent.slice(0,1200),paths:window.f04?.calls.map(c=>c.path)})).catch(()=>({}))));process.exitCode=1;}
+finally{if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile)){assert.equal(fs.realpathSync(profile),ownedProfile);assert.equal(path.dirname(ownedProfile),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(ownedProfile).startsWith('pinvou-f04-management-'));fs.rmSync(ownedProfile,{recursive:true});}}

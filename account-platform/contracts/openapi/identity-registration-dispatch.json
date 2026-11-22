@@ -1,0 +1,40 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Identity registration first dispatch", "version": "1.0.0"},
+  "paths": {
+    "/internal/v1/users/mobile": {
+      "post": {
+        "operationId": "createMobileIdentityWithExplicitDispatchAttestation",
+        "summary": "Create only for the durable Account first-dispatch winner",
+        "description": "Requires internal.identity.user.create. first_attempt=true is the trusted Account attestation of the single durable grant; it is not derived from an absent identity lookup. Replayed first requests cannot dispatch again. first_attempt=false can recover an already correlated result but cannot initiate creation. Missing attestation is rejected. Unknown dispatch or missing process proof cannot justify compensation.",
+        "security": [{"workloadBearer": []}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "type": "object",
+            "required": ["registration_operation_id", "username", "mobile", "password_policy_version", "first_attempt"],
+            "properties": {
+              "registration_operation_id": {"type": "string", "format": "uuid"},
+              "username": {"type": "string"},
+              "mobile": {"type": "string"},
+              "password_handle": {"type": "string", "description": "Opaque existing binding; empty selects the handle already bound to this exact operation."},
+              "password_policy_version": {"type": "string", "const": "user-v1"},
+              "first_attempt": {"type": "boolean"}
+            }
+          }}}
+        },
+        "responses": {
+          "201": {"description": "Confirmed correlated subject; JSON subject string."},
+          "400": {"description": "Malformed request or missing explicit first_attempt."},
+          "401": {"description": "Missing or invalid workload authentication."},
+          "403": {"description": "Workload lacks the unchanged exact create permission."},
+          "409": {"description": "Binding conflict or username conflict. This status never carries canonical never-dispatched compensation proof."},
+          "410": {"description": "IDENTITY_CREATE_NOT_DISPATCHED is the original explicit proof, eligible only for the matching durable first winner and unchanged attempt version. PASSWORD_REFERENCE_INVALID is generic expiry or missing reference and cannot authorize compensation. The code and canonical410 status must both match."},
+          "500": {"description": "Directory failure or unknown remote acknowledgement; retain correlation recovery."},
+          "503": {"description": "IDENTITY_CREATE_UNCONFIRMED or existing bounded password precheck capacity failure; no automatic redispatch."}
+        }
+      }
+    }
+  },
+  "components": {"securitySchemes": {"workloadBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}}}
+}

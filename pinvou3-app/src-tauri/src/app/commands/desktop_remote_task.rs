@@ -4,7 +4,7 @@
 //! A08 accepts only authenticated full bindings or B-local semantic intents;
 //! renderer JSON cannot assert A's role. Legacy A07 raw entry points stay closed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,6 +25,8 @@ mod frozen_permission_tests;
 pub(super) mod journal_owner_tests;
 
 use super::desktop_remote_model::prepare_selected_task_package_snapshot;
+pub(super) use super::desktop_remote_validation::lease_matches_remote_binding;
+use super::desktop_remote_validation::{capability_allows_skills, validated_task_payload};
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::behavior_telemetry::{
@@ -105,21 +107,6 @@ pub(super) fn finish_admitted_task_ready<T>(
                 .map_err(|error| error.code.to_owned())
         }
     }
-}
-
-fn capability_allows_skills(
-    capability: &crate::features::remote_control::controller::controlling_session::ControllerCapabilityProjection,
-    mode: &str,
-    skill_ids: &[String],
-) -> bool {
-    let mut seen = HashSet::new();
-    skill_ids.len() <= 32
-        && skill_ids.iter().all(|skill_id| {
-            seen.insert(skill_id.as_str())
-                && capability.skills.iter().any(|skill| {
-                    skill.skill_id == *skill_id && skill.scopes.iter().any(|scope| scope == mode)
-                })
-        })
 }
 
 /// Creates B-authoritative sessions for remote tasks. Only the local session
@@ -626,9 +613,16 @@ impl DesktopRemoteTaskRuntime {
     }
 
     pub(crate) fn recover_after_restart(&self) -> usize {
-        self.service
-            .recover_after_restart(controlled_monotonic_millis())
-            .len()
+        let report = self
+            .service
+            .recover_after_restart(controlled_monotonic_millis());
+        if let Some((_, failure)) = report.failed.first() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_restart_persistence_failed",
+                failure.code,
+            );
+        }
+        report.committed.len()
     }
 }
 
@@ -656,38 +650,6 @@ fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> 
         .is_supported()
         .then_some(())
         .ok_or_else(|| UNSUPPORTED.to_owned())
-}
-
-fn sanitized_reason(reason: &str) -> String {
-    let sanitized: String = reason
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        .take(64)
-        .collect();
-    if sanitized.is_empty() {
-        "unspecified".to_owned()
-    } else {
-        sanitized
-    }
-}
-
-fn validated_task_payload(
-    payload: &Value,
-    lease: &LeaseContext,
-    negotiated_capabilities: &[String],
-) -> Result<Value, String> {
-    let encoded = serde_json::to_string(payload).map_err(|_| "task_request_invalid".to_owned())?;
-    let context = RuntimeValidationContext {
-        lease: Some(lease.clone()),
-        negotiated_capabilities: negotiated_capabilities.to_vec(),
-    };
-    let validated =
-        validate_controller_runtime_payload_json(&encoded, SenderRole::ControllerA, Some(&context))
-            .map_err(|error| format!("task_payload_{}", error.code))?;
-    if validated.get("type").and_then(Value::as_str) != Some("task_submit") {
-        return Err("task_request_invalid".to_owned());
-    }
-    Ok(validated)
 }
 
 /// Capability exchange precedes A's mode choice, so it must not silently pin
@@ -1279,7 +1241,7 @@ fn finish_prepared_admission_owned(
     use crate::features::remote_control::controller::task::PreparedTaskAdmission;
     let record = match &prepared {
         PreparedTaskAdmission::Accepted(AdmissionOutcome::Admitted(ticket)) => Some(&ticket.record),
-        PreparedTaskAdmission::InstallationFailed(record, _) => Some(record),
+        PreparedTaskAdmission::InstallationFailed(record, _, _) => Some(record),
         _ => None,
     };
     let mut cleanup = record.map(|record| AdmittedTaskCleanup {
@@ -1848,17 +1810,6 @@ impl DesktopRemoteTaskDispatchPort {
 
 fn dispatch_error(code: &'static str) -> UseCaseError {
     UseCaseError::new(code, false)
-}
-
-pub(super) fn lease_matches_remote_binding(
-    lease: &LeaseContext,
-    live: &crate::features::sessions::remote_proxy::binding::LiveRemoteContext,
-) -> bool {
-    lease.connection_id == live.connection_id
-        && lease.controller_lease_id == live.controller_lease_id
-        && lease.lease_epoch == live.lease_epoch
-        && lease.relay_epoch == live.relay_epoch
-        && lease.remote_control_generation == live.generation
 }
 
 pub(super) fn with_current_dispatch_binding<T>(
@@ -3615,7 +3566,11 @@ mod tests {
         };
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test cleanup panic once");
                 }
@@ -3678,7 +3633,11 @@ mod tests {
         };
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test owned terminal cleanup panic once");
                 }
@@ -4448,13 +4407,6 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_reasons_are_sanitized_and_bounded() {
-        assert_eq!(sanitized_reason("stop now!"), "stopnow");
-        assert_eq!(sanitized_reason(""), "unspecified");
-        assert!(sanitized_reason(&"a".repeat(200)).len() <= 64);
-    }
-
-    #[test]
     fn monotonic_clock_never_moves_backwards() {
         let first = controlled_monotonic_millis();
         let second = controlled_monotonic_millis();
@@ -4516,6 +4468,8 @@ mod tests {
                 connection_id: lease.connection_id.clone(),
                 controller_lease_id: lease.controller_lease_id.clone(),
                 lease_epoch: 1,
+                relay_epoch: lease.relay_epoch.clone(),
+                remote_control_generation: lease.remote_control_generation.clone(),
                 task_id: "task-0001".into(),
             },
             primary: ExportRoute {

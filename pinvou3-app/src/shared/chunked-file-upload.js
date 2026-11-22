@@ -2,7 +2,8 @@
   "use strict";
 
   var CHUNK_BYTES = 256 * 1024;
-  var MAX_FILE_BYTES = 20 * 1024 * 1024;
+  // Mirrors file_ingest::MAX_FILE_BYTES (50 MiB); pinned by web_access_contract.test.mjs.
+  var MAX_FILE_BYTES = 50 * 1024 * 1024;
 
   function uploadId(prefix) {
     // 经局部变量取 crypto:打包器无法把它折叠成可静态追踪的 `crypto.randomUUID`
@@ -73,6 +74,13 @@
   }
 
   async function uploadFile(options) {
+    function observePhase(phase) {
+      // Optional, content-free observers must never change upload semantics.
+      try {
+        if (options && typeof options.onPhase === "function") options.onPhase(phase);
+      } catch (_) {}
+    }
+    observePhase("validation");
     var file = options && options.file;
     if (!file || !Number.isSafeInteger(file.size) || file.size < 0) {
       var invalid = new Error("invalid device attachment");
@@ -85,7 +93,10 @@
       throw empty;
     }
     if (file.size > MAX_FILE_BYTES) {
-      var tooLarge = new Error("device attachment exceeds 20 MB");
+      // Dev-facing message derives from the mirrored constant so a future cap
+      // bump cannot leave this raw text lying about the bound (the chip never
+      // renders it — the code field is what surfaces).
+      var tooLarge = new Error(`device attachment exceeds ${MAX_FILE_BYTES} bytes`);
       tooLarge.code = "device_upload_too_large";
       throw tooLarge;
     }
@@ -106,13 +117,16 @@
     }
 
     try {
+      observePhase("read");
       if (integrity) {
         sha256Hex = await fileSha256Hex(file);
       }
       while (offset < file.size) {
         var end = Math.min(offset + CHUNK_BYTES, file.size);
+        observePhase("read");
         var bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
         assertActive();
+        observePhase(end === file.size ? "commit" : "upload");
         result = await options.sendChunk({
           uploadId: id,
           fileName: file.name || "attachment",
@@ -129,6 +143,7 @@
         }
       }
       assertActive();
+      observePhase("result");
       if (typeof options.validateResult === "function" && !options.validateResult(result)) {
         var invalidResult = new Error("upload did not return a valid attachment");
         invalidResult.code = "device_upload_invalid_result";

@@ -126,6 +126,8 @@ async function primeSessionA(rt) {
   rename.resolve({});
   await p;
   const view = rt.view();
+  console.error('DIAG invoke:', JSON.stringify(rt.calls.invoke));
+  console.error('DIAG sess:', view.activeSessionId, 'persona:', JSON.stringify(view.activePersona));
   assert.equal(view.activeSessionId, 'chat-a', 'precondition: chat-a must be active');
   assert.equal(view.activePersona && view.activePersona.id, 'persona-prime', 'precondition: persona mounted');
   return view;

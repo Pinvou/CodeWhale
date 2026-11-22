@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
+import { CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS } from "./credential-transport-contract.js";
 import { isExampleHmacKey } from "./hmac-key-config.js";
 import { isControllerIdentifier, isEnrollmentEndpointIdentifier, isMigrationRequestIdentifier } from "./identifier-contract.js";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { DEFAULT_MAX_RELAY_CONTROLLER_STATE_BYTES } from "./relay-state-store.js";
 
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
 export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
@@ -19,9 +21,9 @@ const REVISION = /^(?:0|[1-9][0-9]{0,19})$/u;
 const U64_MAX = 18_446_744_073_709_551_615n;
 const CREDENTIAL_MIN_BYTES = 32;
 const CREDENTIAL_MAX_BYTES = 4096;
-const NEW_CREDENTIAL_MAX_UTF16_UNITS = 1024;
 const CREDENTIAL_TRANSPORT_ERROR = "enrollment_credential_transport_invalid";
-const MAX_ENTRIES = 100_000;
+export const DEFAULT_MAX_ENROLLMENT_ENTRIES = 100_000;
+const MAX_ENTRIES = 1_000_000;
 const MAX_MIGRATION_REQUESTS = 100_000;
 const MAX_BATCH_OPERATIONS = 10_000;
 const MIGRATION_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/u;
@@ -37,6 +39,14 @@ export class EnrollmentRegistryError extends Error {
 
 function fail(code, cause) {
   throw new EnrollmentRegistryError(code, code, cause ? { cause } : undefined);
+}
+
+function configuredCapacity(raw, fallback, min, max, code) {
+  if (raw === undefined) return fallback;
+  if (typeof raw !== "string" || !/^[1-9][0-9]{0,8}$/u.test(raw)) fail(code);
+  const value = Number(raw);
+  if (value < min || value > max) fail(code);
+  return value;
 }
 
 function exactObject(value, required, label) {
@@ -73,7 +83,7 @@ function validateCredential(credential, label = "enrollment_credential") {
 // Only newly written role material must also fit the Legacy transport limit.
 function validateNewCredential(credential, label = "enrollment_credential") {
   validateCredential(credential, label);
-  if (credential.length > NEW_CREDENTIAL_MAX_UTF16_UNITS) fail(CREDENTIAL_TRANSPORT_ERROR);
+  if (credential.length > CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS) fail(CREDENTIAL_TRANSPORT_ERROR);
 }
 
 function validateRevision(value, label) {
@@ -209,10 +219,14 @@ function validateMigrationResult(raw) {
 }
 
 function validateMigrationRequest(raw) {
-  const request = exactObject(raw, [
+  const fields = [
     "request_id", "operation", "endpoint_ids", "parameters", "status",
     "created_at", "completed_at", "outcome",
-  ], "migration_request");
+  ];
+  if (raw?.operation === "restore" && Object.hasOwn(raw, "expected_namespace_revision")) {
+    fields.push("expected_namespace_revision");
+  }
+  const request = exactObject(raw, fields, "migration_request");
   if (!isMigrationRequestIdentifier(request.request_id)) {
     fail("migration_request_malformed");
   }
@@ -228,6 +242,9 @@ function validateMigrationRequest(raw) {
   }
   if (request.operation === "batch" && endpointIds.length === 0) fail("migration_request_malformed");
   if (request.operation === "restore" && endpointIds.length !== 0) fail("migration_request_malformed");
+  if (Object.hasOwn(request, "expected_namespace_revision")) {
+    validateRevision(request.expected_namespace_revision, "expected_namespace_revision");
+  }
   const parameters = exactObject(request.parameters, ["algorithm", "key_id", "digest_hex"], "migration_parameters");
   if (parameters.algorithm !== "hmac-sha256-v1" || !KEY_ID.test(parameters.key_id)
     || !HEX_64.test(parameters.digest_hex)) fail("migration_request_malformed");
@@ -351,6 +368,8 @@ function publicMigrationRequest(request) {
     created_at: request.created_at,
     completed_at: request.completed_at,
     outcome: structuredClone(request.outcome),
+    ...(Object.hasOwn(request, "expected_namespace_revision")
+      ? { expected_namespace_revision: request.expected_namespace_revision } : {}),
   });
 }
 
@@ -403,8 +422,9 @@ function prepareAtomicOperations(operations) {
         expectedRevision: validateRevision(raw.expected_revision, "expected_endpoint_revision") };
     }
     if (raw.operation === "restore") {
-      exactObject(raw, ["operation", "snapshot"], "enrollment_batch_operation");
-      return { operation: "restore", snapshot: validateRegistry(raw.snapshot) };
+      exactObject(raw, ["operation", "snapshot", "expected_namespace_revision"], "enrollment_batch_operation");
+      return { operation: "restore", snapshot: validateRegistry(raw.snapshot),
+        expectedNamespaceRevision: validateRevision(raw.expected_namespace_revision, "expected_namespace_revision") };
     }
     fail("enrollment_batch_operation_invalid");
   });
@@ -454,9 +474,27 @@ function migrationDescriptor(prepared) {
   };
 }
 
+function requireRestoreRevision(prepared, snapshot, pending = false) {
+  const restore = prepared[0];
+  if (restore.operation !== "restore") return;
+  // Only this request's durable intent may advance the captured namespace.
+  // Any intervening write (including another migration intent) invalidates it.
+  const expected = pending ? incrementRevision(restore.expectedNamespaceRevision) : restore.expectedNamespaceRevision;
+  if (snapshot.namespace_revision !== expected) fail("migration_restore_revision_conflict");
+}
+
+function requireRevocationsPreserved(current, restored) {
+  const revoked = new Set(restored.entries.filter((entry) => entry.status === "revoked")
+    .map((entry) => entry.endpoint_id));
+  if (current.entries.some((entry) => entry.status === "revoked" && !revoked.has(entry.endpoint_id))) {
+    fail("enrollment_restore_revocation_conflict");
+  }
+}
+
 function applyPreparedOperations(registry, prepared, config, clock) {
   if (prepared[0].operation === "restore") {
     const restored = prepared[0].snapshot;
+    requireRevocationsPreserved(registry, restored);
     return {
       registry: {
         ...restored,
@@ -503,7 +541,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
       }
       if (operation.operation === "allowlist" && operation.expectedRevision !== undefined
         && operation.expectedRevision !== "0") fail("endpoint_revision_conflict");
-      if (entries.length >= MAX_ENTRIES) fail("enrollment_capacity_reached");
+      if (entries.length >= config.max_entries) fail("enrollment_capacity_reached");
       validateNewCredential(operation.credential);
       if (operation.desktopCredential !== undefined) validateNewCredential(operation.desktopCredential, "desktop_credential");
       const entry = {
@@ -663,6 +701,10 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     self_registration: selfRegistration,
     controller_state_path: controllerStatePath,
     legacy_web_state_path: legacyWebStatePath,
+    max_entries: configuredCapacity(env.PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES, DEFAULT_MAX_ENROLLMENT_ENTRIES,
+      1, MAX_ENTRIES, "enrollment_entry_limit_invalid"),
+    controller_state_max_bytes: configuredCapacity(env.PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES,
+      DEFAULT_MAX_RELAY_CONTROLLER_STATE_BYTES, 1024, 256 * 1024 * 1024, "enrollment_state_limit_invalid"),
   });
   CONFIG.set(config, {
     ...config,
@@ -710,7 +752,7 @@ export class EnrollmentRegistry {
       fail("enrollment_state_store_path_mismatch");
     }
     const registry = new EnrollmentRegistry(stateStore, details, clock);
-    registry.#read();
+    registry.#reportCapacity(registry.#read().registry.entries.length);
     return registry;
   }
 
@@ -718,6 +760,7 @@ export class EnrollmentRegistry {
   #config;
   #clock;
   #cache = null;
+  #capacityWarning = false;
   #endpointIndex = new WeakMap();
 
   constructor(store, config, clock) {
@@ -788,12 +831,39 @@ export class EnrollmentRegistry {
       || !safeEqualHex(request.parameters.digest_hex, expected.digest_hex)) {
       fail("migration_request_conflict");
     }
+    if (request.operation === "restore") {
+      if (Object.hasOwn(request, "expected_namespace_revision")) {
+        if (request.expected_namespace_revision !== context.prepared[0].expectedNamespaceRevision) {
+          fail("migration_request_conflict");
+        }
+      } else if (request.status === "pending") {
+        // Preserve historical sealed outcomes, but never resume an unfenced
+        // intent. Its original precondition cannot be reconstructed safely.
+        fail("migration_restore_fence_missing");
+      }
+    }
   }
 
   #migrationResponse(request, replayed) {
     if (request.status === "failed") fail(request.outcome.code);
     const result = publicMigrationRequest(request);
     return replayed === undefined ? result : deepFreeze({ ...result, replayed });
+  }
+
+  #reportCapacity(entries) {
+    if (this.#capacityWarning) return;
+    // Operational telemetry cannot change the result of a committed mutation.
+    try {
+      const maxEntries = this.#config.max_entries;
+      if (entries >= Math.ceil(maxEntries * 0.8)) {
+        const capacity = this.#store.readCapacity?.();
+        this.#capacityWarning = true;
+        console.warn("[relay-capacity] enrollment", JSON.stringify({
+          entries, max_entries: maxEntries,
+          serialized_bytes: capacity?.serialized_bytes, max_bytes: capacity?.max_bytes,
+        }));
+      }
+    } catch {}
   }
 
   async #write(snapshot, registry, options = {}) {
@@ -805,7 +875,9 @@ export class EnrollmentRegistry {
         validateRegistry(registry),
         options,
       );
-      return { ...result, registry: validateRegistry(result.value) };
+      const committed = validateRegistry(result.value);
+      this.#reportCapacity(committed.entries.length);
+      return { ...result, registry: committed };
     } catch (error) {
       this.#cache = null;
       if (error instanceof EnrollmentRegistryError) throw error;
@@ -872,6 +944,7 @@ export class EnrollmentRegistry {
     expectedNamespaceRevision = validateRevision(expectedNamespaceRevision, "expected_namespace_revision");
     const current = this.#read();
     if (current.namespace_revision !== expectedNamespaceRevision) fail("enrollment_revision_conflict");
+    requireRevocationsPreserved(current.registry, imported);
     const registry = {
       ...imported,
       migration_requests: structuredClone(current.registry.migration_requests),
@@ -886,6 +959,7 @@ export class EnrollmentRegistry {
   previewAtomicBatch({ operations } = {}) {
     const prepared = prepareAtomicOperations(operations);
     const snapshot = this.#read();
+    requireRestoreRevision(prepared, snapshot);
     const applied = applyPreparedOperations(snapshot.registry, prepared, this.#config, this.#clock);
     return deepFreeze({
       namespace_revision: snapshot.namespace_revision,
@@ -899,6 +973,7 @@ export class EnrollmentRegistry {
     expectedNamespaceRevision = validateRevision(expectedNamespaceRevision, "expected_namespace_revision");
     const snapshot = this.#read();
     if (snapshot.namespace_revision !== expectedNamespaceRevision) fail("enrollment_revision_conflict");
+    requireRestoreRevision(prepared, snapshot);
     const applied = applyPreparedOperations(snapshot.registry, prepared, this.#config, this.#clock);
     if (!applied.changed) {
       return deepFreeze({
@@ -939,6 +1014,7 @@ export class EnrollmentRegistry {
         this.#assertMigrationRequestMatches(existing, context);
         return publicMigrationRequest(existing);
       }
+      requireRestoreRevision(context.prepared, snapshot);
       if (snapshot.registry.migration_requests.length >= MAX_MIGRATION_REQUESTS) {
         fail("migration_request_capacity_reached");
       }
@@ -958,6 +1034,8 @@ export class EnrollmentRegistry {
         created_at: isoTimestamp(this.#clock),
         completed_at: null,
         outcome: null,
+        ...(context.descriptor.operation === "restore"
+          ? { expected_namespace_revision: context.prepared[0].expectedNamespaceRevision } : {}),
       };
       const registry = {
         ...snapshot.registry,
@@ -987,6 +1065,7 @@ export class EnrollmentRegistry {
       let applied;
       let failure = null;
       try {
+        requireRestoreRevision(context.prepared, snapshot, true);
         applied = applyPreparedOperations(snapshot.registry, context.prepared, this.#config, this.#clock);
       } catch (error) {
         if (!(error instanceof EnrollmentRegistryError)) throw error;
@@ -1059,6 +1138,7 @@ export class EnrollmentRegistry {
     if (existing) {
       fail(existing.status === "revoked" ? "endpoint_revoked" : "endpoint_already_enrolled");
     }
+    if (snapshot.registry.entries.length >= this.#config.max_entries) fail("enrollment_capacity_reached");
     validateNewCredential(credential);
     if (desktopCredential !== undefined) validateNewCredential(desktopCredential, "desktop_credential");
     const timestamp = isoTimestamp(this.#clock);
@@ -1225,10 +1305,15 @@ export class EnrollmentRegistry {
       revoked_at: isoTimestamp(this.#clock),
       audit: { ...entry.audit, last_action: "revoked" },
     };
-    await this.#write(snapshot, {
-      ...snapshot.registry,
-      entries: snapshot.registry.entries.map((candidate) => candidate.endpoint_id === endpointId ? next : candidate),
-    });
+    try {
+      await this.#write(snapshot, {
+        ...snapshot.registry,
+        entries: snapshot.registry.entries.map((candidate) => candidate.endpoint_id === endpointId ? next : candidate),
+      });
+    } catch (error) {
+      if (error?.code === "enrollment_registry_capacity_reached") fail("enrollment_revocation_capacity_reached", error);
+      throw error;
+    }
     return publicEntry(next);
   }
 }

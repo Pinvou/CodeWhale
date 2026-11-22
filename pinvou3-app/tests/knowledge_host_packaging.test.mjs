@@ -44,6 +44,18 @@ const remoteKnowledgeView = readFileSync(
 const runDev = readFileSync(path.join(appRoot, 'run-dev.sh'), 'utf8');
 
 test('Linux package embeds the host helper and standalone server build', () => {
+test('host helper completeness probe accepts every MODEL_ONNX_CANDIDATES entry', () => {
+  // model_layout.rs lists three ONNX candidates in priority order; the Linux
+  // helper's model_complete() must accept the same set, otherwise a directory
+  // holding only the third candidate (onnx/model.onnx) is misjudged as
+  // incomplete and the legacy migration copies an old root-level model in,
+  // which the loader then silently prefers.
+  assert.match(helper, /\[ -f "\$root\/model\.onnx" \] \|\|/u);
+  assert.match(helper, /\[ -f "\$root\/onnx\/model_int8\.onnx" \] \|\|/u);
+  assert.match(helper, /\[ -f "\$root\/onnx\/model\.onnx" \]; \} &&/u);
+
+});
+
   assert.match(platformConfig, /resources\/platforms\/linux\/knowledge-host\//u);
   // Packaging calls may pass cross-build options (pre-built target server);
   // the pin is that build.js reaches this step at all — the dev path matches

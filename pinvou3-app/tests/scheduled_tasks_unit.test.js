@@ -10,6 +10,9 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+// Node 24 resolves require() of synchronous ESM: share the one deferred
+// helper with the .mjs behavioral tests instead of an inline copy.
+const { deferred } = require('./helpers/deferred.mjs');
 
 const indexHtml = [
   'app/main.jsx',
@@ -70,6 +73,20 @@ const scheduledTemplateSource = indexHtml.slice(
 const scheduledViewSource = indexHtml.slice(
   indexHtml.indexOf('const ScheduledTasksView'),
   indexHtml.indexOf('export { ScheduledTasksView }')
+);
+const zhScheduledDict = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'i18n', 'zh.js'), 'utf8');
+const enScheduledDict = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'i18n', 'en.js'), 'utf8');
+const jaScheduledDict = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'i18n', 'ja.js'), 'utf8');
+// Issue #821: the CRON subset validator is a feature module so the
+// cross-surface contract (creation_requests.rs + server.py) is
+// behavior-tested here, not only source-pinned.
+const scheduleCronExpr = require('../src/features/scheduled/schedule-cron-expr.js');
+// (#900 review P2) the RRULE field grammar behind the schedule editor —
+// parse/project/build the stored rule, mirroring the backend's trim.
+const scheduleRruleFields = require('../src/features/scheduled/schedule-rrule-fields.js');
+const scheduleRruleFieldsSrc = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'features', 'scheduled', 'schedule-rrule-fields.js'),
+  'utf8'
 );
 
 function mustContain(text) {
@@ -147,8 +164,14 @@ assert.ok(
   'scheduled selection must live above the remounted ScheduledTasksView'
 );
 assert.ok(
-  /const refresh = \(\) => bridge\.scheduled\.refreshScheduledTaskData\(20\)[\s\S]{0,260}setInterval\([\s\S]{0,120}refresh\(\)[\s\S]{0,120}3000/.test(indexHtml),
-  'the three-second fallback must refresh tasks, selected detail, and runs through one bridge transaction'
+  /refreshScheduledTaskData\(20\)\.catch\(\(\) => \{\}\);[\s\S]{0,200}useIntervalWhen\(\(\) => \{[\s\S]{0,160}refreshScheduledTaskData\(20\)\.catch\(\(\) => \{\}\);[\s\S]{0,40}\}, 3000, !!\(bridge && bridge\.scheduled\.refreshScheduledTaskData\)\)/.test(indexHtml),
+  'the three-second fallback (shared useIntervalWhen since #817 B3) must refresh tasks, selected detail, and runs through one bridge transaction, gated on the bridge capability'
+);
+// r3 复审:创建表单的窗口级 Escape 与迁移后的确认层同视图共存,IME 组合中的
+// Escape(取消候选词)必须与全应用一致地不关闭本层(busyAction 守卫保持)。
+assert.ok(
+  /const closeOnEscape = \(event\) => \{[\s\S]{0,200}if \(event\.key === 'Escape' && !busyAction && !isImeComposing\(event\)\) setCreateForm\(null\);/.test(scheduledViewSource),
+  'the scheduled create dialog Escape must stay busy-guarded and IME-guarded (r3 review)'
 );
 assert.ok(
   /const handleSwitchSession = useCallback\(async \(id\) => \{[\s\S]{0,220}runBrowserUiTransition[\s\S]{0,260}setCurrentView\('chat'\)[\s\S]{0,180}await bridge\.sessions\.switchToSession\(id\)[\s\S]{0,180}!switched \|\| !isCurrent\(\)[\s\S]{0,260}channel: 'session'[\s\S]{0,100}hideMode: 'workspace'[\s\S]{0,80}serialize: true/.test(indexHtml),
@@ -286,8 +309,8 @@ assert.ok(
   /function scheduleRepeatLabel\(/.test(indexHtml) &&
     /editor\.interval/.test(indexHtml) &&
     /editor\.repeat === 'hourly' \? scheduledCopy\.startTime : scheduledCopy\.time/.test(indexHtml) &&
-    /const hasTimeAnchor = fields\.BYHOUR != null \|\| fields\.BYMINUTE != null/.test(indexHtml) &&
-    /previousEditor\.hasTimeAnchor/.test(indexHtml) &&
+    /const hasTimeAnchor = fields\.BYHOUR != null \|\| fields\.BYMINUTE != null/.test(scheduleRruleFieldsSrc) &&
+    /previousEditor\.hasTimeAnchor/.test(scheduleRruleFieldsSrc) &&
     /placeholder=.*scheduledCopy\.setStart/.test(indexHtml) &&
     !indexHtml.includes("repeat === 'minutely'"),
   'hourly schedules should expose an optional start anchor without migrating legacy rules implicitly'
@@ -369,9 +392,9 @@ assert.ok(
 // without BYDAY, silently dropping the selected weekdays; the hourly branch must carry
 // them and omit BYDAY only when no day is selected.
 assert.ok(
-  /editor\.repeat === 'hourly'\) \{[\s\S]{0,400}const byday = days\.length \? `;BYDAY=\$\{days\.join\(','\)\}` : '';/.test(scheduledViewSource) &&
-    /return `FREQ=HOURLY;INTERVAL=\$\{Math\.max\(1, interval \|\| 1\)\}\$\{byday\}\$\{anchor\}`;/.test(scheduledViewSource),
-  'hourly schedules must persist the selected weekdays as BYDAY and omit it when none is selected'
+  /const byday = days\.length \? `;BYDAY=\$\{days\.join\(','\)\}` : '';/.test(scheduleRruleFieldsSrc) &&
+    /FREQ=HOURLY;INTERVAL=\$\{Math\.max\(1, interval \|\| 1\)\}\$\{byday\}\$\{anchor\}/.test(scheduleRruleFieldsSrc),
+  'hourly schedule edits must carry inherited BYDAY restrictions into the rule instead of silently dropping them; the Rust scheduler honors BYDAY when triggering hourly tasks'
 );
 assert.ok(
   /SCHEDULED_TASK_WRITABLE_FIELDS\s*=\s*\["name", "prompt", "rrule", "model", "modelId", "paused"\]/.test(tauriBridge) &&
@@ -421,7 +444,11 @@ assert.ok(
     /data-testid="scheduled-run-history-list" className=\{`overflow-hidden rounded-\[12px\] \$\{iosHistorySurface\}`\}/.test(indexHtml) &&
     /fixed z-\[1000\][\s\S]{0,120}rounded-\[12px\] border/.test(indexHtml) &&
     /fixed z-\[1000\][\s\S]{0,120}rounded-\[14px\] border/.test(indexHtml) &&
-    /data-testid="scheduled-detail-delete-confirmation"[\s\S]{0,260}rounded-\[14px\] border/.test(indexHtml),
+    // #817 B1: the delete confirmation itself moved to the shared ConfirmDialog
+    // (shadow-2xl card, no border) — the floating-surface-border rule above now
+    // applies to the two popover surfaces; the confirm must at least keep the
+    // app's topmost confirm z-index.
+    /<ConfirmDialog\s+testid="scheduled-detail-delete-confirmation"[\s\S]{0,240}zIndexClass="z-\[300\]"/.test(scheduledViewSource),
   'embedded scheduled task form groups should not have outer borders, while floating surfaces keep borders'
 );
 assert.ok(
@@ -436,56 +463,18 @@ vm.runInNewContext(
   modelOptionsSandbox
 );
 const selectableModelFixture = [
-  { id: 'builtin_llmapi', kind: 'builtin_llmapi', name: '内置模型' },
-  { id: 'user-model', name: '用户模型' },
+  { id: 'builtin_account_platform', kind: 'builtin_account_platform' },
+  { id: 'user-model' }, null, { name: 'no stable id' },
 ];
-assert.deepStrictEqual(
-  Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, {
-    backend_user_exists: true,
-    backend_user_state: 'exists',
-    enabled: true,
-    provisioning_status: 'ready',
-  }), model => model.id),
-  ['builtin_llmapi', 'user-model'],
-  'a confirmed ready backend account should expose the built-in model in every model selector'
-);
-const recoverableStaleStatus = {
-  backend_user_exists: true,
-  backend_user_state: 'exists',
-  stale: true,
-  auto_login_failed: true,
-  enabled: true,
-  provisioning_status: 'ready',
-};
-assert.equal(
-  modelOptionsSandbox.isLlmApiAccountVisible(recoverableStaleStatus),
-  true,
-  'an authentication failure should preserve the only manual login recovery entry'
-);
-assert.equal(
-  modelOptionsSandbox.isBuiltInLlmApiAvailable(recoverableStaleStatus),
-  false,
-  'a recoverable stale account must not make the built-in model selectable before re-authentication'
-);
-for (const unavailableStatus of [
-  null,
-  { backend_user_exists: true, backend_user_state: 'exists', stale: true, enabled: true, provisioning_status: 'ready' },
-  { backend_user_exists: false, backend_user_state: 'not_exists', enabled: false, provisioning_status: 'not_started' },
-  { backend_user_exists: false, backend_user_state: 'unknown', enabled: true, provisioning_status: 'ready' },
-  { backend_user_exists: true, backend_user_state: 'exists', enabled: false, provisioning_status: 'disabled' },
-  { backend_user_exists: true, backend_user_state: 'exists', enabled: true, provisioning_status: 'failed' },
-]) {
-  assert.deepStrictEqual(
-    Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, unavailableStatus), model => model.id),
-    ['user-model'],
-    'the built-in model should only be selectable after account existence and service readiness are confirmed'
-  );
+for (const authState of [null, { authenticated: false }, { authenticated: true }]) {
+  assert.deepStrictEqual(Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, authState), model => model.id),
+    ['builtin_account_platform', 'user-model'], 'catalog visibility does not invent execution authority from login state');
 }
-assert.ok(
-  /selectableModels\(appState\.savedModels \|\| \[\], appState\.llmApiStatus\)/.test(indexHtml) &&
-    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\], bs && bs\.llmApiStatus\)/.test(composerSharedSource),
-  'chat, settings, and scheduled tasks should share availability-based model selection without the old hiding rules'
-);
+assert.equal(modelOptionsSandbox.isBuiltInAccountPlatformModel(selectableModelFixture[0]), true);
+assert.equal(modelOptionsSandbox.isBuiltInAccountPlatformModel(selectableModelFixture[1]), false);
+assert.ok(/selectableModels\(appState\.savedModels \|\| \[\]\)/.test(indexHtml)
+  && /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\]\)/.test(composerSharedSource),
+  'selectors retain the shared catalog; Token Gateway remains authoritative per execution');
 assert.ok(
   /label:\s*selectorMainLabel\(model, t\)/.test(indexHtml) &&
     !/label:\s*model\.name && model\.name !== model\.model \?/.test(indexHtml),
@@ -519,7 +508,7 @@ assert.ok(
     /const lastRequiredSelection = multiple && active && selectedValues\.length <= minSelected/.test(indexHtml) &&
     /onChange=\{values => editSchedule\('days', values\)\} multiple minSelected=\{1\}/.test(indexHtml) &&
     /onClose=\{\(\) => setScheduleRepeatIntent\(null\)\}/.test(indexHtml) &&
-    /WEEKDAY_CODES\.filter\(day => requested\.has\(day\)\)/.test(indexHtml),
+    /WEEKDAY_CODES\.filter\(day => requested\.has\(day\)\)/.test(scheduleRruleFieldsSrc),
   'weekly schedules should support an ordered one-to-seven day multi-select, reject empty selections, and normalize presets after the menu closes'
 );
 assert.ok(
@@ -608,12 +597,67 @@ assert.ok(
   'backend prompt must teach once-only schedules, reject past one-shot times, and pin AT to local wall-clock format'
 );
 assert.ok(
-  scheduledViewSource.includes("fields.FREQ === 'ONCE'") &&
+  scheduleRruleFieldsSrc.includes("fields.FREQ === 'ONCE'") &&
     scheduledViewSource.includes("scheduledCopy.repeatOptions.once"),
   'the schedule editor must recognize one-shot rules instead of rewriting them into recurrences'
 );
+// Issue #821: CRON rules get their own editor mode; the weekly fallback
+// that silently rewrote them on save must be unreachable for FREQ=CRON.
+// The routing pin targets the buildCronRrule call itself so neutering the
+// guard (falling back to the weekly builder) fails the assert.
 assert.ok(
-  scheduledViewSource.includes("function onceScheduleParts"),
+  scheduleRruleFieldsSrc.includes("fields.FREQ === 'CRON'") &&
+    scheduleRruleFieldsSrc.includes("repeat: 'cron'") &&
+    /if \(fields\.FREQ === 'CRON' && key !== 'repeat'\)\s*\{\s*return buildCronRrule\(fields, key, value, currentRrule\);/.test(scheduleRruleFieldsSrc),
+  'the schedule editor must give CRON rules their own mode instead of the weekly fallback that silently rewrote them on save (issue #821)'
+);
+assert.ok(
+  // The real markup is a runtime template literal inside the shared
+  // FormScheduleRows component — the round-2 pin matched only the comment
+  // anchors and stayed green with the whole row deleted (round-3 review),
+  // so pin the construction itself plus the cron-mode row gate.
+  /data-testid=\{`\$\{prefix\}-cron-expr`\}/.test(scheduledViewSource) &&
+    /\{editor\.repeat === 'cron' && \(\(\) => \{/.test(scheduledViewSource) &&
+    scheduledViewSource.includes("{ value: 'cron', label: scheduledCopy.repeatOptions.cron }"),
+  'both schedule forms must expose the CRON expression row for cron-mode tasks'
+);
+assert.ok(
+  /nextEditor\.repeat === 'cron' && cronExprInvalid\(nextEditor\.cronExpr\)/.test(scheduledViewSource) &&
+    /createEditorValue\.repeat === 'cron' && cronExprInvalid\(createEditorValue\.cronExpr\)/.test(scheduledViewSource),
+  'an in-progress invalid CRON expression must stay a local draft in the detail editor (every edit key, so a wheel rewrite cannot bounce a save) and block create submit'
+);
+assert.ok(
+  scheduledViewSource.includes("detailCronEditor && detailCronEditor.repeat === 'cron' && cronExprInvalid(detailCronEditor.cronExpr)") &&
+    scheduledViewSource.includes("createScheduleEditor && createScheduleEditor.repeat === 'cron' && cronExprInvalid(createScheduleEditor.cronExpr)"),
+  'the detail save/run actions and the create submit button must stay disabled while a CRON draft is invalid'
+);
+assert.ok(
+  /function scheduledTaskDraftCronReject\(rrule\)/.test(bridgeSharedHelpers) &&
+    /const cronReject = scheduledTaskDraftCronReject\(lockedDraft\.rrule\);\s*if \(cronReject\) throw new Error\(cronReject\);/.test(bridgeSharedHelpers) &&
+    (bridgeSharedHelpers.match(/scheduledTaskDraftCronReject: b\.scheduledTaskDraftCronReject/g) || []).length === 2,
+  'chat auto-create must structurally reject out-of-subset CRON drafts before createScheduledTask runs, exported from both shared clusters (round-3 review M2)'
+);
+assert.ok(
+  zhScheduledDict.includes("cron:'自定义计划'") &&
+    zhScheduledDict.includes('cronExprHint') &&
+    zhScheduledDict.includes('cronExprInvalid') &&
+    enScheduledDict.includes("cron:'Custom'") &&
+    enScheduledDict.includes('cronExprHint') &&
+    enScheduledDict.includes('cronExprInvalid') &&
+    jaScheduledDict.includes("cron:'カスタム'") &&
+    jaScheduledDict.includes('cronExprHint') &&
+    jaScheduledDict.includes('cronExprInvalid'),
+  'the CRON repeat option and expression hints must exist in the zh/en/ja dictionaries'
+);
+assert.ok(
+  scheduledTaskPromptRust.includes('每月 1 日 09:30：FREQ=CRON;EXPR=30 9 1 * *') &&
+    scheduledTaskPromptRust.includes('分钟字段必须是固定值') &&
+    scheduledTaskPromptRust.includes('rrule 只允许 FREQ 和 EXPR 两个字段') &&
+    scheduledTaskPromptRust.includes('每月指定日期和时间'),
+  'backend prompt must teach the monthly/CRON subset the gates accept (issue #821)'
+);
+assert.ok(
+  scheduleRruleFieldsSrc.includes("function onceScheduleParts"),
   'the schedule editor must resolve once AT to the local wall clock instead of dropping stored UTC offsets'
 );
 assert.ok(
@@ -706,16 +750,6 @@ assert.ok(
     !/SCHEDULED_TASK_WRITABLE_FIELDS\s*=\s*\[[^\]]*["']kind["']/.test(tauriBridge),
   'the memory-organize template should pass task kind on create only; edit flows must never resend it'
 );
-
-function deferred() {
-  var resolve;
-  var reject;
-  var promise = new Promise(function (res, rej) {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
 
 function tick() {
   return new Promise(function (resolve) { setImmediate(resolve); });
@@ -812,9 +846,6 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
         cmd === "list_scheduled_runs") return [];
     if (cmd === "get_mode_state") return { mode: "yolo" };
     if (cmd === "get_memory_overview") return {};
-    if (cmd === "get_llmapi_status") {
-      return { backend_user_exists: false, backend_user_state: "not_exists", stale: false };
-    }
     if (cmd === "session_mounted_collections_snapshot") return { revision: 0, collections: [] };
     if (cmd === "session_mounted_collections") return [];
     if (cmd === "session_mounted_collection" || cmd === "get_active_persona" ||
@@ -2196,110 +2227,18 @@ async function deepSeekTurnTimelineLifecycleBehavior() {
   assert.strictEqual(completed[3].error, "模型失败");
 }
 
-async function llmApiStartupRetryBehavior() {
-  var timers = [];
-  var harness = createBridgeHarness(null, {
-    setTimeout: function (callback, delay) {
-      timers.push({ callback: callback, delay: delay });
-      return timers.length;
-    },
-    clearTimeout: function () {},
-  });
-  var statusCalls = 0;
-  var modelCalls = 0;
-  harness.handlers.get_llmapi_status = function () {
-    statusCalls += 1;
-    if (statusCalls === 1) {
-      return { backend_user_exists: false, backend_user_state: "unknown", stale: true };
-    }
-    if (statusCalls === 2) throw new Error("temporary network failure");
-    return {
-      backend_user_exists: true,
-      backend_user_state: "exists",
-      stale: false,
-      enabled: true,
-      provisioning_status: "ready",
-    };
-  };
-  harness.handlers.get_llmapi_models = function () {
-    modelCalls += 1;
-    return { available_models: ["deepseek-v4-flash"], default_model: "deepseek-v4-flash" };
-  };
-
-  await harness.bridge.lifecycle.init();
-  await tick();
-  assert.strictEqual(statusCalls, 1, "startup should query the built-in account immediately");
-  var firstRetry = timers.find(function (timer) { return timer.delay === 2000; });
-  assert.ok(firstRetry, "an unknown account result should schedule the first retry");
-
-  firstRetry.callback();
-  await tick();
-  await tick();
-  assert.strictEqual(statusCalls, 2, "a transport failure should keep the startup retry active");
-  var secondRetry = timers.find(function (timer) { return timer.delay === 5000; });
-  assert.ok(secondRetry, "startup retries should back off after another inconclusive result");
-
-  secondRetry.callback();
-  await tick();
-  await tick();
-  assert.strictEqual(statusCalls, 3, "startup should retry until the account result is authoritative");
-  assert.strictEqual(modelCalls, 1, "a known existing account should refresh built-in models once");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiStatus.backend_user_state, "exists");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiModels.default_model, "deepseek-v4-flash");
-  assert.strictEqual(
-    timers.filter(function (timer) { return timer.delay === 10000; }).length,
-    0,
-    "startup retries should stop after an existing account is confirmed"
-  );
-
-  var missingTimers = [];
-  var missingHarness = createBridgeHarness(null, {
-    setTimeout: function (callback, delay) {
-      missingTimers.push({ callback: callback, delay: delay });
-      return missingTimers.length;
-    },
-    clearTimeout: function () {},
-  });
-  var missingStatusCalls = 0;
-  missingHarness.handlers.get_llmapi_status = function () {
-    missingStatusCalls += 1;
-    return { backend_user_exists: false, backend_user_state: "not_exists", stale: false };
-  };
-
-  await missingHarness.bridge.lifecycle.init();
-  await tick();
-  await tick();
-  assert.strictEqual(missingStatusCalls, 1, "a confirmed missing account should not be retried");
-  assert.strictEqual(missingHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiStatus.backend_user_state, "not_exists");
-  assert.strictEqual(
-    missingTimers.filter(function (timer) { return timer.delay === 2000; }).length,
-    0,
-    "startup retries should stop after account absence is confirmed"
-  );
-
-  var disabledHarness = createBridgeHarness();
-  var disabledModelCalls = 0;
-  disabledHarness.handlers.get_llmapi_status = function () {
-    return {
-      backend_user_exists: true,
-      backend_user_state: "exists",
-      stale: false,
-      enabled: false,
-      provisioning_status: "disabled",
-    };
-  };
-  disabledHarness.handlers.get_llmapi_models = function () {
-    disabledModelCalls += 1;
-    return { available_models: ["must-not-be-used"] };
-  };
-  await disabledHarness.bridge.lifecycle.init();
-  await tick();
-  assert.strictEqual(disabledModelCalls, 0, "a disabled account must not refresh built-in models during startup");
-  assert.strictEqual(
-    disabledHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiModels,
-    null,
-    "a disabled account must clear the built-in model cache"
-  );
+async function accountPlatformStartupModelBehavior() {
+  var harness=createBridgeHarness(); var listCalls=0, effectiveCalls=0, retiredCalls=0;
+  harness.handlers.list_models=function(){listCalls++;return {models:[{id:'builtin_account_platform',kind:'builtin_account_platform'}],active_model_id:'builtin_account_platform'};};
+  harness.handlers.get_effective_model_config=function(){effectiveCalls++;return {model:'public-model',requires_user_api_key:false};};
+  harness.handlers.get_llmapi_status=function(){retiredCalls++;throw new Error('retired');};
+  await harness.bridge.lifecycle.init();await tick();
+  assert.equal(listCalls,1,'startup loads the actual configured model catalog');
+  assert.equal(effectiveCalls,1,'startup resolves the effective model independently of retired account status');
+  assert.equal(retiredCalls,0,'retired LLM API status must not own startup authority or schedule retries');
+  var state=harness.bridge.state.getMany(['settings','models']);
+  assert.equal(state.modelsLoaded,true);
+  assert.equal(state.effectiveModelConfig.model,'public-model');
 }
 async function internalSubagentHandoffStaysOutOfPresentation(bridgeKind) {
   var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
@@ -2809,7 +2748,7 @@ async function scheduledRunUnreadBehavior() {
   assert.strictEqual(JSON.stringify(marks.map(function (call) { return call.args; })), JSON.stringify([
     { automationId: task.id, runId: "run-1" },
   ]));
-  var afterFirst = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var afterFirst = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(afterFirst.scheduledTaskRuns[0].unread, false, "the opened run should become viewed");
   assert.strictEqual(afterFirst.scheduledTaskRuns[1].unread, true, "sibling runs remain independently unread");
   assert.strictEqual(afterFirst.scheduledTaskRecentRuns[0].unread, false, "the opened sidebar run should lose its dot immediately");
@@ -2819,7 +2758,7 @@ async function scheduledRunUnreadBehavior() {
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(runs[1], task), true);
-  var afterSecond = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var afterSecond = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.ok(afterSecond.scheduledTaskRuns.every(function (run) { return run.unread === false; }));
   assert.ok(afterSecond.scheduledTaskRecentRuns.every(function (run) { return run.unread === false; }));
   assert.strictEqual(afterSecond.scheduledTasks[0].hasUnreadRuns, false, "task dot clears only after every child run was opened");
@@ -2866,29 +2805,29 @@ async function scheduledRunUnreadBehavior() {
     loadCount + 1,
     "a running conversation should hydrate its durable prompt without replacing the live buffer"
   );
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, "sched-running");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, "sched-running");
   assert.ok(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems.some(function (item) {
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems.some(function (item) {
       return String(item.text || item.html || "").includes("partial live output");
     }),
     "the normal chat transcript should expose buffered live output"
   );
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("durable scheduled prompt"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems).includes("durable scheduled prompt"),
     "the normal chat transcript should also include the durable user prompt"
   );
-  var visibleScheduledTranscript = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems);
+  var visibleScheduledTranscript = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems);
   assert.ok(!visibleScheduledTranscript.includes("system-reminder"), "scheduled bubbles must hide the internal reminder");
   assert.ok(!visibleScheduledTranscript.includes("turn_meta"), "scheduled bubbles must hide turn metadata");
   assert.ok(!visibleScheduledTranscript.includes("sudo/apt/systemctl/pkexec"), "scheduled bubbles must hide internal policy text");
   assert.ok(!visibleScheduledTranscript.includes("Current workspace"), "scheduled bubbles must hide internal workspace metadata");
   assert.ok(!visibleScheduledTranscript.includes("Tool calls have failed"), "runtime recovery hints must not render as user bubbles");
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).messages).includes("<system-reminder>"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).messages).includes("<system-reminder>"),
     "the raw scheduled message must remain intact for model context"
   );
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).messages).includes("Tool calls have failed"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).messages).includes("Tool calls have failed"),
     "runtime recovery hints must remain intact in raw model context"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
@@ -2970,7 +2909,7 @@ async function scheduledRunningHydrationRaceBehavior() {
     artifacts: [],
   });
   assert.strictEqual(await opening, true);
-  var hydratedItems = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems;
+  var hydratedItems = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems;
   var rendered = JSON.stringify(hydratedItems);
   assert.ok(rendered.includes("persisted scheduled prompt"), "durable history should survive live hydration");
   assert.ok(rendered.includes("delta received during durable load"), "live deltas received during load should survive hydration");
@@ -2979,7 +2918,7 @@ async function scheduledRunningHydrationRaceBehavior() {
   });
   assert.strictEqual(overlappingAssistantItems.length, 1, "durable and live overlap should render once");
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems.filter(function (item) {
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems.filter(function (item) {
       return item.type === "tool" && item.toolId === "tool-hydrate";
     }).length,
     1,
@@ -3009,7 +2948,7 @@ async function openingRunningMarksBusyBeforeHydration() {
   await tick();
 
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy["sched-opening-busy"],
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).sessionBusy["sched-opening-busy"],
     true,
     "a queued/running scheduled buffer must be busy before durable hydration starts"
   );
@@ -3086,7 +3025,7 @@ async function followupQueuedUntilScheduledInitialTurnTerminal() {
   harness.emit("chat:done", { session_id: "sched-followup" });
   await tick();
   await tick();
-  var flushed = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var flushed = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(flushed.queued.length, 0);
   assert.strictEqual(
     harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
@@ -5980,7 +5919,7 @@ async function terminalEventWinsStaleRunningOpen() {
     messages: [], artifacts: [],
   });
   assert.strictEqual(await opening, true);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy, false, "terminal event should clear initial busy after hydration");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy, false, "terminal event should clear initial busy after hydration");
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(staleRun, {
@@ -5988,7 +5927,7 @@ async function terminalEventWinsStaleRunningOpen() {
     name: "Terminal wins task",
   }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy,
     false,
     "a stale running DTO must not move a terminal scheduled buffer back to active"
   );
@@ -6041,12 +5980,12 @@ async function scheduledDoneBeforeBufferCreatesTerminalTombstone() {
     unread: false,
   }, { id: "automation-done-before-buffer", name: "Done first task" }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy,
     false,
     "a scheduled terminal event received before buffer creation must beat a later stale running DTO"
   );
   await bridge.chat.sendMessage("continue after done-first run");
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).queued.length, 0, "done-first terminal state must not strand follow-up input");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).queued.length, 0, "done-first terminal state must not strand follow-up input");
   assert.strictEqual(
     harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
     1,
@@ -6056,7 +5995,7 @@ async function scheduledDoneBeforeBufferCreatesTerminalTombstone() {
   harness.emit("chat:done", { session_id: "ordinary-done-without-buffer" });
   await tick();
   assert.ok(
-    !Object.prototype.hasOwnProperty.call(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy, "ordinary-done-without-buffer"),
+    !Object.prototype.hasOwnProperty.call(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).sessionBusy, "ordinary-done-without-buffer"),
     "an ordinary unknown chat:done must not create a background session buffer"
   );
 }
@@ -7275,9 +7214,9 @@ async function failedRunningOpenRollsBackOnlyItsProvisionalBusy() {
     sessionId: "sched-open-load-fails",
     status: "running",
   }, { name: "Load failure task" }), false);
-  assert.strictEqual(failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, "chat-origin");
+  assert.strictEqual(failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, "chat-origin");
   assert.ok(
-    !failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy["sched-open-load-fails"],
+    !failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).sessionBusy["sched-open-load-fails"],
     "a failed running open must roll back the provisional busy flag it introduced"
   );
 
@@ -7301,9 +7240,9 @@ async function failedRunningOpenRollsBackOnlyItsProvisionalBusy() {
     messages: [], artifacts: [],
   });
   assert.strictEqual(await staleOpening, false);
-  assert.strictEqual(staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, "chat-other");
+  assert.strictEqual(staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, "chat-other");
   assert.ok(
-    !staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy["sched-open-stale-request"],
+    !staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).sessionBusy["sched-open-stale-request"],
     "an invalidated running open must roll back only its provisional busy flag"
   );
 
@@ -7324,7 +7263,7 @@ async function failedRunningOpenRollsBackOnlyItsProvisionalBusy() {
   };
   assert.strictEqual(await liveHarness.bridge.scheduled.openScheduledRunChat(liveRun, { name: "Live task" }), false);
   assert.strictEqual(
-    liveHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy[liveRun.sessionId],
+    liveHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).sessionBusy[liveRun.sessionId],
     true,
     "failure rollback must not clear a busy phase that existed before this open attempt"
   );
@@ -7355,7 +7294,7 @@ async function concurrentFailedRunningOpensShareRollback() {
   assert.deepStrictEqual(results, [false, false]);
   assert.strictEqual(loadCalls, 1, "concurrent opens for one scheduled session must share one durable load");
   assert.ok(
-    !bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy[run.sessionId],
+    !bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).sessionBusy[run.sessionId],
     "the shared failed open must roll back provisional busy after its final caller settles"
   );
 }
@@ -7386,9 +7325,9 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
   };
   bridge.scheduled.selectScheduledTask("automation-owner-history");
   await bridge.scheduled.loadScheduledTaskRuns("automation-owner-history", 80);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, liveRun.sessionId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, liveRun.sessionId);
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("protected owner live output"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems).includes("protected owner live output"),
     "owner pruning must preserve the current live scheduled conversation"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
@@ -7402,7 +7341,7 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
     status: "running",
   }, { name: "Pruned owner task" }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy,
     true,
     "hard cap must evict lower-priority visible owners once current/context consume registry slots"
   );
@@ -7415,7 +7354,7 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
     status: "running",
   }, { name: "Visible owner task" }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy,
     false,
     "the most recent visible terminal run owner must survive registry pruning"
   );
@@ -7440,7 +7379,7 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
     status: "running",
   }, { name: "Busy owner 0" }), true);
   assert.strictEqual(
-    busyHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    busyHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy,
     false,
     "a live buffer must remain recognizable after its separate owner registry entry is hard-capped"
   );
@@ -7506,7 +7445,7 @@ async function scheduledBufferLruNeverEvictsLive() {
     unread: false,
   }, { id: "automation-lru-cold", name: "LRU cold task" }), true);
   assert.ok(
-    !JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("cold buffer should be evicted"),
+    !JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems).includes("cold buffer should be evicted"),
     "an inactive scheduled buffer older than the 64-entry cap should be evicted"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
@@ -7518,7 +7457,7 @@ async function scheduledBufferLruNeverEvictsLive() {
     status: "running",
     unread: false,
   }, { id: "automation-lru-live", name: "LRU live task" }), true);
-  var live = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var live = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.ok(
     JSON.stringify(live.chatItems).includes("live buffer must survive"),
     "LRU must never evict a busy scheduled buffer"
@@ -7551,7 +7490,7 @@ async function scheduledBufferLruNeverEvictsLive() {
     status: "running",
   }, { name: "New protected task" }), true);
   assert.strictEqual(
-    saturatedHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    saturatedHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy,
     true,
     "when all 64 older buffers are live, LRU must retain the newly opened running buffer too"
   );
@@ -7589,7 +7528,7 @@ async function scheduledTemplateSourcePersistenceBehavior() {
   };
   await second.bridge.scheduled.loadScheduledTasks();
   assert.strictEqual(
-    second.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks[0].templateId,
+    second.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTasks[0].templateId,
     "weekly-review",
     "template source must survive a bridge reload even when every visible template field was customized"
   );
@@ -7624,12 +7563,12 @@ async function scheduledUnreadPollingRaceBehavior() {
   await tick();
 
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(run, task), true);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRuns[0].unread, false);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRuns[0].unread, false);
   staleTasks.resolve([Object.assign({}, task)]);
   staleDetail.resolve(Object.assign({}, task));
   staleRuns.resolve([Object.assign({}, run)]);
   await staleRefresh;
-  var finalState = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var finalState = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(finalState.scheduledTaskRuns[0].unread, false, "an older poll must not resurrect a viewed run dot");
   assert.strictEqual(finalState.scheduledTasks[0].hasUnreadRuns, false, "an older poll must not resurrect the task aggregate dot");
   assert.strictEqual(finalState.scheduledTaskDetail.hasUnreadRuns, false);
@@ -7663,7 +7602,7 @@ async function scheduledRunNavigationBehavior() {
   var editCalls = harness.calls.filter(function (call) { return call.cmd === "edit_last_turn"; });
   assert.strictEqual(editCalls.length, editCallsBefore + 1);
   assert.strictEqual(editCalls[editCalls.length - 1].args.sessionId, "sched-run-1");
-  var opened = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var opened = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(opened.activeSessionId, "sched-run-1");
   assert.deepStrictEqual(opened.scheduledRunContext, {
     sessionId: "sched-run-1",
@@ -7676,7 +7615,7 @@ async function scheduledRunNavigationBehavior() {
   });
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
-  var restored = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var restored = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(restored.activeSessionId, "chat-origin");
   assert.strictEqual(restored.scheduledRunContext, null);
   assert.strictEqual(restored.selectedScheduledTaskId, "automation-1");
@@ -7688,8 +7627,8 @@ async function scheduledRunNavigationBehavior() {
     { id: "automation-1", name: "Nightly report" }
   );
   await bridge.sessions.createNewSession();
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext, null);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, null);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledRunContext, null);
 
   await bridge.sessions.switchToSession("chat-origin");
   await bridge.scheduled.openScheduledRunChat(
@@ -7697,7 +7636,7 @@ async function scheduledRunNavigationBehavior() {
     { id: "automation-1", name: "Nightly report", model: "/locked-model", mode: "plan" }
   );
   await bridge.sessions.switchToSession("chat-origin");
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext, null);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledRunContext, null);
 
   harness.handlers.load_session = function (args) {
     if (args.id === "sched-missing") throw new Error("missing scheduled session");
@@ -7707,7 +7646,7 @@ async function scheduledRunNavigationBehavior() {
       artifacts: [],
     };
   };
-  var chatItemsBeforeFailure = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems);
+  var chatItemsBeforeFailure = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems);
   assert.strictEqual(
     await bridge.scheduled.openScheduledRunChat(
       { id: "run-missing", automationId: "automation-1", sessionId: "sched-missing", status: "completed" },
@@ -7715,13 +7654,13 @@ async function scheduledRunNavigationBehavior() {
     ),
     false
   );
-  var failedOpen = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var failedOpen = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(failedOpen.activeSessionId, "chat-origin");
   assert.strictEqual(failedOpen.scheduledRunContext, null);
   assert.ok(String(failedOpen.scheduledTaskError).includes("missing scheduled session"));
   assert.strictEqual(JSON.stringify(failedOpen.chatItems), chatItemsBeforeFailure, "scheduled load errors must not pollute chat");
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat({ id: "no-session", status: "completed" }, {}), false);
-  assert.ok(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError, "missing run sessions should expose a scheduled-scoped error");
+  assert.ok(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskError, "missing run sessions should expose a scheduled-scoped error");
 }
 
 async function scheduledSelectionGenerationBehavior() {
@@ -7740,10 +7679,10 @@ async function scheduledSelectionGenerationBehavior() {
   var tasksB = harness.bridge.scheduled.loadScheduledTasks();
   listB.resolve([{ id: "automation-b", name: "B" }]);
   await tasksB;
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskLoading, false, "an old task-list generation must not keep the current selection loading");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskLoading, false, "an old task-list generation must not keep the current selection loading");
   listA.resolve([{ id: "automation-a", name: "A" }]);
   await tasksA;
-  var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(state.selectedScheduledTaskId, "automation-b");
   assert.strictEqual(state.scheduledTasks[0].id, "automation-b", "a stale task list must not replace the current generation");
 
@@ -7767,11 +7706,11 @@ async function scheduledSelectionGenerationBehavior() {
   detailB.resolve({ id: "automation-b", name: "B detail" });
   runsB.resolve([{ id: "run-b", automationId: "automation-b" }]);
   await Promise.all([readB, loadRunsB]);
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskLoading, false, "old detail/run requests must not keep the current selection loading");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskLoading, false, "old detail/run requests must not keep the current selection loading");
   detailA.resolve({ id: "automation-a", name: "A detail" });
   runsA.resolve([{ id: "run-a", automationId: "automation-a" }]);
   await Promise.all([readA, loadRunsA]);
-  state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(state.selectedScheduledTaskId, "automation-b");
   assert.strictEqual(state.scheduledTaskDetail.id, "automation-b");
   assert.strictEqual(state.scheduledTaskRuns[0].id, "run-b");
@@ -7799,7 +7738,7 @@ async function scheduledSelectionGenerationBehavior() {
   await new Promise(function (resolve) { setTimeout(resolve, 450); });
   await tick();
   assert.strictEqual(listCalls, 3, "burst run events should debounce to one global task refresh");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks[0].hasUnreadRuns, true, "the unselected task unread summary should enter global state");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTasks[0].hasUnreadRuns, true, "the unselected task unread summary should enter global state");
   assert.strictEqual(refreshes, 1, "the selected task detail should refresh once after the event burst");
   assert.strictEqual(aggregateRefreshes, 1, "the global scheduled-run sidebar should refresh once after the event burst");
 }
@@ -7844,19 +7783,19 @@ async function scheduledMutationErrorBehavior() {
     var entry = cases[i];
     harness.handlers[entry[1]] = function () { throw new Error("visible scheduled failure"); };
     await assert.rejects(function () { return harness.bridge.scheduled[entry[0]].apply(null, entry[2]); }, /visible scheduled failure/);
-    var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+    var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
     assert.ok(String(state.scheduledTaskError).includes("visible scheduled failure"), entry[0] + " should expose its error");
     assert.strictEqual(state.scheduledTaskBusyAction, null, entry[0] + " should clear busy after failure");
     harness.bridge.scheduled.dismissScheduledTaskError();
-    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError, null, entry[0] + " errors should be dismissible");
+    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskError, null, entry[0] + " errors should be dismissible");
   }
 
   var chatHarness = createBridgeHarness();
   chatHarness.handlers.scheduled_task_chat_prompt = function () { throw new Error("chat creation failed"); };
   await assert.rejects(function () { return chatHarness.bridge.scheduled.startScheduledTaskChat(); }, /chat creation failed/);
-  assert.ok(String(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError).includes("chat creation failed"));
-  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null, "failed chat creation must not change sessions");
-  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskBusyAction, null);
+  assert.ok(String(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskError).includes("chat creation failed"));
+  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, null, "failed chat creation must not change sessions");
+  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskBusyAction, null);
 }
 
 async function scheduledDeletePreservesHistoryAndSessionBuffers() {
@@ -7925,7 +7864,7 @@ async function scheduledDeletePreservesHistoryAndSessionBuffers() {
     status: "running",
   }, { id: "automation-other", name: "Sibling task" }), true);
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("retain this sibling buffer"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems).includes("retain this sibling buffer"),
     "deleting one task must not guess at or purge unreported scheduled session ids"
   );
 
@@ -7990,7 +7929,7 @@ async function scheduledRecentRunsIgnoreStaleAggregate() {
   }]);
   await loading;
   assert.strictEqual(
-    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.length,
+    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.length,
     0,
     "an older aggregate response must not overwrite the post-delete history snapshot"
   );
@@ -8059,9 +7998,9 @@ async function scheduledRunRecordSessionActionsBehavior() {
   await bridge.scheduled.loadScheduledTasks();
   await bridge.scheduled.loadScheduledTaskRecentRuns();
 
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionId, sessionId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns[0].sessionId, sessionId);
   await bridge.sessions.renameSession(sessionId, "重命名后的定时任务记录");
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionTitle, "重命名后的定时任务记录");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns[0].sessionTitle, "重命名后的定时任务记录");
   assert.strictEqual(
     harness.calls.some(function (call) {
       return call.cmd === "rename_session" && call.args.id === sessionId;
@@ -8071,7 +8010,7 @@ async function scheduledRunRecordSessionActionsBehavior() {
   );
 
   await bridge.sessions.toggleSessionPinned(sessionId, true);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].pinned, true);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns[0].pinned, true);
   assert.strictEqual(
     harness.calls.some(function (call) {
       return call.cmd === "set_session_pinned" && call.args.id === sessionId && call.args.pinned === true;
@@ -8082,7 +8021,7 @@ async function scheduledRunRecordSessionActionsBehavior() {
 
   await bridge.sessions.archiveSession(sessionId);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
     false,
     "archiving a scheduled run record should remove it from the sidebar shortcut list"
   );
@@ -8096,17 +8035,17 @@ async function scheduledRunRecordSessionActionsBehavior() {
   // 归档后的运行不再回流侧边栏(archived 由后端 run DTO 携带)。
   await bridge.scheduled.loadScheduledTaskRecentRuns();
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
     false,
     "archived scheduled runs must stay out of the sidebar list after a reload"
   );
   await bridge.sessions.restoreArchivedSession(sessionId);
 
   await bridge.scheduled.loadScheduledTaskRecentRuns();
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionId, sessionId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns[0].sessionId, sessionId);
   await bridge.sessions.deleteSession(sessionId);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
     false,
     "deleting a scheduled run record should remove it from the sidebar shortcut list"
   );
@@ -8165,7 +8104,7 @@ async function scheduledDraftModelBehavior() {
   await harness.bridge.lifecycle.init();
   await harness.bridge.scheduled.startScheduledTaskChat();
   await harness.bridge.chat.sendMessage("Create a report schedule");
-  var sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId;
+  var sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId;
   harness.emit("chat:delta", {
     session_id: sessionId,
     text: "```scheduled-task-draft\n{\"name\":\"Report\",\"prompt\":\"Run report\",\"rrule\":\"FREQ=DAILY\"}\n```",
@@ -8176,12 +8115,12 @@ async function scheduledDraftModelBehavior() {
   // #566/#627 合并后形态适配：chat 生成参数走 auto-create 直建流程，
   // 确认卡片状态位 scheduledTaskDraft 不再存在于 scheduled 状态切片。
   assert.ok(
-    !Object.prototype.hasOwnProperty.call(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']), 'scheduledTaskDraft'),
+    !Object.prototype.hasOwnProperty.call(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']), 'scheduledTaskDraft'),
     "chat-generated parameters must not create a confirmation-card state (the card surface retired with the auto-create flow)",
   );
-  assert.ok(String(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError).includes("cannot create scheduled draft"));
+  assert.ok(String(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskError).includes("cannot create scheduled draft"));
   assert.ok(
-    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems.some(function (item) {
+    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).chatItems.some(function (item) {
       return item.type === "system" && String(item.text || "").includes("cannot create scheduled draft");
     }),
     "automatic creation failures must remain visible in the creation chat"
@@ -8195,7 +8134,7 @@ async function scheduledDraftModelBehavior() {
   rejectCreate = false;
   await harness.bridge.scheduled.startScheduledTaskChat();
   await harness.bridge.chat.sendMessage("Create the edited report schedule");
-  sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId;
+  sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId;
   harness.emit("chat:delta", {
     session_id: sessionId,
     text: "```scheduled-task-draft\n{\"name\":\"Edited report\",\"prompt\":\"Run the edited report\",\"rrule\":\"FREQ=DAILY\",\"cwds\":[\"D:/workspace\"],\"mode\":\"plan\",\"allowShell\":true}\n```",
@@ -8212,8 +8151,8 @@ async function scheduledDraftModelBehavior() {
   assert.strictEqual(capturedInput.model, "/wire-active");
   assert.strictEqual(capturedInput.modelId, "model-active");
   assert.ok(!Object.prototype.hasOwnProperty.call(capturedInput, "sourceSessionId"));
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).selectedScheduledTaskId, "automation-created");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskAutoOpenId, "automation-created");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).selectedScheduledTaskId, "automation-created");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskAutoOpenId, "automation-created");
 }
 
 async function completedRunReopenPreservesStreamingFollowup() {
@@ -8259,14 +8198,14 @@ async function completedRunReopenPreservesStreamingFollowup() {
     session_id: run.sessionId,
     text: "partial follow-up output",
   });
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy, true);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).busy, true);
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(run, {
     id: run.automationId,
     name: "Streaming follow-up task",
   }), true);
-  var reopened = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var reopened = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(
     scheduledSessionLoads,
     1,
@@ -8419,14 +8358,14 @@ async function scheduledRunNowSidebarLinkBehavior() {
   await bridge.scheduled.runScheduledTaskNow(task.id);
   await tick();
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run && run.id === "run-now-1"; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.some(function (run) { return run && run.id === "run-now-1"; }),
     false,
     "a run without a sessionId must not enter the sidebar list"
   );
   linked = true;
   await new Promise(function (resolve) { setTimeout(resolve, 1300); });
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0] && bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionId,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns[0] && bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns[0].sessionId,
     "sched-run-now-1",
     "once the run links its session it must appear in the sidebar list"
   );
@@ -8514,7 +8453,7 @@ async function scheduledCreateListRefreshBehavior() {
   staleResolve([]);
   await stale;
   assert.ok(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks.some(function (task) { return task.id === "automation-fresh"; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTasks.some(function (task) { return task.id === "automation-fresh"; }),
     "a stale in-flight task list response must not clobber the newly created task"
   );
 
@@ -8529,7 +8468,7 @@ async function scheduledCreateListRefreshBehavior() {
   }
   assert.strictEqual(threw, true, "a create response without a real id must be treated as a failure");
   assert.ok(
-    !bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks.some(function (task) { return task.id === undefined || task.id === null; }),
+    !bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTasks.some(function (task) { return task.id === undefined || task.id === null; }),
     "failed creations must not leave phantom tasks in the list"
   );
 }
@@ -8661,30 +8600,30 @@ async function scheduledRunViewExitBehavior() {
     await harness.bridge.scheduled.loadScheduledTasks();
     await harness.bridge.scheduled.loadScheduledTaskRecentRuns();
     assert.strictEqual(await harness.bridge.scheduled.openScheduledRunChat(run, task), true);
-    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext.sessionId, run.sessionId);
-    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, run.sessionId);
+    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledRunContext.sessionId, run.sessionId);
+    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, run.sessionId);
     return harness;
   }
 
   var deleting = await openedHarness();
   await deleting.bridge.sessions.deleteSession(run.sessionId);
   assert.strictEqual(
-    deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext,
+    deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledRunContext,
     null,
     "删除正在查看的定时运行后必须清掉 scheduledRunContext,否则界面回不到定时任务列表"
   );
-  assert.strictEqual(deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null);
+  assert.strictEqual(deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, null);
 
   var archiving = await openedHarness();
   await archiving.bridge.sessions.archiveSession(run.sessionId);
   assert.strictEqual(
-    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext,
+    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledRunContext,
     null,
     "收纳正在查看的定时运行后同样必须退出视图(与普通对话收纳一致)"
   );
-  assert.strictEqual(archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null);
+  assert.strictEqual(archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).activeSessionId, null);
   assert.strictEqual(
-    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (item) {
+    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.some(function (item) {
       return item && item.sessionId === run.sessionId;
     }),
     false,
@@ -8695,7 +8634,7 @@ async function scheduledRunViewExitBehavior() {
   var failing = await openedHarness();
   failing.handlers.set_session_archived = function () { throw new Error("archive failed"); };
   await failing.bridge.sessions.archiveSession(run.sessionId);
-  var rolledBack = failing.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var rolledBack = failing.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']);
   assert.strictEqual(rolledBack.activeSessionId, run.sessionId, "收纳失败必须回到原会话");
   assert.ok(rolledBack.scheduledRunContext, "收纳失败必须恢复定时运行上下文");
   assert.strictEqual(rolledBack.scheduledRunContext.sessionId, run.sessionId);
@@ -8738,7 +8677,7 @@ async function scheduledRunNowPollStopsOnTerminalBehavior() {
     "run 进入终态且仍无会话时必须停止轮询(再等也不会有会话)"
   );
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (item) { return item && item.id === "run-terminal"; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'models']).scheduledTaskRecentRuns.some(function (item) { return item && item.id === "run-terminal"; }),
     false,
     "没有会话的运行不进侧边栏"
   );
@@ -9440,7 +9379,289 @@ async function draftKnowledgeQueueStaysOnMaterializedSessionAfterSwitch() {
   );
 }
 
+// Issue #821: behavioral check of the shared CRON subset validator — the
+// same accept/reject boundary creation_requests.rs and server.py enforce
+// structurally, plus the engine's deterministic semantics (field bounds,
+// range order, step, names, impossible dates): an expression the engine
+// would reject must read invalid so the editor holds it as a local draft
+// instead of bouncing a save off the bridge and wedging the panel.
+function scheduleCronExprBehavior() {
+  assert.strictEqual(scheduleCronExpr.parseCronExprFields(' 30  9 1 * * ').length, 5);
+  assert.strictEqual(scheduleCronExpr.parseCronExprFields('30\t9\u30001 * *').length, 5);
+  assert.strictEqual(scheduleCronExpr.cronExprInvalid('30 9 1 * *'), false);
+  assert.strictEqual(scheduleCronExpr.cronExprInvalid('0 9-18 1,15 * MON-FRI'), false);
+  assert.strictEqual(scheduleCronExpr.cronExprInvalid('15 9 */2 * *'), false);
+  assert.strictEqual(scheduleCronExpr.cronExprInvalid('5 9 1 JAN *'), false);
+  for (const good of [
+    '059 9 1 * *', '30 9 29 2 *', '0 9 31 2,3 *', '30 9 30 2,4 *',
+    '30 9 1-5/2 * *', '30 9 5/2 * *', '30 9 1 * 7', '30 9 1 JAN/2 *',
+    '30\t9 1 * *',
+    // U+0085 (NEL) is Unicode White_Space: the watcher's split_whitespace
+    // and server.py's str.split() both split it, so the mirror must too
+    // (round-3 review minor 2 — the class used to miss exactly this char).
+    '30\u00859\u00851\u0085*\u0085*', '\u008530 9 1 * *\u0085',
+  ]) {
+    assert.strictEqual(scheduleCronExpr.cronExprInvalid(good), false, good);
+  }
+  for (const bad of [
+    '', '30 9 1 *', '30 9 1 * * *', '*/5 * * * *', '0,30 * * * *', '5-55/10 * * * *',
+    '60 9 1 * *', 'abc 9 1 * *', '30 9 1,3 * *;BYDAY=MO', '30 9 1,,3 * *', '30 9 1 * ?',
+    '30 99 1 * *', '30 9 32 * *', '30 9 1 13 *', '30 9 1 * 8',
+    '30 9 31 2 *', '30 9 30 2 *', '30 9 31 2,4 *', '30 9 5-1 * *',
+    '30 9 1-5/0 * *', '30 9 1/0 * *', '30 9 1 * MON/0', '30 9 1 * XYZ',
+    '99999999999999999999 9 1 * *', '\uFEFF30 9 1 * *', '30 9 1 * *\u001c',
+  ]) {
+    assert.strictEqual(scheduleCronExpr.cronExprInvalid(bad), true, bad);
+  }
+  assert.deepStrictEqual(scheduleCronExpr.fixedCronTime('30 9 1 * *'), { minute: '30', hour: '09' });
+  assert.deepStrictEqual(scheduleCronExpr.fixedCronTime('05 8 31 * *'), { minute: '05', hour: '08' });
+  assert.deepStrictEqual(scheduleCronExpr.fixedCronTime('059 9 1 * *'), { minute: '59', hour: '09' });
+  assert.strictEqual(scheduleCronExpr.fixedCronTime('0 9-18 1 * *'), null);
+  assert.strictEqual(scheduleCronExpr.fixedCronTime('* 9 1 * *'), null);
+  assert.strictEqual(scheduleCronExpr.fixedCronTime('30 99 1 * *'), null);
+  assert.strictEqual(scheduleCronExpr.cronExprWithTime('30 9 1 * *', '07:05'), '5 7 1 * *');
+  assert.strictEqual(scheduleCronExpr.cronExprWithTime('059 9 1 * *', '07:05'), '5 7 1 * *');
+  assert.strictEqual(scheduleCronExpr.cronExprWithTime('0 9-18 1 * *', '07:05'), '0 9-18 1 * *');
+}
+
+// (#900 review P2, fixwave 2): the backend accepts and stores whitespace-
+// padded KEY=VALUE rules (validate_product_rrule / server.py both trim keys
+// and values), so the detail editor's field map must project them the same
+// way — the weekly-fallback misread used to turn a CRON time edit into
+// appended BYHOUR/BYMINUTE the domain refuses, and the bounced patch then
+// wedged the pending-patch flush on every later action. Drive the real
+// save → detail time-edit chain through the extracted module.
+function scheduleRruleFieldsBehavior() {
+  assert.deepStrictEqual(
+    scheduleRruleFields.parseScheduleFields('FREQ = CRON;EXPR=30 9 1 * *'),
+    { FREQ: 'CRON', EXPR: '30 9 1 * *' },
+    'spaces around the separator must not orphan the FREQ field'
+  );
+  assert.deepStrictEqual(
+    scheduleRruleFields.parseScheduleFields('FREQ= CRON; EXPR=30 9 1 * *'),
+    { FREQ: 'CRON', EXPR: '30 9 1 * *' },
+    'a space-padded mid-rule segment must parse like the engine segment trim'
+  );
+  assert.deepStrictEqual(
+    scheduleRruleFields.parseScheduleFields('=X;FREQ=WEEKLY'),
+    { FREQ: 'WEEKLY' },
+    'an empty-key segment stays skipped without hiding the real fields'
+  );
+  // the padded CRON rule projects to the CRON editor, not the weekly fallback
+  const editor = scheduleRruleFields.scheduleEditorValue('FREQ = CRON;EXPR=30 9 1 * *');
+  assert.strictEqual(editor.repeat, 'cron');
+  assert.strictEqual(editor.cronExpr, '30 9 1 * *');
+  assert.strictEqual(editor.time, '09:30');
+  assert.strictEqual(editor.hasTimeAnchor, true);
+  // the real chain: a detail time edit rewrites the CRON expression in place
+  // instead of appending BYHOUR/BYMINUTE to it
+  assert.strictEqual(
+    scheduleRruleFields.buildRrule('FREQ = CRON;EXPR=30 9 1 * *', 'time', '07:05'),
+    'FREQ=CRON;EXPR=5 7 1 * *'
+  );
+  // value trim also rescues ONCE time edits on padded AT segments
+  assert.strictEqual(
+    scheduleRruleFields.buildRrule('FREQ = ONCE; AT = 2027-06-01T09:30', 'time', '08:15'),
+    'FREQ=ONCE;AT=2027-06-01T08:15'
+  );
+  // round-trip re-emission: keys land in the backend's uppercase form,
+  // values stay verbatim (the stored rule is normalized upstream) and
+  // lose only the separator padding
+  assert.strictEqual(
+    scheduleRruleFields.serializeScheduleFields(
+      scheduleRruleFields.parseScheduleFields('freq = weekly ; byday = MO,WE ; byhour = 9 ; byminute = 30')
+    ),
+    'FREQ=weekly;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=30'
+  );
+  // canonical weekly rules keep their existing edit shape
+  assert.strictEqual(
+    scheduleRruleFields.buildRrule('FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=30', 'time', '07:05'),
+    'FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=7;BYMINUTE=5'
+  );
+  // #900 review P2 (round 2): the backend trims keys and values with the
+  // full Unicode White_Space set and persistence's outer trim preserves an
+  // INTERNAL U+0085, so `FREQ\u0085=CRON` / `FREQ=CRON\u0085` are valid
+  // stored rules the guard and Rust parser both accept — JS trim() used to
+  // leave them orphaned and re-wedge the pending patch. The padded
+  // spellings must project to the CRON editor and survive a real time edit
+  // (guard → stored-rule projection → time-edit round trip, padding
+  // adjacent to '=').
+  assert.deepStrictEqual(
+    scheduleRruleFields.parseScheduleFields('FREQ\u0085=CRON;EXPR=30 9 1 * *'),
+    { FREQ: 'CRON', EXPR: '30 9 1 * *' },
+    'a U+0085-padded key must not orphan the field'
+  );
+  assert.deepStrictEqual(
+    scheduleRruleFields.parseScheduleFields('FREQ=CRON\u0085;EXPR=30 9 1 * *'),
+    { FREQ: 'CRON', EXPR: '30 9 1 * *' },
+    'a U+0085-padded value must not split the classification'
+  );
+  const paddedKeyEditor = scheduleRruleFields.scheduleEditorValue('FREQ\u0085=CRON;EXPR=30 9 1 * *');
+  assert.strictEqual(paddedKeyEditor.repeat, 'cron', 'padded-key rule must project to the CRON editor');
+  assert.strictEqual(
+    scheduleRruleFields.buildRrule('FREQ\u0085=CRON;EXPR=30 9 1 * *', 'time', '07:05'),
+    'FREQ=CRON;EXPR=5 7 1 * *',
+    'a padded-key rule must rewrite the CRON expression, not append BYHOUR/BYMINUTE'
+  );
+  const paddedValueEditor = scheduleRruleFields.scheduleEditorValue('FREQ=CRON\u0085;EXPR=30 9 1 * *');
+  assert.strictEqual(paddedValueEditor.repeat, 'cron', 'padded-value rule must project to the CRON editor');
+  assert.strictEqual(
+    scheduleRruleFields.buildRrule('FREQ=CRON\u0085;EXPR=30 9 1 * *', 'time', '07:05'),
+    'FREQ=CRON;EXPR=5 7 1 * *',
+    'a padded-value rule must rewrite the CRON expression, not append BYHOUR/BYMINUTE'
+  );
+}
+
+// Round-3 review M2 (issue #821): the chat draft fence auto-creates with the
+// model's rrule and the engine accepts the full cron vocabulary, so the
+// shared helpers must structurally reject out-of-subset CRON drafts — the
+// one product constraint with no engine backstop. Run the real helpers file
+// in a bare context and drive the exported predicate like the lane does.
+function scheduledTaskDraftCronRejectBehavior() {
+  const helpersContext = {
+    window: {},
+    console: { log: function () {}, warn: function () {}, error: function () {} },
+  };
+  vm.runInNewContext(bridgeSharedHelpers, helpersContext, { filename: 'bridge-shared-helpers.js' });
+  const reject = helpersContext.window.PinvouBridgeShared
+    .create('tauriScheduled', {}).scheduledTaskDraftCronReject;
+  assert.strictEqual(typeof reject, 'function');
+  // out-of-subset CRON drafts are refused, with gate-aligned wording
+  assert.match(reject('FREQ=CRON;EXPR=*/5 * * * *'), /minute field must be a fixed value/);
+  assert.match(reject('FREQ=CRON;EXPR=0,30 9 1 * *'), /minute field must be a fixed value/);
+  assert.match(reject('FREQ=CRON;EXPR=30 9 1 * *;BYDAY=MO'), /unsupported field/);
+  assert.match(reject('FREQ=CRON;BYDAY=MO'), /requires EXPR/);
+  assert.match(reject('FREQ=CRON;EXPR=30 9 1 *'), /exactly 5 fields/);
+  assert.match(reject('FREQ=CRON;EXPR=abc 9 1 * *'), /fixed value/);
+  assert.match(reject('FREQ=CRON;EXPR=30 9 1,,3 * *'), /empty list item/);
+  // everything the engine rejects on its own stays engine's error: the
+  // structural subset passes it through so the engine message surfaces
+  assert.strictEqual(reject('FREQ=CRON;EXPR=30 9 1 * *'), null);
+  assert.strictEqual(reject('freq=cron;expr=05 08 31 JAN *'), null);
+  // deliberately out of scope: impossible dates are the engine's semantic
+  // authority — the guard must not duplicate the editor mirror here
+  assert.strictEqual(reject('FREQ=CRON;EXPR=30 9 31 2 *'), null);
+  // non-CRON drafts are untouched (engine validates those shapes itself)
+  assert.strictEqual(reject('FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=30'), null);
+  assert.strictEqual(reject('FREQ=ONCE;AT=2027-06-01T09:30'), null);
+  assert.strictEqual(reject('FREQ=HOURLY;INTERVAL=6;BYMINUTE=0'), null);
+  // #900 review P2: classify AFTER parsing — reordered, space-padded and
+  // duplicate-FREQ spellings are all engine-valid CRON drafts the old
+  // startsWith prefix check waved through without the product fence.
+  assert.match(
+    reject('EXPR=*/5 * * * *;FREQ=CRON'),
+    /minute field must be a fixed value/,
+    'reordered EXPR-first must still be classified as CRON and refused'
+  );
+  assert.match(
+    reject('FREQ = CRON;EXPR=*/5 * * * *'),
+    /minute field must be a fixed value/,
+    'space-padded FREQ must still be classified as CRON and refused'
+  );
+  assert.match(
+    reject('FREQ = cron;EXPR=*/5 * * * *'),
+    /minute field must be a fixed value/,
+    'the effective FREQ is compared case-insensitively'
+  );
+  assert.match(
+    reject('FREQ=WEEKLY;FREQ=CRON;EXPR=*/5 * * * *'),
+    /duplicate field\(s\) FREQ/,
+    'duplicate FREQ with an effective CRON must be rejected, not last-wins accepted'
+  );
+  assert.strictEqual(
+    reject('FREQ=WEEKLY;FREQ=WEEKLY;BYDAY=MO'),
+    null,
+    'duplicates on a non-CRON effective FREQ stay engine\'s business'
+  );
+  // #900 review P3: the EXPR split uses the editor's exact Unicode
+  // White_Space set — U+0085 is a valid separator for the engine and the
+  // editor, and must not be refused by this final product entry point.
+  assert.strictEqual(
+    reject('FREQ=CRON;EXPR=30\u00859\u00851\u0085*\u0085*'),
+    null,
+    'a U+0085-separated minute-fixed EXPR must pass the fence'
+  );
+  assert.match(
+    reject('FREQ=CRON;EXPR=*/5\u00859\u00851\u0085*\u0085*'),
+    /minute field must be a fixed value/,
+    'a U+0085-separated wildcard-minute EXPR must still be refused'
+  );
+  // #900 review P3 (round 2): JS trim() misses U+0085, which the engine
+  // trims — edge padding used to orphan the key (dodging classification
+  // entirely) or leave a phantom empty field the editor never sees.
+  assert.strictEqual(
+    reject('FREQ=CRON;EXPR=\u008530 9 1 * *'),
+    null,
+    'a U+0085 edge-padded fixed-minute EXPR must pass like the editor'
+  );
+  assert.strictEqual(
+    reject('FREQ=CRON;EXPR=30 9 1 * *\u0085'),
+    null,
+    'trailing U+0085 edge padding must not become a phantom sixth field'
+  );
+  assert.match(
+    reject('\u0085FREQ=CRON;EXPR=*/5 9 1 * *'),
+    /minute field must be a fixed value/,
+    'a U+0085-padded rrule is an engine-valid CRON draft the fence must still refuse'
+  );
+  assert.match(
+    reject('FREQ=CRON\u0085;EXPR=*/5 9 1 * *'),
+    /minute field must be a fixed value/,
+    'a U+0085-padded value must not split the FREQ classification'
+  );
+}
+
+  /// (#900 review P2, fixwave): the reordered / space-padded / duplicate-FREQ
+  /// spellings drive the ACTUAL auto-create path (chat auto-create is the
+  /// surface that must carry the product fence) — none may reach the
+  /// backend creation command; each surfaces the cron rejection through the
+  /// creation error instead.
+  function cronGuardRefusesVariantsThroughAutoCreate() {
+    const helpersContext = {
+      window: {},
+      console: { log: function () {}, warn: function () {}, error: function () {} },
+    };
+    vm.runInNewContext(bridgeSharedHelpers, helpersContext, { filename: 'bridge-shared-helpers.js' });
+    const state = { scheduledTaskError: null };
+    const invokes = [];
+    const api = helpersContext.window.PinvouBridgeShared.create('tauriScheduled', {
+      state,
+      notify() {},
+      bt(key) { return key; },
+      invoke(name) { invokes.push(name); return Promise.reject(new Error('backend must not be reached')); },
+      runSyncOnSession(sessionId, fn) { fn(); },
+      addSystemItem() {},
+      scheduledTaskAutoCreateInFlight: { value: {} },
+      scheduledTaskAutoCreateSeq: { value: 0 },
+    });
+    const variants = [
+      'EXPR=*/5 * * * *;FREQ=CRON',
+      'FREQ = CRON;EXPR=*/5 * * * *',
+      'FREQ=WEEKLY;FREQ=CRON;EXPR=*/5 * * * *',
+    ];
+    return Promise.all(variants.map(function (rrule, index) {
+      return new Promise(function (resolve) {
+        api.autoCreateScheduledTaskDraft({ rrule, name: 'n' + index }, 'session-' + index);
+        setTimeout(resolve, 0);
+      });
+    })).then(function () {
+      assert.strictEqual(
+        invokes.indexOf('create_scheduled_task'), -1,
+        'no variant may reach the backend creation command; got: ' + invokes.join(',')
+      );
+      assert.ok(
+        state.scheduledTaskError && /invalid rrule/.test(JSON.stringify(state.scheduledTaskError)),
+        'each variant surfaces the cron rejection through the creation error: ' +
+        JSON.stringify(state.scheduledTaskError)
+      );
+    });
+  }
+
 Promise.resolve()
+  .then(scheduleCronExprBehavior)
+  .then(scheduleRruleFieldsBehavior)
+  .then(scheduledTaskDraftCronRejectBehavior)
+  .then(cronGuardRefusesVariantsThroughAutoCreate)
   .then(subscriptionSnapshotsAvoidTranscriptDeepClone)
   .then(reentrantSubscriptionNotificationsStayOrdered)
   .then(persistentSubscriptionSnapshotsPreserveJsonEdges)
@@ -9507,7 +9728,7 @@ Promise.resolve()
   .then(sessionDownloadCapabilityGraceExpiryFailsOnce)
   .then(sessionDownloadCapabilityGraceSupersededByDraftFailsSilently)
   .then(deepSeekTurnTimelineLifecycleBehavior)
-  .then(llmApiStartupRetryBehavior)
+  .then(accountPlatformStartupModelBehavior)
   .then(function () { return internalSubagentHandoffStaysOutOfPresentation("tauri"); })
   .then(function () { return internalSubagentHandoffStaysOutOfPresentation("web"); })
   .then(currentInternalProvenanceAndEnvelopeStayOutOfPresentation)

@@ -16,6 +16,7 @@ name: rustc-wrapper-smoke
 # 导致所有 Cargo build/check/test/run 全断。
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'pinvou3-app/src-tauri/.cargo/config.toml'
       - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper'
@@ -23,6 +24,9 @@ on:
       - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper-select.sh'
       - 'pinvou3-app/run-dev.sh'
       - '.github/workflows/rustc-wrapper-smoke.yml'
+      - 'scripts/ci-test-reuse.py'
+      - 'scripts/ci-reuse-policy.py'
+      - 'scripts/tests/test_ci_reuse_policy.py'
   merge_group:
   push:
     branches: [main]
@@ -33,8 +37,12 @@ on:
       - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper-select.sh'
       - 'pinvou3-app/run-dev.sh'
       - '.github/workflows/rustc-wrapper-smoke.yml'
+      - 'scripts/ci-test-reuse.py'
+      - 'scripts/ci-reuse-policy.py'
+      - 'scripts/tests/test_ci_reuse_policy.py'
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -53,6 +61,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Use the verified official source; do not inherit a failing runner mirror.
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   # merge_group 不支持事件级 paths 过滤，先在一个轻量 Linux job 中判断组合
   # diff；无关 PR 入队时跳过后续三个平台 runner。PR/push 的事件级 paths 仍
@@ -64,6 +77,8 @@ jobs:
     timeout-minutes: 10
     outputs:
       wrapper: ${{ steps.filter.outputs.wrapper }}
+      reused_jobs: ${{ steps.reuse.outputs.reused_jobs || '[]' }}
+      reuse_verified: ${{ steps.reuse.outputs.reuse_verified || 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,14 +99,32 @@ jobs:
               - 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper-select.sh'
               - 'pinvou3-app/run-dev.sh'
               - '.github/workflows/rustc-wrapper-smoke.yml'
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
+
+      - name: Verify identical-input PR success proofs
+        id: reuse
+        if: ${{ github.event_name == 'merge_group' }}
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_REUSE_WORKFLOW: .github/workflows/rustc-wrapper-smoke.yml
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_ROUTING_FILTERS: ${{ toJSON(steps.filter.outputs) }}
+        run: python3 scripts/ci-test-reuse.py lookup
 
   smoke:
     needs: changes
-    if: ${{ needs.changes.outputs.wrapper == 'true' }}
+    if: ${{ needs.changes.outputs.wrapper == 'true' && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke')) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"macos-15"},{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    # Windows pool overrides are limited to same-repository PR metadata (name + ID).
+    # Fork/missing metadata or undeclared events use hosted Windows.
+    # PR-editable YAML is not a runner ACL; other declared events keep their pools.
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     # Minutes of work when healthy (init a tiny crate, compile, run the
     # wrapper probes); the cap keeps a hung cargo from burning the 360-minute
     # default, including on the scarce macOS runner.
@@ -104,8 +137,14 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # 1) 默认配置直接可用:不设任何覆盖,全新 clone 的默认 config.toml 必须
       #    三端直接 cargo check 通过。config.toml 已移除 [build] rustc-wrapper
@@ -278,3 +317,58 @@ jobs:
           chain_status=0
           CHAIN_PROBE_EXIT=42 RUSTC_WRAPPER_CHAIN="$PWD/chain-probe.exe" "$wrapper" rustc --version --verbose >/dev/null || chain_status=$?
           test "$chain_status" -eq 42
+
+  wrapper-gate:
+    name: wrapper-gate
+    needs: [changes, smoke]
+    if: ${{ always() }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 10
+    env:
+      CI_REUSE_WORKFLOW: .github/workflows/rustc-wrapper-smoke.yml
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify current workflow result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TEST_RESULT: ${{ needs.smoke.result }}
+          APPLICABLE: ${{ needs.changes.outputs.wrapper }}
+          REUSED: ${{ github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'smoke') }}
+        run: |
+          set -euo pipefail
+          [[ "$CHANGES_RESULT" == success ]]
+          if [[ "$APPLICABLE" == true ]]; then
+            [[ "$TEST_RESULT" == success || ( "$TEST_RESULT" == skipped && "$REUSED" == true ) ]]
+          else
+            [[ "$TEST_RESULT" == skipped || "$TEST_RESULT" == success ]]
+          fi
+
+      - name: Record successful PR test inputs
+        id: success_proof
+        if: ${{ success() && github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
+        timeout-minutes: 2
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-test-reuse.py record
+
+      - name: Configure artifact transport for PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: ci-success-proof-${{ github.run_attempt }}
+          path: ${{ steps.success_proof.outputs.directory }}/proof.json
+          if-no-files-found: error
+          retention-days: 2

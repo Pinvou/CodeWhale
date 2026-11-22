@@ -619,15 +619,18 @@ async fn serve_controlling_lane_with_evidence_context(
     let owned_sender = lane.transport_sender();
     let registration = owned_sender
         .as_ref()
-        .map(|sender| sender.disconnect_context());
+        .map(|sender| sender.keeper_registration());
     let Some(registration) = registration else {
         return;
     };
     // Every keeper, including isolated tests, uses its original registration.
     let operation = evidence.operation.clone().for_lane(registration.clone());
-    if manager.with_lane_owner(&operation, || ()).is_err() {
+    // Acquire the key-slot identity only while this exact registration owns the
+    // manager. Every terminal return/cancellation retires that slot; a delayed
+    // old keeper cannot capture or clear a successor installation.
+    let Ok(_retirement) = manager.with_lane_owner(&operation, || business.retire_on_exit()) else {
         return;
-    }
+    };
     let mut owned_liveness = |frame: Value| {
         if manager.with_lane_owner(&operation, || ()).is_err() {
             return false;
@@ -716,7 +719,17 @@ async fn serve_controlling_lane_with_evidence_context(
                             continue;
                         }
                         if resume.is_active() {
-                            continue;
+                            // A second loss belongs to this candidate only if
+                            // the complete original registration still matches.
+                            // Do not restart or extend the first frozen budget.
+                            if context != registration {
+                                continue;
+                            }
+                            if manager.with_lane_owner(&operation, || business.clear()).is_err() {
+                                return;
+                            }
+                            fail_resume(manager, &operation, sinks);
+                            return;
                         }
                         // A pre-authentication D carries no lease authority.
                         // Its non-reusable original port/intent may still fail
@@ -1110,25 +1123,6 @@ fn handle_resume_frame(
     }
 }
 
-/// 生成下一条心跳帧：只在存在活租约（connected）时产出，序号单调递增；租约
-/// 变更后序号从 1 重新开始（epoch 同步换新，接收侧按新 epoch 接受）。
-fn next_liveness_frame(
-    manager: &ControllingDeviceManager,
-    liveness: &mut LivenessExpectations,
-) -> Option<Value> {
-    let (lease, _) = manager.live_runtime_context().ok()?;
-    let epoch = manager.live_liveness_epoch()?;
-    let next = liveness.next_sequence()?;
-    let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
-        &lease,
-        SenderRole::ControllerA,
-        &epoch,
-        next,
-    )
-    .ok()?;
-    Some(frame)
-}
-
 /// 把状态投影压成一行排障文本：与 UI 收到的 `status` / `errorCode` 同源，
 /// 不含连接码、租约、指纹或设备标识。
 fn controller_status_log_detail(status: &ControllingStatus) -> String {
@@ -1304,8 +1298,14 @@ pub(crate) async fn connect_controlling_device(
         }
     };
 
+    // Construct before spawning, not on the task's first poll: cancellation of
+    // an unpolled keeper must still retire this exact installed key slot.
+    let retirement = manager
+        .with_lane_owner(&operation, || business.retire_on_exit())
+        .ok();
     let keeper = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _retirement = retirement;
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
@@ -1947,7 +1947,7 @@ mod tests {
         let new_running = manager.is_running() && !next_sender.is_stopped();
         let new_status = projection(&manager.status());
         let new_code_retained = manager.pending_code(next).is_ok();
-        manager.stop();
+        manager.stop(&business);
         assert!(old_result.is_err());
         assert!(
             statuses.is_empty(),
@@ -2261,6 +2261,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_adapter_second_disconnect_ends_candidate_before_inbox_terminal() {
+        assert_actual_adapter_case("second").await;
+    }
+
+    #[tokio::test]
     async fn actual_adapter_pre_auth_disconnect_fails_only_its_original_attempt() {
         assert_actual_adapter_case("pre_auth").await;
     }
@@ -2268,6 +2273,21 @@ mod tests {
     #[tokio::test]
     async fn actual_adapter_old_queued_disconnect_preserves_replacement_pairing_code() {
         assert_actual_adapter_case("replacement").await;
+    }
+
+    #[tokio::test]
+    async fn actual_adapter_task_retirement_before_first_keeper_poll_closes_owned_state() {
+        assert_actual_adapter_case("task_ended").await;
+    }
+
+    #[tokio::test]
+    async fn actual_adapter_task_retirement_preserves_connected_replacement_owner() {
+        assert_actual_adapter_case("task_ended_replacement").await;
+    }
+
+    #[tokio::test]
+    async fn actual_adapter_requested_stop_before_first_keeper_poll_keeps_cleanup_identity() {
+        assert_actual_adapter_case("task_stopped").await;
     }
 
     async fn assert_actual_adapter_case(case: &str) {
@@ -2286,6 +2306,7 @@ mod tests {
         let mut lease = adapter_fixture_lease();
         lease.context = context.clone();
         lease.negotiated_capabilities.push("resume_v1".into());
+        lease.negotiated_capabilities.sort();
         let (sender, receiver) = transport_channels(
             ControllerRole::ControllerA,
             &context.remote_control_generation,
@@ -2311,19 +2332,33 @@ mod tests {
         }
         let expected = sender.disconnect_context();
         let sink_tx = ingress_tx.clone();
-        let sink = move |event: ControllerTransportEvent| {
-            let ControllerTransportEvent::Disconnected { context, .. } = &event else {
-                panic!("expected the actual transport disconnect producer");
-            };
-            assert_eq!(context, &expected);
-            sink_tx.enqueue(event);
-        };
+        let sink: Arc<dyn super::super::relay_transport::ControllerEventSink> =
+            Arc::new(move |event: ControllerTransportEvent| {
+                let ControllerTransportEvent::Disconnected { context, .. } = &event else {
+                    panic!("expected the actual transport disconnect producer");
+                };
+                assert_eq!(context, &expected);
+                sink_tx.enqueue(event);
+            });
         // Exercise the actual transport producer, suspension, production
         // adapter, inbox, production port and keeper. The WebSocket driver
         // itself is outside this A adapter test's scope.
-        super::super::relay_transport::disconnect_test_transport_to_sink(&sender, &sink);
-        drop(sink);
-        drop(ingress_tx);
+        let task_ended = matches!(
+            case,
+            "task_ended" | "task_ended_replacement" | "task_stopped"
+        );
+        if !task_ended {
+            super::super::relay_transport::disconnect_test_transport_to_sink(
+                &sender,
+                sink.as_ref(),
+            );
+            if case == "second" {
+                super::super::relay_transport::disconnect_test_transport_to_sink(
+                    &sender,
+                    sink.as_ref(),
+                );
+            }
+        }
         if case == "pre_auth" {
             install_sender();
         }
@@ -2336,11 +2371,71 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease)
             .unwrap();
+        if task_ended {
+            // Deterministic handoff boundary: authenticated state is committed,
+            // but the keeper has never been polled. Use the real lifetime guard
+            // and real adapter inbox, not a manufactured None registration.
+            if case == "task_stopped" {
+                sender.request_stop();
+            }
+            super::super::relay_transport::retire_test_transport_to_sink(&sender, sink.clone());
+            assert!(sender.is_stopped());
+            assert!(sender.authenticated_lease().is_none());
+            assert_eq!(sender.keeper_registration().lease.as_ref(), Some(&context));
+        }
+        drop(sink);
+        drop(ingress_tx);
         let mut port = ControllerTransportPort::new(sender.clone(), inbound);
+        let mut connected_replacement = None;
         let replacement = if case == "replacement" {
             manager.disconnect();
             business.clear();
             Some(manager.connect("345-6789").unwrap())
+        } else if case == "task_ended_replacement" {
+            manager.disconnect();
+            business.clear();
+            let next = manager.connect("345-6789").unwrap();
+            manager.complete_reserved(next.clone()).unwrap();
+            let mut next_fixture = pairing_fixture("relay-task-retired-replacement");
+            super::super::test_support::bind_pairing_generation(
+                &mut next_fixture,
+                &context.remote_control_generation,
+            );
+            assert_eq!(lease_context(&next_fixture.reservation), context);
+            let (next_session, _) = paired_session_keys(
+                next_fixture.a_keys,
+                next_fixture.b_keys,
+                &next_fixture.reservation,
+            );
+            let (next_sender, next_receiver) = transport_channels(
+                ControllerRole::ControllerA,
+                &context.remote_control_generation,
+                8,
+                2,
+                8192,
+                1024,
+            );
+            let mut next_lease = adapter_fixture_lease();
+            next_lease.context = context.clone();
+            next_lease.negotiated_capabilities.push("resume_v1".into());
+            next_lease.negotiated_capabilities.sort();
+            next_sender
+                .install_authenticated_lease(AuthenticatedLease {
+                    context: context.clone(),
+                    negotiated_capabilities: next_lease.negotiated_capabilities.clone(),
+                })
+                .unwrap();
+            manager
+                .replace_owned_transport(&next, next_sender.clone(), &business)
+                .unwrap();
+            business
+                .install(HandshakeRole::A, &context, next_session)
+                .unwrap();
+            manager
+                .complete_connected(next.clone(), next_lease)
+                .unwrap();
+            connected_replacement = Some((next_sender, next_receiver));
+            Some(next)
         } else {
             None
         };
@@ -2372,6 +2467,25 @@ mod tests {
         )
         .await;
         match case {
+            "second" => {
+                assert_eq!(
+                    seen,
+                    [
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
+                assert!(
+                    matches!(
+                        port.next_lane_event().await,
+                        Some(ControllerLaneEvent::Failed(ControllerLaneFailure::Closed))
+                    ),
+                    "second disconnect was ignored until inbox terminal"
+                );
+                assert!(!business.is_installed());
+                assert!(manager.live_lease().is_err());
+                assert_eq!(receiver.pending_control_for_test(), 1);
+            }
             "current" => {
                 // The accepted disconnect still drives Reconnecting and the
                 // validated resume prepare; the producer teardown's Closed
@@ -2402,6 +2516,40 @@ mod tests {
                     0,
                     "None lease context cannot acquire resume authority"
                 );
+            }
+            "task_ended" => {
+                assert_eq!(
+                    seen,
+                    vec![
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+                assert!(!business.is_installed());
+                assert_eq!(
+                    receiver.pending_control_for_test(),
+                    0,
+                    "retired metadata must not restore prepare sending authority"
+                );
+            }
+            "task_stopped" => {
+                assert_eq!(seen, vec![ControllingStatusKind::Error]);
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+                assert!(!business.is_installed());
+                assert_eq!(receiver.pending_control_for_test(), 0);
+            }
+            "task_ended_replacement" => {
+                assert!(seen.is_empty());
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+                assert!(business.is_installed());
+                let (next_sender, _) = connected_replacement.as_ref().unwrap();
+                assert!(!next_sender.is_stopped());
+                assert_eq!(next_sender.authenticated_lease().unwrap().context, context);
+                assert_ne!(next_sender.owner(), sender.owner());
+                assert_eq!(receiver.pending_control_for_test(), 0);
+                manager.disconnect();
+                business.clear();
             }
             "replacement" => {
                 assert!(seen.is_empty());
@@ -2957,6 +3105,19 @@ mod tests {
         lane.authorize_resume_final = reader_authorized;
         let mut statuses: Vec<String> = Vec::new();
         let mut on_status = |status: &ControllingStatus| {
+            if matches!(
+                status.kind(),
+                ControllingStatusKind::Reconnecting | ControllingStatusKind::Connected
+            ) {
+                assert!(
+                    business.is_installed(),
+                    "recoverable transitions retain the actual crypto slot"
+                );
+                assert_eq!(
+                    business.is_suspended(),
+                    status.kind() == ControllingStatusKind::Reconnecting
+                );
+            }
             statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
         };
         let mut on_session = |_: &ControllingSessionProjection| {};
@@ -3015,7 +3176,10 @@ mod tests {
             Some("live-a-2"),
             "恢复必须采用 Relay 下发的 A 端 liveness epoch"
         );
-        assert!(!business.is_suspended(), "恢复后业务通道必须重新打开");
+        assert!(
+            !business.is_installed(),
+            "keeper input ended after successful resume; terminal exit retires the slot"
+        );
         let now_a = lane_monotonic_millis();
         manager.mark_transport_disconnected(now_a, Some(now_a + 30_000));
         let second = manager

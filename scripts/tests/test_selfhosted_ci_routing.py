@@ -45,7 +45,7 @@ class SelfHostedRoutingTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('bash'), 'requires bash')
     def test_disabled_macos_does_not_block_but_windows_failure_does(self):
         gate = (ROOT / '.github/workflows/pr-check.yml').read_text(encoding='utf-8').split('\n  required-gate:', 1)[1]
-        script = textwrap.dedent(gate.split('\n        run: |\n', 1)[1])
+        script = textwrap.dedent(gate.split('\n        run: |\n', 1)[1].split('\n      - ', 1)[0])
         names = re.findall(r'^          ([A-Z0-9_]+_RESULT):', gate, re.M)
         env = dict(os.environ, **{name: 'success' for name in names})
         env.update(GITHUB_EVENT_NAME='pull_request', RELAY_REQUIRED_BY_POLICY='true',
@@ -71,10 +71,10 @@ class SelfHostedRoutingTests(unittest.TestCase):
         for job, pool in (('windows-rust-test', 'HEAVY'),
                           ('windows-rustup-repair-test', 'HEAVY'),
                           ('windows-relay-dacl', 'LIGHT'),
-                          ('windows-relay-tools-test', 'LIGHT'),
+                          ('windows-relay-tools-test', 'MEDIUM'),
                           ('windows-static-updater-contract', 'LIGHT'),
-                          ('windows-codex-runtime-test', 'LIGHT'),
-                          ('windows-runtime-test', 'LIGHT')):
+                          ('windows-codex-runtime-test', 'MEDIUM'),
+                          ('windows-runtime-test', 'MEDIUM')):
             block = re.split(r'\n  [a-zA-Z]', source.split('\n  ' + job + ':', 1)[1], maxsplit=1)[0]
             with self.subTest(job=job):
                 self.assertIn("vars.PINVOU_WINDOWS_ENABLED != 'false'", block)
@@ -98,7 +98,7 @@ class SelfHostedRoutingTests(unittest.TestCase):
     def test_native_switch_keeps_linux_relay_required(self):
         source=(ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         gate=source.split('\n  required-gate:',1)[1]
-        script=textwrap.dedent(gate.split('\n        run: |\n',1)[1])
+        script=textwrap.dedent(gate.split('\n        run: |\n',1)[1].split('\n      - ',1)[0])
         result_names=re.findall(r'^          ([A-Z0-9_]+_RESULT):',gate,re.M)
         env=dict(os.environ, **{name:'success' for name in result_names})
         env.update(GITHUB_EVENT_NAME='pull_request',RELAY_REQUIRED_BY_POLICY='true',WINDOWS_RUST_REQUIRED_BY_POLICY='false',WINDOWS_ENABLED='false')

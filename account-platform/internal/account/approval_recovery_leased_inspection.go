@@ -1,0 +1,209 @@
+package account
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvaleffect"
+	"github.com/google/uuid"
+)
+
+type RecoveryQueryLeaser interface {
+	Claim(context.Context, ApprovalRecoveryCandidate) (RecoveryQueryLease, error)
+	Release(context.Context, RecoveryQueryLease) (time.Time, error)
+}
+
+type RecoverySuccessConfirmer interface {
+	ConfirmOriginalSuccess(context.Context, ApprovalRecoveryCandidate, RecoveryQueryLease) error
+}
+
+type RecoveryZeroEffectConfirmer interface {
+	InvalidateOriginalApprovalZeroEffect(context.Context, ApprovalRecoveryCandidate, RecoveryQueryLease) error
+}
+
+type oneRecoveryCandidate struct{ candidate ApprovalRecoveryCandidate }
+
+func (p oneRecoveryCandidate) PlanProofApprovalRecovery(context.Context, int) (ApprovalRecoveryPlan, error) {
+	return ApprovalRecoveryPlan{Candidates: []ApprovalRecoveryCandidate{p.candidate}}, nil
+}
+
+// InspectProofRecoveryLeased performs only read-only effect queries, each
+// protected by a durable short lease on the original execution. Even an
+// ABSENT observation leaves UNKNOWN_QUERY_ONLY: it cannot prove zero effect.
+// This is not a terminal recovery worker or a retry authorization.
+func InspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	return InspectProofRecoveryLeasedWithResults(ctx, planner, leaser, effects, nil, limit)
+}
+
+// Result observations are gathered under the same short query lease as the
+// effect check. Neither a positive result nor an absent effect changes state.
+func InspectProofRecoveryLeasedWithResults(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, nil, nil, limit)
+}
+
+// A positive domain result can be converged only while the original query
+// lease is live. Account performs a second authoritative read and the CAS;
+// this worker never sends a claimed result or invokes a domain executor.
+func InspectProofRecoveryLeasedWithConfirmation(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	if results == nil || confirmer == nil {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+	}
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, confirmer, nil, limit)
+}
+
+// InspectProofRecoveryLeasedWithRecovery is the operational recovery worker: it
+// converges a persisted positive result and, for the narrow case the Account
+// service re-proves as zero effect, closes the original execution through the
+// governed invalidation surface - both while the original query lease is live.
+func InspectProofRecoveryLeasedWithRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, zeroEffect RecoveryZeroEffectConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	if results == nil || confirmer == nil || zeroEffect == nil {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+	}
+	return inspectProofRecoveryLeased(ctx, planner, leaser, effects, results, confirmer, zeroEffect, limit)
+}
+
+func inspectProofRecoveryLeased(ctx context.Context, planner ApprovalRecoveryPlanner, leaser RecoveryQueryLeaser, effects approvaleffect.Reader, results ApprovalRecoveryResultReader, confirmer RecoverySuccessConfirmer, zeroEffect RecoveryZeroEffectConfirmer, limit int) (ApprovalRecoveryInspectionBatch, error) {
+	if planner == nil || leaser == nil || effects == nil || limit < 1 || limit > 200 {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	plan, err := planner.PlanProofApprovalRecovery(ctx, limit)
+	if err != nil {
+		return ApprovalRecoveryInspectionBatch{}, err
+	}
+	if len(plan.Candidates) > limit {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+	}
+	seen := make(map[uuid.UUID]struct{}, len(plan.Candidates))
+	for _, candidate := range plan.Candidates {
+		if !validRecoveryInspectionCandidate(candidate) || candidate.OriginalKey == "" || candidate.ApprovalEpoch < 1 || candidate.RequestVersion < 1 {
+			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+		}
+		if _, duplicate := seen[candidate.RequestID]; duplicate {
+			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+		}
+		seen[candidate.RequestID] = struct{}{}
+	}
+	batch := ApprovalRecoveryInspectionBatch{Plan: plan, Inspections: make([]ApprovalRecoveryInspection, 0, len(plan.Candidates))}
+	for _, candidate := range plan.Candidates {
+		lease, claimErr := leaser.Claim(ctx, candidate)
+		if errors.Is(claimErr, ErrApprovalRecoveryLeaseUnavailable) {
+			batch.Inspections = append(batch.Inspections, ApprovalRecoveryInspection{
+				Candidate: candidate, EffectObservation: "UNAVAILABLE", Disposition: "UNKNOWN_QUERY_ONLY",
+			})
+			continue
+		}
+		if claimErr != nil {
+			return ApprovalRecoveryInspectionBatch{}, claimErr
+		}
+		if lease.RequestID != candidate.RequestID || lease.Token == uuid.Nil || lease.Version < 1 || lease.QueryCount < 1 {
+			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
+		}
+		deadline := time.Now().Add(7 * time.Second)
+		if lease.Until.Add(-time.Second).Before(deadline) {
+			deadline = lease.Until.Add(-time.Second)
+		}
+		var observation ApprovalRecoveryInspection
+		var inspectionErr error
+		if deadline.After(time.Now()) {
+			queryCtx, stop := context.WithDeadline(ctx, deadline)
+			resultState := ""
+			var resultAt *time.Time
+			if results != nil {
+				resultStarted := time.Now().UTC()
+				result, resultErr := results.ObserveRecoveryResult(queryCtx, candidate)
+				resultState = "UNAVAILABLE"
+				if resultErr == nil {
+					if !validRecoveryResultState(candidate, result.State) || result.ObservedAt.Before(resultStarted.Add(-30*time.Second)) ||
+						result.ObservedAt.After(time.Now().UTC().Add(30*time.Second)) {
+						stop()
+						inspectionErr = ErrApprovalRecoveryPlanInvalid
+					} else {
+						resultState = result.State
+						observed := result.ObservedAt
+						resultAt = &observed
+					}
+				}
+			}
+			var one ApprovalRecoveryInspectionBatch
+			var err error
+			if inspectionErr == nil {
+				one, err = InspectProofRecovery(queryCtx, oneRecoveryCandidate{candidate}, effects, 1)
+			}
+			stop()
+			if inspectionErr == nil {
+				inspectionErr = err
+			}
+			if inspectionErr == nil {
+				observation = one.Inspections[0]
+				observation.ResultObservation = resultState
+				observation.ResultObservedAt = resultAt
+				if resultState == "SUCCEEDED" && observation.EffectObservation == approvaleffect.StateAbsent {
+					inspectionErr = ErrApprovalRecoveryPlanInvalid
+				}
+				// Read-only verdict for the later governed terminal transition;
+				// it never changes state and never authorizes a retry.
+				observation.ZeroEffectProven, observation.ZeroEffectReason = recoveryZeroEffectVerdict(candidate, observation)
+			}
+			if inspectionErr == nil && resultState == "SUCCEEDED" && confirmer != nil {
+				confirmDeadline := lease.Until.Add(-time.Second)
+				if confirmDeadline.After(time.Now()) {
+					confirmCtx, cancelConfirm := context.WithDeadline(ctx, confirmDeadline)
+					inspectionErr = confirmer.ConfirmOriginalSuccess(confirmCtx, candidate, lease)
+					cancelConfirm()
+				} else {
+					inspectionErr = ErrApprovalRecoveryLeaseUnavailable
+				}
+				if inspectionErr == nil {
+					observation.Disposition = "ORIGINAL_RESULT_CONFIRMED"
+				}
+			}
+			// Zero effect is the only other terminal convergence, and it must also
+			// happen inside the same live lease: the Account service re-reads both
+			// owner authorities and performs the single CAS itself.
+			if inspectionErr == nil && observation.ZeroEffectProven && zeroEffect != nil {
+				invalidateDeadline := lease.Until.Add(-time.Second)
+				if invalidateDeadline.After(time.Now()) {
+					invalidateCtx, cancelInvalidate := context.WithDeadline(ctx, invalidateDeadline)
+					inspectionErr = zeroEffect.InvalidateOriginalApprovalZeroEffect(invalidateCtx, candidate, lease)
+					cancelInvalidate()
+				} else {
+					inspectionErr = ErrApprovalRecoveryLeaseUnavailable
+				}
+				if inspectionErr == nil {
+					observation.Disposition = "ZERO_EFFECT_INVALIDATED"
+				}
+			}
+		} else {
+			inspectionErr = ErrApprovalRecoveryLeaseUnavailable
+		}
+		// Release uses a fresh bounded context so cancellation cannot silently
+		// retain a live lease. A failed release still cannot authorize a retry.
+		releaseCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+		_, releaseErr := leaser.Release(releaseCtx, lease)
+		stop()
+		if releaseErr != nil {
+			return ApprovalRecoveryInspectionBatch{}, releaseErr
+		}
+		if inspectionErr != nil {
+			return ApprovalRecoveryInspectionBatch{}, inspectionErr
+		}
+		batch.Inspections = append(batch.Inspections, observation)
+	}
+	return batch, nil
+}
+
+func validRecoveryResultState(candidate ApprovalRecoveryCandidate, state string) bool {
+	if candidate.Workload == "billing-command-executor" {
+		return state == "UNCONFIRMED" || state == "SUCCEEDED"
+	}
+	if candidate.Workload == "token-command-executor" {
+		switch state {
+		case "UNCONFIRMED", "PENDING", "SUCCEEDED", "REJECTED", "FAILED", "UNKNOWN":
+			return true
+		}
+	}
+	return false
+}

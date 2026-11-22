@@ -7,6 +7,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  selectedDeployProfile,
+  deployProfileLabel,
   MAX_LOG_LINES,
   canStopRetainedProcess,
   lifecycleTaskKey,
@@ -19,6 +21,8 @@ import {
   missingFormFields,
   applyLayerUpdate,
   layerSummary,
+  operationErrorText,
+  operationWarningText,
   parseDockerLayerLine,
   parseDockerSize,
   parseProgressLine,
@@ -30,9 +34,13 @@ import {
   reduceLogChunk,
   splitDuration,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
   trimSamples,
 } from '../src/features/model-store/model-store-logic.js';
+import { dictZh } from '../src/shared/i18n/zh.js';
+import { dictEn } from '../src/shared/i18n/en.js';
+import { dictJa } from '../src/shared/i18n/ja.js';
 
 const emptyState = () => ({ lines: [], progress: null, speed: null, prompt: null, samples: [] });
 
@@ -50,6 +58,23 @@ test('残留实例标记独立于截断日志保留，只对失败启用提供�
   for (const line of ['example LMM_RETAINED_NATIVE_PROCESS=1', 'LMM_RETAINED_NATIVE_PROCESS=0', 'LMM_RETAINED_NATIVE_PROCESS=1 trailing']) {
     assert.equal(reduceLogChunk(emptyState(), [line], 0).retainedNativeProcess, false);
   }
+});
+
+test('deployment selection uses the backend default and keeps valid saved choices', () => {
+  const record = {
+    card_id: 'qwen38-27b-nvfp4-mtp',
+    profiles: [{ id: 'benchmark' }, { id: 'production-sampling' }],
+    default_profile_id: 'production-sampling',
+  };
+  assert.equal(selectedDeployProfile(record), 'production-sampling');
+  assert.equal(selectedDeployProfile({ ...record, active_profile_id: 'benchmark' }), 'benchmark');
+  assert.equal(selectedDeployProfile({ ...record, active_profile_id: 'removed' }), 'production-sampling');
+  assert.equal(selectedDeployProfile({ ...record, default_profile_id: 'removed' }), 'benchmark');
+  assert.equal(selectedDeployProfile({ profiles: [] }), null);
+  const copy = { profileMtpBenchmark: 'Benchmark 64K', profileMtpProduction: 'Production 256K' };
+  assert.equal(deployProfileLabel(record, { id: 'benchmark', name: 'Old default 8K' }, copy), 'Benchmark 64K');
+  assert.equal(deployProfileLabel(record, { id: 'production-sampling' }, copy), 'Production 256K');
+  assert.equal(deployProfileLabel({ card_id: 'other' }, { id: 'benchmark', name: 'Other profile' }, copy), 'Other profile');
 });
 
 test('formatBytes：按 1024 进位，B 取整、其余保留一位小数', () => {
@@ -228,6 +253,17 @@ test('uninstallDoneText：结果缺失时退回"已保留"，宁可少说也不�
   assert.equal(uninstallDoneText(COPY, 'Qwen', null), 'kept:Qwen');
   assert.equal(uninstallDoneText(COPY, 'Qwen', undefined), 'kept:Qwen');
   assert.equal(uninstallDoneText(COPY, 'Qwen', {}), 'kept:Qwen');
+});
+
+test('uninstall cleanup keeps sync failures visible and combines both recovery warnings', () => {
+  const copy = {
+    uninstallLinksLeft: (name) => `links-left:${name}`,
+    linkSyncFailed: (error) => `sync-failed:${error}`,
+  };
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', true, null), '');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', true, 'disk full'), 'sync-failed:disk full');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', false, null), 'links-left:Qwen');
+  assert.equal(uninstallCleanupWarning(copy, 'Qwen', false, 'disk full'), 'links-left:Qwen sync-failed:disk full');
 });
 
 // ---------------------------------------------- 卸载对话框该给几个选项
@@ -430,4 +466,91 @@ test('达到字节上限不代表任务完成；仅后端成功才退出等待�
   assert.equal(taskProgressView({ status: 'running', step: { index: 4, total: 4 } }).awaitingCompletion, true);
   assert.equal(taskProgressView({ status: 'running', progress: { done: 90, total: 100 } }).awaitingCompletion, false);
   assert.equal(taskProgressView({ status: 'running', progress: { done: 99999, total: 100000 } }).awaitingCompletion, true, 'rounding must not resurrect 100.0%');
+});
+
+// 进度分母可疑时降为 estimated + 0%（客户反馈 728K/2.4TB · 0%）。
+test('taskProgressView 分母可疑（0 或 >1.5TB）时 percent=0 + estimated=true', async () => {
+  const { taskProgressView } = await import('../src/features/model-store/model-store-logic.js');
+  // total=0
+  let v = taskProgressView({ progress: { done: 728000, total: 0 }, status: 'running' });
+  assert.equal(v.kind, 'bytes');
+  assert.equal(v.percent, 0);
+  assert.equal(v.estimated, true);
+  assert.equal(v.done, 728000);
+  // total > 1.5TB
+  v = taskProgressView({ progress: { done: 728000, total: 2.4e12 }, status: 'running' });
+  assert.equal(v.percent, 0);
+  assert.equal(v.estimated, true);
+  // 正常 total
+  v = taskProgressView({ progress: { done: 50e9, total: 168e9 }, status: 'running' });
+  assert.ok(v.percent > 0);
+  assert.equal(v.estimated, false);
+});
+
+// r33 P2-3：done 态短路——完成卡不被可疑分母拖回 2% 估算条。
+test('taskProgressView 分母可疑但任务已 done 时不降级为 2% 估算条', async () => {
+  const { taskProgressView } = await import('../src/features/model-store/model-store-logic.js');
+  // done + total=0：不走 estimated 降级，落到 percent=null → null（完成卡不渲染进度条）
+  let v = taskProgressView({ progress: { done: 728000, total: 0 }, status: 'done' });
+  assert.equal(v, null);
+  // done + 分母量大但数值自洽（done=total）：短路后走正常百分比臂，满条 100%，
+  // 不再被拖回 estimated 2% 条（r33 P2-3 的实机回归场景：2.4TB 下完那一刻倒退）
+  v = taskProgressView({ progress: { done: 2.4e12, total: 2.4e12 }, status: 'done' });
+  assert.equal(v.percent, 100);
+  assert.equal(v.estimated, false);
+  assert.equal(v.awaitingCompletion, false);
+  // 对照：running + 可疑分母仍走降级（原修复行为不变）
+  v = taskProgressView({ progress: { done: 728000, total: 0 }, status: 'running' });
+  assert.equal(v.estimated, true);
+  assert.equal(v.percent, 0);
+});
+
+test('operationWarningText：警告码按语言渲染，未知字符串原样回退', () => {
+  const copy = {
+    forceRemoveRecordsOnlyWarning: '只删了记录，请自行核实磁盘。',
+    forceRemoveResidualWarning: '磁盘文件未删除，请核查以下路径。',
+  };
+  // 后端两个警告码各对应一句文案
+  assert.equal(
+    operationWarningText(copy, 'force_remove_records_only'),
+    '只删了记录，请自行核实磁盘。'
+  );
+  assert.equal(
+    operationWarningText(copy, 'force_remove_residual_paths'),
+    '磁盘文件未删除，请核查以下路径。'
+  );
+  // 旧版结果、测试桩的纯文本警告原样显示，不吞不译
+  assert.equal(operationWarningText(copy, 'files retained'), 'files retained');
+  // 无警告一律空串，界面上不渲染空段落
+  assert.equal(operationWarningText(copy, null), '');
+  assert.equal(operationWarningText(copy, undefined), '');
+  assert.equal(operationWarningText(copy, ''), '');
+});
+
+test('operationErrorText：链接资源拒绝说明现有资源保留和安全迁移步骤，按当前语言显示', () => {
+  const code = 'model_store_linked_resource_path';
+  const copies = [dictZh.uiModelStore, dictEn.uiModelStore, dictJa.uiModelStore];
+  const messages = copies.map((copy) => operationErrorText(copy, code));
+  assert.equal(new Set(messages).size, 3);
+  const required = [
+    [/符号链接/, /现有资源和记录已保留/, /停用.*退出.*备份/, /迁移文档.*实际目录/, /不要直接删除.*目标目录/],
+    [/symbolic link/, /Existing resources and records have been preserved/, /Stop.*exit.*back up/, /migration guide.*physical directories/, /Do not delete.*target directory/],
+    [/シンボリックリンク/, /現存するリソースと記録.*保持/, /停止.*終了.*バックアップ/, /移行手順.*実体のディレクトリ/, /リンク先.*直接削除しない/],
+  ];
+  for (const [index, message] of messages.entries()) {
+    assert.ok(!message.includes(code));
+    for (const phrase of required[index]) assert.match(message, phrase);
+    assert.equal(operationErrorText(copies[index], new Error(code)), message);
+  }
+});
+
+test('operationErrorText：未知诊断与原型名称保持原串，不接受继承的错误映射', () => {
+  for (const copy of [dictZh.uiModelStore, dictEn.uiModelStore, dictJa.uiModelStore]) {
+    for (const message of ['Permission denied (os error 13)\nretained detail', '__proto__', 'constructor', 'toString', '']) {
+      assert.equal(operationErrorText(copy, message), message);
+    }
+  }
+  const code = 'model_store_linked_resource_path';
+  assert.equal(operationErrorText({ operationErrors: Object.create({ [code]: 'inherited translation' }) }, code), code);
+  assert.equal(operationErrorText({}, 'diagnostic from an older host'), 'diagnostic from an older host');
 });

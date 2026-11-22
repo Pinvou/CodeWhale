@@ -1,0 +1,264 @@
+package events
+
+import (
+	"context"
+	_ "embed"
+
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type PostgresStore struct {
+	pool               *pgxpool.Pool
+	excludedEventTypes []string
+	accountReplay      bool
+}
+
+//go:embed queries/outbox_stats.sql
+var outboxStatisticsSQL string
+
+type OutboxStats struct {
+	Pending          int64
+	DeadLettered     int64
+	OldestPendingAge time.Duration
+	// RetainedStorageBytes includes this table's indexes and TOAST, not inboxes
+	// or the separate frozen authorization sidecar. It is not a capacity grant.
+	RetainedStorageBytes int64
+}
+
+func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
+	return newPostgresStore(ctx, databaseURL, nil)
+}
+
+// NewOwnedPostgresStore rejects a misrouted outbox before any delivery claim.
+// The expected owner is a compiled integration contract, never a DSN input.
+func NewOwnedPostgresStore(ctx context.Context, databaseURL, expectedOwner string) (*PostgresStore, error) {
+	if expectedOwner == "" {
+		return nil, errors.New("expected outbox schema owner is required")
+	}
+	return openPostgresStore(ctx, databaseURL, nil, expectedOwner)
+}
+
+// NewAccountReplayPostgresStore explicitly selects the restricted Account
+// replay capability. Ordinary relay delivery and generic Billing/Token stores
+// retain their existing constructors and do not acquire a new startup gate.
+func NewAccountReplayPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
+	store, err := newPostgresStore(ctx, databaseURL, []string{"account.approval-command.authorized.v1"})
+	if err != nil {
+		return nil, err
+	}
+	var session, actor string
+	if err := store.pool.QueryRow(ctx, `SELECT session_user,current_user`).Scan(&session, &actor); err != nil || session != "account_service" || actor != "account_service" {
+		store.Close()
+		return nil, errors.New("Account replay requires the dedicated runtime identity")
+	}
+	store.accountReplay = true
+	return store, nil
+}
+
+// NewPartitionedPostgresStore creates a generic outbox store whose claim and
+// stats queries exclude a closed set of event types. The regular constructor
+// retains the original unfiltered SQL path used by Billing and Token.
+func NewPartitionedPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string) (*PostgresStore, error) {
+	excluded := make([]string, 0, len(excludedEventTypes))
+	seen := map[string]bool{}
+	for _, eventType := range excludedEventTypes {
+		eventType = strings.TrimSpace(eventType)
+		if eventType == "" || len(eventType) > 160 || strings.ContainsAny(eventType, " \t\r\n*>/") || seen[eventType] {
+			return nil, errors.New("event store partition is invalid")
+		}
+		seen[eventType] = true
+		excluded = append(excluded, eventType)
+	}
+	if len(excluded) == 0 || len(excluded) > 16 {
+		return nil, errors.New("event store partition is invalid")
+	}
+	return newPostgresStore(ctx, databaseURL, excluded)
+}
+
+func newPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string) (*PostgresStore, error) {
+	return openPostgresStore(ctx, databaseURL, excludedEventTypes, "")
+}
+
+func openPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string, expectedOwner string) (*PostgresStore, error) {
+	configuration, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse event store database URL: %w", err)
+	}
+	configuration.MaxConns = 4
+	configuration.MinConns = 1
+	if expectedOwner != "" {
+		// All physical connections use the attested relation; a DSN search_path
+		// cannot redirect the ordinary unqualified delivery queries elsewhere.
+		configuration.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
+			if _, err := connection.Exec(ctx, `SET search_path TO pg_catalog,public`); err != nil {
+				return err
+			}
+			var matches bool
+			err := connection.QueryRow(ctx, `SELECT c.relkind IN ('r','p') AND pg_catalog.pg_get_userbyid(c.relowner)=$1
+ AND EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attname='publication_generation'
+   AND a.atttypid='pg_catalog.int8'::regtype AND a.attnotnull AND NOT a.attisdropped)
+ FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+ WHERE c.oid=pg_catalog.to_regclass('outbox_events') AND n.nspname='public'`, expectedOwner).Scan(&matches)
+			if err != nil || !matches {
+				return errors.New("outbox schema owner or publication fence does not match the selected source")
+			}
+			return nil
+		}
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, configuration)
+	if err != nil {
+		return nil, fmt.Errorf("open event store: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping event store: %w", err)
+	}
+	return &PostgresStore{pool: pool, excludedEventTypes: excludedEventTypes}, nil
+}
+
+func (store *PostgresStore) Close() { store.pool.Close() }
+
+func (store *PostgresStore) Ping(ctx context.Context) error { return store.pool.Ping(ctx) }
+
+func (store *PostgresStore) Stats(ctx context.Context) (OutboxStats, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var stats OutboxStats
+	var oldestSeconds float64
+	// An empty, non-NULL array preserves the unpartitioned case. Put predicates
+	// in WHERE so published history is not an input to every metrics aggregate.
+	excluded := append([]string{}, store.excludedEventTypes...)
+	err := store.pool.QueryRow(ctx, outboxStatisticsSQL, excluded).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds, &stats.RetainedStorageBytes)
+	stats.OldestPendingAge = time.Duration(oldestSeconds * float64(time.Second))
+	return stats, err
+}
+
+func (store *PostgresStore) Claim(ctx context.Context, workerID string, limit int, lease time.Duration, allowedSubjects []string) ([]Event, error) {
+	if strings.TrimSpace(workerID) == "" || limit < 1 || limit > 1000 || lease <= 0 || !validSubjectScope(allowedSubjects) {
+		return nil, errors.New("event outbox claim parameters are invalid")
+	}
+	exact, prefixes := []string{}, []string{}
+	for _, subject := range allowedSubjects {
+		if strings.HasSuffix(subject, ".>") {
+			prefixes = append(prefixes, strings.TrimSuffix(subject, ">"))
+		} else {
+			exact = append(exact, subject)
+		}
+	}
+	// Scope and partition exclusion both apply before acquiring any lease.
+	// Prefix equality uses left/length rather than LIKE so _ and % are literal.
+	query := `
+WITH candidates AS (
+    SELECT event_id FROM outbox_events
+    WHERE published_at IS NULL AND dead_lettered_at IS NULL AND next_attempt_at <= now()
+      AND (locked_until IS NULL OR locked_until < now())
+      AND NOT(event_type=ANY($4::text[]))
+      AND (event_type=ANY($5::text[]) OR EXISTS (
+          SELECT 1 FROM unnest($6::text[]) AS scope(prefix)
+          WHERE left(event_type,length(scope.prefix))=scope.prefix
+      ))
+    ORDER BY occurred_at, event_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+)
+UPDATE outbox_events event
+SET locked_by=$2, locked_until=now() + ($3 * interval '1 second')
+FROM candidates
+WHERE event.event_id=candidates.event_id
+RETURNING event.event_id,event.event_type,event.aggregate_id,event.aggregate_version,event.payload,event.trace_id,event.occurred_at,event.attempts,event.publication_generation,event.locked_until`
+	excluded := store.excludedEventTypes
+	if excluded == nil {
+		excluded = []string{}
+	}
+	rows, err := store.pool.Query(ctx, query, limit, workerID, max(1, int(lease.Seconds())), excluded, exact, prefixes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	claimed := make([]Event, 0, limit)
+	for rows.Next() {
+		var event Event
+		if err := rows.Scan(&event.ID, &event.Type, &event.AggregateID, &event.AggregateVersion, &event.Payload, &event.TraceID, &event.OccurredAt, &event.Attempts, &event.PublicationGeneration, &event.LeaseUntil); err != nil {
+			return nil, err
+		}
+		claimed = append(claimed, event)
+	}
+	return claimed, rows.Err()
+}
+
+func (store *PostgresStore) MarkPublished(ctx context.Context, workerID string, event Event) error {
+	command, err := store.pool.Exec(ctx, `UPDATE outbox_events SET published_at=now(),attempts=attempts+1,last_error=NULL,locked_by=NULL,locked_until=NULL WHERE event_id=$1 AND locked_by=$2 AND publication_generation=$3 AND locked_until=$4 AND locked_until>now() AND published_at IS NULL AND dead_lettered_at IS NULL`, event.ID, workerID, event.PublicationGeneration, event.LeaseUntil)
+	if err == nil && command.RowsAffected() != 1 {
+		return errors.New("event outbox lease was lost before publish acknowledgement")
+	}
+	return err
+}
+
+func (store *PostgresStore) MarkFailed(ctx context.Context, workerID string, event Event, retryAt time.Time, message string) error {
+	command, err := store.pool.Exec(ctx, `UPDATE outbox_events SET attempts=attempts+1,last_error=$3,next_attempt_at=$4,locked_by=NULL,locked_until=NULL WHERE event_id=$1 AND locked_by=$2 AND publication_generation=$5 AND locked_until=$6 AND locked_until>now() AND published_at IS NULL AND dead_lettered_at IS NULL`, event.ID, workerID, message, retryAt.UTC(), event.PublicationGeneration, event.LeaseUntil)
+	if err == nil && command.RowsAffected() != 1 {
+		return errors.New("event outbox lease was lost before failure acknowledgement")
+	}
+	return err
+}
+
+func (store *PostgresStore) MarkDeadLettered(ctx context.Context, workerID string, event Event, message string) error {
+	command, err := store.pool.Exec(ctx, `UPDATE outbox_events SET attempts=attempts+1,last_error=$3,dead_lettered_at=now(),locked_by=NULL,locked_until=NULL WHERE event_id=$1 AND locked_by=$2 AND publication_generation=$4 AND locked_until=$5 AND locked_until>now() AND published_at IS NULL AND dead_lettered_at IS NULL`, event.ID, workerID, message, event.PublicationGeneration, event.LeaseUntil)
+	if err == nil && command.RowsAffected() != 1 {
+		return errors.New("event outbox lease was lost before dead-letter acknowledgement")
+	}
+	return err
+}
+
+type InboxHandler func(context.Context, pgx.Tx, Event) error
+
+func (store *PostgresStore) ProcessInbox(ctx context.Context, event Event, handler InboxHandler) (bool, error) {
+	if err := event.Validate(); err != nil || handler == nil {
+		return false, ErrInvalidEvent
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	command, err := tx.Exec(ctx, `INSERT INTO inbox_messages(event_id,event_type,aggregate_id,aggregate_version,received_at) VALUES ($1,$2,$3,$4,now()) ON CONFLICT (event_id) DO NOTHING`, event.ID, event.Type, event.AggregateID, event.AggregateVersion)
+	if err != nil {
+		return false, err
+	}
+	if command.RowsAffected() == 0 {
+		return false, tx.Commit(ctx)
+	}
+	var current int64
+	err = tx.QueryRow(ctx, `SELECT last_version FROM inbox_aggregate_versions WHERE event_type=$1 AND aggregate_id=$2 FOR UPDATE`, event.Type, event.AggregateID).Scan(&current)
+	hasCurrent := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	switch DecideVersion(hasCurrent, current, event.AggregateVersion) {
+	case Stale:
+		_, err = tx.Exec(ctx, `UPDATE inbox_messages SET processed_at=now(),last_error='stale aggregate version ignored' WHERE event_id=$1`, event.ID)
+		if err != nil {
+			return false, err
+		}
+		return false, tx.Commit(ctx)
+	case Gap:
+		return false, ErrVersionGap
+	}
+	if err := handler(ctx, tx, event); err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO inbox_aggregate_versions(event_type,aggregate_id,last_version,updated_at) VALUES ($1,$2,$3,now()) ON CONFLICT (event_type,aggregate_id) DO UPDATE SET last_version=EXCLUDED.last_version,updated_at=EXCLUDED.updated_at`, event.Type, event.AggregateID, event.AggregateVersion)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE inbox_messages SET processed_at=now(),last_error=NULL WHERE event_id=$1`, event.ID)
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}

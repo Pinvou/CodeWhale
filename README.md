@@ -52,7 +52,7 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 - 工具商店统一管理本地 MCP、远程 MCP、CLI 和 API 连接器
 - 支持 OAuth / SSO 等免手填密钥的授权方式
-- 可按需连接飞书、钉钉、企业微信、Obsidian、企业知识库、法律与企业数据等能力
+- 可按需连接飞书、钉钉、企业微信、腾讯会议、腾讯文档、腾讯 ima、Obsidian、企查查、智慧芽、Canva、同花顺问财、高德天气、企业知识库、法律与企业数据等能力
 - 移动端扫码后可远程查看和控制当前工作区
 
 ### 面向实际运行
@@ -165,6 +165,8 @@ git submodule update --init --recursive
 # 以下命令均从仓库根目录执行
 (cd pinvou3-app && npm run lint:ui)
 (cd pinvou3-app && npm run build:ui)
+# 前端测试也会加载账户平台的协议校验器，须安装该目录的锁定依赖
+npm --prefix account-platform ci
 (cd pinvou3-app && npm test)
 
 (cd pinvou3-app/src-tauri && cargo test --lib -- --test-threads=1)
@@ -203,6 +205,7 @@ docs/                 架构设计、验证报告与维护文档
 - [macOS 运行环境要求](docs/macos-requirements.md)
 - [CodeWhale fork 策略](docs/fork-policy.md)
 - [当前 fork 修改清单](docs/fork-modifications.md)
+- [远控临时模型租约绑定（开发文档）](docs/remote-control-temporary-model-binding.md)
 - [工具市场概览](docs/工具市场.md)
 - [应用内升级设计](docs/应用内升级-设计.md)
 - [终端用户资料包](资料包/README.md)

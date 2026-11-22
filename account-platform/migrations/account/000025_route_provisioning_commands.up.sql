@@ -1,0 +1,3 @@
+INSERT INTO approval_command_policies(command_type,policy_version,approval_mode,requester_permission,risk_class,approval_count,self_approval_forbidden,snapshot_schema_version,critical_resource_fields,expires_after,execution_window,executor_identity,created_at) VALUES
+('TOKEN_ROUTE_PROVISIONING_REPAIR',1,'AUDIT_ONLY','platform.tokens.manage','GOVERNANCE_OR_NORMAL_STATE_MACHINE',0,false,1,'["target_id","request_fingerprint"]',INTERVAL '24 hours',INTERVAL '5 minutes','requesting-domain-service',now()),
+('TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE',1,'AUDIT_ONLY','org.models.manage','GOVERNANCE_OR_NORMAL_STATE_MACHINE',0,false,1,'["target_id","request_fingerprint"]',INTERVAL '24 hours',INTERVAL '5 minutes','requesting-domain-service',now());

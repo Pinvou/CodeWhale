@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -46,19 +49,54 @@ export function commandFor({ kind, target }) {
   throw new Error(`unsupported frontend smoke command kind: ${kind}`);
 }
 
-function runOnce(item) {
+export function fixtureCommand(executable, args, python, isolateNetwork) {
+  return isolateNetwork
+    ? [python, path.join(repoRoot, 'scripts/ci-browser-network.py'), '--', executable, ...args]
+    : [executable, ...args];
+}
+
+export function runOnce(item, { isolateNetwork = false } = {}) {
   const { executable, args } = commandFor(item);
   process.stdout.write(`\n== ${item.kind}:${item.target} ==\n`);
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const evidence = process.env.PINVOU_CI_RESOURCE_LEDGER
+      || fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'pinvou-process-receipts-'));
+    fs.mkdirSync(evidence, { recursive: true });
+    if (fs.lstatSync(evidence).isSymbolicLink()) throw new Error('fixture receipt directory is a symbolic link');
+    const receipt = path.join(evidence, `process-${randomUUID()}.json`);
+    const python = process.env.PINVOU_CI_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    const child = spawn(python, [path.join(repoRoot, 'scripts/ci-fixture-process.py'), '--receipt', receipt, '--', ...fixtureCommand(executable, args, python, isolateNetwork)], {
       cwd: appRoot,
       env: process.env,
       stdio: "inherit",
     });
+    const cancel = () => child.kill('SIGTERM');
+    process.once('SIGINT', cancel);
+    process.once('SIGTERM', cancel);
+    const detach = () => { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); };
     child.once("error", (error) => {
-      reject(new Error(`${item.kind}:${item.target} failed to start: ${error.message}`));
+      detach();
+      reject(Object.assign(new Error(`${item.kind}:${item.target} supervisor failed to start: ${error.message}`), { cleanupFailed: true }));
     });
-    child.once("exit", (code, signal) => {
+    // close also acknowledges inherited stdio retirement. The supervisor has
+    // already confirmed its entire owned tree, including detached browsers.
+    child.once("close", (code, signal) => {
+      detach();
+      let retired;
+      try { retired = JSON.parse(fs.readFileSync(receipt, 'utf8')); } catch {}
+      const clean = retired?.schema === 1 && retired?.state === 'released' && retired?.cleanup_failed === false;
+      if (!clean) {
+        reject(Object.assign(new Error(`${item.target} resource retirement was not clean; receipt: ${receipt}`), { cleanupFailed: true, exitCode: code }));
+        return;
+      }
+      if (isolateNetwork) {
+        let network;
+        try { network = JSON.parse(fs.readFileSync(path.join(evidence, path.basename(receipt, '.json') + '-resources', 'browser-network.txt'), 'utf8')); } catch {}
+        if (network?.mode !== 'loopback' || network.network === network.parent_network || network.capabilities !== 'none') {
+          reject(Object.assign(new Error(`${item.target} browser network isolation was not confirmed`), { isolationFailed: true, exitCode: code }));
+          return;
+        }
+      }
       if (signal) {
         reject(new Error(`${item.target} terminated by ${signal}`));
       } else if (code !== 0) {
@@ -94,7 +132,7 @@ export async function runSelected(items, {
         await run(item);
         break;
       } catch (error) {
-        if (attempt >= attempts || error?.exitCode === 2) throw error;
+        if (attempt >= attempts || error?.exitCode === 2 || error?.cleanupFailed || error?.isolationFailed) throw error;
         warn(
           `${item.kind}:${item.target} failed on attempt ${attempt}/${attempts}`
             + ` (${error.message}); retrying once to absorb a transient runner flake`,
@@ -139,13 +177,29 @@ async function readStdin() {
   return chunks.join("");
 }
 
-async function main() {
-  if (process.argv.length === 3 && process.argv[2] === "--full") {
-    await runSelected(FULL_FRONTEND_SMOKES);
-    return;
+// Partition the validated global selection, never a per-job partial list.
+// Keeping the selector's order makes assignment stable and automatically
+// includes future smokes without a second, hand-maintained test inventory.
+export function selectShard(items, coordinate) {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(coordinate);
+  if (!match) throw new Error('invalid smoke shard; expected INDEX/COUNT (one-based)');
+  const [, index, count] = match.map(Number);
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count) || index > count) {
+    throw new Error('invalid smoke shard; INDEX must be within COUNT');
   }
-  if (process.argv.length === 3 && process.argv[2] === "--selected") {
-    const items = parseSelection(await readStdin());
+  if (items.length === 0) throw new Error('empty global frontend smoke selection; failing closed');
+  const identities = items.map(({ kind, target }) => `${kind}\t${target}`);
+  if (new Set(identities).size !== items.length) throw new Error('duplicate frontend smoke selection');
+  return items.filter((_, offset) => offset % count === index - 1);
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const isolateNetwork = args.at(-1) === '--isolate-network';
+  if (isolateNetwork) args.pop();
+  if ((args.length === 1 || (args.length === 3 && args[1] === '--shard'))
+      && ['--full', '--selected'].includes(args[0])) {
+    const items = args[0] === '--full' ? FULL_FRONTEND_SMOKES : parseSelection(await readStdin());
     // selectFrontendSmokes never returns an empty set for any diff, so an
     // empty selection means the upstream selector (or its git diff) failed
     // inside a pipeline whose exit status was masked — fail closed instead of
@@ -155,10 +209,15 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    await runSelected(items);
+    const selected = args.length === 3 ? selectShard(items, args[2]) : items;
+    if (args.length === 3) {
+      console.log(`Frontend smoke shard ${args[2]}: ${selected.length}/${items.length} selected`);
+      if (selected.length === 0) console.log('Explicit empty shard of a valid nonempty global selection');
+    }
+    await runSelected(selected, { run: item => runOnce(item, { isolateNetwork }) });
     return;
   }
-  console.error("usage: node scripts/run-frontend-smokes.mjs --full | --selected");
+  console.error("usage: node scripts/run-frontend-smokes.mjs --full | --selected [--shard INDEX/COUNT] [--isolate-network]");
   process.exitCode = 2;
 }
 

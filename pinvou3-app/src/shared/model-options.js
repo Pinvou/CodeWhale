@@ -1,32 +1,40 @@
-function isBuiltInLlmApiModel(model) {
-  return !!(model && (model.kind === 'builtin_llmapi' || model.id === 'builtin_llmapi'));
+function isBuiltInAccountPlatformModel(model) {
+  return !!(model && (
+    model.kind === 'builtin_account_platform' ||
+    model.id === 'builtin_account_platform'
+  ));
 }
 
-function isLlmApiAccountVisible(status) {
-  if (!status) return false;
-  if (status.enabled === false || String(status.provisioning_status || '').trim().toLowerCase() === 'disabled') {
+function selectableModels(models) {
+  // Catalog visibility is independent of the current login/credit state.
+  // Token Gateway remains authoritative when each request is prepared.
+  return (models || []).filter(model => model && model.id);
+}
+
+function baseUrlIsLoopback(baseUrl) {
+  try {
+    const hostname = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+    if (hostname === 'localhost' || hostname === '::1') return true;
+    const octets = hostname.split('.');
+    return octets.length === 4
+      && octets.every(part => /^\d+$/.test(part) && Number(part) <= 255)
+      && Number(octets[0]) === 127;
+  } catch {
     return false;
   }
-  const accountExists = status.backend_user_state === 'exists' ||
-    (!status.backend_user_state && status.backend_user_exists === true);
-  if (status.stale === true) return accountExists && status.auto_login_failed === true;
-  return accountExists;
 }
 
-function isBuiltInLlmApiAvailable(status) {
-  if (!status || status.stale === true) return false;
-  const accountExists = status.backend_user_state === 'exists' ||
-    (!status.backend_user_state && status.backend_user_exists === true);
-  return accountExists &&
-    status.enabled === true &&
-    String(status.provisioning_status || '').trim().toLowerCase() === 'ready';
+// 判定单个模型是否本地推理后端（local_vllm 预设，或 base_url 指向 loopback）。
+// 集中放这里，供加载提示与 API Key gate 共用，避免两套规则漂移。
+function isLocalModel(model) {
+  return !!(model && (model.preset === 'local_vllm' || baseUrlIsLoopback(model.base_url || '')));
 }
 
-function selectableModels(models, status) {
-  const allowBuiltin = isBuiltInLlmApiAvailable(status);
-  return (models || []).filter(model =>
-    model && model.id && (!isBuiltInLlmApiModel(model) || allowBuiltin)
-  );
+// 当前激活模型是否本地推理后端；拿不到模型信息时默认 false（按在线口径显示，绝不误称本地）。
+function activeModelIsLocal(bs) {
+  if (!bs || !Array.isArray(bs.savedModels) || !bs.activeModelId) return false;
+  const m = bs.savedModels.find(x => x && x.id === bs.activeModelId);
+  return isLocalModel(m);
 }
 
-export { isBuiltInLlmApiModel, isBuiltInLlmApiAvailable, isLlmApiAccountVisible, selectableModels };
+export { isBuiltInAccountPlatformModel, selectableModels, baseUrlIsLoopback, isLocalModel, activeModelIsLocal };

@@ -830,6 +830,9 @@ assert.deepEqual(linux.bundle.linux.deb.depends, [
   "libpipewire-0.3-0",
   "libgbm1",
   "libegl1",
+  // r33 P2-1：native-tls（OpenSSL 3）直链入 deb——bundler 不跑 shlibdeps，
+  // 缺这条则目标机上装得上、起不来（动态链接器报缺库）。
+  "libssl3",
 ]);
 const linuxManifest = buildResourceManifest(linux, { platform: "linux" });
 assert.ok(linuxManifest.resourceFileCount > 0);

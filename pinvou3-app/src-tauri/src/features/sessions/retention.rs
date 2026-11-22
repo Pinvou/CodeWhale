@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 
 use super::SessionStore;
 use super::scheduled::{SCHEDULED_PROFILE_SCHEMA_VERSION, ScheduledProfileRegistry};
-use super::scheduled::{ScheduledEngineState, ScheduledRunProfile};
+use super::scheduled::{ScheduledEngineState, ScheduledRunProfile, ScheduledTokenAccounting};
 use super::store::{HEADLESS_SESSION_PREFIX, MAX_HEADLESS_SESSIONS, MAX_SESSIONS_PER_KIND};
 use super::validators::validate_session_id;
 use super::validators::{
@@ -40,6 +40,14 @@ use deepseek_tui::artifacts::{ArtifactKind, ArtifactRecord};
 use deepseek_tui::session_manager::create_saved_session_with_id_and_mode;
 use deepseek_tui::session_manager::{SavedSession, SessionMetadata};
 use std::path::PathBuf;
+
+/// Absolute lifetime total from the spawn-time durable base plus the
+/// engine-cumulative usage accumulated since that spawn. The single encoding
+/// shared by `persist_scheduled_engine_state` and
+/// `persist_scheduled_token_total`; the result replaces the stored value.
+fn scheduled_lifetime_total(base_total_tokens: u64, engine_total_tokens: u64) -> u64 {
+    base_total_tokens.saturating_add(engine_total_tokens)
+}
 
 #[cfg(test)]
 static SCHEDULED_RUNTIME_DELETE_FAULTS: LazyLock<parking_lot::Mutex<HashMap<String, ErrorKind>>> =
@@ -171,7 +179,15 @@ impl SessionStore {
             .join(format!("{}.json", session.metadata.id));
         let payload = serde_json::to_vec_pretty(session).context("serialize saved session")?;
         crate::platform::filesystem::atomic_write_private(&path, &payload)
-            .with_context(|| format!("write session {}", path.display()))?;
+            // Fold at the formation point: this reason rides the session
+            // command wrappers straight into toasts, so every caller's
+            // failure leaves with the storage prefix (OS user name) folded.
+            .with_context(|| {
+                crate::platform::paths::redact_storage_prefix(&format!(
+                    "write session {}",
+                    path.display()
+                ))
+            })?;
         // Once the session JSON hits disk the list snapshot is stale (title /
         // updated_at / new session may all have changed)
         self.invalidate_list_cache();
@@ -1047,12 +1063,21 @@ impl SessionStore {
             .manager
             .load_session_snapshot(id)
             .with_context(|| format!("load scheduled session {id} for engine persistence"))?;
-        let total_tokens = session.metadata.total_tokens;
+        match state.token_accounting {
+            // load→persist never touches total_tokens; that IS the preserve.
+            ScheduledTokenAccounting::PreservePersisted => {}
+            ScheduledTokenAccounting::EngineCumulative {
+                base_total_tokens,
+                engine_total_tokens,
+            } => {
+                session.metadata.total_tokens =
+                    scheduled_lifetime_total(base_total_tokens, engine_total_tokens);
+            }
+        }
         let mode_label = state.mode.as_label();
 
         session.metadata.updated_at = Utc::now();
         session.metadata.message_count = state.messages.len();
-        session.metadata.total_tokens = total_tokens;
         session.metadata.model = state.model;
         session.metadata.workspace = profile.workspace;
         session.metadata.mode = Some(mode_label.to_string());
@@ -1084,7 +1109,8 @@ impl SessionStore {
             .load_session_snapshot(id)
             .with_context(|| format!("load scheduled session {id} for token persistence"))?;
         session.metadata.updated_at = Utc::now();
-        session.metadata.total_tokens = base_total_tokens.saturating_add(engine_total_tokens);
+        session.metadata.total_tokens =
+            scheduled_lifetime_total(base_total_tokens, engine_total_tokens);
 
         self.persist_then_reconcile_with(
             &session,
@@ -1103,6 +1129,13 @@ impl SessionStore {
         }
 
         let _mutation = self.scheduled_mutation.lock();
+        // Allocate the id before any side effect: id exhaustion is a
+        // fallible step, and running it first keeps the loud-failure path
+        // free of an orphan empty task-workspace dir (the workspace is
+        // reused idempotently, but leaving one behind on a pure allocation
+        // error is still an avoidable error-state side effect).
+        let id =
+            self.generate_unused_session_id_with(|| format!("sched-{}", generate_session_id()))?;
         // Each run creates its own conversation; all conversations of the same
         // automation share the task workspace.
         // workspace is derived only from the stable task_id (automation_id);
@@ -1114,7 +1147,6 @@ impl SessionStore {
                 profile.workspace.display()
             )
         })?;
-        let id = format!("sched-{}", generate_session_id());
         let mode = profile.mode.as_label();
         let mut session = create_saved_session_with_id_and_mode(
             id.clone(),

@@ -77,6 +77,28 @@ macro_rules! command_protocol {
 }
 
 command_protocol!(
+    account_platform_protocol,
+    "account_platform.rs",
+    [
+        "account_platform_session",
+        "account_platform_open_portal",
+        "account_platform_reset_password",
+        "account_platform_login",
+        "account_platform_send_sms",
+        "account_platform_create_slider_captcha",
+        "account_platform_prepare_registration_password",
+        "account_platform_register_mobile",
+        "account_platform_registration_status",
+        "account_platform_login_sms",
+        "account_platform_logout",
+        "account_platform_request",
+        "account_platform_model_catalog",
+        "account_platform_select_catalog_model",
+        "account_platform_select_session_model",
+        "account_platform_branch_replacement_session",
+    ]
+);
+command_protocol!(
     artifacts_protocol,
     "artifacts.rs",
     [
@@ -132,6 +154,7 @@ command_protocol!(
         "computer_use_confirm",
         "computer_use_deny",
         "computer_use_set_enabled",
+        "computer_use_set_virtual_display_preference",
         "computer_use_request_permissions",
         "computer_use_permission_status"
     ]
@@ -194,6 +217,116 @@ command_protocol!(
     "global_shortcut.rs",
     ["set_global_shortcut_config"]
 );
+command_protocol!(
+    device_protocol,
+    "device.rs",
+    [
+        "get_device_snapshot",
+        "get_device_services",
+        "get_external_models",
+        "device_register_external_model",
+        "device_remove_external_model",
+        "device_doctor_prompt"
+    ]
+);
+
+/// 命令清单（上一测试）必须真的注册进 `generate_handler!`：protocol 宏只读
+/// device.rs 源码，从 lib.rs 删掉注册行不会红、运行时才炸。这里做弱文本包含
+/// 检查兜住该缝（五轮评审 P3；全仓既有模式，聊胜于无）。
+#[test]
+fn device_commands_are_registered_in_the_handler() {
+    let lib = include_str!("../../lib.rs");
+    for command in [
+        "get_device_snapshot",
+        "get_device_services",
+        "get_external_models",
+        "device_register_external_model",
+        "device_remove_external_model",
+        "device_doctor_prompt",
+    ] {
+        assert!(
+            lib.contains(command),
+            "device 命令 {command} 未注册进 lib.rs 的 generate_handler!"
+        );
+    }
+}
+
+/// 命令体切分（纯函数，测试直打）：先把 CRLF 归一成 LF 再按独占一行的属性
+/// 切分——.gitattributes 未固定 Rust 文件换行，CRLF 检出下源码里的
+/// `\r\n#[tauri::command]\r\n` 不匹配精确 LF 针，会切出 0 条命令使契约假红
+/// （二十三轮评审 P2）。属性独占一行才算命令（文件头注释里的反引号
+/// `#[tauri::command]` 不算）。
+fn command_bodies(source: &str) -> Vec<String> {
+    source
+        .replace("\r\n", "\n")
+        .split("\n#[tauri::command]\n")
+        .skip(1)
+        .map(str::to_string)
+        .collect()
+}
+
+/// 六条设备命令必须**每条**先过 `ensure_device_supported()` 能力门禁（第二十轮
+/// 评审 P2 的破坏面收口）：从任一命令删掉门禁调用，Rust/JS 全部测试照绿
+/// （二十一轮评审变异实证）。与上一测试同一弱文本锚定模式：每个
+/// `#[tauri::command]` 之后、下一条命令之前的函数体必须含门禁调用。
+#[test]
+fn every_device_command_calls_the_capability_gate() {
+    let bodies = command_bodies(include_str!("device.rs"));
+    assert_eq!(
+        bodies.len(),
+        6,
+        "device.rs 命令数量变了，请同步本测试与协议清单"
+    );
+    for body in &bodies {
+        let signature_end = body.find('{').expect("command body");
+        let name = body[..signature_end]
+            .split("fn ")
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+            .unwrap_or("<unknown>");
+        assert!(
+            body.contains("ensure_device_supported()?;"),
+            "device 命令 {name} 没有调用 ensure_device_supported() 能力门禁"
+        );
+    }
+}
+
+#[test]
+fn command_body_split_is_line_ending_agnostic() {
+    let lf = "header\n#[tauri::command]\nfn a() { ensure_device_supported()?; }\n#[tauri::command]\nfn b() { ensure_device_supported()?; }\n";
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(command_bodies(lf).len(), 2);
+    assert_eq!(command_bodies(&crlf).len(), 2, "CRLF 检出不得把命令切丢");
+    assert_eq!(command_bodies(lf), command_bodies(&crlf));
+    // 文件头注释里的反引号属性不是命令（既有口径，归一后仍保持）。
+    assert_eq!(command_bodies("see `#[tauri::command]` docs\n").len(), 0);
+}
+
+/// doctor 上下文的命令路径必须经由带脱敏的组合函数（round-22 评审 P2）：
+/// `build_doctor_context` 是生产路径唯一的上下文组装点，改调未脱敏的
+/// `assemble_doctor_context` 会让家目录/MAC 等静默进入送往云端模型的提示词，
+/// 而 `finish_doctor_context` 本体的直打测试照绿——它们测的是函数自己，不是
+/// 这条接线。与上方门禁锚同一弱文本形状模式：函数体断言。
+#[test]
+fn build_doctor_context_routes_through_the_masking_wrapper() {
+    let source = include_str!("device.rs");
+    let start = source
+        .find("async fn build_doctor_context")
+        .expect("build_doctor_context must exist in device.rs");
+    let body = &source[start..];
+    let end = body
+        .find("\n}")
+        .expect("build_doctor_context body terminator (rustfmt closing brace)");
+    let body = &body[..end];
+    assert!(
+        body.contains("finish_doctor_context("),
+        "build_doctor_context 必须经由 finish_doctor_context（拼装+脱敏组合）组装上下文"
+    );
+    assert!(
+        !body.contains("assemble_doctor_context("),
+        "build_doctor_context 不得直接调用未脱敏的 assemble_doctor_context"
+    );
+}
 command_protocol!(
     files_protocol,
     "files.rs",
@@ -266,14 +399,20 @@ command_protocol!(
         "kb_search",
         "kb_stats",
         "kb_model_status",
+        "kb_model_cancel",
         "kb_model_load_after_first_frame",
         "kb_model_download"
     ]
 );
-command_protocol!(
-    llmapi_protocol,
-    "llmapi.rs",
-    [
+#[test]
+fn retired_llmapi_commands_are_not_registered() {
+    let command_modules = include_str!("mod.rs");
+    let app_entrypoint = include_str!("../../lib.rs");
+    assert!(
+        !command_modules.contains("mod llmapi"),
+        "retired llmapi command module is still installed"
+    );
+    for removed in [
         "ensure_llmapi_binding",
         "login_llmapi_user",
         "save_llmapi_user_session",
@@ -282,9 +421,18 @@ command_protocol!(
         "set_llmapi_default_model",
         "retry_llmapi_provisioning",
         "set_llmapi_user_enabled",
-        "get_llmapi_admin_overview"
-    ]
-);
+        "get_llmapi_admin_overview",
+    ] {
+        assert!(
+            !command_modules.contains(removed),
+            "retired llmapi command remains in the installed command modules: {removed}"
+        );
+        assert!(
+            !app_entrypoint.contains(removed),
+            "retired llmapi command is still registered: {removed}"
+        );
+    }
+}
 
 #[test]
 fn preinstalled_model_startup_commands_are_not_registered() {
@@ -300,6 +448,45 @@ fn preinstalled_model_startup_commands_are_not_registered() {
         );
     }
 }
+
+// command_protocol! pins the source-side list only; the invoke-handler
+// registration for this module is otherwise unpinned (dropping an entry
+// 404s the command with every test green — global_shortcut.rs documents
+// the same class for its own command, whose single-entry pin stays
+// comma-sensitive). Sort both sides: registration order need not follow
+// file order, but the sets must match exactly so a dropped, renamed, or
+// unregistered command fails here.
+//
+// Split on the module path instead of matching line prefixes plus a
+// trailing comma: an entry may legitimately end the handler list
+// without one (rustfmt keeps either form), and a comma-strict parse
+// would fail on good code. Residual limitations, shared with
+// command_names: text mentioning the path — a comment included —
+// counts as an occurrence, and include_str! cannot see #[cfg] (the
+// handler list carries none today).
+#[test]
+fn remote_knowledge_registrations_match_the_command_surface() {
+    let lib = include_str!("../../lib.rs");
+    let mut registered: Vec<&str> = lib
+        .split("commands::remote_knowledge::")
+        .skip(1)
+        .filter_map(|rest| {
+            let end = rest
+                .char_indices()
+                .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_'))
+                .map_or(rest.len(), |(i, _)| i);
+            if end == 0 { None } else { Some(&rest[..end]) }
+        })
+        .collect();
+    let mut defined = command_names(include_str!("remote_knowledge.rs"));
+    registered.sort_unstable();
+    defined.sort_unstable();
+    assert_eq!(
+        defined, registered,
+        "every command in remote_knowledge.rs must stay registered in lib.rs's generate_handler, and vice versa"
+    );
+}
+
 command_protocol!(
     marketplace_protocol,
     "marketplace.rs",
@@ -470,6 +657,7 @@ command_protocol!(
         "web_access_discard_attachment",
         "web_access_read_conversation_attachment_chunk",
         "web_access_create_session_and_chat",
+        "web_access_create_session_and_chat_with_model",
         "web_access_chat",
         "web_access_create_codex_acp_session",
         "web_access_list_codex_workspace",
@@ -529,11 +717,13 @@ command_protocol!(
         "clear_session",
         "list_sessions",
         "list_archived_sessions",
+        "fork_session",
         "create_session",
         "get_session_workspace_binding",
         "load_session",
         "delete_session",
         "export_session",
+        "import_session_archive",
         "rename_session",
         "set_session_pinned",
         "set_session_archived",
@@ -562,12 +752,17 @@ command_protocol!(
         "reveal_model_api_key",
         "save_model",
         "delete_model",
+        "delete_model_if_store_link",
+        // 三十三轮评审 P2：移除回收的条件删除（最终事务按快照身份核对）。
+        "delete_model_if_matches",
         "set_active_model",
         "set_session_model",
         "get_session_model_id",
+        "get_session_model_ref",
         "get_image_input_capability",
         "test_search_provider",
         "test_model_connection",
+        "probe_endpoint_models",
         "test_image_input_capability",
         "update_settings",
         "update_search_settings",
@@ -703,7 +898,10 @@ command_protocol!(
         "remote_kb_download_model",
         "remote_kb_devices",
         "remote_kb_update_device",
+        "remote_kb_update_collection",
         "remote_kb_remove_device",
+        "remote_kb_trashed_collections",
+        "remote_kb_trashed_documents",
         "remote_kb_permanently_delete_collection",
         "remote_kb_permanently_delete_document",
         "remote_kb_remove_connection",

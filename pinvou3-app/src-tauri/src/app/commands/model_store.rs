@@ -40,8 +40,10 @@ pub async fn model_store_cards() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn model_store_library() -> Result<Value, String> {
-    model_store::library().await
+pub async fn model_store_library(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::library(Arc::clone(&service)).await
 }
 
 #[tauri::command]
@@ -60,8 +62,11 @@ pub async fn model_store_local_resources() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn model_store_memory_admission(card_id: String) -> Result<Value, String> {
-    model_store::memory_admission(card_id).await
+pub async fn model_store_memory_admission(
+    card_id: String,
+    version_id: Option<String>,
+) -> Result<Value, String> {
+    model_store::memory_admission(card_id, version_id).await
 }
 
 #[tauri::command]
@@ -71,6 +76,61 @@ pub async fn model_store_delete_engine(
     engine_version: Option<String>,
 ) -> Result<Value, String> {
     model_store::delete_engine(&service, engine_name, engine_version).await
+}
+
+#[tauri::command]
+pub async fn model_store_follow_deployment_context(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    model_id: String,
+) -> Result<Value, String> {
+    model_store::follow_deployment_context(Arc::clone(&service), card_id, model_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_check_card_update(card_id: String) -> Result<Value, String> {
+    model_store::check_card_update(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_startup_update_check(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::startup_update_check(Arc::clone(service.inner())).await
+}
+
+/// `measure=true` 时逐行重测目录大小并登记（评审第 7 轮：展示与配额读登记
+/// 值，不每次全树遍历；显式测量是失效策略的用户入口）。
+#[tauri::command]
+pub async fn model_store_versions(card_id: String, measure: Option<bool>) -> Result<Value, String> {
+    model_store::versions(card_id, measure).await
+}
+#[tauri::command]
+pub async fn model_store_start_version_action(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    action: String,
+    version_id: String,
+    memory_confirmed: bool,
+) -> Result<Value, String> {
+    // r43 P2：switch 的内存准入带 Docker/进程探测（prepare_model_start 内联
+    // reconcile+采样），同步命令会把 UI 线程卡住数秒——改走与 start_deploy
+    // 相同的 spawn_blocking 形态。
+    let service = Arc::clone(&service);
+    tokio::task::spawn_blocking(move || {
+        model_store::start_version_action(&service, card_id, action, version_id, memory_confirmed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn model_store_start_card_update(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    revision: String,
+) -> Result<Value, String> {
+    model_store::start_card_update(&service, card_id, revision)
 }
 
 // ---------------------------------------------------------------- 长操作
@@ -165,9 +225,13 @@ pub fn model_store_reveal_run_logs_dir() -> Result<Value, String> {
 
 /// 导出一次运行的日志。导出那份比落盘那份多过一道脱敏（内网地址 + 全仓通用的
 /// 凭证尺子）——它会离开这台机器。
+/// r26 P2-4：4MiB 上限全文件逐行脱敏 + snapshot IPC 回传从主线程挪到
+/// spawn_blocking——同步版最坏 ~0.3-1.5s UI 冻结（files.rs:269 先例同款）。
 #[tauri::command]
-pub fn model_store_export_run_log(run_id: String) -> Result<Value, String> {
-    model_store::export_run_log(run_id)
+pub async fn model_store_export_run_log(run_id: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || model_store::export_run_log(run_id))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -275,6 +339,7 @@ pub fn model_store_storage_settings() -> Result<Value, String> {
 pub fn model_store_set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
+    startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::set_storage_settings(models_dir, import_scan_dirs)
+    model_store::set_storage_settings(models_dir, import_scan_dirs, startup_update_check_enabled)
 }

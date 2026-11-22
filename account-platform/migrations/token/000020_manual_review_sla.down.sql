@@ -1,0 +1,10 @@
+DROP TRIGGER manual_review_stop_loss_evaluations_immutable ON manual_review_stop_loss_evaluations;
+DROP TRIGGER manual_review_assignments_immutable ON manual_review_assignments;
+DROP TRIGGER manual_review_case_events_immutable ON manual_review_case_events;
+DROP FUNCTION reject_token_manual_review_evidence_mutation();
+DROP TABLE manual_review_stop_loss_evaluations;
+DROP TABLE manual_review_assignments;
+DROP INDEX manual_review_case_events_case_idx;
+DROP TABLE manual_review_case_events;
+DROP INDEX manual_review_cases_open_sla_idx;
+DROP TABLE manual_review_cases;

@@ -639,12 +639,102 @@ pub(crate) fn emit_chat_terminal(
     crate::features::remote_control::forward_app_event(app, "chat:done", payload);
 }
 
+/// Canonical opening of an engine pinned-context drift delta (`<context_update>`
+/// user-role message). Must stay byte-identical to the base writer
+/// (`CodeWhale/crates/tui/src/prefix_cache.rs`, the `out = String::from(...)`
+/// inside the context_update composition) and to the frontend matcher
+/// (`pinvou3-app/src/shared/bridge-messages.js` `isContextUpdateRuntimeMessage`
+/// prefix array). All three spell the literal independently because the base
+/// composes it inline; `context_update_message_text` pins this copy with a
+/// unit test and the frontend matcher is pinned in the bridge harness tests.
+const CONTEXT_UPDATE_MESSAGE_PREFIX: &str = "<context_update>\nSession context changed since it was pinned; the pinned system prompt is unchanged. Delta (+ added, - removed):\n";
+
+/// Mirror of the frontend matcher: a user-role message whose joined Text
+/// blocks (same join the replay rawText rebuild uses) carry the canonical
+/// `<context_update>` shape. The engine appends exactly one such message per
+/// pinned-context drift delta; every other runtime user-role message carries
+/// non-authoritative provenance and does not match.
+fn context_update_message_text(message: &Message) -> bool {
+    if message.role != deepseek_tui::models::Role::User {
+        return false;
+    }
+    // 预筛（r7 perf minor，r9 收紧为双边缘必要条件）：规范化后的全文必以
+    // 前缀首字符 '<' 开头、以收尾 '>' 结束（`trim` 只剥空白），两个必要
+    // 条件沿各块的边缘字符即可判定——绝大多数用户消息在此零分配拒绝，
+    // 免掉每个 persist 对整份转写的全文拷贝（r9 finding：原实现无条件
+    // join 所有 Text 块后才 contains 预筛，10 MB 粘贴 × 每 turn 数十次
+    // persist 的 memcpy 白付）。只有两侧都通过的消息才拼接全文做精确
+    // 匹配，拼接语义（含跨块分裂的标记）保持不变。
+    let text_blocks: Vec<&str> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            deepseek_tui::models::ContentBlock::Text {
+                text: block_text, ..
+            } => Some(block_text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let first_non_ws = text_blocks
+        .iter()
+        .find_map(|text| text.chars().find(|ch| !ch.is_whitespace()));
+    if first_non_ws != Some('<') {
+        return false;
+    }
+    let last_non_ws = text_blocks
+        .iter()
+        .rev()
+        .find_map(|text| text.chars().rev().find(|ch| !ch.is_whitespace()));
+    if last_non_ws != Some('>') {
+        return false;
+    }
+    let mut text = String::new();
+    for block_text in &text_blocks {
+        text.push_str(block_text);
+    }
+    if !text.contains("<context_update>") {
+        return false;
+    }
+    let normalized = text.trim().replace("\r\n", "\n");
+    normalized.starts_with(CONTEXT_UPDATE_MESSAGE_PREFIX)
+        && normalized.ends_with("\n</context_update>")
+}
+
+/// Count of era-boundary `<context_update>` drift deltas currently in the
+/// transcript. The frontend counts these on the replay path; the live
+/// admission-shaped channel does not announce them in practice (a drift
+/// delta produces no `chat:user_message`), so the committed-transcript
+/// event carries the authoritative cumulative total and the entry-table
+/// counter resyncs against it after every commit — the committed count is
+/// authoritative regardless of what the live channel did (r8 wording: the
+/// frontend keeps a defensive admission-shaped increment for the shape, so
+/// "never" overstated one side of the contract).
+pub(crate) fn count_context_updates(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|m| context_update_message_text(m))
+        .count()
+}
+
+fn transcript_committed_payload(
+    session_id: &str,
+    revision: &str,
+    context_updates_total: usize,
+) -> serde_json::Value {
+    json!({
+        "session_id": session_id,
+        "transcript_revision": revision,
+        "context_updates_total": context_updates_total,
+    })
+}
+
 pub(crate) fn emit_transcript_committed(
     app: &AppHandle,
     session_id: &str,
     revision: String,
     persistence_origin: &str,
     message_count: usize,
+    context_updates_total: usize,
 ) {
     crate::features::sessions::diagnostics::record_backend(
         "transcript_committed_emitting",
@@ -653,12 +743,10 @@ pub(crate) fn emit_transcript_committed(
             "transcript_revision": revision,
             "persistence_origin": if persistence_origin.is_empty() { "unknown" } else { persistence_origin },
             "message_count": message_count,
+            "context_updates_total": context_updates_total,
         }),
     );
-    let payload = json!({
-        "session_id": session_id,
-        "transcript_revision": revision,
-    });
+    let payload = transcript_committed_payload(session_id, &revision, context_updates_total);
     let _ = app.emit("chat:transcript_committed", payload.clone());
     crate::features::remote_control::forward_app_event(app, "chat:transcript_committed", payload);
 }
@@ -698,6 +786,33 @@ impl TurnLifecycle {
         } else {
             None
         }
+    }
+
+    pub(crate) fn current_runtime_turn_generation(&self) -> Option<u64> {
+        let state = self.state.lock();
+        if state.active && !state.terminal_closing {
+            Some(state.turn_epoch)
+        } else {
+            None
+        }
+    }
+
+    /// Match and publish a bounded turn-local observation atomically. The
+    /// callback may take the timing-map lock but cannot re-enter this lifecycle.
+    pub(crate) fn with_current_turn_generation(
+        &self,
+        generation: u64,
+        callback: &mut dyn FnMut(),
+    ) -> bool {
+        let state = self.state.lock();
+        if generation == 0
+            || !(state.active || state.terminal_closing)
+            || state.turn_epoch != generation
+        {
+            return false;
+        }
+        callback();
+        true
     }
 
     /// Run a synchronous side effect only for this still-active generation.
@@ -1670,6 +1785,7 @@ async fn finish_reclaimed_lifecycle_turn(
                         revision,
                         "reclaimed_fallback",
                         saved.messages.len(),
+                        count_context_updates(&saved.messages),
                     );
                 }
                 Err(revision_error) => {
@@ -1848,7 +1964,15 @@ impl AppEngine {
         // 子智能体仍由 CodeWhale 的通用角色与运行时策略进一步收窄。
         let scheduled_profile = store.scheduled_profile(session_id);
         let scheduled_base_total_tokens = if scheduled_profile.is_some() {
-            Some(store.load(session_id)?.metadata.total_tokens)
+            // base 读取与两条 persist 写入路径走同一 `scheduled_mutation` 门
+            // （load_for_engine_spawn）：裸读会与在途 TurnComplete 落盘交错，
+            // 新 incarnation 先读后写时把旧引擎最后几轮的累计永久少记。
+            Some(
+                store
+                    .load_for_engine_spawn(session_id)?
+                    .metadata
+                    .total_tokens,
+            )
         } else {
             None
         };
@@ -1912,6 +2036,15 @@ impl AppEngine {
             }
             None => bridge.build_engine_config_for_session_roots(session_id, roots),
         };
+        if engine_config
+            .features
+            .enabled(deepseek_tui::features::Feature::Mcp)
+            && let Some(profile) = bridge
+                .resolve_work_mode_mcp_fallback(session_id, &engine_config.mcp_config_path)
+                .map_err(anyhow::Error::msg)?
+        {
+            engine_config.mcp_config_path = profile;
+        }
         if scheduled_unattended_spawn {
             engine_config.subagents_enabled = false;
         }
@@ -2500,6 +2633,39 @@ impl AppEngine {
         Ok(())
     }
 
+    /// Queue a remote preference only while this exact turn is still running.
+    /// The foundation send has a single bounded-mpsc await and no post-send
+    /// await: Pending means no capacity was acquired and dropping it is safe.
+    /// Ready proves mailbox acceptance, not that a model/tool has executed.
+    pub(crate) fn try_remote_user_input(
+        &self,
+        generation: u64,
+        id: &str,
+        response: Option<UserInputResponse>,
+        check_budget: impl FnOnce() -> std::result::Result<(), String>,
+    ) -> std::result::Result<(), String> {
+        use futures_util::FutureExt as _;
+        let state = self.turn_lifecycle.state.lock();
+        if generation == 0
+            || state.turn_epoch != generation
+            || !state.active
+            || state.terminal_closing
+            || self.handle.is_cancelled()
+        {
+            return Err("user_input_stale".into());
+        }
+        check_budget()?;
+        let send = async {
+            match response {
+                Some(response) => self.handle.submit_user_input(id.to_owned(), response).await,
+                None => self.handle.cancel_user_input(id.to_owned()).await,
+            }
+        };
+        send.now_or_never()
+            .ok_or_else(|| "user_input_busy".to_owned())?
+            .map_err(|_| "user_input_unavailable".to_owned())
+    }
+
     /// 切换 engine 内部 session 状态：替换 messages + 切到 session-specific
     /// workspace。
     ///
@@ -2513,11 +2679,8 @@ impl AppEngine {
         // engine through the hydration/align push either; all in-repo
         // writers are aux-guarded, this is the backstop the bridge comment
         // has claimed all along.
-        let roots = if crate::features::sessions::is_aux_session_id(&session_id) {
-            Vec::new()
-        } else {
-            self.bridge.session_workspace_roots(&session_id)
-        };
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
         let op = Self::sync_session_op(
             &session_id,
             messages,
@@ -2540,16 +2703,17 @@ impl AppEngine {
         session_id: String,
         messages: Vec<Message>,
     ) -> Result<()> {
+        let roots =
+            sync_session_workspace_roots(&session_id, |id| self.bridge.session_workspace_roots(id));
         let op = Self::sync_session_op(
             &session_id,
             messages,
             self.bridge.model(),
             self.workspace.clone(),
-            // CodeWhale #54 normalizes this empty list to the existing single
-            // workspace; the spawn lane already delivers the full keychain via
-            // EngineConfig.workspace_roots (bridge roots resolver), so the
-            // pre-publication gate keeps the fork's empty-roots payload.
-            Vec::new(),
+            // SyncSession replaces the foundation's roots even immediately
+            // after spawn. Carry the same frozen keychain as the awaited sync;
+            // an empty legacy/aux snapshot still normalizes to the primary root.
+            roots,
         );
         self.handle.try_send(op)
     }
@@ -2577,6 +2741,17 @@ impl AppEngine {
             workspace_roots,
             mode: AppMode::Agent,
         }
+    }
+}
+
+fn sync_session_workspace_roots(
+    session_id: &str,
+    resolve: impl FnOnce(&str) -> Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        Vec::new()
+    } else {
+        resolve(session_id)
     }
 }
 
@@ -4601,6 +4776,44 @@ mod expert_turn_invariant_tests {
 }
 
 #[cfg(test)]
+mod runtime_turn_observation_tests {
+    use super::TurnLifecycle;
+    use std::sync::Arc;
+    #[test]
+    fn local_then_platform_turn_uses_lifecycle_epoch_and_rejects_retired_epoch() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(lifecycle.on_submitted(None));
+        let first = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(lifecycle.claim_terminal().is_some());
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        let mut closing_notice = false;
+        assert!(lifecycle.with_current_turn_generation(first, &mut || closing_notice = true));
+        assert!(
+            closing_notice,
+            "already admitted response remains owned during terminal close"
+        );
+        lifecycle.finish_terminal_emission();
+        let reservation = lifecycle.reserve().unwrap();
+        let second = lifecycle.current_runtime_turn_generation().unwrap();
+        assert!(second > first);
+        assert!(
+            !lifecycle.with_current_turn_generation(first, &mut || panic!("retired local turn"))
+        );
+        let mut count = 0;
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert!(lifecycle.with_current_turn_generation(second, &mut || count += 1));
+        assert_eq!(count, 2, "tool loop and retry retain the active epoch");
+        drop(reservation);
+        assert!(lifecycle.current_runtime_turn_generation().is_none());
+        assert!(
+            !lifecycle.with_current_turn_generation(second, &mut || panic!("aborted reservation"))
+        );
+        assert!(!lifecycle.with_current_turn_generation(0, &mut || panic!("zero sentinel")));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4639,6 +4852,53 @@ mod tests {
             "the unattended spawn must disable subagents — the deterministic \
              delegation-disable leg of the recursion shield (round-34 M4)"
         );
+    }
+
+    #[test]
+    fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain() {
+        let expected = vec![
+            std::path::PathBuf::from("/primary"),
+            std::path::PathBuf::from("/attached"),
+        ];
+        let roots = sync_session_workspace_roots("session-keyed", |id| {
+            assert_eq!(id, "session-keyed");
+            expected.clone()
+        });
+        let op = AppEngine::sync_session_op(
+            "session-keyed",
+            Vec::new(),
+            "model".into(),
+            std::path::PathBuf::from("/primary"),
+            roots,
+        );
+        match op {
+            Op::SyncSession {
+                workspace_roots, ..
+            } => assert_eq!(workspace_roots, expected),
+            other => panic!("unexpected op: {other:?}"),
+        }
+        assert!(sync_session_workspace_roots("legacy", |_| Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn session_sync_root_selection_never_resolves_aux_keychains() {
+        for id in ["aux-session", "AUX-session", "aUx-session"] {
+            let roots =
+                sync_session_workspace_roots(id, |_| panic!("aux must not resolve attachments"));
+            let op = AppEngine::sync_session_op(
+                id,
+                Vec::new(),
+                "model".into(),
+                std::path::PathBuf::from("/primary"),
+                roots,
+            );
+            match op {
+                Op::SyncSession {
+                    workspace_roots, ..
+                } => assert!(workspace_roots.is_empty()),
+                other => panic!("unexpected op: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -5033,5 +5293,135 @@ mod agent_shed_pin_tests {
             body.contains(needle),
             "the broadcast must re-shield watcher-marked sessions (code-qualified needle)"
         );
+    }
+}
+
+#[cfg(test)]
+mod context_update_count_tests {
+    use super::{
+        CONTEXT_UPDATE_MESSAGE_PREFIX, context_update_message_text, count_context_updates,
+        transcript_committed_payload,
+    };
+    use deepseek_tui::models::{ContentBlock, Message};
+
+    fn user_message(text: &str) -> Message {
+        Message {
+            role: deepseek_tui::models::Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
+        }
+    }
+
+    fn canonical(delta: &str) -> String {
+        // Same composition shape as the base writer (prefix_cache.rs):
+        // header + delta lines + closing tag.
+        format!("{CONTEXT_UPDATE_MESSAGE_PREFIX}{delta}\n</context_update>")
+    }
+
+    #[test]
+    fn counts_only_canonical_user_context_updates() {
+        let messages = vec![
+            user_message("plain prompt"),
+            user_message(&canonical("- drifted\n")),
+            Message {
+                role: deepseek_tui::models::Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: canonical("- echoed\n"),
+                    cache_control: None,
+                }],
+            },
+            user_message(&canonical("+ added\n- removed\n")),
+            user_message("quoted mention: <context_update> is not canonical"),
+        ];
+        assert_eq!(count_context_updates(&messages), 2);
+    }
+
+    #[test]
+    fn matcher_requires_full_prefix_and_suffix() {
+        assert!(context_update_message_text(&user_message(&canonical(
+            "+ x\n"
+        ))));
+        // Missing the closing tag: a truncated/pasted fragment must not count.
+        assert!(!context_update_message_text(&user_message(&format!(
+            "{}+ x\n",
+            CONTEXT_UPDATE_MESSAGE_PREFIX
+        ))));
+        // Missing the header (bare tag mention) must not count.
+        assert!(!context_update_message_text(&user_message(
+            "x\n</context_update>"
+        )));
+        // CRLF normalization and surrounding whitespace mirror the frontend matcher.
+        let crlf = format!(
+            "{}- y\r\n\r\n</context_update>",
+            CONTEXT_UPDATE_MESSAGE_PREFIX
+        );
+        assert!(context_update_message_text(&user_message(&crlf)));
+        assert!(context_update_message_text(&user_message(&format!(
+            "  {}",
+            canonical("- z\n")
+        ))));
+        // Non-user roles never count.
+        assert!(!context_update_message_text(&Message {
+            role: deepseek_tui::models::Role::System,
+            content: vec![ContentBlock::Text {
+                text: canonical("- w\n"),
+                cache_control: None,
+            }],
+        }));
+    }
+
+    fn user_message_with_blocks(blocks: Vec<String>) -> Message {
+        Message {
+            role: deepseek_tui::models::Role::User,
+            content: blocks
+                .into_iter()
+                .map(|text| ContentBlock::Text {
+                    text,
+                    cache_control: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// 边缘预筛（r9 perf）不得产生假阴性：标记跨块分裂（拼接语义）与
+    /// 空白填充消息仍必须精确匹配——预筛过严（over-reject）即红。截断
+    /// 片段（首字符 '<' 而尾字符非 '>'）仍被预筛正确拒绝。
+    #[test]
+    fn edge_prefilter_keeps_split_marker_and_padded_messages_matching() {
+        // 标记跨块分裂：拼接后才构成完整前缀/后缀（保持原 join 语义）。
+        let split = user_message_with_blocks(vec![
+            "<context_upd".to_string(),
+            format!(
+                "ate>\nSession context changed since it was pinned; the pinned \
+                 system prompt is unchanged. Delta (+ added, - removed):\n- split\n</context_"
+            ),
+            "update>".to_string(),
+        ]);
+        assert!(
+            context_update_message_text(&split),
+            "a marker split across text blocks must still match after the join"
+        );
+        // 纯空白块夹在中间不破坏匹配（trim 只剥空白）。
+        let padded = user_message_with_blocks(vec![
+            "  \n".to_string(),
+            format!("{}- p\n", CONTEXT_UPDATE_MESSAGE_PREFIX),
+            "</context_update>\n\n  ".to_string(),
+        ]);
+        assert!(context_update_message_text(&padded));
+        // 首字符 '<' 而尾字符非 '>'：预筛拒绝（截断片段不计数）。
+        assert!(!context_update_message_text(&user_message(&format!(
+            "{}- truncated",
+            CONTEXT_UPDATE_MESSAGE_PREFIX
+        ))));
+    }
+
+    #[test]
+    fn committed_payload_carries_context_update_total() {
+        let payload = transcript_committed_payload("sess-1", "rev-9", 7);
+        assert_eq!(payload["session_id"], "sess-1");
+        assert_eq!(payload["transcript_revision"], "rev-9");
+        assert_eq!(payload["context_updates_total"], 7);
     }
 }

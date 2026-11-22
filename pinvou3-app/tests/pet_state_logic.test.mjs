@@ -7,29 +7,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = path.join(here, '..', 'src', 'features', 'pet', 'pet-state.js');
-const i18nSrc = path.join(here, '..', 'src', 'shared', 'i18n.js');
-const connectorI18nSrc = path.join(here, '..', 'src', 'shared', 'connector-i18n.js');
 const dir = mkdtempSync(path.join(tmpdir(), 'pinvou3-pet-state-'));
 // pet-state.js imports ../../shared/i18n.js，保持两层目录结构以便相对路径解析
 const tmp = path.join(dir, 'a', 'b', 'pet-state.mjs');
-mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
-mkdirSync(path.join(dir, 'shared'), { recursive: true });
-copyFileSync(src, tmp);
-copyFileSync(i18nSrc, path.join(dir, 'shared', 'i18n.js'));
-copyFileSync(connectorI18nSrc, path.join(dir, 'shared', 'connector-i18n.js'));
-// Preserve the locale modules' transitive imports as dictionaries evolve.
-cpSync(path.join(here, '..', 'src', 'shared', 'i18n'), path.join(dir, 'shared', 'i18n'), { recursive: true });
-// zh moved behind i18n.js's lazy loader (startup budget): seed the staged
-// copy synchronously so the imported module reads a filled dict.zh.
-{
-  const { readFileSync, writeFileSync } = await import('node:fs');
-  const i18nCopy = path.join(dir, 'shared', 'i18n.js');
-  let staged = readFileSync(i18nCopy, 'utf8');
-  staged += "\nimport { dictZh as __zh } from './i18n/zh.js';\ndict.zh = __zh;\n";
-  writeFileSync(i18nCopy, staged);
-}
-
 try {
+  mkdirSync(path.join(dir, 'a', 'b'), { recursive: true });
+  copyFileSync(src, tmp);
+  // Stage the production shared tree so eager and lazy i18n imports resolve together.
+  cpSync(path.join(here, '..', 'src', 'shared'), path.join(dir, 'shared'), { recursive: true });
+  const { ensureLanguage } = await import(pathToFileURL(path.join(dir, 'shared', 'i18n.js')).href);
+  assert.equal(await ensureLanguage('zh'), true);
+
   // Timing fixtures mirror the module-private ACTIVITY_TTL_MS /
   // SNAPSHOT_REMOVAL_GRACE_MS constants (production values asserted
   // behaviorally by the expiry cases below).

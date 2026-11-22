@@ -1,0 +1,551 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Entitlement component adjustment owner precheck",
+    "version": "2"
+  },
+  "paths": {
+    "/admin/v2/approval-command-prechecks": {
+      "post": {
+        "operationId": "accountEntitlementPrecheck",
+        "description": "Current Account identity + platform.billing.repairs.request. Read-only; no claim, approval, effect or cache. Single complete unique-key JSON, aggregate transport bound 65536 bytes, deadline 2 seconds.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "401": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "403": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "422": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "503": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "504": {
+            "description": "Closed refusal or existing authentication/transport error"
+          }
+        }
+      }
+    },
+    "/internal/v1/approval-command-prechecks": {
+      "post": {
+        "operationId": "billingEntitlementPrecheck",
+        "description": "Account service workload + internal.billing.approval-proof.read. Read-only; no claim, approval, effect or cache. Single complete unique-key JSON, aggregate transport bound 65536 bytes, deadline 2 seconds.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "401": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "403": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "422": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "503": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "504": {
+            "description": "Closed refusal or existing authentication/transport error"
+          }
+        }
+      }
+    },
+    "/api/admin/account/admin/v2/approval-command-prechecks": {
+      "post": {
+        "operationId": "portalEntitlementPrecheck",
+        "description": "Existing Portal management session + X-CSRF-Token; downstream Account permission. Read-only; no claim, approval, effect or cache. Single complete unique-key JSON, aggregate transport bound 65536 bytes, deadline 2 seconds.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrecheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Closed owner projection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrecheckProjection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "401": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "403": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "422": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "503": {
+            "description": "Closed refusal or existing authentication/transport error"
+          },
+          "504": {
+            "description": "Closed refusal or existing authentication/transport error"
+          }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-CSRF-Token",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PrecheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "target_resource_id",
+          "payment_order_id",
+          "reason_code"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "ENTITLEMENT_COMPONENT_ADJUSTMENT"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Trimmed non-empty value, at most 80 UTF-8 bytes."
+          }
+        }
+      },
+      "NormalizedCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "package_id",
+          "payment_order_id",
+          "reason_code"
+        ],
+        "properties": {
+          "package_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason_code": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Trimmed non-empty value, at most 80 UTF-8 bytes."
+          }
+        }
+      },
+      "CriticalResourceVersions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "package_id",
+          "wallet_id",
+          "payment_order_id",
+          "payment_transaction_id",
+          "source_component_id",
+          "source_lot_id",
+          "wallet_version",
+          "target_component_id",
+          "target_lot_id",
+          "source_type",
+          "target_type",
+          "amount_microcredits",
+          "source_evidence_digest",
+          "facts_digest",
+          "policy_version"
+        ],
+        "properties": {
+          "package_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_transaction_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_component_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_lot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "target_component_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_lot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_type": {
+            "enum": [
+              "BASE",
+              "BONUS"
+            ]
+          },
+          "target_type": {
+            "enum": [
+              "BASE",
+              "BONUS"
+            ]
+          },
+          "amount_microcredits": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "source_evidence_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "facts_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "policy_version": {
+            "const": 2
+          }
+        }
+      },
+      "FinancialSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "package_total_microcredits",
+          "source_original_microcredits",
+          "target_original_microcredits",
+          "effective_total_microcredits"
+        ],
+        "properties": {
+          "package_total_microcredits": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "source_original_microcredits": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "target_original_microcredits": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          },
+          "effective_total_microcredits": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9223372036854775807
+          }
+        }
+      },
+      "PrecheckProjection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_type",
+          "policy_version",
+          "snapshot_schema_version",
+          "target_resource_type",
+          "target_resource_id",
+          "normalized_command",
+          "critical_resource_versions",
+          "financial_snapshot"
+        ],
+        "properties": {
+          "command_type": {
+            "const": "ENTITLEMENT_COMPONENT_ADJUSTMENT"
+          },
+          "policy_version": {
+            "const": 2
+          },
+          "snapshot_schema_version": {
+            "const": 2
+          },
+          "target_resource_type": {
+            "const": "ENTITLEMENT_PACKAGE"
+          },
+          "target_resource_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "normalized_command": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "package_id",
+              "payment_order_id",
+              "reason_code"
+            ],
+            "properties": {
+              "package_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "payment_order_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason_code": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Trimmed non-empty value, at most 80 UTF-8 bytes."
+              }
+            }
+          },
+          "critical_resource_versions": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "package_id",
+              "wallet_id",
+              "payment_order_id",
+              "payment_transaction_id",
+              "source_component_id",
+              "source_lot_id",
+              "wallet_version",
+              "target_component_id",
+              "target_lot_id",
+              "source_type",
+              "target_type",
+              "amount_microcredits",
+              "source_evidence_digest",
+              "facts_digest",
+              "policy_version"
+            ],
+            "properties": {
+              "package_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "wallet_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "payment_order_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "payment_transaction_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "source_component_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "source_lot_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "wallet_version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807
+              },
+              "target_component_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "target_lot_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "source_type": {
+                "enum": [
+                  "BASE",
+                  "BONUS"
+                ]
+              },
+              "target_type": {
+                "enum": [
+                  "BASE",
+                  "BONUS"
+                ]
+              },
+              "amount_microcredits": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9223372036854775807
+              },
+              "source_evidence_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "facts_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "policy_version": {
+                "const": 2
+              }
+            }
+          },
+          "financial_snapshot": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "package_total_microcredits",
+              "source_original_microcredits",
+              "target_original_microcredits",
+              "effective_total_microcredits"
+            ],
+            "properties": {
+              "package_total_microcredits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "source_original_microcredits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "target_original_microcredits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "effective_total_microcredits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "x-existing-approval-flow": {
+    "command_type": "ENTITLEMENT_COMPONENT_ADJUSTMENT",
+    "policy_version": 2,
+    "snapshot_schema_version": 2,
+    "requester_permission": "platform.billing.repairs.request",
+    "approver_permission": "platform.billing.repairs.approve",
+    "self_approval_forbidden": true,
+    "readiness": "Existing activation/proof/claim controls; no new activation API.",
+    "typed_projection": "PackageID/PaymentOrderID/ReasonCode; no raw proof on v2 typed reads.",
+    "int64_wire": "JSON integer; browser codec uses exact decimal strings internally.",
+    "effect": "One complete unused component reclassification, total package/wallet conserved, paired zero-sum postings and immutable correction.",
+    "recovery": "Existing result-first query and same-request ledger binding; no automatic new execution after ambiguous effect."
+  }
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly size check for KMS audit rotation
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+Unit=pinvou-kms-audit-rotate.service
+
+[Install]
+WantedBy=timers.target

@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const { windowsBundleTargets } = require("../scripts/tauri/build.js");
 const { stageWindowsInstaller } = require("../scripts/tauri/windows-installer.js");
+const { resolveDescriptorPath } = require("../scripts/tauri/windows-runtime.js");
 
 const appRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(appRoot, "..");
@@ -37,6 +38,7 @@ const runtimeInitScript = readApp(
   "scripts",
   "init-submodule.ps1",
 );
+const releaseAssetsScript = readApp("src-tauri", "packaging", "windows", "runtime", "scripts", "release-assets.ps1");
 const runtimeScript = readApp(
   "src-tauri",
   "packaging",
@@ -56,6 +58,14 @@ const onnxRuntimeScript = readApp(
   "runtime",
   "scripts",
   "stage-onnx-runtime.ps1",
+);
+const stageRuntimeWrapper = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "runtime",
+  "scripts",
+  "stage-runtime.ps1",
 );
 const onnxRuntimeSmoke = readApp(
   "src-tauri",
@@ -84,6 +94,10 @@ const vcRedistTempPreflight = fs.readFileSync(vcRedistTempPreflightPath, "utf8")
 const runtimeCacheBehaviorHarness = readApp(
   "tests",
   "windows_runtime_cache_behavior.ps1",
+);
+const runtimeReleaseBehaviorHarness = readApp(
+  "tests",
+  "windows_runtime_release_behavior.ps1",
 );
 const runtimeWrapper = readApp("scripts", "tauri", "windows-runtime.js");
 const installerAdapter = readApp("scripts", "tauri", "windows-installer.js");
@@ -146,6 +160,14 @@ for (const contract of [
   "python_dependencies",
   "windows-x64",
   "files.pythonhosted.org",
+  // Long-path hardening: the staged node tree (npm's bundled node_modules)
+  // passes MAX_PATH on the self-hosted windows-heavy runners, so every
+  // staging operation must stay inside the \\?\ namespace or robocopy.
+  "Get-ExtendedPath",
+  "Get-LongPathFiles",
+  "Get-PlainPath",
+  "Remove-TreeLongPath",
+  "Expand-ZipArchiveLongPath",
 ]) {
   assert.ok(runtimeScript.includes(contract), `runtime staging must retain ${contract}`);
 }
@@ -188,6 +210,113 @@ assert.match(runtimeScript, /System\.Diagnostics\.FileVersionInfo/u);
 assert.match(runtimeScript, /\$vcActualVersion -lt \$vcMinimumVersion/u);
 assert.match(runtimeScript, /HashSet\[string\]/u);
 assert.match(runtimeScript, /Remove-Item -LiteralPath \$bundledAsrModelPath/u);
+assert.match(
+  runtimeScript,
+  /& robocopy \$requiredDirectory \$Destination \/E /u,
+  "the flattened runtime copy arm must go through long-path-native robocopy",
+);
+assert.match(
+  runtimeScript,
+  /& robocopy \$emptyRoot \$Path \/MIR /u,
+  "runtime staging tree cleanup must go through long-path-native robocopy",
+);
+// Review 5796830161: robocopy reports success with exit codes 0-7 (a /MIR
+// cleanup of a non-empty tree usually returns 2, an /E copy 1 or 3). Both
+// wrapper scripts forward $LASTEXITCODE as their process exit code after the
+// resolver returns, so a leftover informational code used to fail an otherwise
+// verified staging and break the Windows dev/build chain. Each robocopy arm
+// must therefore clear the success boundary itself — only AFTER the >= 8
+// throw, so real robocopy failures stay fatal.
+const removeTreeFnStart = runtimeScript.indexOf("function Remove-TreeLongPath");
+const removeTreeFnEnd = runtimeScript.indexOf("\nfunction ", removeTreeFnStart);
+assert.ok(removeTreeFnStart >= 0 && removeTreeFnEnd > removeTreeFnStart);
+const removeTreeFnBody = runtimeScript.slice(removeTreeFnStart, removeTreeFnEnd);
+const mirThrowIndex = removeTreeFnBody.indexOf('throw ("Robocopy /MIR cleanup failed');
+const mirResetIndex = removeTreeFnBody.indexOf("$global:LASTEXITCODE = 0");
+assert.ok(mirThrowIndex > 0, "the /MIR cleanup arm must keep its >= 8 failure throw");
+assert.ok(
+  mirResetIndex > mirThrowIndex,
+  "the /MIR cleanup arm must clear $LASTEXITCODE only after the >= 8 throw (robocopy >= 8 stays fatal)",
+);
+const flattenedFnStart = runtimeScript.indexOf("function Expand-FlattenedRuntime");
+const flattenedFnEnd = runtimeScript.indexOf("\nfunction ", flattenedFnStart);
+assert.ok(flattenedFnStart >= 0 && flattenedFnEnd > flattenedFnStart);
+const flattenedFnBody = runtimeScript.slice(flattenedFnStart, flattenedFnEnd);
+const copyThrowIndex = flattenedFnBody.indexOf('throw ("Robocopy failed with exit code');
+const copyResetIndex = flattenedFnBody.indexOf("$global:LASTEXITCODE = 0");
+assert.ok(copyThrowIndex > 0, "the flattened /E copy arm must keep its >= 8 failure throw");
+assert.ok(
+  copyResetIndex > copyThrowIndex,
+  "the flattened /E copy arm must clear $LASTEXITCODE only after the >= 8 throw (robocopy >= 8 stays fatal)",
+);
+assert.equal(
+  (runtimeScript.match(/\$global:LASTEXITCODE = 0/gu) || []).length,
+  2,
+  "exactly the two robocopy arms clear the success boundary; every other external command in the resolver (git, the python ABI probe) leaves $LASTEXITCODE at 0 on success and must be re-audited before this count grows",
+);
+for (const wrapperScript of [stageRuntimeWrapper, onnxRuntimeScript]) {
+  assert.match(
+    wrapperScript,
+    /if \(\$LASTEXITCODE -ne 0\) \{[\s\S]*?exit \$LASTEXITCODE/u,
+    "the wrapper must keep forwarding the resolver's $LASTEXITCODE as the process exit code — that propagation is the reason the resolver's success boundary must be cleared in the resolver itself",
+  );
+}
+assert.match(
+  runtimeScript,
+  /\[System\.IO\.File\]::OpenRead\(\(Get-ExtendedPath \$Path\)\)/u,
+  "staged-file hashing must stream through the extended-length namespace",
+);
+assert.match(
+  runtimeScript,
+  /Get-LongPathFiles -Root \$temporary \|/u,
+  "the flattened runtime required-file search must enumerate past MAX_PATH",
+);
+assert.match(
+  runtimeScript,
+  /\[System\.IO\.Compression\.ZipFileExtensions\]::ExtractToFile\(\$entry, \(Get-ExtendedPath \$entryTargetPath\), \$true\)/u,
+  "archive extraction must materialize entries through the extended-length namespace",
+);
+assert.doesNotMatch(
+  runtimeScript,
+  /ExtractToDirectory\(/u,
+  "ZipFile.ExtractToDirectory normalizes target paths and fails past MAX_PATH; it must not come back",
+);
+assert.match(
+  runtimeScript,
+  /\(\$Path -split '\[\\\\\/\]'\) -contains '\.\.'/u,
+  "the staging containment guard must refuse traversal segments outright (GetFullPath skips normalization on \\\\?\\ device paths, so an interior '..' would not collapse before the comparison)",
+);
+assert.match(
+  runtimeScript,
+  /Assert-ChildPath -Root \$Destination -Path \$entryTargetPath/u,
+  "archive extraction must enforce per-entry containment inside the destination",
+);
+assert.doesNotMatch(
+  runtimeScript,
+  /Expand-Archive\(/u,
+  "Expand-Archive is provider-routed and MAX_PATH-bound; archive extraction must stay on the long-path channel",
+);
+assert.match(
+  runtimeScript,
+  /Get-PlainPath \(\[System\.IO\.Path\]::GetFullPath\(\(Get-ExtendedPath \(\$Path\.Replace\('\/', '\\'\)\)\)\)\)/u,
+  "the containment comparison must strip the device prefix by shape (Get-PlainPath), not by a fixed offset that corrupts UNC roots",
+);
+// Review 5800111649 non-blocking follow-up: root and child must reach the
+// containment comparison in the SAME path namespace — GetFullPath keeps an
+// explicit \\?\ prefix on the root while the child chain strips it, so an
+// explicitly extended RuntimeRoot used to be mis-rejected as outside the
+// root for its own children. Both containment helpers must run the root
+// through the same extend-canonicalize-strip chain (plain inputs unchanged).
+assert.match(
+  runtimeScript,
+  /Get-PlainPath \(\[System\.IO\.Path\]::GetFullPath\(\(Get-ExtendedPath \(\$Root\.Replace\('\/', '\\'\)\)\)\)\)/u,
+  "the root side of containment must take the same namespace form as the child (an explicitly extended RuntimeRoot must not be mis-rejected for its own children)",
+);
+assert.match(
+  runtimeScript,
+  /\$script:RuntimeExpandCleanupFailures = @\(\$script:RuntimeExpandCleanupFailures\) \+ @\{ Path = \$temporary/u,
+  "extraction cleanup failures must be recorded by path so litter is claimed by record instead of diffing pinvou3-runtime-expand-* names in shared TEMP (a before/after name diff can swallow a concurrent run's active extraction tree on a self-hosted runner)",
+);
 for (const destination of [
   "runtime/poppler",
   "runtime/pandoc",
@@ -220,10 +349,9 @@ assert.match(runtimeInitScript, /Select-Object -First 1 -ExpandProperty Source/u
 assert.match(runtimeInitScript, /& \$gitExecutable -C/u);
 assert.match(runtimeInitScript, /\$exitCode = \$LASTEXITCODE/u);
 assert.match(runtimeInitScript, /if \(\$exitCode -ne 0\)/u);
-assert.match(runtimeInitScript, /git lfs pull/);
-assert.match(runtimeInitScript, /--include=/);
+assert.match(runtimeInitScript, /Sync-RuntimeReleaseAssets/);
 assert.match(runtimeInitScript, /\[switch\]\$OnnxOnly/);
-assert.match(runtimeInitScript, /onnxruntime-win-x64-\*-runtime\.zip/);
+assert.match(releaseAssetsScript, /component -ceq 'onnxruntime'/);
 assert.match(runtimeInitScript, /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit/u);
 
 assert.match(runtimeWrapper, /runtime-descriptor\.json/);
@@ -234,8 +362,46 @@ assert.match(runtimeWrapper, /stageWindowsOnnxRuntime/);
 assert.match(onnxRuntimeScript, /-Mode StageOnnx/);
 assert.match(runtimeScript, /Get-VerifiedOnnxManifest/);
 assert.match(runtimeScript, /Stage-OnnxRuntime/);
+// The ZIP extraction parent calculation must stay on the long-path channel:
+// Path.GetDirectoryName on the plain entry path normalizes its argument and
+// throws past MAX_PATH on Windows PowerShell 5.1 hosts with
+// UseLegacyPathHandling=false plus BlockLongPaths=true, before the extended
+// directory creation or file extraction can run. The parent is derived on
+// the \\?\ form (device paths skip normalization) and stripped back to the
+// plain shape for the CreateDirectory/ExtractToFile consumers.
+assert.doesNotMatch(
+  runtimeScript,
+  /\[System\.IO\.Path\]::GetDirectoryName\(\$entryTargetPath\)/u,
+  "the ZIP extraction parent must not be computed from the plain entry path (GetDirectoryName normalizes and throws past MAX_PATH on long-path-blocking hosts)",
+);
+assert.match(
+  runtimeScript,
+  /Get-PlainPath \(\[System\.IO\.Path\]::GetDirectoryName\(\(Get-ExtendedPath \$entryTargetPath\)\)\)/u,
+  "the ZIP extraction parent must be derived on the extended \\?\ form and stripped back to the plain shape",
+);
 assert.match(onnxRuntimeSmoke, /LoadLibraryEx/);
 assert.match(onnxRuntimeSmoke, /OrtGetApiBase/);
+// The ONNX dev descriptor key produced by resolve-runtime.ps1's
+// Get-RelativeStagePath must flow through the real Node descriptor consumer:
+// the exact slash-joined production shape resolves under src-tauri, while the
+// leading-slash shape a swallowed string concatenation in the PowerShell root
+// normalization used to emit must be rejected as an absolute path (the
+// stageWindowsOnnxRuntime consumer would otherwise fail dev startup before
+// any staged file is touched).
+{
+  const descriptorKey =
+    "target/windows-runtime/dcde8f01abcd-0123456789ab-onnx-dev/onnxruntime/onnxruntime.dll";
+  assert.equal(
+    resolveDescriptorPath(descriptorKey, "onnxRuntimeDylib"),
+    path.resolve(appRoot, "src-tauri", descriptorKey),
+    "the production ONNX dev descriptor key must resolve under src-tauri",
+  );
+  assert.throws(
+    () => resolveDescriptorPath(`/${descriptorKey}`, "onnxRuntimeDylib"),
+    /必须是相对路径/u,
+    "a leading-slash descriptor key must be rejected as an absolute path",
+  );
+}
 assert.match(installerAdapter, /bundleTargets\.includes\("nsis"\)/);
 assert.equal(
   windowsConfig.bundle.windows.nsis.installerHooks,
@@ -243,29 +409,40 @@ assert.equal(
 );
 assert.match(installerHook, /!macro NSIS_HOOK_PREINSTALL/);
 assert.match(installerHook, /VC_redist\.x64\.exe/);
-assert.match(installerHook, /\.\.\\\.\.\\\.\.\\windows-runtime\\nsis\\vc_redist/);
-assert.doesNotMatch(installerHook, /\.\.\\\.\.\\\.\.\\target\\windows-runtime/);
+assert.match(
+  installerHook,
+  /!define PINVOU_HOOKS_DIR "\$\{__FILEDIR__\}"/,
+  "hook macro bodies must anchor the hooks directory at file level: ${__FILEDIR__} inside !macro keeps the insertion-site value",
+);
+assert.match(
+  installerHook,
+  /\$\{PINVOU_HOOKS_DIR\}\\\.\.\\\.\.\\\.\.\\target\\windows-runtime\\nsis\\vc_redist/,
+  "vc_redist is staged to src-tauri\\target\\windows-runtime\\nsis by windows-installer.js",
+);
+assert.doesNotMatch(
+  installerHook,
+  /File "[^"]*\$\{__FILEDIR__\}/,
+  "File sources must go through ${PINVOU_HOOKS_DIR}, not the macro insertion-site ${__FILEDIR__}",
+);
 assert.match(installerHook, /\/install \/quiet \/norestart/);
 assert.match(installerHook, /pinvou-vcredist-temp-preflight\.ps1/);
 assert.match(
   installerHook,
-  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
-  "preflight script File source must resolve from the installer.nsi output directory",
+  /\$\{PINVOU_HOOKS_DIR\}\\\.\.\\\.\.\\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
+  "hook-packed scripts must resolve against src-tauri (both hook dirs sit three levels below it)",
 );
 assert.doesNotMatch(
   installerHook,
-  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
-  "preflight script File source must not resolve past src-tauri",
+  /\$\{PINVOU_HOOKS_DIR\}\\\.\.\\\.\.\\\.\.\\\.\.\\packaging/,
 );
 assert.match(
   installerHook,
-  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
-  "runtime-env script File source must resolve from the installer.nsi output directory",
+  /\$\{PINVOU_HOOKS_DIR\}\\\.\.\\\.\.\\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
+  "runtime-env script File source must resolve against src-tauri via the file-level hooks anchor",
 );
 assert.doesNotMatch(
   installerHook,
-  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
-  "runtime-env script File source must not resolve past src-tauri",
+  /\$\{PINVOU_HOOKS_DIR\}\\\.\.\\\.\.\\\.\.\\\.\.\\packaging/,
 );
 assert.ok(
   installerHook.indexOf("pinvou-vcredist-temp-preflight.ps1") <
@@ -275,6 +452,17 @@ assert.ok(
 assert.match(installerHook, /SetEnvironmentVariableW\(w "TEMP", w "\$WINDIR\\Temp"\)/);
 assert.match(installerHook, /IntCmp \$5 1632 pinvou_vc_redist_temp_failed/);
 assert.match(installerHook, /IntCmp \$5 -2147023264 pinvou_vc_redist_temp_failed/);
+// The exit-ladder pins carry the full jump targets, not just the compared
+// code: a one-letter drift in a target spelling is a makensis-dangling
+// label that no CI lane compiles away (no PR lane runs makensis), so the
+// prefix-only form cannot catch it. 1638 = ERROR_PRODUCT_VERSION: a newer
+// VC++ runtime already present must count as ready, not abort the install.
+assert.match(installerHook, /IntCmp \$5 3010 pinvou_vc_redist_reboot 0 0/);
+assert.match(installerHook, /IntCmp \$5 1638 pinvou_vc_redist_ready 0 0/);
+assert.match(
+  installerHook,
+  /IntCmp \$5 1641 pinvou_vc_redist_reboot pinvou_vc_redist_exit_failed pinvou_vc_redist_exit_failed/,
+);
 assert.match(installerHook, /Pinvou3-vcredist\.log/);
 for (const recoveryHint of [
   "释放系统盘空间",
@@ -480,13 +668,23 @@ assert.match(
 );
 assert.match(
   runtimeInitScript,
-  /Get-LfsPointerPaths/u,
-  "runtime initialization must inspect materialized LFS files before pulling",
+  /Sync-RuntimeReleaseAssets/u,
+  "runtime initialization must invoke the verified Release transport",
 );
+assert.match(releaseAssetsScript, /\$handler\.AllowAutoRedirect = \$false/u,
+  "redirects must remain subject to per-hop endpoint validation");
+assert.ok(releaseAssetsScript.indexOf("Assert-RuntimeReleaseUri -Uri $Uri", releaseAssetsScript.indexOf("function Write-RuntimeReleaseDownload")) <
+  releaseAssetsScript.indexOf("$client.GetAsync"), "URI policy must execute before every request");
+assert.match(releaseAssetsScript, /Get-RuntimeReleaseProxy/u,
+  "the production transport must preserve explicit Runner proxy routing");
+assert.doesNotMatch(releaseAssetsScript, /ServerCertificateCustomValidationCallback|ServerCertificateValidationCallback|DangerousAcceptAnyServerCertificateValidator/u,
+  "transport tests must never weaken production certificate validation");
+assert.match(releaseAssetsScript, /& \$Download \$uri \$temporary \(\[long\]\$entry\.bytes\)/u,
+  "the byte budget must come from the verified immutable manifest");
 assert.match(
-  runtimeInitScript,
-  /git lfs pull was skipped/u,
-  "runtime initialization must expose the LFS reuse path",
+  releaseAssetsScript,
+  /Test-RuntimeReleaseFile -Path \$target -Entry \$entry/u,
+  "runtime initialization must verify materialized files before offline reuse",
 );
 assert.match(
   runtimeInitScript,
@@ -494,9 +692,9 @@ assert.match(
   "runtime initialization must emit a schema, commit and lock-scoped Jenkins cache key",
 );
 assert.ok(
-  runtimeInitScript.includes('$cacheSchema = "v5"') &&
+  runtimeInitScript.includes('$cacheSchema = "v6"') &&
     runtimeScript.includes('$verificationSchemaVersion = 5'),
-  "the external LFS cache and trusted staging marker must invalidate pre Python-dependency-gate caches",
+  "Release transport must use a fresh cache schema while retaining the trusted Python-dependency staging gate",
 );
 assert.match(
   runtimeScript,
@@ -515,28 +713,36 @@ assert.match(
 );
 assert.ok(
   runtimeInitScript.includes(
-    '$lfsStorageRoot = Join-Path $resolverCacheRoot "lfs-storage"',
+    '$releaseCacheRoot = Join-Path $resolverCacheRoot "release-assets"',
   ),
-  "Git LFS objects must be stored outside the submodule gitdir",
+  "verified Release assets must be cached outside the submodule gitdir",
 );
 assert.match(
   runtimeInitScript,
-  /\$lfsArguments = @\("-c", "lfs\.storage=\$lfsStorageRoot", "lfs", "pull"\)/u,
-  "Git LFS pulls must use the external workspace cache",
+  /Sync-RuntimeReleaseAssets -RuntimeRoot \$runtimeRoot -CacheRoot \$releaseCacheRoot/u,
+  "initialization must use the hash-verified Release transport",
 );
+assert.doesNotMatch(runtimeInitScript, /"lfs", "pull"/u, "initialization must not download Git LFS objects");
+assert.match(runtimeInitScript, /\[Alias\("ForceLfsPull"\)\]/u,
+  "legacy ForceLfsPull callers must retain their ForceDownload alias");
+const runtimePrJob = prCheckWorkflow.slice(prCheckWorkflow.indexOf("\n  windows-runtime-test:"),
+  prCheckWorkflow.indexOf("\n  macos-codex-runtime-test:"));
+for (const script of ["windows_runtime_cache_behavior.ps1", "windows_runtime_release_behavior.ps1"]) {
+  assert.ok(runtimePrJob.includes(script), `${script} must run in the ordinary PR runtime job`);
+}
+assert.match(runtimePrJob, /@\('powershell', 'pwsh'\)/u,
+  "runtime regressions must exercise both Windows PowerShell and PowerShell 7");
+assert.ok(runtimePrJob.includes("scripts/ci-fixture-process.py --receipt $receipt"),
+  "runtime behavior regressions must preserve process ownership and retirement receipts");
 assert.ok(
   runtimeInitScript.lastIndexOf("Update-RuntimeSubmoduleWithoutLfsSmudge") <
-    runtimeInitScript.indexOf(
-      "New-Item -ItemType Directory -Path $lfsStorageRoot",
-    ),
-  "a fresh submodule must be initialized before the external LFS cache is used",
+    runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),
+  "a fresh submodule must be initialized before its locked manifest selects Release assets",
 );
 assert.ok(
   runtimeInitScript.indexOf("if ($CacheKeyOnly)") <
-    runtimeInitScript.indexOf(
-      "New-Item -ItemType Directory -Path $lfsStorageRoot",
-    ),
-  "cache-key discovery must not create the external LFS storage directory",
+    runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),
+  "cache-key discovery must not initialize runtime payloads or contact GitHub",
 );
 assert.ok(
   runtimeGuide.includes(
@@ -550,7 +756,7 @@ assert.ok(
 assert.match(
   runtimeInitScript,
   /SetEnvironmentVariable\("GIT_LFS_SKIP_SMUDGE", "1", "Process"\)[\s\S]*?submodule", "update"/u,
-  "submodule checkout must disable automatic LFS smudge before selective pulls",
+  "submodule checkout must disable automatic LFS downloads before Release materialization",
 );
 assert.match(
   runtimeInitScript,
@@ -571,6 +777,30 @@ assert.match(
   packageJson.scripts["test:windows-runtime-installer"],
   /windows_runtime_installer_integration\.test\.js/u,
   "the staged runtime and NSIS installer adapter must have an integration test entry",
+);
+// The release lane is the only place the two wrapper scripts can run against
+// a fully staged runtime, and no other lane exercises the wrapper exit
+// contract at all (`runtime:windows:stage` invokes the resolver directly, so
+// its -File process code never sees the wrapper forwarding). Pin the tests'
+// presence so they cannot be silently dropped (review 5796830161).
+const runtimeInstallerIntegration = readApp(
+  "tests",
+  "windows_runtime_installer_integration.test.js",
+);
+assert.match(
+  runtimeInstallerIntegration,
+  /runRuntimeWrapper\("stage-runtime\.ps1"/u,
+  "the release-lane integration test must observe the stage wrapper's final process exit code through the unmodified script",
+);
+assert.match(
+  runtimeInstallerIntegration,
+  /runRuntimeWrapper\("stage-onnx-runtime\.ps1", \["-Force"\]\)/u,
+  "the release-lane integration test must observe the ONNX wrapper's rebuild path (robocopy /MIR cleanup) through the unmodified script",
+);
+assert.match(
+  runtimeInstallerIntegration,
+  /exit \/b 8/u,
+  "the release-lane integration test must prove a stubbed robocopy >= 8 keeps the wrapper process exit code non-zero",
 );
 assert.match(
   runtimeInitScript,
@@ -745,6 +975,41 @@ const windowsBuildJob = releaseWorkflow.slice(
 assert.match(prValidationJob, /github\.event_name == 'pull_request'/);
 assert.match(prValidationJob, /npm run test:windows-runtime/);
 assert.match(prValidationJob, /npm run test:codex-acp-windows-runtime/);
+function verifyRuntimePrSupervision(job) {
+  for (const entry of ["test:windows-runtime", "test:windows-runtime-cache"]) {
+    assert.ok(job.includes(`python ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/${entry === "test:windows-runtime" ? "packaging" : "cache-release"}.json" -- cmd.exe /d /c "npm run ${entry}"`),
+      `${entry} must execute inside the owned process supervisor`);
+  }
+  assert.doesNotMatch(job, /^    continue-on-error:/mu, "the release PR job must remain blocking");
+  const steps = job.split("\n      - name: ").slice(1);
+  const advisory = steps.filter(step => step.includes("\n        continue-on-error:"));
+  assert.equal(advisory.length, 1, "only the reviewed receipt upload may be advisory");
+  assert.ok(advisory[0].startsWith("上传 Windows runtime PR 资源收据\n"));
+  for (const field of ["timeout-minutes: 3", "retention-days: 7", "if: always()",
+    "uses: actions/upload-artifact@v7", "continue-on-error: true", "if-no-files-found: warn",
+    "path: ${{ runner.temp }}/windows-runtime-pr-${{ github.run_id }}-${{ github.run_attempt }}/"]) {
+    assert.ok(advisory[0].includes(field), `release PR resource receipts must preserve ${field}`);
+  }
+  const transportEnv = [
+    "        env:",
+    "          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}",
+    "          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
+    "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+    "",
+  ].join("\n");
+  assert.ok(advisory[0].includes(transportEnv), "receipt upload must use the scoped storage transport");
+  assert.doesNotMatch(advisory[0].replace(transportEnv, ""), /^        (?:run|env):/mu);
+}
+verifyRuntimePrSupervision(prValidationJob);
+for (const mutant of [
+  prValidationJob.replace('-- cmd.exe /d /c "npm run test:windows-runtime-cache"', '-- cmd.exe /d /c "echo ignored"'),
+  prValidationJob.replace('        timeout-minutes: 3\n', ''),
+  prValidationJob.replace('          retention-days: 7\n', '          retention-days: 90\n'),
+  prValidationJob.replace('        continue-on-error: true\n', '').replace('      - name: 验证 Windows 打包契约\n', '      - name: 验证 Windows 打包契约\n        continue-on-error: true\n'),
+]) {
+  assert.notEqual(mutant, prValidationJob, "the negative control must change the real entry");
+  assert.throws(() => verifyRuntimePrSupervision(mutant), "supervision or failure suppression must be rejected");
+}
 assert.match(prValidationJob, /submodules: false/);
 assert.doesNotMatch(
   prValidationJob,
@@ -763,14 +1028,42 @@ assert.doesNotMatch(
 );
 assert.match(windowsBuildJob, /npm run runtime:windows:init/);
 assert.match(windowsBuildJob, /npm run runtime:windows:onnx-smoke/);
+assert.match(prValidationJob, /test_windows_release_workspace\.ps1/);
+const workspacePrepareStep = windowsBuildJob.indexOf("id: windows-workspace");
+assert.ok(workspacePrepareStep > 0);
+assert.ok(
+  workspacePrepareStep < windowsBuildJob.indexOf("git submodule update"),
+  "the pinned checkout must be selected before any submodule is initialized",
+);
+// All run steps that consume source or output must use the same checkout.
+// Runner transport helpers use the original checkout, as does cleanup.
+const runnerTransport = /^node scripts\/(?:ci-rust-network\.cjs(?: --report)?|ci-network-node-options\.cjs|ci-artifact-node-options\.cjs --network)$/u;
+for (const step of windowsBuildJob.split(/\n      - name:/u).slice(1)) {
+  const run = /\n        run: ([^\n]+)/u.exec(step);
+  if (!run || /id: windows-workspace| -Mode Cleanup/u.test(step) || runnerTransport.test(run[1])) continue;
+  assert.match(
+    step,
+    /working-directory: \$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}/u,
+    "Windows source, runtime and installer steps must share the selected short checkout",
+  );
+}
+assert.match(
+  windowsBuildJob,
+  /path: \|\n\s+\$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}[^\n]+\.exe\n\s+\$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}[^\n]+\.sha256/u,
+);
+assert.match(
+  windowsBuildJob,
+  /if: always\(\) && steps\.windows-workspace\.outputs\.state != ''[\s\S]+-Mode Cleanup/u,
+  "failed or successful builds must clean up only their owned temporary checkout",
+);
 // The installer integration test self-skips unless the runtime is staged and
-// it is invoked directly with --require-staged-runtime (node --test drops the
-// flag); without these pins a dropped or reordered step would make it skip
-// silently forever instead of failing.
+// it is invoked directly with --require-staged-runtime; the release job goes
+// through the npm alias, and the pin below keeps that alias a direct node
+// invocation (node --test would drop the flag and skip silently forever).
 const windowsInitStep = windowsBuildJob.indexOf("npm run runtime:windows:init");
 const windowsStageStep = windowsBuildJob.indexOf("npm run runtime:windows:stage");
 const windowsInstallerTestStep = windowsBuildJob.indexOf(
-  "node tests/windows_runtime_installer_integration.test.js --require-staged-runtime",
+  "npm run test:windows-runtime-installer",
 );
 assert.ok(
   windowsStageStep > windowsInitStep,
@@ -780,6 +1073,12 @@ assert.ok(
   windowsInstallerTestStep > windowsStageStep,
   "the installer integration test must run directly, after the runtime is staged",
 );
+// The npm alias must invoke node directly with the flag: node --test would
+// drop --require-staged-runtime and the test would silently skip.
+assert.match(
+  packageJson.scripts["test:windows-runtime-installer"],
+  /node tests\/windows_runtime_installer_integration\.test\.js --require-staged-runtime/u,
+);
 assert.doesNotMatch(
   windowsBuildJob,
   /runtime-access|available == 'true'|available != 'true'/,
@@ -788,6 +1087,8 @@ assert.doesNotMatch(
 
 for (const triggerPath of [
   ".gitmodules",
+  "scripts/windows-release-workspace.ps1",
+  "scripts/tests/test_windows_release_workspace.ps1",
   "private-runtimes/windows",
   "pinvou3-app/package-lock.json",
   "pinvou3-app/scripts/tauri/windows-runtime.js",
@@ -812,9 +1113,9 @@ assert.match(
 );
 
 // Windows PowerShell 5.1 spawned under a pwsh 7 parent (CI step shells, pwsh
-// terminals) inherits pwsh's PSModulePath: Get-FileHash then raises
-// CommandNotFound and Get-Acl resolves the unloadable PowerShell 7 module,
-// so the native harnesses die before their assertions while the aggregate
+// terminals) inherits pwsh's PSModulePath: built-in module autoload then
+// fails (Add-Type and module-dependent cmdlets raise CommandNotFound), so
+// the native harnesses die before their assertions while the aggregate
 // CI step still reports green. Each direct 5.1 entry point must restore the
 // host default module path before its first module-dependent cmdlet.
 const modulePathGuard =
@@ -834,6 +1135,18 @@ assert.match(
   modulePathGuard,
   "the runtime init script must restore the 5.1 module path before its lock-file hashing",
 );
+for (const [name, harness, firstDependency] of [
+  ["windows_runtime_cache_behavior.ps1", runtimeCacheBehaviorHarness, "$appRoot ="],
+  ["windows_runtime_release_behavior.ps1", runtimeReleaseBehaviorHarness, ". (Join-Path"],
+]) {
+  assert.match(harness, modulePathGuard, `${name} must restore its own 5.1 module path`);
+  const guardStart = harness.indexOf("if ($PSVersionTable.PSVersion.Major -lt 6)");
+  const dependencyStart = harness.indexOf(firstDependency);
+  assert.ok(
+    guardStart >= 0 && dependencyStart > guardStart,
+    `${name} must restore the module path before resolving or importing fixture dependencies`,
+  );
+}
 assert.ok(
   runtimeScript.indexOf("PSVersionTable.PSVersion.Major -lt 6") <
     runtimeScript.indexOf("Add-Type -AssemblyName"),
@@ -927,6 +1240,26 @@ assert.match(
   runtimeCacheBehaviorHarness,
   /atomic replace under a sharing reader must fail loudly/u,
   "the cache-behavior harness must prove a failed atomic replacement preserves the previous descriptor",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /successful flattened runtime expansion \(robocopy \/E\) must leave the process-visible exit code at zero/u,
+  "the cache-behavior harness must prove the robocopy /E success arm finishes at $LASTEXITCODE 0 for the wrapper scripts",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /successful long-path cleanup \(robocopy \/MIR\) must leave the process-visible exit code at zero/u,
+  "the cache-behavior harness must prove the robocopy /MIR success arm finishes at $LASTEXITCODE 0 for the wrapper scripts",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /Robocopy \/MIR cleanup failed with exit code 8/u,
+  "the cache-behavior harness must prove a stubbed robocopy 8 keeps the /MIR cleanup arm fatal",
+);
+assert.match(
+  runtimeCacheBehaviorHarness,
+  /Robocopy failed with exit code 8/u,
+  "the cache-behavior harness must prove a stubbed robocopy 8 keeps the flattened copy arm fatal",
 );
 
 console.log("Windows runtime packaging contract: ok");

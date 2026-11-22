@@ -11,7 +11,7 @@ import {
   sessionTitlePresentation,
 } from '../attachments/attachment-message.js';
 import { formatDateGroupLabel, formatSessionDate, localDateKey } from '../../shared/date-utils.js';
-import { sessionRoute } from '../../shared/session-management.js';
+import { runSessionBatch, sessionRoute } from '../../shared/session-management.js';
 import { compareSessionsByRecentUpdate, filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../../shared/session-list-pipeline.js';
 import { isDefaultChatTitle } from '../../shared/i18n.js';
 
@@ -135,9 +135,9 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
   });
   const toggleSelectAll = () => setSelectedIds(allVisibleSelected ? new Set() : new Set(visibleIds));
   const switchPanel = (toArchived) => { setShowArchived(toArchived); exitBatch(); };
-  const runBatchArchive = () => { if (onArchiveMany) onArchiveMany(Array.from(selectedIds)); exitBatch(); };
-  const runBatchDelete = () => { if (onDeleteMany) onDeleteMany(Array.from(selectedIds)); exitBatch(); };
-  const runBatchRestore = () => { if (onRestoreMany) onRestoreMany(Array.from(selectedIds)); exitBatch(); };
+  const runBatchArchive = () => { if (onArchiveMany) onArchiveMany(Array.from(selectedIds), runSessionBatch); exitBatch(); };
+  const runBatchDelete = () => { if (onDeleteMany) onDeleteMany(Array.from(selectedIds), runSessionBatch); exitBatch(); };
+  const runBatchRestore = () => { if (onRestoreMany) onRestoreMany(Array.from(selectedIds), runSessionBatch); exitBatch(); };
 
   const handlePickDate = (key) => {
     setSelectedDate(key);
@@ -474,7 +474,6 @@ export const SearchView = ({ theme, history, t, language, archived = EMPTY_ARCHI
           {/* 永久删除已收纳对话(二次确认,沿用原设置页同款弹窗) */}
           {archivedDeleteConfirm && createPortal(
             <ArchivedDeleteConfirmDialog
-              theme={theme}
               t={t}
               onCancel={() => setArchivedDeleteConfirm(null)}
               onConfirm={() => {

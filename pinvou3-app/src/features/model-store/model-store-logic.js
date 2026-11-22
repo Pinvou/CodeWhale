@@ -19,6 +19,22 @@ const LOG_WAIT_SECONDS = 25;
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 
+/** Preserve a valid saved choice; otherwise use the backend's deployment default. */
+function selectedDeployProfile(record) {
+  const profiles = record?.profiles || [];
+  return [record?.active_profile_id, record?.default_profile_id]
+    .find((id) => profiles.some((profile) => profile.id === id)) || profiles[0]?.id || null;
+}
+
+/** Legacy catalogue names still label the benchmark as default. */
+function deployProfileLabel(record, profile, copy) {
+  if (record?.card_id === 'qwen38-27b-nvfp4-mtp') {
+    if (profile.id === 'benchmark') return copy.profileMtpBenchmark;
+    if (profile.id === 'production-sampling') return copy.profileMtpProduction;
+  }
+  return profile.name;
+}
+
 /**
  * 人类可读的字节数。单位是国际通用符号,不需要进 i18n 词典。
  * @param {number} bytes - 字节数。
@@ -234,6 +250,29 @@ function layerSummary(layers) {
   return { count: entries.length, complete, done, total: Math.max(total, done) };
 }
 
+/**
+ * 强制移除结果的结构化警告码 → 界面文案。后端只发码（`force_remove_records_only`
+ * / `force_remove_residual_paths`），正文按当前语言渲染；路径明细不进文案，始终由
+ * `residual_paths` 列表单独渲染。未知字符串（旧版结果、测试桩的纯文本）原样显示，
+ * 保证向后兼容。
+ * @param {object} copy - i18n 文案对象（uiModelStore 段）。
+ * @param {string|null|undefined} warning - 后端警告码或旧版纯文本警告。
+ * @returns {string} 可直接渲染的文案；无警告时为空串。
+ */
+function operationWarningText(copy, warning) {
+  if (!warning) return '';
+  if (warning === 'force_remove_records_only') return copy.forceRemoveRecordsOnlyWarning;
+  if (warning === 'force_remove_residual_paths') return copy.forceRemoveResidualWarning;
+  return String(warning);
+}
+
+/** Translate owned operation codes at display time; keep other diagnostics intact. */
+function operationErrorText(copy, failure) {
+  const message = String(failure?.message || failure);
+  const messages = copy.operationErrors;
+  return messages && Object.prototype.hasOwnProperty.call(messages, message) ? messages[message] : message;
+}
+
 const PROMPT_KINDS = ['text', 'password', 'confirm'];
 
 /**
@@ -446,6 +485,23 @@ function taskProgressView(task) {
   // Keep the raw counter available, but let the UI switch to an indeterminate
   // state until the backend actually finishes instead of promising 100% / 0s.
   const pendingCompletion = (percent) => Number(percent.toFixed(1)) >= 100 && task?.status !== 'done';
+  // 分母可疑检测提前（total=0 时 progressPercent 返回 null，进不了字节臂）：
+  // total 为 0 或超过 1.5TB 时百分比不可信——降为 estimated + percent=0，
+  // UI 显示「已下载 X」而非「0.0%」（客户反馈 728K/2.4TB · 0% 问题）。
+  // r33 P2-3：done 态短路——任务面板里 done 卡不是终态（还会停留展示），
+  // 不短路会把刚完成的卡拖回 2% 估算条（2.4TB 模型下完那一刻进度条倒退）。
+  // done + 可疑分母时走到后面 percent=null → view=null，完成卡不再渲染进度条。
+  const rawTotal = Number(task?.progress?.total);
+  if (task?.progress && task?.status !== 'done' && (rawTotal <= 0 || rawTotal > 1.5 * 1024 ** 4)) {
+    return {
+      kind: 'bytes',
+      percent: 0,
+      awaitingCompletion: false,
+      estimated: true,
+      done: Number(task.progress.done),
+      total: rawTotal,
+    };
+  }
   const percent = progressPercent(task?.progress);
   if (percent !== null) {
     return {
@@ -800,15 +856,28 @@ function uninstallDoneText(copy, name, outcome) {
   return copy.uninstallDoneKept(name);
 }
 
+/** Preserve all uninstall recovery warnings after linked-model cleanup finishes. */
+function uninstallCleanupWarning(copy, name, linksCleaned, syncError) {
+  return [
+    !linksCleaned ? copy.uninstallLinksLeft(name) : null,
+    syncError ? copy.linkSyncFailed(syncError) : null,
+  ].filter(Boolean).join(' ');
+}
+
 export {
+  selectedDeployProfile,
+  deployProfileLabel,
   MAX_LOG_LINES,
   SPEED_WINDOW_MS,
   LOG_WAIT_SECONDS,
   formatBytes,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
   splitDuration,
   parseProgressLine,
+  operationWarningText,
+  operationErrorText,
   parsePromptLine,
   parseStageLine,
   parseStepLine,

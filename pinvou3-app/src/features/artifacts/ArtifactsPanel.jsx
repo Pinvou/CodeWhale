@@ -10,6 +10,7 @@ import { ScaledHtmlPreview } from '../settings/composer-shared.jsx';
 import { cardBtnCls } from '../../shared/card-buttons.mjs';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
 import { DESIGN_MESSAGE_TYPES, buildDesignRuntimeScript } from './design-runtime.js';
+import { artifactPreviewInstallRuntimeMessage } from './artifact-preview-navigation.js';
 import { DesignInspectorPanel } from './DesignInspectorPanel.jsx';
 import { EditableMarkdownPreview } from './EditableMarkdownPreview.jsx';
 import { loadArtifactPreview } from './artifact-preview.js';
@@ -200,8 +201,15 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
         designFrameRef.current = frame || null;
         if (!showDesignWorkbench || !frame || !frame.contentWindow) return;
         try {
-          const script = designRuntimeScriptRef.current || (designRuntimeScriptRef.current = buildDesignRuntimeScript());
-          frame.contentWindow.eval(script);
+          if (!designRuntimeScriptRef.current) designRuntimeScriptRef.current = buildDesignRuntimeScript();
+          // sandbox 收紧后（allow-scripts，无 allow-same-origin）父窗口不能再
+          // contentWindow.eval 注入：经帧内 bootstrap 的安装中继在本帧内 eval。
+          // 帧本就允许脚本执行，runtime 与页面自身脚本同权限，无提权；安装失败
+          // 经 design runtime 的错误通道回报（onMessage 监听器已有 ERROR 分支）。
+          frame.contentWindow.postMessage(
+            artifactPreviewInstallRuntimeMessage(designRuntimeScriptRef.current),
+            '*',
+          );
         } catch (error) {
           console.warn('[pinvou3][artifacts] design runtime inject failed', error);
         }
@@ -267,7 +275,11 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
         const onMessage = (event) => {
           const data = event && event.data;
           if (!data || data.source !== 'pinvou-design-runtime') return;
-          if (designFrameRef.current && event.source !== designFrameRef.current.contentWindow) return;
+          // 来源校验不设豁免（r8）：`designFrameRef.current &&` 形态在安装尚未
+          // 登记（designFrameRef 为 null，例如仅文件预览弹层在屏）时放行任意
+          // 窗口的同标记消息，伪造的选中元素/变更记录会直接喂进 design 工作台
+          // ——帧未登记就不存在合法的帧内来源，一律拒绝。
+          if (!designFrameRef.current || event.source !== designFrameRef.current.contentWindow) return;
           if (data.type === DESIGN_MESSAGE_TYPES.READY) {
             replayDesignChanges();
           } else if (data.type === DESIGN_MESSAGE_TYPES.ELEMENT_SELECTED) {
@@ -718,7 +730,17 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                       // The list row has multiple nested layouts and inline buttons; a
                       // <button type="button"> would break existing styles, so keep the div keyboard-usable.
                       <div key={a.path} role="button" tabIndex={0} onClick={() => preview(a)}
-                        onKeyDown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); preview(a); } }}
+                        onKeyDown={(e) => {
+                          // The row hosts a real <button> (locate folder): ignore
+                          // keys bubbled from it, or preventDefault here would
+                          // swallow its native Enter/Space activation and
+                          // preview the artifact instead.
+                          if (e.target !== e.currentTarget) return;
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            preview(a);
+                          }
+                        }}
                         className={`group flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer
                           ${sel && sel.path === a.path ? 'bg-[#E8EDF2] dark:bg-[#333537]' : 'hover:bg-[#F0F4F9] dark:hover:bg-[#282A2C]'}`}>
                         <ArtifactTileIcon name={a.basename} />

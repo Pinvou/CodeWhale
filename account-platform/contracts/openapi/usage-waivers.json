@@ -1,0 +1,47 @@
+{
+  "contract": "usage-waiver-v1",
+  "routes": [
+    {
+      "service": "billing",
+      "method": "POST",
+      "path": "/admin/v1/usage-holds/:hold_id/release",
+      "identity": "HUMAN",
+      "permission": "platform.billing.holds.release",
+      "command": "BILLING_USAGE_HOLD_SAFE_RELEASE",
+      "mode": "AUDIT_ONLY",
+      "idempotency": "original Idempotency-Key; actor/hold/reason frozen",
+      "success": 200,
+      "rejected": 409,
+      "unknown": 503
+    },
+    {
+      "service": "token",
+      "method": "POST",
+      "path": "/internal/v1/usage-waivers",
+      "identity": "billing-service",
+      "permission": "internal.token.usage.waive",
+      "response": "persisted ADMITTED with result or persisted REJECTED; errors remain unknown"
+    },
+    {
+      "service": "billing",
+      "method": "POST",
+      "path": "/internal/v1/holds/waiver",
+      "identity": "token-gateway",
+      "permission": "internal.billing.hold.waive",
+      "body": [
+        "command_reference",
+        "request_digest"
+      ],
+      "response": "original immutable financial winner"
+    }
+  ],
+  "invariants": [
+    "unknown never releases a coordination claim",
+    "only exact original persisted rejection retires its claim",
+    "new request cannot replace unknown original key/actor/reason",
+    "ordinary Commit and waiver share wallet->hold lock order",
+    "F16 rechecks current release-only claim under original lock",
+    "no zero posting and no later customer debit",
+    "legacy pending never fabricates a modern reference"
+  ]
+}

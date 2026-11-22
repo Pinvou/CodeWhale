@@ -1,6 +1,6 @@
 [package]
 name = "pinvou3-tauri"
-version = "0.10.17"
+version = "0.10.18"
 description = "品悟智能助手桌面应用后端"
 authors = ["pinvou"]
 license = "MIT"
@@ -148,13 +148,15 @@ codewhale-execpolicy = { path = "../../CodeWhale/crates/execpolicy" }
 # - pinvou-cli 的**探针二进制自有 manifest** 不引 OpenSSL 依赖（其自述仍准确）；
 #   但 cli 依赖本 crate（path 依赖，feature 统一后 OpenSSL 仍在 cli 的依赖图里
 #   ——2026-10-30 评审勘误，原「cli 不引 OpenSSL」在依赖图层面不成立。
-#   （app=系统 OpenSSL 库，cli=platform-verifier 系统根库）——分裂已评估，
+#   （r49 勘误的再勘误：cli 与 app 的 TLS 栈**同为系统 OpenSSL**——feature
+#   统一后 reqwest 默认后端是 NativeTLS，无 use_rustls_tls 调用点，此前
+#   「cli=platform-verifier 系统根库」的分裂描述在依赖统一时已失效。）
 #   CLI 面向的开发机场景无商店连接需求。
 # system-proxy: reqwest 0.13 的 default feature,读 macOS SystemConfiguration /
 # Windows 系统代理设置(非环境变量)。此前 default-features=false 把它关掉,
 # 导致用「系统代理」模式(非 TUN)的用户模型请求直连而被代理工具的路由规则
 # 绕过。显式启用后,reqwest 在 Client::build() 时自动注入系统代理 matcher。
-reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "blocking", "stream", "query", "multipart", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "blocking", "stream", "query", "form", "multipart", "system-proxy"] }
 wait-timeout = "0.2"
 
 # rustls 直依赖:tokio-tungstenite(经 platform-verifier)仍把 rustls 带进图,
@@ -195,6 +197,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 md5 = "0.7"
 flate2 = "1"
 tar = "0.4"
+# 会话归档导入（import_session_archive）的 xz 解码；与底座 session_export
+# 的编码端同用 liblzma static（版本对齐，复用同一锁定版本）。
+liblzma = { version = "0.4", features = ["static"] }
 
 # Session store 用：阻塞式 RwLock（sync 不需要 .await 拿读写锁）
 parking_lot = "0.12"
@@ -218,7 +223,9 @@ notify = "8"
 # 本地知识底座 L0：全系统元数据索引 + 秒搜 + 去重（docs/本地知识底座-产品形态与架构.md）
 # rusqlite bundled —— 自带 SQLite + FTS5（名/路径秒搜），不依赖系统 libsqlite，
 # 对 .deb 离线分发友好（与 file_ingest 二进制依赖降 recommends 的思路一致）。
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# CodeWhale 6f7a3a748 起 rusqlite 0.41（libsqlite3-sys 0.39）；父仓同步升，
+# 避免 0.40/0.41 双版本把 bundled SQLite 编两份。
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 # 全盘遍历：容错(权限不足跳过)、防 symlink 环。L0 扫描器用。
 walkdir = "2"
 
@@ -245,13 +252,22 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 rand = "0.10"
-# Keep 0.22: age, codewhale-tui, reqwest 0.12, ureq 2.12, oauth2 5,
-# hf-hub, ort-sys and rmcp 3 all still require 0.22 (wry 0.57.1 and
-# hyper-util have moved to 0.23); a solo 0.23 bump would only add a second
-# copy. Revisit once upstreams align.
+# Keep 0.22: codewhale-tui, reqwest (0.12 via hf-hub plus the direct 0.13
+# pin), ureq 2.12 and pinvou-knowledge still require 0.22; the lock graph
+# adds further 0.22 pins via hyper-util, plist, serde_with and termwiz.
+# rmcp 3 declares base64 0.23 only as an optional dependency enabled by
+# its default/request-state/client-side-sse/auth-enterprise-managed/
+# server-side-http features; the sole rmcp declaration (CodeWhale tui)
+# enables just auth + client with default-features = false, so rmcp adds
+# no base64 requirement here (its auth feature does pull oauth2 5, which
+# sits on 0.21.7 along with age 0.11.5). wry 0.57.1 and tauri-codegen
+# already carry a separate 0.23 copy, so a solo 0.23 bump would leave
+# those holdouts on a separate 0.22 copy. Revisit once upstreams align.
 base64 = "0.22"
 tempfile = "3"
-age = { version = "=0.12.1", default-features = false }
+# Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
+# 0.12 unconditionally adds HPKE/P-256 with affected crypto-bigint; revisit after an upstream fixed release.
+age = { version = "=0.11.5", default-features = false }
 
 # Computer Use capability foundation (features/computer_use): screen capture via
 # xcap (0.9.8, reusing its re-exported image 0.25 for PNG encoding/scaling, no direct
@@ -262,8 +278,15 @@ xcap = "0.9.8"
 enigo = "0.6"
 # ACP resource ledger: aggregate RSS + process-tree ownership on Linux/macOS/Windows.
 # Pin 0.36.x for the project's Rust 1.89 toolchain; 0.39 requires Rust 1.95.
-# Disable disk/network/user/component probes because the ledger only samples processes.
-sysinfo = { version = "=0.36.1", default-features = false, features = ["system"] }
+# Default-features off: the ledger (features/codex_acp/resource_ledger.rs) only
+# samples processes, while features/device additionally opts into the
+# component(temperature)/disk/network probes below.
+sysinfo = { version = "=0.36.1", default-features = false, features = [
+    "system",
+    "component",
+    "disk",
+    "network",
+] }
 
 # keyring 不再直接依赖 —— 凭证走底座 codewhale-secrets(它内部按平台引 keyring)。
 # 这条曾有过一处漏网:模型商店的 HF Token 自建 keyring::Entry,与本注释矛盾。
@@ -373,10 +396,31 @@ uiautomation = "0.25"
 # which uiautomation's plain `TreeScope` enum cannot express: the flag is set
 # on the underlying `IUIAutomationCacheRequest`, and that interface has to be
 # the type from this exact `windows` version.
-windows = { version = "0.62", features = ["Win32_UI_Accessibility"] }
+# The Win32_* features beyond Accessibility serve the computer-use virtual
+# display (features/computer_use/platform/windows_virtual): hidden-desktop
+# creation (StationsAndDesktops; the API is Security-gated upstream, so
+# Win32_Security is declared here explicitly instead of riding another
+# crate's feature unification), the hidden-desktop composite capture
+# (Graphics_Gdi), the kill-on-close job object wrapping launched apps
+# (JobObjects + Threading + Security), the message-level input posts
+# (UI_Input_KeyboardAndMouse + UI_WindowsAndMessaging), and the cloaked-
+# window filter for the composite (Graphics_Dwm).
+windows = { version = "0.62", features = [
+    "Win32_UI_Accessibility",
+    "Win32_System_StationsAndDesktops",
+    "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_JobObjects",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
 
 # Process liveness probe using kill(pid, 0) semantics; see process_alive in
-# platform/os/posix.rs. Browser watch uses it to guard stale port-file deletion.
+# platform/os/posix.rs. Browser watch uses it to guard stale port-file
+# deletion. The macOS computer_use backend also reads `libc::pid_t` for the
+# self-targeted AX guard's pid comparisons.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -428,7 +472,18 @@ zbus = { version = "5.5", default-features = false, features = ["async-io"] }
 # Tauri's unstable Wry plugin API lets the browser feature pre-register its
 # dedicated WebKit context with automation enabled. Keep this exact version
 # aligned with Tauri's resolved runtime so the unstable runtime API cannot drift.
-tauri-runtime-wry = "=2.12.3"
+tauri-runtime-wry = "=2.12.5"
+# Computer Use virtual display (features/computer_use/platform/linux_virtual):
+# pure-Rust X11 connection for Xvfb readiness polling and full-screen GetImage
+# capture. default-features = false keeps the pure-Rust RustConnection path —
+# libxcb is NOT needed and the dl-libxcb/allow-unsafe-code features must stay
+# off (a hidden Xvfb with no libxcb dependency is the point of this backend).
+# Already in the lock (global-hotkey pulls it), so this adds no new crate.
+# NOTE: x11rb 0.13 has no connect_to_display_with_auth helper; the explicit
+# cookie path is parse_display → DefaultStream::connect →
+# RustConnection::connect_to_stream_with_auth_info (see the linux_virtual
+# module docs for the verified recipe).
+x11rb = { version = "0.13", default-features = false }
 
 # =============================================================================
 # Lint gates — hard-gate design: deny only lints with a measured zero
@@ -644,3 +699,10 @@ overflow-checks = true
 # 依赖在 dev 下也做轻量优化(否则全 debug 编译,运行太慢影响本地调试体验)。
 [profile.dev.package."*"]
 opt-level = 2
+
+# 与根工作区相同的 CJK 感知 unicode-width 补丁(#4479):本应用通过 path 依赖
+# 编译 CodeWhale 的 codewhale-tui,原版 width() 对等宽歧义字符按 1 列测量,
+# CJK 终端下造成单元格错位。补丁取自子模块内的同一份拷贝,保证嵌入式 TUI
+# 与依赖它的各工作区行为一致。
+[patch.crates-io]
+unicode-width = { path = "../../CodeWhale/patches/unicode-width-0.2.2" }

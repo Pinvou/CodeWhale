@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
@@ -30,6 +31,22 @@ pub(crate) const RECONNECT_BASE_DELAY_MS: u64 = 500;
 pub(crate) const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const REVOKE_ACK_TIMEOUT: Duration = Duration::from_secs(12);
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+// One deadline covers DNS/TCP/TLS/upgrade awaiting. It is not restarted by
+// outbound traffic and does not replace the independent post-connect ACK budget.
+async fn connect_with_deadline<T>(
+    connection: impl Future<Output = Result<T, WebSocketError>>,
+) -> Result<T, WebSocketError> {
+    tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, connection)
+        .await
+        .unwrap_or_else(|_| {
+            Err(WebSocketError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "relay connection attempt timed out",
+            )))
+        })
+}
 
 /// True when nothing inbound has arrived for two full heartbeat windows: a
 /// half-open socket (sleep/resume, NAT rebind) keeps absorbing outbound
@@ -230,19 +247,35 @@ impl RelaySender {
     }
 
     fn serialize_message(&self, value: Value) -> Result<SerializedFrame, RelayTrySendError> {
-        self.serialize_message_owned(value, None)
+        self.serialize_message_owned(value, None, None)
     }
 
     fn serialize_message_owned(
         &self,
         value: Value,
         owner: Option<(&str, u64)>,
+        resume_prepare: Option<(u64, u64)>,
     ) -> Result<SerializedFrame, RelayTrySendError> {
         let controller_v1 = value.get("v").and_then(Value::as_u64) == Some(1);
         if controller_v1 && self.socket_mode.load(Ordering::Acquire) == SOCKET_MODE_LEGACY_V2 {
             return Err(RelayTrySendError::ControllerProtocolUnavailable);
         }
-        let controller_scope = if controller_v1 {
+        let controller_scope = if let Some((epoch, deadline_b)) = resume_prepare {
+            let (generation, binding) =
+                owner.ok_or(RelayTrySendError::ControllerAuthorityUnavailable)?;
+            Some(
+                self.controller_authority
+                    .resume_prepare_scope(
+                        &value,
+                        generation,
+                        binding,
+                        epoch,
+                        deadline_b,
+                        super::controller::relay_runtime::controlled_monotonic_millis(),
+                    )
+                    .map_err(|_| RelayTrySendError::ControllerAuthorityUnavailable)?,
+            )
+        } else if controller_v1 {
             self.controller_authority
                 .outbound_scope_owned(&value, owner)
                 .map_err(|_| RelayTrySendError::ControllerAuthorityUnavailable)?
@@ -342,8 +375,33 @@ impl RelaySender {
         if value["v"].as_u64() != Some(1) {
             return Err(RelayTrySendError::ControllerAuthorityUnavailable);
         }
-        let frame = self.serialize_message_owned(value, Some((generation, binding)))?;
+        let frame = self.serialize_message_owned(value, Some((generation, binding)), None)?;
         self.try_send_serialized(frame)
+    }
+
+    pub(crate) fn try_send_resume_prepare_owned(
+        &self,
+        generation: &str,
+        binding: u64,
+        value: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, RelayTrySendError> {
+        let frame = match self.serialize_message_owned(
+            value,
+            Some((generation, binding)),
+            Some((epoch, deadline_b)),
+        ) {
+            Ok(frame) => frame,
+            // A socket can change between readiness and enqueue. Its next
+            // connection event retries the same candidate, never a new budget.
+            Err(
+                RelayTrySendError::ControllerAuthorityUnavailable
+                | RelayTrySendError::ControllerProtocolUnavailable,
+            ) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        self.try_send_serialized(frame).map(|()| true)
     }
 
     /// Queue a stream-reset barrier without spawning one waiter per failure.
@@ -506,11 +564,11 @@ async fn run_revocation_loop(
 ) {
     let mut reconnect_backoff = ReconnectBackoff::default();
     loop {
-        let connection = connect_async_with_config(
+        let connection = connect_with_deadline(connect_async_with_config(
             &relay_url,
             Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
             false,
-        );
+        ));
         tokio::pin!(connection);
         let connected = tokio::select! {
             result = &mut connection => result,
@@ -720,6 +778,26 @@ async fn wait_reconnect_delay(
     }
 }
 
+#[cfg(test)]
+fn injected_prepare_write_failure(
+    authority: &SharedControllerAuthority,
+    frame: &OutboundFrame,
+) -> Option<WebSocketError> {
+    use sha2::Digest as _;
+    let scope = frame.controller_scope.as_ref()?;
+    if !authority
+        .take_prepare_write_failure(scope, sha2::Sha256::digest(frame.text.as_bytes()).into())
+    {
+        return None;
+    }
+    // One exact instance, before bytes reach the socket: exercise the actual
+    // retained-frame/reconnect branch without a timing-dependent TCP reset.
+    Some(WebSocketError::Io(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "isolated prepare write fault",
+    )))
+}
+
 async fn run_loop(
     config: WebAccessConfig,
     tx_in: mpsc::Sender<RelayInbound>,
@@ -734,7 +812,7 @@ async fn run_loop(
 
     'reconnect: loop {
         let offer_controller_protocol = request_controller_protocol;
-        let connection = async {
+        let connection = connect_with_deadline(async {
             let request = if offer_controller_protocol {
                 controller_websocket_request(&config.relay_url)?
             } else {
@@ -746,7 +824,7 @@ async fn run_loop(
                 false,
             )
             .await
-        };
+        });
         tokio::pin!(connection);
 
         // Remain responsive to disable/rotate while the network connection is
@@ -871,17 +949,24 @@ async fn run_loop(
                 }
                 continue;
             }
-            if frame
-                .controller_scope
-                .as_ref()
-                .is_some_and(|scope| !controller_authority.frame_is_current(scope))
-            {
+            if frame.controller_scope.as_ref().is_some_and(|scope| {
+                !controller_authority.frame_is_current(
+                    scope,
+                    super::controller::relay_runtime::controlled_monotonic_millis(),
+                )
+            }) {
                 continue;
             }
             let send_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => return,
-                result = write.send(Message::Text(frame.text.clone().into())) => result,
+                result = async {
+                    #[cfg(test)]
+                    if let Some(error) = injected_prepare_write_failure(&controller_authority, &frame) {
+                        return Err(error);
+                    }
+                    write.send(Message::Text(frame.text.clone().into())).await
+                } => result,
             };
             if let Err(error) = send_result {
                 push_pending_front(&mut pending, frame);
@@ -944,11 +1029,17 @@ async fn run_loop(
                                 continue;
                             }
                             if frame.controller_scope.as_ref().is_some_and(|scope|
-                                !controller_authority.frame_is_current(scope)) { continue; }
+                                !controller_authority.frame_is_current(scope, super::controller::relay_runtime::controlled_monotonic_millis())) { continue; }
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
-                                result = write.send(Message::Text(frame.text.clone().into())) => result,
+                                result = async {
+                                    #[cfg(test)]
+                                    if let Some(error) = injected_prepare_write_failure(&controller_authority, &frame) {
+                                        return Err(error);
+                                    }
+                                    write.send(Message::Text(frame.text.clone().into())).await
+                                } => result,
                             };
                             if send_result.is_err() {
                                 push_pending_front(&mut pending, frame);
@@ -1272,9 +1363,225 @@ mod shared_controller_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio_tungstenite::accept_async;
+
+    struct ControllerUpgrade;
+
+    // The upstream trait fixes the ErrorResponse ABI. Implement that interface
+    // directly instead of an inferred closure with a large error variant.
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for ControllerUpgrade {
+        fn on_request(
+            self,
+            _request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> std::result::Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(
+                    super::super::controller::protocol::CONTROLLER_SUBPROTOCOL,
+                ),
+            );
+            Ok(response)
+        }
+    }
+
+    async fn observe_stalled_upgrade(stream: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let byte = stream.read_u8().await.unwrap();
+            request.push(byte);
+            assert!(request.len() < 8192);
+        }
+        assert!(request.starts_with(b"GET "));
+    }
+
+    #[tokio::test]
+    async fn webaccess_connect_deadline_retries_stalled_upgrade_and_preserves_pending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut configuration = config();
+        configuration.relay_url = format!("ws://{}", listener.local_addr().unwrap());
+        let (sender, rx_out) = outbound_channel(8, 8192, 4096);
+        let queued = json!({"v": 2, "type": "rpc_response", "fixture": "retained"});
+        sender
+            .try_send(RelayOutbound::Message(queued.clone()))
+            .unwrap();
+        let (tx_in, mut rx_in) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
+        let worker = tokio::spawn(run_loop(
+            configuration,
+            tx_in,
+            rx_out,
+            sender.shutdown.clone(),
+            sender.socket_mode.clone(),
+            sender.controller_authority.clone(),
+        ));
+        let server = async {
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            observe_stalled_upgrade(&mut stalled).await;
+            // The peer does not send a response or close: the client deadline
+            // must cause EOF, then the existing backoff must lead to a new TCP.
+            assert_eq!(
+                stalled.read_u8().await.unwrap_err().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+            let (next, _) = listener.accept().await.unwrap();
+            assert!(began.elapsed() >= CONNECT_ATTEMPT_TIMEOUT + Duration::from_millis(350));
+            let mut socket = tokio_tungstenite::accept_hdr_async(next, ControllerUpgrade)
+                .await
+                .unwrap();
+            let register = socket.next().await.unwrap().unwrap();
+            let Message::Text(register) = register else {
+                panic!("registration")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&register).unwrap()["type"],
+                "desktop_endpoint_register"
+            );
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("retained frame")
+            };
+            assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), queued);
+            let mut timed_out = false;
+            loop {
+                match rx_in.recv().await.unwrap() {
+                    RelayInbound::Connection {
+                        connected: false,
+                        error: Some(error),
+                        ..
+                    } => {
+                        timed_out |= error.contains("connection attempt timed out");
+                    }
+                    RelayInbound::Connection {
+                        connected: true, ..
+                    } => break,
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+            assert!(timed_out);
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), server).await;
+        sender.cancel();
+        worker.await.unwrap();
+        result.expect("deadline must lead to a successful actual retry");
+    }
+
+    #[tokio::test]
+    async fn revocation_connect_deadline_retries_stalled_upgrade_and_keeps_responsibility() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("ws://{}", listener.local_addr().unwrap());
+        let (tx_in, mut rx_in) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
+        let worker = tokio::spawn(run_revocation_loop(
+            relay_url,
+            "ep_fixture".into(),
+            "fixture-secret".into(),
+            tx_in,
+        ));
+        let server = async {
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            observe_stalled_upgrade(&mut stalled).await;
+            assert_eq!(
+                stalled.read_u8().await.unwrap_err().kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+            let (next, _) = listener.accept().await.unwrap();
+            assert!(began.elapsed() >= CONNECT_ATTEMPT_TIMEOUT + Duration::from_millis(350));
+            let mut socket = accept_async(next).await.unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("revocation")
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap(),
+                revoke_message_parts("ep_fixture", "fixture-secret")
+            );
+            let terminal =
+                json!({"v":2,"type":"desktop_endpoint_revoked","endpoint_id":"ep_fixture"});
+            socket
+                .send(Message::Text(terminal.to_string().into()))
+                .await
+                .unwrap();
+            let mut timed_out = false;
+            loop {
+                match rx_in.recv().await.unwrap() {
+                    RelayInbound::Connection {
+                        connected: false,
+                        error: Some(error),
+                        ..
+                    } => timed_out |= error.contains("connection attempt timed out"),
+                    RelayInbound::Message(text) => {
+                        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), terminal);
+                        break;
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+            assert!(timed_out);
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), server).await;
+        drop(rx_in);
+        worker.await.unwrap();
+        result.expect("deadline must preserve revocation for the actual retry");
+    }
+
+    #[tokio::test]
+    async fn both_legacy_connect_waits_cancel_before_deadline() {
+        for revocation in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let relay_url = format!("ws://{}", listener.local_addr().unwrap());
+            let (tx_in, rx_in) = mpsc::channel(8);
+            let (sender, rx_out) = outbound_channel(8, 8192, 4096);
+            let mut configuration = config();
+            configuration.relay_url = relay_url.clone();
+            let mut worker = if revocation {
+                tokio::spawn(run_revocation_loop(
+                    relay_url,
+                    "ep_fixture".into(),
+                    "fixture-secret".into(),
+                    tx_in,
+                ))
+            } else {
+                tokio::spawn(run_loop(
+                    configuration,
+                    tx_in,
+                    rx_out,
+                    sender.shutdown.clone(),
+                    sender.socket_mode.clone(),
+                    sender.controller_authority.clone(),
+                ))
+            };
+            let test = async {
+                let (mut stalled, _) = listener.accept().await.unwrap();
+                observe_stalled_upgrade(&mut stalled).await;
+                if revocation {
+                    drop(rx_in);
+                } else {
+                    sender.cancel();
+                }
+                tokio::time::timeout(Duration::from_secs(1), &mut worker)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    stalled.read_u8().await.unwrap_err().kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                );
+            };
+            if tokio::time::timeout(Duration::from_secs(3), test)
+                .await
+                .is_err()
+            {
+                worker.abort();
+                let _ = worker.await;
+                panic!("legacy cancellation must not await the connection deadline");
+            }
+        }
+    }
 
     #[test]
     fn inbound_debug_redacts_relay_payloads_and_preserves_reader_receipt() {

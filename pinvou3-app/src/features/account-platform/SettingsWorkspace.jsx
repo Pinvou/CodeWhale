@@ -1,0 +1,220 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AdminLanguageControl } from './AdminLanguageControl.jsx';
+import { secureRequestID } from './request-id.js';
+import { useAccountOwner } from './useAccountOwner.js';
+import { smsStatusCopy, smsTemplateCopy } from '../../shared/i18n.js';
+import './admin-sms-presentation.css';
+function SectionHeader({ title, children }) { return <header className="adm-section-head"><h2>{title}</h2>{children}</header>; }
+function emptySMSTemplates() {
+  return { REGISTER: '', LOGIN: '', PROFILE_MOBILE: '', PASSWORD_RESET: '' };
+}
+
+function normalizeSMSField(value) {
+  // Match the server's strings.TrimSpace, including NEL but retaining BOM.
+  return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+}
+
+function smsConfigurationForm(configuration = {}) {
+  return {
+    enabled: Boolean(configuration.enabled),
+    provider_id: configuration.provider_id || 'aliyun-managed',
+    credential_profile: configuration.credential_profile || 'aliyun-default',
+    sign_name: configuration.sign_name || '',
+    templates: { ...emptySMSTemplates(), ...(configuration.templates || {}) },
+    reason: '',
+  };
+}
+
+export function SettingsWorkspace({ copy, language, languageFeedback, onLanguageChange, client, permissions }) {
+  const permissionSet = useMemo(() => new Set(permissions || []), [permissions]);
+  const canReadSMS = permissionSet.has('platform.sms-config.read');
+  const canManageSMS = permissionSet.has('platform.sms-config.manage');
+  const epoch = client.financeSessionEpoch || 0;
+  const authority = JSON.stringify([client.authorizationVersions?.context_version || 0, client.authorizationVersions?.platform_authorization_version || 0]);
+  const identity = useMemo(() => ({ client, epoch, authority, canReadSMS, canManageSMS }), [client, epoch, authority, canReadSMS, canManageSMS]);
+  const owner = useAccountOwner(identity);
+  const current = useCallback(token => owner.current(token) && (identity.client.financeSessionEpoch || 0) === identity.epoch && JSON.stringify([identity.client.authorizationVersions?.context_version || 0, identity.client.authorizationVersions?.platform_authorization_version || 0]) === identity.authority, [owner, identity]);
+  const readGeneration = useRef(0);
+  const readController = useRef(null);
+  const smsSource = useRef(null);
+  const intent = useRef(null);
+  const loadFailed = useRef(copy.settings.sms.loadFailed);
+  loadFailed.current = copy.settings.sms.loadFailed;
+  const conflictMessage = useRef(copy.settings.sms.conflict);
+  conflictMessage.current = copy.settings.sms.conflict;
+  const [sms, setSMS] = useState(null);
+  const [smsForm, setSMSForm] = useState(() => smsConfigurationForm());
+  const [smsState, setSMSState] = useState({ loading: canReadSMS, saving: false, error: '', notice: '' });
+
+  const loadSMSConfiguration = useCallback(async () => {
+    if (!canReadSMS) return;
+    readController.current?.abort();
+    const controller = new globalThis.AbortController(), signal = controller.signal;
+    readController.current = controller;
+    const token = owner.capture(), request = ++readGeneration.current, pending = intent.current;
+    setSMSState((value) => ({ ...value, loading: true, error: '', notice: '' }));
+    try {
+      const result = await client.smsConfiguration(signal);
+      if (!current(token) || signal?.aborted || request !== readGeneration.current) return;
+      if (!Number.isSafeInteger(result?.revision) || result.revision < 0) throw new Error('INVALID_SMS_REVISION');
+      // Only a read started after a definite no-write CAS conflict can retire it.
+      // Unknown outcomes keep their original command/key even after a refresh.
+      if (pending?.conflicted && intent.current === pending && result.revision > pending.command.expected_revision) intent.current = null;
+      smsSource.current = token;
+      setSMS(result);
+      setSMSForm(smsConfigurationForm(result));
+      setSMSState({ loading: false, saving: false, error: pending?.conflicted && intent.current === pending ? conflictMessage.current : '', notice: '' });
+    } catch (error) {
+      if (current(token) && !signal?.aborted && request === readGeneration.current && error?.name !== 'AbortError') setSMSState({ loading: false, saving: false, error: loadFailed.current, notice: '' });
+    }
+  }, [canReadSMS, client, owner, current]);
+
+  useEffect(() => {
+    intent.current = null; smsSource.current = null; setSMS(null);
+    void loadSMSConfiguration();
+    return () => { readGeneration.current++; readController.current?.abort(); };
+  }, [loadSMSConfiguration]);
+
+  useEffect(() => client.onAuthorizationVersion?.(() => {
+    if ((client.financeSessionEpoch || 0) !== epoch || JSON.stringify([client.authorizationVersions?.context_version || 0, client.authorizationVersions?.platform_authorization_version || 0]) !== authority) {
+      owner.invalidate(); readGeneration.current++; readController.current?.abort(); intent.current = null; smsSource.current = null;
+      setSMS(null); setSMSState({ loading: false, saving: false, error: loadFailed.current, notice: '' });
+    }
+  }), [client, owner, epoch, authority]);
+
+  const chooseSMSProvider = (providerID) => {
+    setSMSForm((value) => ({
+      ...value,
+      provider_id: providerID,
+      credential_profile: providerID === 'aliyun-managed' ? 'aliyun-default' : 'http-default',
+      sign_name: providerID === 'aliyun-managed' ? value.sign_name : '',
+      templates: providerID === 'aliyun-managed' ? value.templates : emptySMSTemplates(),
+    }));
+  };
+
+  const saveSMSConfiguration = async (event) => {
+    event.preventDefault();
+    if (!canManageSMS || !sms || smsState.loading || smsState.saving || !smsSource.current || !current(smsSource.current) || intent.current?.conflicted) return;
+    const token = owner.capture();
+    readGeneration.current++;
+    let attempt;
+    setSMSState((value) => ({ ...value, saving: true, error: '', notice: '' }));
+    try {
+      const command = {
+        expected_revision: sms.revision,
+        enabled: smsForm.enabled,
+        provider_id: smsForm.provider_id,
+        credential_profile: smsForm.credential_profile,
+        sign_name: smsForm.provider_id === 'aliyun-managed' ? normalizeSMSField(smsForm.sign_name) : '',
+        templates: smsForm.provider_id === 'aliyun-managed' ? Object.fromEntries(Object.entries(smsForm.templates).map(([purpose, value]) => [purpose, normalizeSMSField(value)])) : emptySMSTemplates(),
+        reason: smsForm.reason.trim(),
+      };
+      if (!Number.isSafeInteger(command.expected_revision) || command.expected_revision < 0) throw new Error('INVALID_SMS_REVISION');
+      const fingerprint = JSON.stringify({ ...command, expected_revision: undefined });
+      if (!intent.current || (!intent.current.unknown && intent.current.fingerprint !== fingerprint)) intent.current = { fingerprint, command, key: `sms-configuration-${secureRequestID()}` };
+      attempt = intent.current;
+      const result = await client.updateSMSConfiguration(attempt.command, attempt.key);
+      if (!current(token)) return;
+      if (!result || result.revision !== attempt.command.expected_revision + 1 || result.provider_id !== attempt.command.provider_id || result.credential_profile !== attempt.command.credential_profile || result.enabled !== attempt.command.enabled || Object.keys(emptySMSTemplates()).some(key => result.templates?.[key] !== attempt.command.templates[key]) || (result.sign_name || '') !== attempt.command.sign_name) throw new Error('INVALID_SMS_ACK');
+      if (intent.current === attempt) intent.current = null;
+      smsSource.current = token;
+      setSMS(result);
+      setSMSForm(smsConfigurationForm(result));
+      setSMSState({ loading: false, saving: false, error: '', notice: { revision: result.revision, original: Boolean(attempt.unknown) } });
+    } catch (error) {
+      if (!current(token)) return;
+      const outcomeUnknown = !error?.status || error.status >= 500;
+      if (attempt && intent.current === attempt) {
+        if (error?.status === 409 && error?.code === 'SMS_CONFIGURATION_CONFLICT') attempt.conflicted = true;
+        else if (outcomeUnknown) attempt.unknown = true;
+      }
+      const message = error?.code === 'SMS_CONFIGURATION_CONFLICT'
+        ? copy.settings.sms.conflict
+        : error?.code === 'SMS_PROVIDER_PROFILE_UNAVAILABLE'
+          ? copy.settings.sms.profileUnavailable
+          : error?.code === 'RECENT_AUTHENTICATION_REQUIRED'
+            ? copy.settings.sms.recentAuthenticationRequired
+            : attempt?.unknown && outcomeUnknown ? '' : copy.settings.sms.saveFailed;
+      setSMSState({ loading: false, saving: false, error: message, notice: '' });
+    }
+  };
+
+  const smsWords = smsStatusCopy[language];
+  const templateWords = smsTemplateCopy[language];
+  const saveNotice = smsState.notice && (smsState.notice.original ? templateWords.replaySaved : templateWords.saved).replace('{revision}', smsState.notice.revision);
+  const onOff = value => value === true ? smsWords.on : value === false ? smsWords.off : smsWords.unknown;
+  const savedForm = sms ? smsConfigurationForm(sms) : null;
+  const draftChanged = savedForm && (['enabled', 'provider_id', 'credential_profile', 'sign_name'].some(key => savedForm[key] !== smsForm[key]) ||
+    Object.keys(emptySMSTemplates()).some(key => savedForm.templates[key] !== smsForm.templates[key]));
+  const savedProfile = sms?.available_profiles?.find(profile => profile.provider_id === sms.provider_id && profile.profile_id === sms.credential_profile);
+  const pendingAttempt = intent.current?.unknown && !intent.current.conflicted ? intent.current.command : null;
+  const providerName = value => copy.settings.sms.providers[value] || value || smsWords.unknown;
+  const selectedProfile = sms?.available_profiles?.find((profile) => profile.profile_id === smsForm.credential_profile);
+  const formValid = smsForm.reason.trim().length >= 10 && (!smsForm.enabled || selectedProfile?.configured) && (smsForm.provider_id !== 'aliyun-managed' || (
+    normalizeSMSField(smsForm.sign_name) && Object.values(smsForm.templates).every((value) => normalizeSMSField(value))
+  ));
+  return (
+    <div className="adm-settings-stack">
+      <section className="adm-panel adm-settings-panel">
+        <SectionHeader title={copy.settings.title} copy={copy} />
+        <AdminLanguageControl label={copy.settings.language} language={language} feedback={languageFeedback} onChange={onLanguageChange} />
+      </section>
+      {canReadSMS && (
+        <section className="adm-panel adm-settings-panel adm-sms-configuration" data-readiness={sms?.readiness || 'LOADING'}>
+          <SectionHeader title={copy.settings.sms.title} copy={copy} />
+          <p className="adm-muted">{copy.settings.sms.boundary}</p>
+          {smsState.loading && <div className="adm-empty" role="status">{copy.loading}</div>}
+          {smsState.error && <div className="adm-inline-message error adm-sms-error" role="alert"><span>{smsState.error}</span><button type="button" disabled={smsState.loading || smsState.saving} onClick={() => void loadSMSConfiguration()}>{copy.retry}</button></div>}
+          {sms && !smsState.loading && (
+            <>
+              <section className="adm-sms-effective">
+                <h3>{smsState.notice?.original ? templateWords.originalReceipt : smsWords.saved}</h3>
+                <dl className="adm-detail-grid adm-sms-summary">
+                  <div><dt>{smsWords.switchLabel}</dt><dd>{onOff(sms.enabled)}</dd></div>
+                  <div><dt>{copy.settings.sms.readiness}</dt><dd>{copy.settings.sms.readinessValues[sms.readiness] || sms.readiness || smsWords.unknown}</dd></div>
+                  <div><dt>{copy.settings.sms.profile}</dt><dd>{savedProfile?.configured === true ? copy.settings.sms.configured : savedProfile?.configured === false ? copy.settings.sms.notConfigured : smsWords.unknown}</dd></div>
+                  <div><dt>{copy.settings.sms.provider}</dt><dd>{providerName(sms.provider_id)}</dd></div>
+                  <div><dt>{copy.settings.sms.revision}</dt><dd>{sms.revision}</dd></div>
+                  <div><dt>{copy.settings.sms.source}</dt><dd>{copy.settings.sms.sources[sms.source] || sms.source || smsWords.unknown}</dd></div>
+                </dl>
+                <p className="adm-muted">{smsWords.readinessBoundary}</p>
+              </section>
+              <form className="adm-sms-form" onSubmit={saveSMSConfiguration}>
+              {canManageSMS && <div className="adm-sms-draft-head">
+                <h3>{smsWords.edit}</h3>
+                <p role="status" className={draftChanged ? "adm-status warn" : "adm-status neutral"}>{draftChanged ? smsWords.dirty : smsWords.clean}</p>
+              </div>}
+              {pendingAttempt && <p className="adm-sms-unknown" role="status">{smsWords.unknownWrite} {smsWords.retryTarget}: <strong>{onOff(pendingAttempt.enabled)} · {providerName(pendingAttempt.provider_id)} · {smsWords.version} {pendingAttempt.expected_revision}</strong> <button type="button" disabled={smsState.loading || smsState.saving} onClick={() => void loadSMSConfiguration()}>{copy.refresh}</button></p>}
+              <label className="adm-sms-switch"><input aria-describedby="adm-sms-impact" type="checkbox" checked={smsForm.enabled} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{copy.settings.sms.enabled}</span></label>
+              <p className="adm-muted adm-sms-impact" id="adm-sms-impact">{smsForm.enabled ? smsWords.enableImpact : smsWords.disableImpact}</p>
+              <div className="adm-sms-fields">
+                <label><span>{copy.settings.sms.provider}</span><select value={smsForm.provider_id} disabled={!canManageSMS || smsState.saving} onChange={(event) => chooseSMSProvider(event.target.value)}>{(sms.available_profiles || []).map((profile) => <option key={profile.profile_id} value={profile.provider_id}>{copy.settings.sms.providers[profile.provider_id] || profile.provider_id}</option>)}</select></label>
+                <label><span>{copy.settings.sms.profile}</span><select value={smsForm.credential_profile} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, credential_profile: event.target.value }))}>{(sms.available_profiles || []).filter((profile) => profile.provider_id === smsForm.provider_id).map((profile) => <option key={profile.profile_id} value={profile.profile_id}>{profile.profile_id} · {profile.configured ? copy.settings.sms.configured : copy.settings.sms.notConfigured}</option>)}</select></label>
+                {smsForm.provider_id === 'aliyun-managed' && <>
+                  <label><span>{copy.settings.sms.signName}</span><input required maxLength="100" value={smsForm.sign_name} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, sign_name: event.target.value }))} /></label>
+                  {Object.entries(copy.settings.sms.templateLabels).map(([purpose, label]) => {
+                    const saved = sms.provider_id === 'aliyun-managed' ? sms.templates?.[purpose] : '';
+                    return <label className="adm-sms-template" key={purpose}>
+                      <span>{label} · {templateWords.identifier}</span>
+                      <input aria-describedby={'adm-sms-template-' + purpose} required maxLength="120" value={smsForm.templates[purpose]} disabled={!canManageSMS || smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, templates: { ...value.templates, [purpose]: event.target.value } }))} />
+                      <small id={'adm-sms-template-' + purpose}>{templateWords.savedID}: {saved ? <bdi dir="ltr"><code>{saved}</code></bdi> : templateWords.notConfigured}</small>
+                    </label>;
+                  })}
+                </>}
+                {canManageSMS && <label className="adm-sms-reason"><span>{copy.settings.sms.reason}</span><textarea aria-describedby="adm-sms-reason-help" required minLength="10" maxLength="500" rows="3" value={smsForm.reason} disabled={smsState.saving} onChange={(event) => setSMSForm((value) => ({ ...value, reason: event.target.value }))} /><small id="adm-sms-reason-help">{copy.settings.sms.reasonPlaceholder}</small></label>}
+              </div>
+              {!selectedProfile?.configured && smsForm.enabled && <div className="adm-inline-message error" role="alert">{copy.settings.sms.profileUnavailable}</div>}
+              {!canManageSMS && <div className="adm-inline-message info" role="status">{copy.settings.sms.readOnly}</div>}
+              {canManageSMS && <footer className="adm-sms-form-actions">
+                <div className="adm-sms-save-feedback" role="status">{smsState.saving ? copy.settings.sms.saving : saveNotice}</div>
+                {smsState.notice?.original && <button type="button" disabled={smsState.saving || smsState.loading} onClick={() => void loadSMSConfiguration()}>{copy.refresh}</button>}
+                <button type="submit" className="adm-primary-button" formNoValidate={Boolean(pendingAttempt)} disabled={smsState.saving || (!pendingAttempt && !formValid) || Boolean(intent.current?.conflicted)}>{smsState.saving ? copy.settings.sms.saving : pendingAttempt ? smsWords.retryOriginal : copy.settings.sms.save}</button>
+              </footer>}
+              </form>
+            </>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}

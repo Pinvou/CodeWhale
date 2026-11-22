@@ -1,0 +1,5 @@
+DROP TRIGGER usage_hold_admin_actions_immutable ON usage_hold_admin_actions;
+DROP TRIGGER usage_hold_lease_events_immutable ON usage_hold_lease_events;
+DROP FUNCTION reject_usage_hold_evidence_mutation();
+DROP TABLE usage_hold_admin_actions;
+DROP TABLE usage_hold_lease_events;

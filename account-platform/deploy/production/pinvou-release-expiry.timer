@@ -1,0 +1,11 @@
+[Unit]
+Description=Pinvou daily recorded runtime credential expiry check
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+RandomizedDelaySec=5min
+Unit=pinvou-release-expiry.service
+
+[Install]
+WantedBy=timers.target

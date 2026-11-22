@@ -22,6 +22,7 @@ const staticExtensions = new Set([
 // ships it (see runtimeFetchAssets below).
 export const staticRuntimeScripts = new Set([
   'features/attachments/attachment-drop-controller.js',
+  'features/attachments/attachment-telemetry.js',
   'features/personas/personas-i18n.js',
   'features/updater/update-notice-logic.js',
   // Windows 双端远程控制的纯状态模块（DEV-20）：index.html 经典脚本，
@@ -437,15 +438,17 @@ export const lazyChunkContracts = {
   knowledge: ['features/knowledge/KnowledgeView.jsx', 'KnowledgeView'],
   modelStore: ['features/model-store/ModelStoreView.jsx', 'ModelStoreView'],
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
+  deviceManager: ['features/device-manager/DeviceManagerView.jsx', 'DeviceManagerView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
   teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
+  accountPlatformPopover: ['features/account-platform/AccountPlatformPopover.jsx', 'AccountPlatformPopover'],
   searchOverlay: ['features/search/SearchOverlay.jsx', 'SearchOverlay'],
   moveToProjectDialog: ['features/projects/MoveToProjectDialog.jsx', 'MoveToProjectDialog'],
   rebindFolderDialog: ['features/projects/RebindFolderDialog.jsx', 'RebindFolderDialog'],
   pinvouSummon: ['features/tools/PinvouSummonCard.jsx', 'PinvouSummonModal'],
   updateNotice: ['features/updater/UpdateNoticeButton.jsx', 'UpdateNoticeButton'],
   savedPersonaConfirmDialog: ['features/personas/SavedPersonaConfirmDialog.jsx', 'SavedPersonaConfirmDialog'],
-  apiKeyGateDialog: ['features/settings/ApiKeyGateDialog.jsx', 'ApiKeyGateDialog'],
+  modelAccessGate: ['features/settings/ModelAccessGate.jsx', 'ModelAccessGate'],
   archiveConfirmDialog: ['components/ArchiveConfirmDialog.jsx', 'ArchiveConfirmDialog'],
   toolWelcome: ['features/tools/ToolWelcomeCard.jsx', 'ToolWelcomeCard'],
 };
@@ -471,12 +474,37 @@ export function assertLazyChunks(bundle, contracts = { ...lazyChunkContracts, ..
   }
 }
 
+// A non-entry chunk can still be eagerly imported. Follow the complete static
+// dependency graph so moving the reminder to a static group cannot pass this.
+export function assertDeferredStartupUpdates(bundle) {
+  const chunks = Object.values(bundle).filter(output => output.type === 'chunk');
+  const main = chunks.find(output => output.name === 'main' && output.isEntry);
+  if (!main) throw new Error('Startup reminder gate did not find the main entry');
+  const byFile = new Map(chunks.map(output => [output.fileName, output]));
+  const eager = new Set();
+  const pending = [main.fileName];
+  while (pending.length) {
+    const file = pending.pop();
+    if (eager.has(file)) continue;
+    eager.add(file);
+    pending.push(...(byFile.get(file)?.imports || []));
+  }
+  for (const module of ['startup-update-runtime.js', 'startup-update-read-state.js']) {
+    const holders = chunks.filter(output => Object.keys(output.modules).some(id =>
+      id.replaceAll('\\', '/').endsWith(`/features/model-store/${module}`)));
+    if (holders.length !== 1 || holders[0].isEntry || eager.has(holders[0].fileName)) {
+      throw new Error(`${module} must be emitted once outside the main static dependency graph`);
+    }
+  }
+}
+
 function enforceLazyChunks() {
   return {
     name: 'pinvou-enforce-lazy-chunks',
     apply: 'build',
     generateBundle(_options, bundle) {
       assertLazyChunks(bundle);
+      assertDeferredStartupUpdates(bundle);
     },
   };
 }
@@ -543,8 +571,19 @@ function enforceLazyChunks() {
 // typical node 22 vs CI node 24 delta and the one recorded ~0.9 kB spike).
 // Raising a ceiling still requires measured desktop + web before/after sizes
 // and an explicit review decision.
-export const MAIN_ENTRY_BUDGET_BYTES = 159_000;
-export const WEB_MAIN_ENTRY_BUDGET_BYTES = 161_000;
+// 2026-10-28 account-platform integration: 159_000 / 161_000 -> 173_000 /
+// 175_000, explicitly approved after same-host Windows / Node 24 builds.
+// Frozen main f1f1286d measured desktop 156,637 B / web 158,885 B; the merged
+// account-platform tree measured 170,915 B / 173,102 B. Resolved dependency
+// versions were identical. Keep about 2 kB headroom and both strict gates;
+// do not defer the account client or alter its synchronous identity capture
+// merely to meet an entry-file budget. Chunk groups remain unchanged.
+// 2026-11-05 rebase 重测（合并树实测）：main 库存 173_000/175_000 对
+// device-manager 接线不够——本机 arm64 desktop/web main entry 同为
+// 174,805 B，CI x64 系统性 +~0.6 kB ≈ 175.4 kB，已越过 main 天花板。
+// 按 11-03 先例取"实测 + ~3 kB"重立余量（web 保持 desktop+2 kB 既有关系）。
+export const MAIN_ENTRY_BUDGET_BYTES = 178_000;
+export const WEB_MAIN_ENTRY_BUDGET_BYTES = 180_000;
 
 function mainEntryBudgetBytesFor(mode) {
   return mode === 'web' ? WEB_MAIN_ENTRY_BUDGET_BYTES : MAIN_ENTRY_BUDGET_BYTES;
@@ -577,6 +616,7 @@ function enforceMainEntryBudget(mode) {
 
 export default defineConfig(({ mode }) => {
   const webBuild = mode === 'web';
+  const accountPortalBuild = mode === 'account-portal';
   return {
   root: 'src',
   // The Relay and Vite build intentionally share one deployment variable;
@@ -590,14 +630,10 @@ export default defineConfig(({ mode }) => {
   },
   plugins: [
     react(),
-    copyRuntimeAssets(),
-    enforceLazyChunks(),
-    enforceMainEntryBudget(mode),
-    conditionalPlatformScripts(webBuild),
-    bundleClassicStartup(webBuild),
+    ...(accountPortalBuild ? [] : [copyRuntimeAssets(), enforceLazyChunks(), enforceMainEntryBudget(mode), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
   ],
   build: {
-    outDir: webBuild ? '../../remote-control-relay/web/dist' : '../dist',
+    outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
     emptyOutDir: true,
     // Minimum supported WebViews: macOS 11 WKWebView is Safari 14.0 — the
     // default "baseline-widely-available" target emits syntax it cannot parse
@@ -610,7 +646,9 @@ export default defineConfig(({ mode }) => {
     target: 'safari14',
     cssTarget: 'safari14',
     rolldownOptions: {
-      input: webBuild
+      input: accountPortalBuild
+        ? { account: resolve(sourceRoot, 'account.html'), admin: resolve(sourceRoot, 'admin.html'), handoff: resolve(sourceRoot, 'portal-session-handoff.html') }
+        : webBuild
         ? { main: resolve(sourceRoot, 'index.html') }
         : {
             main: resolve(sourceRoot, 'index.html'),

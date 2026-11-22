@@ -26,3 +26,18 @@ pub mod unsupported;
 pub(crate) use linux as backend;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use unsupported as backend;
+
+// 商店边界（features/device 的外部模型登记/移除消费）。与文件内其余平台差异
+// 同一约定：具体实现住 linux/（boundary.rs）与 unsupported/，这里只做无 cfg 的
+// 转发——第四轮评审前这里曾内联两套 #[cfg] fn，与模块级约定并存成第二套写法。
+pub(crate) use backend::{
+    installed_import_markers_checked, installed_ownership_unconfirmable_checked,
+    installed_weight_candidate_names_checked, installed_weight_filenames_checked,
+    installed_weight_paths_checked, installed_weight_paths_for_removal_checked, ollama_base_url,
+    ollama_base_url_checked, store_model_name, store_model_name_checked, store_weights_roots,
+    store_weights_roots_checked, with_weight_removal_boundary,
+};
+
+// lib.rs 启动路径直接调用的后台对账（r36 P2-1）：与上面边界函数同约定走
+// backend 转发，非 Linux 是 no-op——启动同步没有用户面，不适用「回不支持」话术。
+pub(crate) use backend::linked_models_startup_sync;

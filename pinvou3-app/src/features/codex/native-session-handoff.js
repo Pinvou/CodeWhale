@@ -64,3 +64,24 @@ export async function finalizePreparedSessionCreation({
   // the error so the caller can rebind session-scoped operation state before reporting it.
   return { id: sessionId, info, activated: true, preparationError };
 }
+
+// Code owns its session/draft reference; an in-flight refresh for another session
+// cannot supply a reference for the newly active one.
+export function resolveNativeModelRef({ activeId, controlsSessionId, controlsModelRef, draftModelRef, handoffModelRef }) {
+  if (activeId && controlsSessionId === activeId) return controlsModelRef || null;
+  if (activeId) return handoffModelRef || null;
+  return draftModelRef || null;
+}
+
+// Platform selections use the registered catalog-validated command. The session
+// store's internal set_session_model_ref method is not a public host command.
+export async function persistNativeSessionModelRef(invoke, sessionId, ref) {
+  if (!sessionId || !ref) throw new Error('Invalid session model selection');
+  if (ref.source === 'ACCOUNT_PLATFORM' && typeof ref.model_id === 'string' && ref.model_id.trim()) {
+    return invoke('account_platform_select_session_model', { input: { sessionId, modelId: ref.model_id } });
+  }
+  if (ref.source === 'LOCAL_CONFIG' && typeof ref.saved_model_id === 'string' && ref.saved_model_id.trim()) {
+    return invoke('set_session_model', { sessionId, modelId: ref.saved_model_id });
+  }
+  throw new Error('Invalid session model selection');
+}

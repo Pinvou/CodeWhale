@@ -1,0 +1,3 @@
+DROP TRIGGER organization_lifecycle_terminal_guard ON organization_lifecycle_states;
+DROP FUNCTION prevent_deleted_organization_reactivation();
+DROP TABLE organization_lifecycle_states;

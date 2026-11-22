@@ -9,12 +9,16 @@ import { Check, ChevronDown, Cpu, Plus, Store, Users, Wrench, X } from '../../co
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
-import { selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
+import { ACCOUNT_PLATFORM_SOURCE, LOCAL_CONFIG_SOURCE, composerPlatformModels, platformModelRuntimeSupported, platformModelSelectableForNewSession, sameModelSelectionRef } from '../account-platform/model-catalog-selection.js';
 import { can } from '../../shared/platform.js';
 import { buildComposerToolMenuState, createToggleWriteGate, TOGGLE_WRITE_KEY_PROJECT_SKILLS } from './composer-tool-menu-logic.js';
 import { invokeTauri } from '../../platform/tauri/client.js';
 import {
+  ARTIFACT_PREVIEW_REQUEST_SIZE,
+  artifactPreviewContentSizeFromMessage,
   artifactPreviewExternalUrlFromMessage,
+  artifactPreviewFrameWheelFromMessage,
   buildArtifactPreviewDocument,
 } from '../artifacts/artifact-preview-navigation.js';
 import {
@@ -61,17 +65,27 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       compact,
       sessionId: sessionIdProp,
       sessionModelId: sessionModelIdProp,
+      sessionModelRef: sessionModelRefProp,
       busy: busyProp,
       onSwitchModel,
+      onSwitchModelRef,
       multiAgentEnabled: multiAgentEnabledProp,
       multiAgentAvailable: multiAgentAvailableProp,
       onToggleMultiAgent,
+      accountPlatformClient,
       // eslint-disable-next-line sonarjs/cognitive-complexity -- the composer selector aggregates model/menu/multi-agent branches; splitting needs a dedicated design like the SettingsView suppression
     }) => {
       const [open, setOpen] = useState(false);
+      const [platformModels, setPlatformModels] = useState([]);
+      const [platformState, setPlatformState] = useState('idle');
+      const [modelSwitchError, setModelSwitchError] = useState(false);
+      const modelSwitchPending = useRef(false);
       const triggerRef = useRef(null);
       const canManageModels = can('modelManagement');
       const canSwitchModels = can('sessionModelSwitch');
+      const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
+      const modelSelectionOwner = useRef(activeSessionId);
+      modelSelectionOwner.current = activeSessionId;
       // 多智能体模式 = 模型列表下方的会话级开关（ADR-0006）。状态权威在
       // 后端 mode_state，这里只读 bs 镜像；翻转后 bridge 回写权威状态。
       // 可用性由调用方以 multiAgentAvailable 显式传入（定时会话在后端被
@@ -93,6 +107,28 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
       useEffect(() => {
         if (!open) setMultiAgentRevealing(false);
       }, [open]);
+      useEffect(() => {
+        if (!open || !accountPlatformClient) return undefined;
+        const controller = new window.AbortController();
+        setPlatformModels([]);
+        setPlatformState('loading');
+        accountPlatformClient.session(controller.signal).then(session => {
+          if (controller.signal.aborted) return null;
+          if (!session?.authenticated) {
+            setPlatformModels([]);
+            setPlatformState('auth_required');
+            return null;
+          }
+          return accountPlatformClient.modelCatalog(controller.signal);
+        }).then(catalog => {
+          if (!catalog || controller.signal.aborted) return;
+          setPlatformModels(composerPlatformModels(catalog.items));
+          setPlatformState('ready');
+        }).catch(() => {
+          if (!controller.signal.aborted) setPlatformState('error');
+        });
+        return () => controller.abort();
+      }, [open, accountPlatformClient, activeSessionId]);
       async function toggleMultiAgent() {
         if (multiAgentBusy || busy) return;
         if (!onToggleMultiAgent
@@ -106,13 +142,25 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           setMultiAgentBusy(false);
         }
       }
-      const savedModels = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus);
-      const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
+      const savedModels = selectableModels((bs && bs.savedModels) || [])
+        .filter(model => !isBuiltInAccountPlatformModel(model));
+
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);
       const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
-      const effectiveId = currentSessionModelId || activeModelId;
-      const current = savedModels.find(m => m.id === effectiveId);
+      const legacyRef = { source: LOCAL_CONFIG_SOURCE, saved_model_id: currentSessionModelId || activeModelId };
+      // Explicit host bindings (e.g. Code mode) must not borrow the chat session's model.
+      const effectiveRef = sessionModelRefProp !== undefined
+        ? (sessionModelRefProp || legacyRef)
+        : ((sessionModelIdProp !== undefined ? legacyRef : null)
+          || (activeSessionId ? bs?.currentSessionModelRef : bs?.pendingDraftModelRef)
+          || bs?.defaultModelRef
+          || legacyRef);
+      const effectiveLocalId = effectiveRef?.source === LOCAL_CONFIG_SOURCE ? effectiveRef.saved_model_id : null;
+      const effectivePlatformId = effectiveRef?.source === ACCOUNT_PLATFORM_SOURCE ? effectiveRef.model_id : null;
+      const current = savedModels.find(m => m.id === effectiveLocalId);
+      const currentPlatform = platformModels.find(item => item.model_id === effectivePlatformId);
+      const currentLabel = currentPlatform?.display_name || effectivePlatformId || (current ? selectorMainLabel(current, t) : t.modelNonePick);
       // 本地/私网 openai_compatible 端点：探测服务类型，按探测结果下发真实档位
       // (vllm → four tiers, ollama → off/high, lmstudio/generic → unsupported hint). Credentials are saved values
       // that do not change per keystroke, so no debounce is needed (only the form entry needs 400ms, see the hook comment).
@@ -138,7 +186,9 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
         if (!current) return;
         if (tier === reasoningEffortValue) return;
         setEffortSaveError('');
-        const next = { ...current, reasoning_effort: tier };
+        // The bridge may await telemetry while another editor or store refresh
+        // updates this row. Commit only this field against the latest settings.
+        const next = { ...current, reasoning_effort: tier, reasoning_effort_only: true };
         if (!bridge.available) { setOpen(false); return; }
         // 保存成功才收弹层；失败保留弹层以便展示 effortSaveError（否则错误渲染
         // 在已关闭的 popover 内不可达）。
@@ -149,18 +199,32 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
             setEffortSaveError(message);
           });
       }
-      if (!savedModels.length) return null;
-      function pick(id) {
-        setOpen(false);
-        setEffortSaveError('');
-        if (id === effectiveId) return;
-        if (onSwitchModel) { onSwitchModel(activeSessionId, id); return; }
-        if (bridge.available) bridge.models.switchModel(activeSessionId, id);
+      async function pick(modelRef) {
+        if (busy || !canSwitchModels || modelSwitchPending.current) return;
+        const owner = activeSessionId;
+        setModelSwitchError(false);
+        const alreadySelected = sameModelSelectionRef(modelRef, effectiveRef);
+        if (alreadySelected) { setOpen(false); return; }
+        modelSwitchPending.current = true;
+        try {
+          if (onSwitchModelRef) {
+            await onSwitchModelRef(activeSessionId, modelRef);
+          } else if (onSwitchModel && modelRef.source === LOCAL_CONFIG_SOURCE) {
+            await onSwitchModel(activeSessionId, modelRef.saved_model_id);
+          } else if (bridge.available) {
+            await bridge.models.switchModelRef(activeSessionId, modelRef);
+          }
+          if (owner === modelSelectionOwner.current) setOpen(false);
+        } catch (_) {
+          if (owner === modelSelectionOwner.current) setModelSwitchError(true);
+        } finally {
+          modelSwitchPending.current = false;
+        }
       }
       return (
         <div className="relative min-w-0">
           <button type="button" ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
-            title={(current ? selectorMainLabel(current, t) : t.modelNonePick) + (busy ? ' · ' + t.modelSwitchBusy : '')}
+            title={currentLabel + (busy ? ' · ' + t.modelSwitchBusy : '')}
             className={`relative shrink-0 flex items-center justify-center ${multiAgentOn ? 'text-[#6d28d9] dark:text-[#c4b5fd]' : 'text-gray-700 dark:text-gray-200'} transition-colors border disabled:opacity-50 ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold min-w-0 max-w-full bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
             {compact ? (
               <>
@@ -170,7 +234,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
             ) : (
               <>
                 <span className="w-1.5 h-1.5 shrink-0 rounded-full bg-[#34C759]"></span>
-                <span className="max-w-[116px] truncate">{t.composerModelLabel(current ? selectorMainLabel(current, t) : t.modelNonePick)}</span>
+                <span className="max-w-[116px] truncate">{t.composerModelLabel(currentLabel)}</span>
                 <ChevronDown size={13} className="opacity-50 shrink-0" />
               </>
             )}
@@ -184,7 +248,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                       {withDivider && <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />}
                       <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{label}</div>
                       {items.map(m => (
-                        <button type="button" key={m.id} onClick={() => pick(m.id)}
+                        <button type="button" key={m.id} onClick={() => pick({ source: LOCAL_CONFIG_SOURCE, saved_model_id: m.id })}
                           className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white">
                           <span className="flex items-center gap-2.5 min-w-0">
                             <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
@@ -193,15 +257,40 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
                               <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{selectorSubLabel(m, t)}</span>
                             </span>
                           </span>
-                          {m.id === effectiveId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
+                          {m.id === effectiveLocalId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
                         </button>
                       ))}
                     </>
                   );
                   return (
                     <>
-                      {renderGroup(t.modelGroupPreset, preset, false)}
-                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0)}
+                      {platformModels.length > 0 && (
+                        <>
+                          <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{t.uiSettingsDetail.platformModels}</div>
+                          {platformModels.map(item => {
+                            const selectable = platformModelSelectableForNewSession(item);
+                            return (
+                              <button key={item.model_id} disabled={!selectable} title={!platformModelRuntimeSupported(item) ? t.uiSettingsDetail.modelRuntimeProtocolUnavailable : undefined} onClick={() => pick({ source: ACCOUNT_PLATFORM_SOURCE, model_id: item.model_id })}
+                                className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group enabled:hover:bg-[#007AFF] enabled:hover:text-white disabled:opacity-60 disabled:cursor-not-allowed">
+                                <span className="flex items-center gap-2.5 min-w-0">
+                                  <Cpu size={15} className="shrink-0 text-gray-400 group-[:enabled:hover]:text-white/90" />
+                                  <span className="min-w-0">
+                                    <span className="block text-[13px] truncate text-gray-700 dark:text-gray-200 group-[:enabled:hover]:text-white">{item.display_name || item.model_id}</span>
+                                    <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-[:enabled:hover]:text-white/80">{item.model_id}</span>
+                                  </span>
+                                </span>
+                                {item.model_id === effectivePlatformId && <Check size={15} className="shrink-0 text-[#007AFF] group-[:enabled:hover]:text-white" />}
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
+                      {platformState === 'loading' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsLoading}</div>}
+                      {platformState === 'auth_required' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsSignIn}</div>}
+                      {platformState === 'error' && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.platformModelsUnavailable}</div>}
+                      {renderGroup(t.modelGroupPreset, preset, platformModels.length > 0)}
+                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0 || platformModels.length > 0)}
+                      {modelSwitchError && <div role="alert" className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.modelSwitchFailed}</div>}
                     </>
                   );
                 })()}
@@ -270,29 +359,31 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
     const ScaledHtmlPreview = ({ html, title, onFrameLoad, onOpenExternal, zoomMode = 'auto-width', customScale = 1, onScaleChange, onCustomScaleChange }) => {
       const wrapRef = useRef(null);
       const frameRef = useRef(null);
-      const naturalRef = useRef(null);
+      const naturalRef = useRef(null); // 当前 html 的内容自然尺寸缓存(在面板参考宽度下测得)
+      const openRelayLastAtRef = useRef(0); // 外链打开中继的限速时钟（见消息监听器）
       const [box, setBox] = useState(null); // { w, h, scale }
       const [ready, setReady] = useState(false);
       const managedZoom = zoomMode !== 'auto-width';
       const canvasW = managedZoom ? 1440 : null;
       const measure = () => {
         try {
-          const fr = frameRef.current, wrap = wrapRef.current;
-          if (!fr || !wrap || !fr.contentWindow) return;
-          const doc = fr.contentWindow.document;
-          const de = doc.documentElement, bd = doc.body;
+          const wrap = wrapRef.current;
+          if (!wrap) return;
           const panelW = wrap.clientWidth;
           const panelH = wrap.clientHeight;
-          // Reusing the first natural size prevents iframe growth from feeding back into ResizeObserver.
-          let natural = naturalRef.current;
-          if (!natural) {
-            const width = Math.max(de ? de.scrollWidth : 0, bd ? bd.scrollWidth : 0);
-            const height = Math.max(de ? de.scrollHeight : 0, bd ? bd.scrollHeight : 0);
-            natural = { width, height };
-            if (width > 0 && height > 0) naturalRef.current = natural;
-          }
-          const w = managedZoom ? Math.max(canvasW, natural.width || 0) : natural.width;
-          const h = natural.height;
+          // 内容自然尺寸只在面板参考宽度下测量一次并缓存；后续仅依据面板尺寸重算缩放。
+          // 若把「已按自然宽度撑开的 iframe 视口」每次再喂回测量，弹层里的 vw/vh 与
+          // 溢出内容（如 right:-120px 的绝对定位元素）会让 scrollWidth/scrollHeight 随 iframe
+          // 被撑大而继续放大，触发 ResizeObserver 无限反馈 → 预览无限放大。
+          //
+          // sandbox 收紧后（allow-scripts，无 allow-same-origin）帧是跨源的，
+          // contentDocument 不可读：自然尺寸由帧内 bootstrap 自报
+          // （artifact-preview-navigation.js reportSize），只在首条非空上报时
+          // 写入缓存，空测量/后续上报不再改写，保持同一防反馈语义。
+          const nat = naturalRef.current;
+          if (!nat) return;
+          const w = managedZoom ? Math.max(canvasW, nat.w || 0) : nat.w;
+          const h = nat.h;
           let scale = 1;
           if (zoomMode === 'fit') {
             const widthScale = w > 0 && panelW > 0 ? panelW / w : 1;
@@ -338,33 +429,42 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
         applyWheelZoom(event.deltaY);
       };
       useEffect(() => {
-        const fr = frameRef.current;
-        if (!managedZoom || !fr || !fr.contentWindow) return undefined;
-        let doc = null;
-        try {
-          doc = fr.contentWindow.document;
-        } catch (e) {
-          return undefined;
-        }
-        if (!doc) return undefined;
-        const handleFrameWheel = event => {
-          if (!event.ctrlKey) return;
-          event.preventDefault();
-          event.stopPropagation();
-          applyWheelZoom(event.deltaY);
-        };
-        doc.addEventListener('wheel', handleFrameWheel, { passive: false, capture: true });
-        return () => doc.removeEventListener('wheel', handleFrameWheel, { capture: true });
-      }, [managedZoom, ready, box && box.scale, customScale, onCustomScaleChange]);
-      useEffect(() => {
         const handlePreviewMessage = event => {
           const frameWindow = frameRef.current && frameRef.current.contentWindow;
           if (!frameWindow || event.source !== frameWindow) return;
-          const url = artifactPreviewExternalUrlFromMessage(event.data);
-          if (url && onOpenExternal) onOpenExternal(url);
+          const data = event.data;
+          // 帧内自报的内容自然尺寸：首个非空上报写入缓存（防反馈语义见 measure）。
+          const size = artifactPreviewContentSizeFromMessage(data);
+          if (size) {
+            if (!naturalRef.current) {
+              naturalRef.current = size;
+              measure();
+            }
+            return;
+          }
+          // ctrl+滚轮转发：sandbox 收紧后无法把 wheel 监听挂进帧文档，
+          // 帧内 bootstrap 将 ctrl 滚轮转回父窗口的受控缩放。
+          const deltaY = artifactPreviewFrameWheelFromMessage(data);
+          if (deltaY != null) {
+            if (managedZoom) applyWheelZoom(deltaY);
+            return;
+          }
+          const url = artifactPreviewExternalUrlFromMessage(data);
+          if (url && onOpenExternal) {
+            // 打开中继限速（r8）：外链由后端直接 spawn 系统浏览器打开，没有
+            // 弹窗拦截器兜底——恶意页面可在循环里 postMessage 刷开浏览器。
+            // 帧侧的点击门槛父窗口无法校验（合成 click 与真实 click 不可分），
+            // 限速是父窗口侧唯一可执行的节制：同组件 1.5s 内只放行一次。
+            const now = Date.now();
+            if (now - openRelayLastAtRef.current >= 1500) {
+              openRelayLastAtRef.current = now;
+              onOpenExternal(url);
+            }
+          }
         };
         window.addEventListener('message', handlePreviewMessage);
         return () => window.removeEventListener('message', handlePreviewMessage);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- applyWheelZoom/measure are in-component closures; the listener mounts once and forwards via refs
       }, [onOpenExternal]);
       const scaled = box && box.scale !== 1;
       const scaledW = box ? Math.max(1, Math.ceil(box.w * box.scale)) : 0;
@@ -396,7 +496,18 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           {!ready && <div className="h-[480px] bg-white dark:bg-[#15171a]"></div>}
           <div data-testid="artifact-html-preview-stage" style={managedZoom ? stageStyle : (box && scaled ? { width: scaledW + 'px', height: scaledH + 'px', position: 'relative' } : { width: '100%', height: '100%' })}>
             <div style={box && scaled ? { width: scaledW + 'px', height: scaledH + 'px', position: 'relative', flex: '0 0 auto' } : (managedZoom && box ? { width: box.w + 'px', height: box.h + 'px', flex: '0 0 auto' } : { width: '100%', height: '100%' })}>
-              <iframe ref={frameRef} sandbox="allow-same-origin allow-scripts" title={title || 'Artifact preview'} data-testid="artifact-html-preview-frame" onLoad={() => { measure(); if (onFrameLoad) { onFrameLoad(frameRef.current); } setTimeout(() => setReady(true), 80); }}
+              {/* allow-scripts only: 导入的产物是第三方可控输入，allow-same-origin 会让
+                  srcdoc 脚本共享主窗口源并直达 window.parent.__TAURI__。测量/缩放/
+                  design runtime 均走 postMessage 通道（见上方消息监听与
+                  artifact-preview-navigation.js bootstrap）。 */}
+              <iframe ref={frameRef} sandbox="allow-scripts" title={title || 'Artifact preview'} data-testid="artifact-html-preview-frame" onLoad={() => {
+                try {
+                  const fw = frameRef.current && frameRef.current.contentWindow;
+                  if (fw) fw.postMessage({ type: ARTIFACT_PREVIEW_REQUEST_SIZE }, '*');
+                } catch { /* frame not ready */ }
+                if (onFrameLoad) { onFrameLoad(frameRef.current); }
+                setTimeout(() => setReady(true), 80);
+              }}
                 className={`border-0 block bg-white dark:bg-[#15171a] [color-scheme:light] dark:[color-scheme:dark] transition-opacity duration-300 ${ready ? 'opacity-100' : 'opacity-0 absolute pointer-events-none'}`}
                 data-zoom-mode={zoomMode}
                 data-zoom-scale={box ? String(box.scale) : ''}

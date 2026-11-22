@@ -1,0 +1,22 @@
+{{- if .Values.availability.enabled }}
+{{- $root := . -}}
+{{- $components := list "account-service" "billing-service" "token-gateway" "token-portal" "new-api" "keycloak" "account-event-relay" "billing-event-relay" -}}
+{{- if .Values.tokenEventRelay.enabled -}}{{- $components = append $components "token-event-relay" -}}{{- end -}}
+{{- range $component := $components }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pinvou.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: IfHealthyBudget
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+{{- end }}
+{{- end }}

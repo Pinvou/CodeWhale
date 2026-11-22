@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.com/schemas/billing.recharge.succeeded.v1.json",
+  "title": "billing.recharge.succeeded.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "aggregate_id",
+    "aggregate_version",
+    "occurred_at",
+    "trace_id",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event_type": {
+      "const": "billing.recharge.succeeded.v1"
+    },
+    "aggregate_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "aggregate_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order_id",
+        "wallet_id",
+        "channel",
+        "amount_fen",
+        "credit_microcredits",
+        "payment_transaction_id",
+        "entitlement_package_id",
+        "payer_user_id",
+        "beneficiary_organization_id"
+      ],
+      "properties": {
+        "order_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "wallet_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "channel": {
+          "enum": [
+            "UNIONPAY",
+            "ALIPAY",
+            "WECHAT"
+          ]
+        },
+        "amount_fen": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "credit_microcredits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "payment_transaction_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "entitlement_package_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "payer_user_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "beneficiary_organization_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      }
+    }
+  }
+}

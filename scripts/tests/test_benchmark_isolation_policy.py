@@ -59,7 +59,9 @@ class BenchmarkIsolationPolicyTests(unittest.TestCase):
 
         self.assertIn(
             '#[cfg(feature = "benchmark-hooks")]\n'
-            "    let should_notify = notification_state.unwrap_or_else(|| {",
+            "    let should_notify = !crate::features::assistant::timing::"
+            "eval_observation_enabled(session_id)\n"
+            "        && notification_state.unwrap_or(true);",
             support,
         )
         self.assertIn("eval_observation_enabled(session_id)", support)
@@ -121,7 +123,8 @@ class BenchmarkIsolationPolicyTests(unittest.TestCase):
             "\n  windows-rust-test:", 1
         )[0]
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml "
+            "cargo --config 'profile.dev.package.codewhale-tui.opt-level=0' test "
+            "--manifest-path pinvou3-app/src-tauri/Cargo.toml "
             "--no-default-features --lib --features benchmark-hooks --locked "
             "-- --test-threads=1",
             rust_test,

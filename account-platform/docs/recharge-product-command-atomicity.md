@@ -1,0 +1,9 @@
+# Recharge product command recovery
+
+PAY-53 human publish, unpublish, logical-delete, admission start/retry and human revoke commands commit their catalogue/admission effects, original response and audit in one PostgreSQL transaction. A failed state, receipt or audit write rolls the transaction back; the original expected_version and key remain usable for an explicit retry. Concurrent identical keys serialize before catalogue locks. A matching retained receipt is read before current version/admission checks; changed facts under the same key still conflict. An expired receipt whose key remains stored also returns conflict before any new effect; its identity/history is not rebound or renewed.
+
+The existing 24-hour receipt lifetime, permission and 15-minute recent-authentication gates, AUDIT_ONLY classification, lifecycle CAS, admission fingerprints/expiry/revocation, immutable mapping and financial-history rules remain in force. Create, unpublished-draft editing and display-name commands retain their existing atomic implementations. Provider/workload completion and revocation retain their existing contracts.
+
+This change does not reconstruct historical transitions that already committed without a receipt/audit. A new receipt cannot establish their missing actor, original key or request facts; existing rows and history are not rewritten. Such retained incidents still require controlled investigation rather than automatic replay or a fabricated audit.
+
+The required PostgreSQL contract test injects actual receipt/audit INSERT failures through owned-database triggers, then checks rollback, explicit original-key recovery, unchanged replay, differing facts, concurrent/CAS behavior and registered HTTP authorization gates. It uses controlled identity/authority/provider inputs, not a live IdP or deployment acceptance test.

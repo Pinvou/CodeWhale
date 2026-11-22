@@ -11,9 +11,12 @@ pinvou_pptx —— spec 驱动的本地 PPT 渲染器（Phase A：10 版式 + 3 
 字体：Noto Sans SC（思源黑体同源，跨平台 + 本机可预览；Phase C 做字体嵌入彻底锁死）
 原则：模型只填 layout + 内容；坐标/配色/字体由模板定死 → 稳、不会摆崩；单页失败兜底不崩。
 """
+import copy
 import json
 import os
+import stat
 import sys
+import tempfile
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -475,7 +478,15 @@ def _load_cjk_font(size):
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Debian/Ubuntu
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",        # Arch/其它
-        "/System/Library/Fonts/PingFang.ttc",                       # mac(开发机)
+        # mac:PingFang 仅预装到 macOS 14(Sonoma)。macOS 15 起苹方改为按需资产字体
+        # (Font Book 手动下载;下载后落 AssetsV2/com_apple_MobileAsset_Font8/<内容hash>.asset/,
+        # 路径含内容 hash 且未必存在,无法硬编码——mpv#14878/Chromium#380313555 同类受害者)。
+        # 冬青/黑体/宋体在本机 macOS 27.3 实测仍在固定路径且 Pillow 能加载。
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ]
     for p in candidates:
         if os.path.isfile(p):
@@ -487,64 +498,77 @@ def _load_cjk_font(size):
 
 
 def _cover_thumbnail(spec, th):
-    """画一张 16:9 封面(bg + 色条 + 标题 + 副标题 + 角标),返回 JPEG bytes;失败/无字体返回 None。"""
+    """画一张 16:9 封面(bg + 色条 + 标题 + 副标题 + 角标),返回 JPEG bytes;失败/无字体返回 None。
+    整体兜底返回 None 而不是抛异常:render() 只认 None 才走占位剥离,
+    若绘制中途抛上去,剥离不执行,模板白图又会留下(全白"封面"回归)。"""
     try:
         from PIL import Image, ImageDraw
         from io import BytesIO
     except Exception:
         return None
-    tf = _load_cjk_font(76)
-    if tf is None:
-        return None  # 没中文字体 → 放弃缩略图,避免方块
-    sf = _load_cjk_font(34) or tf
-    ff = _load_cjk_font(22) or tf
-    W, H, M = 1280, 720, 96
-    img = Image.new("RGB", (W, H), "#" + th["bg"])
-    d = ImageDraw.Draw(img)
-    d.rectangle([M, 300, M + 150, 314], fill="#" + th["accent"])  # 色条
-    # 标题优先取封面页(layout=cover)的,退回 spec 级,让缩略图跟真封面一致
-    slides = spec.get("slides", [])
-    cover = next((s for s in slides if s.get("layout") == "cover"), (slides[0] if slides else {}))
-    title = spec.get("title") or cover.get("title") or "未命名演示"
-    sub = spec.get("subtitle") or cover.get("subtitle") or ""
-    d.text((M, 196), str(title)[:32], fill="#" + th["ink"], font=tf)
-    if sub:
-        d.text((M, 344), str(sub)[:48], fill="#" + th["muted"], font=sf)
-    n = len(spec.get("slides", []))
-    d.text((M, H - 84), "Pinvou · %d 页 · %s" % (n, spec.get("theme", DEFAULT_THEME)),
-           fill="#" + th["muted"], font=ff)
-    buf = BytesIO()
-    img.save(buf, format="JPEG", quality=86)
-    return buf.getvalue()
+    try:
+        tf = _load_cjk_font(76)
+        if tf is None:
+            return None  # 没中文字体 → 放弃缩略图,避免方块
+        sf = _load_cjk_font(34) or tf
+        ff = _load_cjk_font(22) or tf
+        W, H, M = 1280, 720, 96
+        img = Image.new("RGB", (W, H), "#" + th["bg"])
+        d = ImageDraw.Draw(img)
+        d.rectangle([M, 300, M + 150, 314], fill="#" + th["accent"])  # 色条
+        # 标题优先取封面页(layout=cover)的,退回 spec 级,让缩略图跟真封面一致
+        slides = spec.get("slides", [])
+        cover = next((s for s in slides if s.get("layout") == "cover"), (slides[0] if slides else {}))
+        title = spec.get("title") or cover.get("title") or "未命名演示"
+        sub = spec.get("subtitle") or cover.get("subtitle") or ""
+        d.text((M, 196), str(title)[:32], fill="#" + th["ink"], font=tf)
+        if sub:
+            d.text((M, 344), str(sub)[:48], fill="#" + th["muted"], font=sf)
+        n = len(spec.get("slides", []))
+        d.text((M, H - 84), "Pinvou · %d 页 · %s" % (n, spec.get("theme", DEFAULT_THEME)),
+               fill="#" + th["muted"], font=ff)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=86)
+        return buf.getvalue()
+    except Exception:
+        return None  # 绘制/编码任何一步失败 → 走占位剥离,绝不留白图
 
 
 def _inject_thumbnail(pptx_path, jpeg_bytes):
-    """把封面塞进 pptx 包:docProps/thumbnail.jpeg + .rels 关系 + Content_Types(让 PowerPoint/资源管理器也认)。"""
-    if not jpeg_bytes:
-        return
+    """封面写入 pptx 包:docProps/thumbnail.jpeg + .rels 关系 + Content_Types(让 PowerPoint/资源管理器也认)。
+    jpeg_bytes 为 None 时反向剥离:python-pptx 默认模板自带一张纯白占位缩略图,
+    画不出真封面时若把它留在包里,产物卡会提取到全白图渲染成一大块空白封面
+    (macOS 15 起苹方改为按需资产字体后,mac 生成的每一份 PPT 都中招)。
+    剥离时连 .rels 里的 thumbnail 关系一起删(悬空关系会让严格解析器报错),
+    前端读不到缩略图即回退紧凑图标态。两种模式共用同一次包重写。"""
     import zipfile
-    import shutil
+    import re
     tmp = pptx_path + ".tmp"
     with zipfile.ZipFile(pptx_path, "r") as zin:
         ct = zin.read("[Content_Types].xml").decode("utf-8")
         rels = zin.read("_rels/.rels").decode("utf-8")
-        if 'Extension="jpeg"' not in ct:
-            ct = ct.replace("</Types>", '<Default Extension="jpeg" ContentType="image/jpeg"/></Types>')
-        if "thumbnail.jpeg" not in rels:
-            rel = ('<Relationship Id="rIdThumb" '
-                   'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" '
-                   'Target="docProps/thumbnail.jpeg"/>')
-            rels = rels.replace("</Relationships>", rel + "</Relationships>")
+        if jpeg_bytes:
+            if 'Extension="jpeg"' not in ct:
+                ct = ct.replace("</Types>", '<Default Extension="jpeg" ContentType="image/jpeg"/></Types>')
+            if "thumbnail.jpeg" not in rels:
+                rel = ('<Relationship Id="rIdThumb" '
+                       'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" '
+                       'Target="docProps/thumbnail.jpeg"/>')
+                rels = rels.replace("</Relationships>", rel + "</Relationships>")
+        else:
+            # 剥离模式:去掉 thumbnail 关系(属性顺序无关,单标签内匹配有界)。
+            rels = re.sub(r'<Relationship\b[^>]*\bTarget="docProps/thumbnail\.jpeg"[^>]*/>', "", rels)
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
             for n in zin.namelist():
-                # 跳过这几个:Content_Types/.rels 改写后单独写;旧 thumbnail 用我们的替换(避免重复名)
+                # 跳过这几个:Content_Types/.rels 改写后单独写;旧 thumbnail 用我们的替换/移除(避免重复名)
                 if n in ("[Content_Types].xml", "_rels/.rels", "docProps/thumbnail.jpeg"):
                     continue
                 zout.writestr(n, zin.read(n))
             zout.writestr("[Content_Types].xml", ct)
             zout.writestr("_rels/.rels", rels)
-            zout.writestr("docProps/thumbnail.jpeg", jpeg_bytes)
-    shutil.move(tmp, pptx_path)
+            if jpeg_bytes:
+                zout.writestr("docProps/thumbnail.jpeg", jpeg_bytes)
+    os.replace(tmp, pptx_path)
 
 
 def render(spec, out_path):
@@ -564,9 +588,11 @@ def render(spec, out_path):
             para(tf, "[本页渲染失败: %s]" % e, 14, "C0282D", first=True)
     prs.save(out_path)
     try:
-        _inject_thumbnail(out_path, _cover_thumbnail(spec, th))  # 封面缩略图(方案 A),失败不影响主产物
+        # 封面缩略图(方案 A):画得出真封面就注入,画不出就把模板白图占位剥掉,
+        # 两条路都不给产物卡留一张全白"封面"。失败不影响主产物。
+        _inject_thumbnail(out_path, _cover_thumbnail(spec, th))
     except Exception as e:
-        print("  (缩略图注入跳过: %s)" % e, file=sys.stderr)  # 别写 stdout,MCP 模式下会污染 JSON-RPC
+        print("  (缩略图处理跳过: %s)" % e, file=sys.stderr)  # 别写 stdout,MCP 模式下会污染 JSON-RPC
     return len(spec.get("slides", []))
 
 
@@ -597,7 +623,7 @@ def _safe_join(base, name):
         full = os.path.join(base_abs, "演示文稿.pptx")
     stem, ext = os.path.splitext(full)
     i = 1
-    while os.path.exists(full):                          # 重名加序号
+    while os.path.lexists(full):                         # 重名加序号
         full = "%s(%d)%s" % (stem, i, ext)
         i += 1
     return full
@@ -653,6 +679,24 @@ def _coerce_slides(slides):
     return out
 
 
+_session_artifacts_dir = None
+
+
+def _prepare_session_artifacts_dir(directory):
+    if not os.path.isabs(directory):
+        raise OSError("Invalid session output directory")
+    session = os.path.dirname(directory)
+    # The application can relocate its sessions root. Reject redirects below
+    # that trust anchor, where each session and its artifacts have one owner.
+    for path in (session, directory):
+        os.makedirs(path, exist_ok=True)
+        metadata = os.lstat(path)
+        if not stat.S_ISDIR(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise OSError("Redirected session output directory")
+
+
 def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
     # 模型常把 slides 序列化成 JSON 字符串传入,且大纲一长就容易生成非法 JSON。
     # _coerce_slides 严格失败时逐个抢救顶层 {...}(坏页跳过);彻底空则下面 loud error,
@@ -668,19 +712,252 @@ def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
     # 绝不用 os.getcwd() —— MCP server 的 cwd 是 app 安装目录(release 下是 Program Files,
     # 写入会因无权限直接失败,且文件也不该落进程序目录)。
     _default_art = os.path.join(os.path.expanduser("~"), ".pinvou3", "sessions", "default", "artifacts")
-    art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or _default_art
+    if _session_artifacts_dir is not None:
+        art = _session_artifacts_dir
+        try:
+            _prepare_session_artifacts_dir(art)
+        except OSError:
+            return {"ok": False, "error": "无法创建已配置的 PPT 产物目录。"}
+    else:
+        art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or _default_art
+        try:
+            os.makedirs(art, exist_ok=True)
+        except OSError:
+            art = os.path.join(os.path.expanduser("~"), ".pinvou3")
+            os.makedirs(art, exist_ok=True)
+    name = _sanitize_filename(filename) + ".pptx"
+    spec = {"theme": theme, "slides": slides}
     try:
-        os.makedirs(art, exist_ok=True)
-    except Exception:
-        art = os.path.join(os.path.expanduser("~"), ".pinvou3")
-        os.makedirs(art, exist_ok=True)
-    out = _safe_join(art, _sanitize_filename(filename) + ".pptx")
-    try:
-        n = render({"theme": theme, "slides": slides}, out)
+        if _session_artifacts_dir is None:
+            out = _safe_join(art, name)
+            n = render(spec, out)
+        else:
+            # The remote inventory scans this directory as soon as the turn
+            # succeeds. Publish only a completed deck, on the same filesystem.
+            with tempfile.TemporaryDirectory(prefix=".pptx-", dir=art) as stage:
+                pending = os.path.join(stage, "deck.tmp")
+                n = render(spec, pending)
+                out = _safe_join(art, name)
+                os.replace(pending, out)
         return {"ok": True, "path": out, "slides": n, "theme": theme}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
+# ── per-layout anyOf branches for slides.items (2026-11-04) ───────────────
+# Background: Kimi K3 constrained decoding tends toward minimal legal
+# completions on "large payloads with deeply nested optional fields" — the
+# old flat items marked only layout required, so the model repeatedly
+# produced layout+title shells and dropped every other optional field
+# (2026-11-04 real user session: 7 calls, 5 with dropped fields). Incident
+# anchor: k3 once emitted slides:[] 27 times in a row (an itemless array
+# gets completed to the minimal legal value []); a 2026-11-04 retest showed
+# the old schema already producing 4KB+ complete bodies in a fresh single
+# turn, and the 27-in-a-row run did not reproduce — but field loss under
+# long-context / multi-turn failure anchoring is still real.
+# Mitigation = per-layout anyOf: each branch is an explicit type:object,
+# the layout enum collapses to a single value (picking the branch picks the
+# layout), and required carries only the fields the layout's render function
+# reads whose absence yields a blank body (2026-11-05 required final ruling:
+# a field may be required only when leaving it blank is a business error;
+# agenda/end render the semantically complete fallback pages 「目录」/「谢谢」
+# (table of contents / thank you) for a blank title, so title left those two
+# branches' required). 2026-11-04 live probe A2: this shape was the only run
+# where all 10 pages met the layout brief, at +6% byte cost; the control
+# group ("every field required") produced blank values + enum guessing
+# (+76% tokens, disproved). The walle validator lists anyOf as a first-class
+# member (upstream ValidateAnyOf); "branches must be explicit type:object
+# and type must not share a level with anyOf" is the CodeWhale engine
+# mirror's own stricter policy (in place since f1eb10efc; walle lite accepts
+# type beside anyOf — verified against MoonshotAI/walle upstream main on
+# 2026-11-05). The resource budgets were aligned to the walle conf.go source
+# defaults on 2026-11-05 (anyOf ≤500, total properties ≤3000, nesting depth
+# ≤30, enum values ≤1000, enum literals ≤75000 bytes; encoded bytes 120000
+# and the enum-length check threshold 250 unchanged; source comparison, not
+# a documented clause). Loosening them means changing the CodeWhale
+# constants and syncing the parent-repo mirror scripts. Note: the aligned
+# budgets only take effect once the T11 engine batch (CodeWhale #143–#147)
+# lands on the parent gitlink through the close-out re-pin PR; the currently
+# pinned engine is still the pre-T11 face whose anyOf branch cap is in fact
+# 10 — this schema's 10 branches sit exactly at that cap, so adding a layout
+# before the re-pin hits the 10-branch cap first (the pinned engine's
+# sanitizer then omits the make_pptx tool from that request with a warning
+# while the remaining tools still ship, and the build fails outright only
+# when an explicit tool_choice forces the omitted tool); only after the
+# re-pin is it "just add a branch". The union
+# itself is already legal on the current engine: nested multi-branch anyOf
+# is kept and accepted as-is (flattening happens only at the root
+# combination level), with no need to wait for the re-pin.
+def _slides_item_branch(layout, layout_label, required, blurb, fields):
+    """Build one per-layout branch of slides.items: explicit type:object
+    plus that layout's own required.
+
+    required takes only the fields the render function reads whose absence
+    yields a blank body (2026-11-05 final ruling, single criterion: a field
+    may be required only when leaving it blank is a business error);
+    pure-decoration fields (cover's subtitle/date, two_col's column titles)
+    stay optional, so constrained decoding's minimal-completion tendency is
+    not pushed into filling blanks (disproved by the probe's control group).
+    agenda/end fall back on the render side to 「目录」/「谢谢」 for a blank
+    title — a complete page either way — so their title stays out of
+    required.
+    """
+    properties = {
+        "layout": {
+            "type": "string",
+            "enum": [layout],
+            "description": "版式:%s" % layout_label,
+        },
+    }
+    # The fields constants (_SLIDE_TITLE, _ITEMS_LEAF) are shared by several
+    # branches; deepcopy gives each branch its own copy — otherwise any
+    # future in-process schema rewrite (such as strict mode's nullable
+    # annotation) would leak through the shared nodes into every layout
+    # branch. tools/list goes through JSON serialization, so the copies are
+    # byte-identical to the originals on the wire.
+    properties.update(copy.deepcopy(fields))
+    return {
+        "type": "object",
+        "description": blurb,
+        "properties": properties,
+        "required": required,
+    }
+
+
+_SLIDE_TITLE = {"type": "string", "description": "页标题"}
+
+# Shared items anyOf for agenda/kpi: a whole-string entry is used as-is; an
+# object goes through {num, label}. Neither num nor label enters required:
+# agenda draws its own numbering and a label-only entry is legal — the
+# renderer falls back to "" for None (_item_num_label); the object branch
+# therefore must not carry required.
+_ITEMS_LEAF = {
+    "type": "array",
+    "items": {
+        "anyOf": [
+            {"type": "string"},
+            {
+                "type": "object",
+                "properties": {
+                    "num": {"type": "string", "description": "大数字,如 68%"},
+                    "label": {"type": "string", "description": "指标说明"},
+                },
+            },
+        ],
+    },
+}
+
+_SLIDES_ITEMS_ANY_OF = [
+    _slides_item_branch(
+        "cover", "封面页", ["layout", "title"],
+        "封面页:必填 title;subtitle/date 可选",
+        {
+            "title": {"type": "string", "description": "主标题"},
+            "subtitle": {"type": "string", "description": "副标题"},
+            "date": {"type": "string", "description": "日期"},
+        },
+    ),
+    _slides_item_branch(
+        "agenda", "目录页", ["layout", "items"],
+        "目录页:必填 items(章节条目数组,最多 6 条);title 可选,缺省「目录」",
+        {
+            "title": _SLIDE_TITLE,
+            "items": dict(_ITEMS_LEAF, description="章节条目数组(最多 6 条):字符串,或 {num, label}"),
+        },
+    ),
+    _slides_item_branch(
+        "section", "章节分隔页", ["layout", "title"],
+        "章节分隔页:只要 layout+title",
+        {"title": _SLIDE_TITLE},
+    ),
+    _slides_item_branch(
+        "bullets", "要点页", ["layout", "title", "bullets"],
+        "要点页:必填 bullets(要点字符串数组)",
+        {
+            "title": _SLIDE_TITLE,
+            "bullets": {"type": "array", "items": {"type": "string"},
+                        "description": "要点,每条一个字符串"},
+        },
+    ),
+    _slides_item_branch(
+        "two_col", "双栏对比页", ["layout", "title", "left", "right"],
+        "双栏对比页:必填 left/right 两栏要点;leftTitle/rightTitle 可选",
+        {
+            "title": _SLIDE_TITLE,
+            "leftTitle": {"type": "string", "description": "左栏标题"},
+            "left": {"type": "array", "items": {"type": "string"}, "description": "左栏要点"},
+            "rightTitle": {"type": "string", "description": "右栏标题"},
+            "right": {"type": "array", "items": {"type": "string"}, "description": "右栏要点"},
+        },
+    ),
+    _slides_item_branch(
+        "kpi", "大数字指标页", ["layout", "title", "items"],
+        "大数字指标页:必填 items(最多 4 个 {num, label})",
+        {
+            "title": _SLIDE_TITLE,
+            "items": dict(_ITEMS_LEAF, description="指标数组(最多 4 个):{num, label} 或字符串"),
+        },
+    ),
+    _slides_item_branch(
+        "chart", "图表页", ["layout", "title", "categories", "series"],
+        "图表页:必填 categories+series;chartType 缺省 bar",
+        {
+            "title": _SLIDE_TITLE,
+            "chartType": {"type": "string", "enum": ["bar", "line", "pie"],
+                          "description": "图表类型,缺省 bar"},
+            "categories": {"type": "array", "items": {"type": "string"},
+                           "description": "类目轴标签"},
+            "series": {
+                "type": "array",
+                "description": "数据系列,data 与 categories 等长",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        # name optional: single-series charts hide the
+                        # legend, so a forced invented name is pure
+                        # friction; the renderer falls back to "".
+                        "name": {"type": "string", "description": "系列名"},
+                        "data": {"type": "array", "items": {"type": "number"},
+                                 "description": "与 categories 等长的数值"},
+                    },
+                    "required": ["data"],
+                },
+            },
+        },
+    ),
+    _slides_item_branch(
+        "table", "表格页", ["layout", "title", "headers", "rows"],
+        "表格页:必填 headers+rows,每行与 headers 等长",
+        {
+            "title": _SLIDE_TITLE,
+            "headers": {"type": "array", "items": {"type": "string"}, "description": "表头"},
+            "rows": {
+                "type": "array",
+                "description": "行数据,每行是与 headers 等长的单元格数组",
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    ),
+    _slides_item_branch(
+        "image", "图片页", ["layout", "title"],
+        "图片页:image 缺了显示占位框(不强制编造路径);bullets 作侧栏说明,caption 作图注",
+        {
+            "title": _SLIDE_TITLE,
+            "bullets": {"type": "array", "items": {"type": "string"},
+                        "description": "图片旁的说明要点"},
+            "image": {"type": "string", "description": "本地图片绝对路径(可选,缺了显示占位框)"},
+            "caption": {"type": "string", "description": "图注"},
+        },
+    ),
+    _slides_item_branch(
+        "end", "结尾页", ["layout"],
+        "结尾页:layout 即完整,标题缺省「谢谢」;subtitle 可选",
+        {
+            "title": _SLIDE_TITLE,
+            "subtitle": {"type": "string", "description": "副标题"},
+        },
+    ),
+]
 
 TOOL_DEFS = [{
     "name": "make_pptx",
@@ -699,96 +976,39 @@ TOOL_DEFS = [{
             "slides": {
                 "type": "array",
                 "description": (
-                    "deck 的 slides 数组。每页一个对象,`layout` 选版式,并**必须按版式填正文字段**"
-                    "(只给 title 会得到空白页!):\n"
-                    "- cover: {layout, title, subtitle, date}\n"
-                    "- agenda: {layout, title, items:[字符串,...]}\n"
-                    "- section: {layout, title}  ← 章节分隔页\n"
-                    "- bullets: {layout, title, bullets:[字符串,...]}\n"
-                    "- two_col: {layout, title, leftTitle, left:[字符串,...], rightTitle, right:[字符串,...]}\n"
-                    "- kpi: {layout, title, items:[{num, label},...]}  ← 最多4个大数字\n"
-                    "- chart: {layout, title, chartType:'bar'|'pie'|'line', categories:[字符串,...], series:[{name, data:[数字,...]},...]}\n"
-                    "- table: {layout, title, headers:[字符串,...], rows:[[单元格,...],...]}\n"
-                    "- image: {layout, title, bullets:[字符串,...], caption, image:<本地图片绝对路径，可选>}\n"
-                    "- end: {layout, title, subtitle}  ← 结尾页\n"
-                    "正文要有真实内容/数据,不要只放标题。"
+                    "deck 的 slides 数组。每页一个对象,`layout` 选版式,并**按版式填该分支"
+                    "required 的正文字段**(agenda/bullets/two_col/kpi/chart/table 缺正文"
+                    "字段会得到空白正文页)。每版式的必填字段已写进对应分支的 required:\n"
+                    "- cover: {title}(subtitle/date 可选)\n"
+                    "- agenda: {items}  章节条目数组;title 可选,缺省「目录」\n"
+                    "- section: {title}  ← 章节分隔页\n"
+                    "- bullets: {title, bullets}  要点数组\n"
+                    "- two_col: {title, left, right}(leftTitle/rightTitle 可选)\n"
+                    "- kpi: {title, items}  最多4个大数字\n"
+                    "- chart: {title, chartType?, categories, series}\n"
+                    "- table: {title, headers, rows}\n"
+                    "- image: {title}(image/bullets/caption 可选)\n"
+                    "- end: layout 即完整(subtitle 可选;标题缺省「谢谢」)  ← 结尾页\n"
+                    "正文版式(agenda/bullets/two_col/kpi/chart/table)要有真实内容/数据,不要只放标题。"
                 ),
-                # items must carry a concrete type: on constrained tool-call
-                # decoding channels (Kimi and friends) an itemless array is
-                # completed to its minimal valid value [] (observed live: k3
-                # emitted slides:[] 27 times in a row); structured items also
-                # give the constrained decoder a shape it can fill.
+                # Per-layout anyOf: one branch per layout, each branch's
+                # required listing that layout's semantically required fields
+                # — the mitigation for constrained decoding's (Kimi K3 et
+                # al.) minimal legal-completion tendency. Incident anchor:
+                # k3 once emitted slides:[] 27 times in a row (an itemless
+                # array gets completed to []); the 2026-11-04 retest no
+                # longer reproduced it on a fresh single turn, but field
+                # loss under long context / multi-turn remains (real
+                # session: 7 calls, 5 dropped) — see the full comment above
+                # _SLIDES_ITEMS_ANY_OF. Note: the items node allows only
+                # description beside anyOf (MFJS spec: type must not share
+                # a level with anyOf).
                 "items": {
-                    "type": "object",
-                    "required": ["layout"],
-                    "properties": {
-                        "layout": {
-                            "type": "string",
-                            "enum": ["cover", "agenda", "section", "bullets", "two_col",
-                                     "kpi", "chart", "table", "image", "end"],
-                            "description": "版式(必填)",
-                        },
-                        "title": {"type": "string", "description": "页标题"},
-                        "subtitle": {"type": "string", "description": "副标题(cover/end)"},
-                        "date": {"type": "string", "description": "日期(cover)"},
-                        "items": {
-                            "type": "array",
-                            "description": "agenda: 字符串数组; kpi: {num,label} 对象数组(最多4个)",
-                            "items": {
-                                "anyOf": [
-                                    {"type": "string"},
-                                    {"type": "object",
-                                     "properties": {
-                                         "num": {"type": "string", "description": "大数字,如 68%"},
-                                         "label": {"type": "string", "description": "指标说明"},
-                                     },
-                                     # num optional: agenda pages draw their
-                                     # own ordinals, so a label-only dict is
-                                     # a natural entry; the renderer falls
-                                     # back to "".
-                                     },
-                                ],
-                            },
-                        },
-                        "bullets": {"type": "array", "items": {"type": "string"},
-                                    "description": "要点(bullets/image)"},
-                        "leftTitle": {"type": "string", "description": "左栏标题(two_col)"},
-                        "left": {"type": "array", "items": {"type": "string"},
-                                 "description": "左栏要点(two_col)"},
-                        "rightTitle": {"type": "string", "description": "右栏标题(two_col)"},
-                        "right": {"type": "array", "items": {"type": "string"},
-                                  "description": "右栏要点(two_col)"},
-                        "chartType": {"type": "string", "enum": ["bar", "line", "pie"],
-                                      "description": "图表类型(chart)"},
-                        "categories": {"type": "array", "items": {"type": "string"},
-                                       "description": "类目轴(chart)"},
-                        "series": {
-                            "type": "array",
-                            "description": "数据系列(chart)",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    # name optional: single-series charts
-                                    # hide the legend, so a forced invented
-                                    # name is pure friction; the renderer
-                                    # falls back to "".
-                                    "name": {"type": "string", "description": "系列名"},
-                                    "data": {"type": "array", "items": {"type": "number"},
-                                             "description": "与 categories 等长的数值"},
-                                },
-                                "required": ["data"],
-                            },
-                        },
-                        "headers": {"type": "array", "items": {"type": "string"},
-                                    "description": "表头(table)"},
-                        "rows": {
-                            "type": "array",
-                            "description": "行数据,每行是与 headers 等长的单元格数组(table)",
-                            "items": {"type": "array", "items": {"type": "string"}},
-                        },
-                        "caption": {"type": "string", "description": "图注(image)"},
-                        "image": {"type": "string", "description": "本地图片绝对路径(image,可选)"},
-                    },
+                    "description": (
+                        "一页 = 一个版式分支:layout 的单值 enum 选中分支,"
+                        "各分支 required 列出该版式必填字段"
+                    ),
+                    "anyOf": _SLIDES_ITEMS_ANY_OF,
                 },
             },
             "filename": {"type": "string", "description": "文件名(不含扩展名),缺省 演示文稿"},
@@ -840,6 +1060,11 @@ def _handle(msg):
 
 
 def main():
+    global _session_artifacts_dir
+    prefix = "--session-artifacts-dir="
+    _session_artifacts_dir = next(
+        (arg[len(prefix):] for arg in sys.argv[1:] if arg.startswith(prefix)), None
+    )
     for line in sys.stdin:
         line = line.lstrip("﻿").strip()
         if not line:

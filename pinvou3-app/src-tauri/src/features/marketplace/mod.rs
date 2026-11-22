@@ -852,8 +852,9 @@ pub fn unavailable_tool_names_for(scope: ConnectorScope) -> Vec<String> {
 /// 存量 mcp.json 条目的路径迁移：指向旧布局（`bundle/mcp-servers/<id>/`）的
 /// command/args 重写为新包目录（`bundles/<id>/mcp/`）。幂等；只改本 app 写的
 /// 文件（mcp.json）。按 mcp.json 的 server 键（= 工具 id）逐条重写，覆盖内嵌预设
-/// 与自定义/手放 MCP（不再只遍历内嵌清单）。返回是否有改动（供启动标记观测）。
-pub fn migrate_mcp_json_paths() -> Result<bool, String> {
+/// and the custom/manually-placed MCP (no longer only walking the embedded
+/// manifests).
+pub fn migrate_mcp_json_paths() -> Result<(), String> {
     // 与其他 mcp.json 写方（add/remove_to_mcp_json）同一把跨进程文件锁串行化
     // （M-8；锁见 file_lock.rs）。
     connectors::with_mcp_json_lock(|| {
@@ -863,19 +864,19 @@ pub fn migrate_mcp_json_paths() -> Result<bool, String> {
         // mcp.lock critical section — a planted FIFO swapped in after the
         // check blocks `open()` forever while HOLDING mcp.lock, wedging
         // every mcp.json writer in every process.
-        // Absent stays `Ok(false)`; a refused read (FIFO/symlink/non-regular)
+        // Absent stays `Ok(())`; a refused read (FIFO/symlink/non-regular)
         // fails the migration loudly instead of silently skipping, the
         // same fail-closed direction as the sibling in-lock reads.
         let content = match crate::platform::filesystem::read_private_data_file(&mcp_path) {
             Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(format!("读取 mcp.json 失败: {e}")),
         };
         let mut mcp: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| format!("解析 mcp.json 失败: {e}"))?;
         let mut changed = false;
         let Some(servers) = mcp.get_mut("servers").and_then(|s| s.as_object_mut()) else {
-            return Ok(false);
+            return Ok(());
         };
         let ids: Vec<String> = servers.keys().cloned().collect();
         for id in ids {
@@ -907,7 +908,7 @@ pub fn migrate_mcp_json_paths() -> Result<bool, String> {
         if changed {
             connectors::write_json_pretty(&mcp_path, &mcp)?;
         }
-        Ok(changed)
+        Ok(())
     })
 }
 
@@ -3320,15 +3321,18 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-            // 新目录不存在：不重写、旧路径保留
-            assert!(!migrate_mcp_json_paths().unwrap());
+            // The new directory does not exist: no rewrite, the old path
+            // stays (the return value has converged to Result<(), String>;
+            // the skip/rewrite semantics are pinned by the file-content
+            // assertions below).
+            migrate_mcp_json_paths().unwrap();
             let content = std::fs::read_to_string(&mcp_path).unwrap();
             assert!(content.contains(&old_text), "新目录缺失时旧路径应保留");
 
             // 新目录出现（搬迁成功）：重写指向新目录
             let new_dir = mcp_catalog::package_mcp_dir(id);
             std::fs::create_dir_all(&new_dir).unwrap();
-            assert!(migrate_mcp_json_paths().unwrap());
+            migrate_mcp_json_paths().unwrap();
             let mcp: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
             let command = mcp["servers"][id]["command"].as_str().unwrap();
@@ -9587,13 +9591,20 @@ pub(crate) mod tests {
             config.insert("PATSNAP_API_KEY".to_string(), "valid-token".to_string());
 
             mgr.install("patsnap-mock", &config).unwrap();
-            // Ok(()) means validated: the handshake succeeded, tools were non-empty, and every tool the manifest
+            // Ok means validated: the handshake succeeded, tools were non-empty, and every tool the manifest
             // expects (patsnap_search / patsnap_fetch) was discovered — missing any one yields Err.
-            // The old return value carried the tool details; now the real tools/list call is observed
-            // via the methods the mock received.
-            mgr.validate_remote_connection("patsnap-mock")
+            // The Ok value IS the discovered tool inventory, and the mock serves exactly those two names.
+            let mut discovered = mgr
+                .validate_remote_connection("patsnap-mock")
                 .await
                 .unwrap();
+            discovered.sort();
+            assert_eq!(
+                discovered,
+                ["patsnap_fetch", "patsnap_search"]
+                    .map(str::to_string)
+                    .to_vec()
+            );
 
             assert!(mgr.installed_ids().contains(&"patsnap-mock".to_string()));
             let mcp = read_mcp_json();
@@ -9620,6 +9631,30 @@ pub(crate) mod tests {
             let seen = mock.seen_methods.lock().unwrap().clone();
             assert!(seen.contains(&"initialize".to_string()));
             assert!(seen.contains(&"tools/list".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn validate_without_manifest_requirement_returns_empty_inventory() {
+        // 不声明校验的工具（validate_on_install=false）直接空清单成功：不建池、
+        // 不握手——装后管线只看成败，这条钉住"空清单是合法的 Ok 形状"。
+        with_temp_home_async(|| async {
+            write_tool_manifest_fixture(
+                "patsnap-mock",
+                "Patsnap",
+                r#""mcp_tools":["patsnap_search","patsnap_fetch"],"command":"","args":[],
+                    "validate_on_install":false,
+                    "servers":[]"#,
+            );
+            let mgr = MarketplaceManager::with_store(MemoryCredentialStore::default());
+
+            let discovered = mgr
+                .validate_remote_connection("patsnap-mock")
+                .await
+                .unwrap();
+
+            assert!(discovered.is_empty());
         })
         .await;
     }

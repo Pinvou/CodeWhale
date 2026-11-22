@@ -1,7 +1,8 @@
 //! `temporary_model_package/v1` construction, validation and cleanup (DEV-15).
 //!
 //! A exports one task-scoped API-key route; B keeps it in memory only, bound to
-//! `connection_id + controller_lease_id + lease_epoch + task_id`, and releases
+//! `connection_id + controller_lease_id + lease_epoch + relay_epoch +
+//! remote_control_generation + task_id`, and releases
 //! it on every terminal path. Nothing here can carry a `credential_ref`,
 //! OAuth/cookie/subscription state or a host path, and a missing package is a
 //! hard failure — the task never falls back to a B model.
@@ -17,7 +18,7 @@ use serde_json::{Map, Value, json};
 
 use super::crypto::SensitiveString;
 use super::protocol::{LeaseContext, validate_controller_base_url};
-use super::task::RemoteTaskModelScope;
+use super::task::{RemoteTaskModelScope, TaskLeaseBinding};
 use crate::core::model_wire::model_route_wire_api;
 use crate::platform::credential_store::CredentialState;
 use crate::platform::prefs::{
@@ -106,6 +107,8 @@ pub(crate) struct TemporaryModelBinding {
     pub(crate) connection_id: String,
     pub(crate) controller_lease_id: String,
     pub(crate) lease_epoch: u64,
+    pub(crate) relay_epoch: String,
+    pub(crate) remote_control_generation: String,
     pub(crate) task_id: String,
 }
 
@@ -116,6 +119,8 @@ impl fmt::Debug for TemporaryModelBinding {
             .field("connection_id", &self.connection_id)
             .field("controller_lease_id", &self.controller_lease_id)
             .field("lease_epoch", &self.lease_epoch)
+            .field("relay_epoch", &self.relay_epoch)
+            .field("remote_control_generation", &self.remote_control_generation)
             .field("task_id", &self.task_id)
             .finish()
     }
@@ -126,6 +131,8 @@ impl TemporaryModelBinding {
         for value in [
             &self.connection_id,
             &self.controller_lease_id,
+            &self.relay_epoch,
+            &self.remote_control_generation,
             &self.task_id,
         ] {
             if value.is_empty()
@@ -144,6 +151,8 @@ impl TemporaryModelBinding {
         self.connection_id == live.connection_id
             && self.controller_lease_id == live.controller_lease_id
             && self.lease_epoch.to_string() == live.lease_epoch
+            && self.relay_epoch == live.relay_epoch
+            && self.remote_control_generation == live.remote_control_generation
             && self.task_id == task_id
     }
 }
@@ -174,7 +183,7 @@ impl fmt::Debug for ExportRoute {
             .field("display_name", &self.display_name)
             .field("preset", &self.preset)
             .field("wire_api", &self.wire_api)
-            .field("base_url", &self.base_url)
+            .field("base_url", &self.redacted_base_url())
             .field("model", &self.model)
             .field("secret", &"[REDACTED]")
             .finish()
@@ -182,6 +191,21 @@ impl fmt::Debug for ExportRoute {
 }
 
 impl ExportRoute {
+    fn redacted_base_url(&self) -> String {
+        let Ok(mut url) = reqwest::Url::parse(&self.base_url) else {
+            return "[REDACTED]".into();
+        };
+        if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
+            return "[REDACTED]".into();
+        }
+        if url.set_username("").is_err() || url.set_password(None).is_err() {
+            return "[REDACTED]".into();
+        }
+        url.set_query(None);
+        url.set_fragment(None);
+        url.to_string()
+    }
+
     fn to_runtime_model(&self, runtime_id: String) -> Result<SavedModel> {
         // Defense in depth: even internal callers must not materialize a route
         // whose effective protocol is outside the transported v1 contract.
@@ -210,6 +234,7 @@ impl ExportRoute {
             _ => return Err(error("model_image_override_unsupported")),
         };
         Ok(SavedModel {
+            auth_mode: None,
             id: runtime_id,
             name: self.display_name.clone(),
             alias: None,
@@ -218,6 +243,14 @@ impl ExportRoute {
             max_output_tokens: self.max_output_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
             model: self.model.clone(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: self.base_url.clone(),
             provider_kind: self.provider_kind.clone(),
             vendor: self.vendor.clone(),
@@ -327,6 +360,7 @@ impl ExportRoute {
 
     fn to_redacted_value(&self) -> Value {
         let mut value = self.to_wire_value();
+        value["base_url"] = json!(self.redacted_base_url());
         value["has_credential"] = json!(true);
         value
     }
@@ -433,6 +467,8 @@ impl TemporaryModelPackageV1 {
                 "connection_id": self.binding.connection_id,
                 "controller_lease_id": self.binding.controller_lease_id,
                 "lease_epoch": self.binding.lease_epoch.to_string(),
+                "relay_epoch": self.binding.relay_epoch,
+                "remote_control_generation": self.binding.remote_control_generation,
                 "task_id": self.binding.task_id,
             }),
         );
@@ -462,6 +498,8 @@ impl TemporaryModelPackageV1 {
                 "connection_id": self.binding.connection_id,
                 "controller_lease_id": self.binding.controller_lease_id,
                 "lease_epoch": self.binding.lease_epoch.to_string(),
+                "relay_epoch": self.binding.relay_epoch,
+                "remote_control_generation": self.binding.remote_control_generation,
                 "task_id": self.binding.task_id,
             },
             "primary": self.primary.to_redacted_value(),
@@ -499,6 +537,8 @@ impl TemporaryModelPackageV1 {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
             ],
             &[],
@@ -510,6 +550,12 @@ impl TemporaryModelPackageV1 {
             connection_id: required_string(binding, "connection_id", MAX_ID_CHARS)?,
             controller_lease_id: required_string(binding, "controller_lease_id", MAX_ID_CHARS)?,
             lease_epoch,
+            relay_epoch: required_string(binding, "relay_epoch", MAX_ID_CHARS)?,
+            remote_control_generation: required_string(
+                binding,
+                "remote_control_generation",
+                MAX_ID_CHARS,
+            )?,
             task_id: required_string(binding, "task_id", MAX_ID_CHARS)?,
         };
         let primary = ExportRoute::from_wire_value(
@@ -843,7 +889,7 @@ impl ExportDecision {
 /// subscription login or a pending credential edit are refused, and the
 /// `credential_ref` itself is never transported.
 pub(crate) fn export_decision(model: &SavedModel) -> ExportDecision {
-    if model.is_builtin_llmapi() {
+    if model.is_builtin_account_platform() {
         return ExportDecision::refused("model_not_exportable_builtin");
     }
     if model
@@ -926,6 +972,8 @@ pub(crate) struct TemporaryModelStore {
 struct InstalledPackage {
     package: TemporaryModelPackageV1,
     installed_at_ms: u64,
+    // Local lifecycle ownership; deliberately not a new wire-package field.
+    generation: String,
 }
 
 impl TemporaryModelStore {
@@ -946,6 +994,7 @@ impl TemporaryModelStore {
             InstalledPackage {
                 package,
                 installed_at_ms: now_b,
+                generation: live.remote_control_generation.clone(),
             },
         );
         Ok(())
@@ -1024,8 +1073,22 @@ impl TemporaryModelStore {
     }
 
     /// Idempotent release; returns `true` when a package was actually dropped.
-    pub(crate) fn clear_task(&self, task_id: &str) -> bool {
-        self.installed.lock().remove(task_id).is_some()
+    pub(crate) fn clear_task(&self, task_id: &str, lease: &TaskLeaseBinding) -> bool {
+        let mut installed = self.installed.lock();
+        let Some(package) = installed.get(task_id).map(|entry| &entry.package) else {
+            return false;
+        };
+        let binding = &package.binding;
+        if binding.connection_id != lease.connection_id
+            || binding.controller_lease_id != lease.controller_lease_id
+            || binding.lease_epoch.to_string() != lease.lease_epoch
+            || binding.relay_epoch != lease.relay_epoch
+            || binding.remote_control_generation != lease.remote_control_generation
+            || binding.task_id != task_id
+        {
+            return false;
+        }
+        installed.remove(task_id).is_some()
     }
 
     pub(crate) fn clear_for_connection(&self, connection_id: &str) -> bool {
@@ -1033,6 +1096,13 @@ impl TemporaryModelStore {
         let before = installed.len();
         installed.retain(|_, existing| existing.package.binding.connection_id != connection_id);
         installed.len() != before
+    }
+
+    pub(crate) fn register_controlled_cleanup(
+        self: &Arc<Self>,
+        manager: &super::controlled::ControlledDeviceManager,
+    ) {
+        manager.register_cleanup_sink(self.clone());
     }
 
     pub(crate) fn clear_all(&self) {
@@ -1045,8 +1115,21 @@ impl TemporaryModelStore {
 }
 
 impl RemoteTaskModelScope for TemporaryModelStore {
-    fn release_task_credentials(&self, task_id: &str) {
-        self.clear_task(task_id);
+    fn release_task_credentials(&self, task_id: &str, lease: &TaskLeaseBinding) {
+        self.clear_task(task_id, lease);
+    }
+}
+
+impl super::controlled::ControlledCleanupSink for TemporaryModelStore {
+    fn cleanup(&self, generation: &str, scope: super::controlled::ControlledCleanupScope) {
+        if scope.temporary_models {
+            // The task-ledger write may fail during retirement. Release these
+            // transient credentials independently, without claiming a durable
+            // task transition or clearing a successor with reused visible IDs.
+            self.installed
+                .lock()
+                .retain(|_, installed| installed.generation != generation);
+        }
     }
 }
 
@@ -1109,6 +1192,8 @@ mod tests {
                 connection_id: "connection-0001".into(),
                 controller_lease_id: "lease-0001".into(),
                 lease_epoch: 7,
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
                 task_id: "task-0001".into(),
             },
             primary: route("https://api.deepseek.com/v1", "deepseek", key),
@@ -1116,8 +1201,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn controlled_retirement_releases_only_the_exact_model_generation() {
+        use super::super::controlled::{ControlledCleanupScope, ControlledCleanupSink};
+        let store = TemporaryModelStore::default();
+        let old = lease();
+        store
+            .install(package("fixture-old-secret"), &old, "task-0001", 1_000)
+            .unwrap();
+        let mut other = old.clone();
+        other.remote_control_generation = "generation-other".into();
+        let mut other_package = package("fixture-other-secret");
+        other_package.binding.task_id = "task-other".into();
+        other_package.binding.remote_control_generation = other.remote_control_generation.clone();
+        store
+            .install(other_package, &other, "task-other", 1_001)
+            .unwrap();
+        let mut scope = ControlledCleanupScope {
+            remote_tasks: false,
+            pending_permissions: false,
+            session_keys: false,
+            temporary_models: false,
+            workspace_grants: false,
+        };
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(store.contains_task("task-0001"));
+        scope.temporary_models = true;
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(!store.contains_task("task-0001"));
+        assert!(
+            store
+                .with_credentials("task-0001", &old, |_, _| ())
+                .is_err()
+        );
+        assert!(
+            store
+                .with_credentials("task-other", &other, |_, _| ())
+                .is_ok()
+        );
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(store.contains_task("task-other"));
+        // A delayed retirement must preserve a new owner, even if all public
+        // connection/lease/task fields have been reused by that new generation.
+        let mut successor_package = package("fixture-successor-secret");
+        successor_package.binding.remote_control_generation =
+            other.remote_control_generation.clone();
+        store
+            .install(successor_package, &other, "task-0001", 1_002)
+            .unwrap();
+        store.cleanup(&old.remote_control_generation, scope);
+        assert!(store.contains_task("task-0001"));
+        assert!(
+            store
+                .with_credentials("task-0001", &other, |_, _| ())
+                .is_ok()
+        );
+        store.cleanup(&other.remote_control_generation, scope);
+        assert!(store.is_empty());
+    }
+
     fn saved_model() -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: "model-0001".into(),
             name: "My DeepSeek".into(),
             alias: None,
@@ -1126,6 +1271,14 @@ mod tests {
             max_output_tokens: Some(8_192),
             reasoning_effort: Some("high".into()),
             model: "deepseek-chat".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.deepseek.com/v1".into(),
             provider_kind: Some("official_api".into()),
             vendor: Some("deepseek".into()),
@@ -1262,6 +1415,110 @@ mod tests {
     }
 
     #[test]
+    fn route_summary_and_debug_strip_url_authentication_for_primary_and_vision() {
+        let mut exported = package("sk-test-only");
+        let raw = "https://fixture-user:fixture-password@models.example.test:8443/v1?api_key=fixture-query#fixture-fragment";
+        exported.primary.base_url = raw.into();
+        exported.vision_fallback = Some(route(raw, "openai", "sk-vision-test-only"));
+        let summary = exported.to_redacted_value();
+        assert_eq!(
+            summary["primary"]["base_url"],
+            "https://models.example.test:8443/v1"
+        );
+        assert_eq!(
+            summary["vision_fallback"]["base_url"],
+            "https://models.example.test:8443/v1"
+        );
+        for rendered in [summary.to_string(), format!("{exported:?}")] {
+            for secret in [
+                "fixture-user",
+                "fixture-password",
+                "fixture-query",
+                "fixture-fragment",
+            ] {
+                assert!(
+                    !rendered.contains(secret),
+                    "URL authentication must not reach summaries or Debug"
+                );
+            }
+        }
+        assert_eq!(exported.primary.base_url, raw);
+        assert_eq!(exported.to_wire_value()["primary"]["base_url"], raw);
+        assert_eq!(
+            exported.to_wire_value()["vision_fallback"]["route"]["base_url"],
+            raw
+        );
+    }
+
+    #[test]
+    fn url_summary_fails_closed_without_changing_valid_runtime_routes() {
+        let mut exported = package("sk-test-only");
+        for (raw, display) in [
+            (
+                "https://models.example.test/v1",
+                "https://models.example.test/v1",
+            ),
+            (
+                "https://models.example.test/v1?fixture-query",
+                "https://models.example.test/v1",
+            ),
+            (
+                "https://1.1.1.1:8443/v1?fixture-query",
+                "https://1.1.1.1:8443/v1",
+            ),
+        ] {
+            exported.primary.base_url = raw.into();
+            assert_eq!(exported.primary.to_redacted_value()["base_url"], display);
+            assert_eq!(
+                exported
+                    .primary
+                    .to_runtime_model("frozen-route".into())
+                    .unwrap()
+                    .base_url,
+                raw
+            );
+            assert_eq!(exported.to_wire_value()["primary"]["base_url"], raw);
+        }
+        // Diagnostic projection must not widen the frozen runtime URL contract.
+        for (raw, display) in [
+            (
+                "https://models.example.test/v1?fixture-query#fixture-fragment",
+                "https://models.example.test/v1",
+            ),
+            (
+                "https://[2606:4700:4700::1111]:8443/v1?fixture-query",
+                "https://[2606:4700:4700::1111]:8443/v1",
+            ),
+        ] {
+            exported.primary.base_url = raw.into();
+            assert_eq!(exported.primary.to_redacted_value()["base_url"], display);
+            assert_eq!(
+                exported
+                    .primary
+                    .to_runtime_model("frozen-route".into())
+                    .unwrap_err()
+                    .code,
+                "model_endpoint_invalid"
+            );
+            assert_eq!(exported.to_wire_value()["primary"]["base_url"], raw);
+        }
+        for raw in [
+            "not a URL fixture-query",
+            "https:///",
+            "https://fixture-user:fixture-password@",
+            "data:fixture-query",
+            "file:///fixture-query",
+        ] {
+            exported.primary.base_url = raw.into();
+            assert_eq!(
+                exported.primary.to_redacted_value()["base_url"],
+                "[REDACTED]"
+            );
+            assert!(!format!("{:?}", exported.primary).contains("fixture-query"));
+        }
+    }
+
+    #[test]
     fn generated_package_uses_the_frozen_protocol_integer_encoding() {
         let payload = json!({
             "v": 1,
@@ -1395,6 +1652,130 @@ mod tests {
                 .code,
             "model_binding_stale"
         );
+    }
+
+    #[tokio::test]
+    async fn every_lease_component_fences_lookup_and_terminal_cleanup() {
+        for field in [
+            "connection_id",
+            "controller_lease_id",
+            "lease_epoch",
+            "relay_epoch",
+            "remote_control_generation",
+        ] {
+            let original = lease();
+            let mut successor = lease();
+            match field {
+                "connection_id" => successor.connection_id = "connection-next".into(),
+                "controller_lease_id" => successor.controller_lease_id = "lease-next".into(),
+                "lease_epoch" => successor.lease_epoch = "8".into(),
+                "relay_epoch" => successor.relay_epoch = "relay-next".into(),
+                "remote_control_generation" => {
+                    successor.remote_control_generation = "generation-next".into()
+                }
+                _ => unreachable!(),
+            }
+            let store = TemporaryModelStore::default();
+            let mut first = package("fixture-first-key");
+            first.primary.base_url = "https://8.8.8.8/v1".into();
+            store.install(first, &original, "task-0001", 1).unwrap();
+            assert_eq!(
+                store
+                    .redacted_route("task-0001", &successor)
+                    .unwrap_err()
+                    .code,
+                "model_binding_stale"
+            );
+            assert_eq!(
+                store
+                    .with_credentials("task-0001", &successor, |_, _| panic!(
+                        "stale credentials must not be exposed"
+                    ))
+                    .unwrap_err()
+                    .code,
+                "model_binding_stale"
+            );
+            assert_eq!(
+                store
+                    .runtime_models_for_task("task-0001", &successor)
+                    .await
+                    .err()
+                    .unwrap()
+                    .code,
+                "model_binding_stale"
+            );
+            assert!(!store.clear_task("task-0001", &TaskLeaseBinding::from_context(&successor)));
+            assert!(store.contains_task("task-0001"));
+
+            // A replacement with the same task label still belongs to its
+            // complete new lease. A late old terminal callback cannot clear it.
+            let mut replacement = package("fixture-successor-key");
+            replacement.primary.base_url = "https://8.8.8.8/v1".into();
+            replacement.binding.connection_id = successor.connection_id.clone();
+            replacement.binding.controller_lease_id = successor.controller_lease_id.clone();
+            replacement.binding.lease_epoch = successor.lease_epoch.parse().unwrap();
+            replacement.binding.relay_epoch = successor.relay_epoch.clone();
+            replacement.binding.remote_control_generation =
+                successor.remote_control_generation.clone();
+            store
+                .install(replacement, &successor, "task-0001", 2)
+                .unwrap();
+            store.release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&original));
+            assert_eq!(
+                store
+                    .runtime_models_for_task("task-0001", &successor)
+                    .await
+                    .unwrap()
+                    .primary
+                    .api_key,
+                "fixture-successor-key"
+            );
+            store
+                .release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&successor));
+            assert!(store.is_empty());
+            store
+                .install(package("fixture-next-call"), &original, "task-0001", 3)
+                .unwrap();
+            store.release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&original));
+            assert!(store.is_empty());
+        }
+    }
+
+    #[test]
+    fn wire_binding_requires_epochs_and_matches_the_actual_task_envelope() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let original = fixture["task_submit_vectors"]["temporary"].clone();
+        validate_controller_payload_json(&original.to_string(), SenderRole::ControllerA).unwrap();
+        for field in ["relay_epoch", "remote_control_generation"] {
+            let mut missing = original.clone();
+            missing["temporary_model_package"]["binding"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                TemporaryModelPackageV1::from_wire_value(&missing["temporary_model_package"])
+                    .is_err()
+            );
+            assert!(
+                validate_controller_payload_json(&missing.to_string(), SenderRole::ControllerA)
+                    .is_err()
+            );
+            let mut stale = original.clone();
+            stale["temporary_model_package"]["binding"][field] = json!("old-context");
+            assert!(
+                validate_controller_payload_json(&stale.to_string(), SenderRole::ControllerA)
+                    .is_err()
+            );
+            let mut invalid = original.clone();
+            invalid["temporary_model_package"]["binding"][field] = json!("");
+            assert!(
+                TemporaryModelPackageV1::from_wire_value(&invalid["temporary_model_package"])
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1699,7 +2080,7 @@ mod tests {
         assert_eq!(route.secret.expose(), "sk-a-secret-value");
 
         let mut builtin = saved_model();
-        builtin.id = crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID.to_owned();
+        builtin.id = crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_owned();
         assert_eq!(
             export_decision(&builtin).reason,
             Some("model_not_exportable_builtin")
@@ -1754,6 +2135,8 @@ mod tests {
                 connection_id: "connection-0001".into(),
                 controller_lease_id: "lease-0001".into(),
                 lease_epoch: 7,
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
                 task_id: "task-0001".into(),
             },
             primary: route("https://api.deepseek.com/v1", "deepseek", "sk-primary"),
@@ -1918,8 +2301,8 @@ mod tests {
         assert!(store.contains_task("task-0001"));
         assert!(store.contains_task("task-0002"));
 
-        assert!(store.clear_task("task-0001"));
-        assert!(!store.clear_task("task-0001"));
+        assert!(store.clear_task("task-0001", &TaskLeaseBinding::from_context(&lease())));
+        assert!(!store.clear_task("task-0001", &TaskLeaseBinding::from_context(&lease())));
         assert!(!store.is_empty());
         assert_eq!(
             store
@@ -1928,7 +2311,7 @@ mod tests {
                 .code,
             "model_package_missing"
         );
-        assert!(store.clear_task("task-0002"));
+        assert!(store.clear_task("task-0002", &TaskLeaseBinding::from_context(&lease())));
         assert!(store.is_empty());
     }
 
@@ -1940,7 +2323,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.installed_at_ms(), Some(1_000));
         let scope: Arc<dyn RemoteTaskModelScope> = store.clone();
-        scope.release_task_credentials("task-0001");
+        scope.release_task_credentials("task-0001", &TaskLeaseBinding::from_context(&lease()));
         assert!(store.is_empty());
         assert!(!store.clear_for_connection("connection-0001"));
     }

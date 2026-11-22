@@ -669,14 +669,30 @@ async fn address_change_conflicts_model_restart_errors_and_url_secrets() {
     );
     assert_eq!(replacement.seen.lock().unwrap().len(), 1);
     f.store.online.store(false, Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // r26 P2-6：固定 sleep(1200) 改有界轮询——慢机 CI 不再依赖精确计时，
+    // 也不把监听器的实现细节（去间隔）钉死在测试里。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let gone = f
+            .client
+            .get(format!("{base}/models"))
+            .timeout(Duration::from_millis(500))
+            .send()
+            .await
+            .is_err();
+        if gone || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(
         f.client
             .get(format!("{base}/models"))
             .timeout(Duration::from_secs(1))
             .send()
             .await
-            .is_err()
+            .is_err(),
+        "监听不可达后 /models 应在 5 秒内变为不可达"
     );
     assert!(!f.gateway.status(&f.store(), "a").await.unwrap().enabled);
 }

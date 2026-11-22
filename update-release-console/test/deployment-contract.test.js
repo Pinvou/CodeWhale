@@ -17,7 +17,9 @@ test("容器、Compose 与 Nginx 保持最小权限和可信代理契约", async
     source("deploy/nginx-location.conf"),
     source("deploy/nginx-test.conf"),
   ]);
-  assert.match(dockerfile, /^FROM node:20-/mu);
+  assert.match(dockerfile, /^ARG NODE_IMAGE=node:20-bookworm-slim$/mu);
+  assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\}$/mu);
+  assert.match(compose, /NODE_IMAGE: \$\{PINVOU_UPDATE_NODE_IMAGE:-node:20-bookworm-slim\}/u);
   assert.match(dockerfile, /^USER node$/mu);
   assert.match(compose, /PINVOU_UPDATE_TRUSTED_PROXIES:\s+172\.16\.0\.0\/12/u);
   assert.match(compose, /- \/var\/www\/pinvou3:\/srv\/pinvou3/u);

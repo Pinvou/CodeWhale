@@ -1,0 +1,778 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Approval recovery Account authority",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "account service origin; separate service document, not a Portal endpoint"
+    }
+  ],
+  "x-service": "account",
+  "paths": {
+    "/internal/v1/approval-recovery/plan": {
+      "get": {
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "x-required-permission": "internal.approval-recovery.plan",
+        "x-required-workloads": [
+          "account-approval-recovery"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid or noncanonical closed input",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication missing/invalid at existing middleware",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope or dedicated workload identity denied",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authority unavailable; result remains unknown",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Read-only plan, more_candidates does not authorize execution",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "readApprovalRecoveryPlan",
+        "summary": "Read bounded original references without acquiring a lease or changing state",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Exactly one canonical decimal value, no aliases or additional query fields"
+          }
+        ]
+      }
+    },
+    "/internal/v1/approval-recovery/confirm": {
+      "post": {
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "x-required-permission": "internal.approval-recovery.confirm",
+        "x-required-workloads": [
+          "account-approval-recovery"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid or noncanonical closed input",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication missing/invalid at existing middleware",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope or dedicated workload identity denied",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authority unavailable; result remains unknown",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Original terminal CAS completed; no response body"
+          },
+          "409": {
+            "description": "Original result/effect/binding conflict; no inferred terminal outcome",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "confirmOriginalApprovalSuccess",
+        "summary": "Account independently rereads owner result before original success CAS",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Confirmation"
+              }
+            }
+          }
+        },
+        "x-body-max-bytes": 16384,
+        "x-input-rules": [
+          "exact Content-Type application/json; no query",
+          "one JSON object; duplicate and unknown keys rejected",
+          "original candidate registry/binding, original nonempty execution key and live lease must match",
+          "lease approval_request_id equals candidate approval_request_id; nonnil lease_token",
+          "worker-supplied result/effect/zero-effect verdict is not accepted"
+        ],
+        "x-terminal-authority": [
+          "Account owner rereads cannot be replaced by worker assertions",
+          "UNKNOWN/UNCONFIRMED alone never prove zero effect",
+          "positive result always wins; definite pre-effect failure and ended window plus owner ABSENT plus unconfirmed result and fenced original CAS required for zero-effect"
+        ]
+      }
+    },
+    "/internal/v1/approval-recovery/zero-effect": {
+      "post": {
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "x-required-permission": "internal.approval-recovery.zero-effect",
+        "x-required-workloads": [
+          "account-approval-recovery"
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid or noncanonical closed input",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication missing/invalid at existing middleware",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scope or dedicated workload identity denied",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authority unavailable; result remains unknown",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Original terminal CAS completed; no response body"
+          },
+          "409": {
+            "description": "Original result/effect/binding conflict; no inferred terminal outcome",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "operationId": "invalidateOriginalApprovalZeroEffect",
+        "summary": "Account independently rereads owner result and effect before original zero-effect CAS",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Confirmation"
+              }
+            }
+          }
+        },
+        "x-body-max-bytes": 16384,
+        "x-input-rules": [
+          "exact Content-Type application/json; no query",
+          "one JSON object; duplicate and unknown keys rejected",
+          "original candidate registry/binding, original nonempty execution key and live lease must match",
+          "lease approval_request_id equals candidate approval_request_id; nonnil lease_token",
+          "worker-supplied result/effect/zero-effect verdict is not accepted"
+        ],
+        "x-terminal-authority": [
+          "Account owner rereads cannot be replaced by worker assertions",
+          "UNKNOWN/UNCONFIRMED alone never prove zero effect",
+          "positive result always wins; definite pre-effect failure and ended window plus owner ABSENT plus unconfirmed result and fenced original CAS required for zero-effect"
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "WorkloadBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "existing workload service identity"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "Control": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "control_id": {
+            "const": "ADMIN_APPROVAL"
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "LEGACY",
+              "QUIESCING",
+              "PROOF_REQUIRED",
+              "SAFE_ROLLBACK"
+            ]
+          },
+          "approval_wire_version": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ]
+          },
+          "proof_required": {
+            "type": "boolean"
+          },
+          "authorization_relay_state": {
+            "type": "string",
+            "enum": [
+              "RUNNING",
+              "FENCED"
+            ]
+          },
+          "approval_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "authorization_relay_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "control_id",
+          "schema_version",
+          "mode",
+          "approval_wire_version",
+          "proof_required",
+          "authorization_relay_state",
+          "approval_epoch",
+          "authorization_relay_epoch",
+          "version",
+          "updated_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "LEGACY",
+                    "QUIESCING"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "approval_wire_version": {
+                  "const": 1
+                },
+                "proof_required": {
+                  "const": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "PROOF_REQUIRED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "approval_wire_version": {
+                  "const": 2
+                },
+                "proof_required": {
+                  "const": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "const": "SAFE_ROLLBACK"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "approval_wire_version": {
+                  "const": 1
+                },
+                "proof_required": {
+                  "const": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Delivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "domain_attempt_count": {
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_error_code": {
+            "type": "string"
+          },
+          "execution_status": {
+            "type": "string"
+          },
+          "execution_error_class": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_attempt_count",
+          "state",
+          "version"
+        ]
+      },
+      "Investigation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN",
+              "PERMANENT",
+              "FACT_OR_POLICY_CHANGED",
+              "WINDOW_ENDED",
+              "TRANSIENT_SAFE"
+            ]
+          },
+          "retryable": {
+            "const": false
+          },
+          "max_domain_attempts": {
+            "const": 1
+          },
+          "query_only": {
+            "const": true
+          }
+        },
+        "required": [
+          "class",
+          "retryable",
+          "max_domain_attempts",
+          "query_only"
+        ]
+      },
+      "Candidate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "original_execution_idempotency_key": {
+            "type": "string"
+          },
+          "original_event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "durable": {
+            "type": "string"
+          },
+          "workload": {
+            "type": "string"
+          },
+          "command_type": {
+            "type": "string"
+          },
+          "command_fingerprint": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "policy_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "approval_epoch": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "request_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "request_status": {
+            "type": "string"
+          },
+          "execution_status": {
+            "type": "string"
+          },
+          "execution_deadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_elapsed": {
+            "type": "boolean"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/Delivery"
+          },
+          "investigation": {
+            "$ref": "#/components/schemas/Investigation"
+          }
+        },
+        "required": [
+          "approval_request_id",
+          "execution_id",
+          "original_execution_idempotency_key",
+          "original_event_id",
+          "durable",
+          "workload",
+          "command_type",
+          "command_fingerprint",
+          "policy_version",
+          "approval_epoch",
+          "request_version",
+          "request_status",
+          "execution_status",
+          "execution_deadline",
+          "window_elapsed",
+          "delivery",
+          "investigation"
+        ]
+      },
+      "Lease": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lease_token": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lease_until": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "query_count": {
+            "type": "integer"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "approval_request_id",
+          "lease_token",
+          "lease_until",
+          "query_count",
+          "version"
+        ]
+      },
+      "Plan": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "control": {
+            "$ref": "#/components/schemas/Control"
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            }
+          },
+          "more_candidates": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema_version",
+          "observed_at",
+          "control",
+          "candidates",
+          "more_candidates"
+        ]
+      },
+      "Confirmation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/Candidate"
+          },
+          "lease": {
+            "$ref": "#/components/schemas/Lease"
+          }
+        },
+        "required": [
+          "candidate",
+          "lease"
+        ]
+      }
+    }
+  }
+}

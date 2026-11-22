@@ -1,0 +1,140 @@
+export const financeCopy = {
+  zh: {
+    statusLanguage: 'zh',
+    reviewArchiveUnsupported: '当前渠道不提供确定未支付的终态，无法使用此归档操作。请查询付款结果或安排复核；填写原因不能替代支付证据。',
+    reviewArchiveRequirements: '归档需超过等待期，取得渠道明确的未支付结果，并排除到账、支付冲突及未核实的付款申诉。',
+    reviewArchiveConflict: '暂不能归档。请重新读取详情，核对负责人、归档等待期和渠道未支付证据。',
+    reviewAssignedOther: '案件已分配给其他处理人，当前账号不能认领。',
+    reviewClaimConflict: '案件已被分配或处理，请重新读取详情后确认负责人和状态。',
+    unmatchedCallbackHelp: '本地未找到订单。请用以下编号核对渠道交易。结果仍未确认时，保留案件待复核。',
+    callbackNotificationID: '支付通知编号', callbackProvider: '验签服务商及版本', callbackMerchantOrder: '商户订单号',
+    callbackTransaction: '渠道交易号', callbackProviderOrder: '服务商订单号',
+    completionJournal: '实际账本分录', completionDigest: '资金事实摘要', financialCompletion: '确认财务完成', financialCompletionHelp: '仅核验已完成的资金回执，不新增余额或权益。须由另一名有权限的管理员复核；证据缺失或矛盾时继续阻断。无资金效果将重新查询服务商。', completionProposer: '提案人', completionEvidence: '完成证据', completionReference: '已提交修复或退款回执 ID', proposeFinancialCompletion: '提出财务完成核验', confirmFinancialCompletion: '独立复核并确认完成', completionProofs: { PAYMENT_REPAIR: '付款修复已入账', REFUND: '原交易全额退款已完成', NO_FINANCIAL_EFFECT: '权威失败且无资金效果' },
+    qrLoading: "正在加载付款二维码…",
+    paymentPreparing: "订单已创建，正在准备付款信息…",
+    paymentSlow: "加载时间较长，请稍候。可查询付款结果，请勿重复下单。",
+    qrLoadFailed: "二维码加载失败。请重试加载，或查询付款结果。",
+    qrRetry: "重新加载二维码",
+    paymentOrderCreated: "订单已创建，等待付款；尚未确认支付成功。",
+    closureSerializationConflict: '本次注销提交因并发更新而中止。请在原账号下保留原确认内容，以同一请求重试。',
+    forceCancelInflight: '取消在途调用', forceCancelInflightHelp: '仅批准并生效后请求取消；实际用量仍需结算。', forceCancelEnabled: '启用', forceCancelDisabled: '关闭',
+    queryUnknown: '前次复核查询的结果尚未确认。重试仅确认原查询，不会再次派发。',
+    newQuery: '新建复核',
+    confirmNewQuery: '确认新建一次复核？',
+    confirmQuery: '确认查询本次付款结果？',
+    newQueryHelp: '本次将以新请求重新查询支付服务商。前次未确认记录会保留，不会被标为成功。',
+    confirmQueryAction: '确认查询',
+    cancelQuery: '取消',
+    queryRecorded: '本次复核查询及证据已记录；付款状态以实际证据为准。',
+    queryArchiveRecovery: '同一案件最新的显式查询已确认，可重新尝试归档。旧未确认命令仍保留，服务端仍检查当前代次及全部归档条件。',
+    reauthenticationRecoveryUnavailable: "原充值请求仍待确认，但当前身份、上下文或权限无法安全重试。请恢复原账号上下文和权限；不要创建新请求。",
+    inputInvalid: '输入格式无效，请检查金额或标识后重试。',
+    resolutions: { CONFIRM_CHARGEBACK: '确认拒付', CONFIRM_FORCED_REFUND: '确认强制退款', CONFIRM_PAYMENT: '按支付证据确认付款', CONFIRM_PROVIDER_FAILED: '确认服务商付款失败', RECONCILE_REFUND: '查询并对账退款结果', DISMISS: '驳回异常', ESCALATE_FINANCIAL_REPAIR: '移交财务修复' },
+    refundReconcileHelp: '使用原退款号核实渠道结果；渠道幂等调用可能继续完成原退款请求。仅可信的成功或失败证据可完成扣销或释放，未知结果保持人工审核。',
+    paidAt: '支付时间', durationDays: days => `${days} 天`, countdown: seconds => `剩余付款时间 ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`,
+    scanToPay: '请使用手机扫码支付', scanToPayWithApps: apps => `支持以下应用扫码：${apps.join('、')}`, channels: { UNIONPAY: '银联', ALIPAY: '支付宝', WECHAT: '微信支付' },
+    editSubmit: '编辑并提交审批',
+    createProduct: '创建商品', productID: '商品标识', nameZh: '简体中文名称', nameEn: '英文名称', nameJa: '日文名称', displayOrder: '展示顺序', validityDays: '有效天数', invoiceName: '发票商品名称', provider: '支付服务商', sku: '服务商 SKU', amountFen: '金额（分）', admissionClass: '收款准入', formal: '正式收款', testOnly: '仅供测试', saveDraft: '保存商品草稿', saveNames: '保存展示名称', admission: '收款准入验证', verify: '开始验证', publish: '上架', unpublish: '下架', deleteProduct: '删除商品', revoke: '撤销验证证据',
+    title: '充值与权益', products: '充值商品', orders: '支付订单', packages: '权益包', refresh: '刷新', loading: '正在加载…', empty: '暂无记录', product: '商品', channel: '支付渠道', amount: '金额（人民币元）', status: '状态', create: '创建支付订单', retry: '以同一请求重试', unknown: '请求结果尚未确认。请以同一请求重试，不要重新创建。', saved: '操作已确认。', query: '查询付款结果', pay: '打开付款页面', close: '关闭支付订单', confirmClose: '确认关闭这个支付订单？已完成的付款仍会按实际付款事实处理。', claim: '提交付款申诉', statement: '付款情况说明', expires: '付款截止时间', remaining: '剩余积分', used: '已用积分', total: '总积分', validUntil: '有效期至', unavailable: '暂时无法获取真实财务数据，请重试。', invalid: '服务返回的财务回执无效，请刷新确认。', name: '名称', type: '类型', base: '充值积分', bonus: '赠送积分', planNoRefund: 'PLAN 套餐不支持普通退款。', mobileRequired: '请先验证手机号再充值。', noChannel: '当前没有可用支付渠道。', orderID: '订单号', return: '返回', providerQR: '付款二维码', processing: '付款确认或权益发放处理中。', history: '订单详情', finance: '财务管理', approvals: '审批', refunds: '整笔退款', reason: '原因', transaction: '支付流水', package: '权益包', confirmRefund: '确认按所选支付流水和权益包发起整笔退款？', refundUnavailable: '普通退款当前不可用。', permissions: '没有执行此操作的权限。', filters: '筛选', search: '查询', previous: '上一页', next: '下一页', owner: '处理人', severity: '严重级别', nextReview: '下次复核时间', claimCase: '认领', schedule: '安排复核', archive: '归档已确认未付', escalate: '升级人工复核', resolve: '处理异常', resolution: '处理方式', orderRepair: '按付款证据修复', submit: '提交', details: '详情', wallet: '钱包', delta: '调整积分（微积分）', draft: '创建审批草稿', decision: '审批决定', approve: '批准', reject: '拒绝', withdraw: '撤回', version: '版本', command: '操作类型', effects: '执行状态', sla: '处理期限', actions: '操作', productAdmin: '商品管理', providerControls: '支付渠道控制', resume: '恢复收款', more: '更多', confirmAction: '确认提交本次操作？', noActions: '当前没有可执行操作。', reload: '重新读取最新事实', completed: '已完成', sourceChanged: '当前资源或权限已变化，请重新读取。', newInvocation: '开始新的操作', adjustment: '钱包调整'
+  },
+  en: {
+    statusLanguage: 'en',
+    reviewArchiveUnsupported: 'This provider has no authoritative unpaid terminal result, so this archive action is unavailable. Check payment or schedule a review; a written reason cannot replace payment evidence.',
+    reviewArchiveRequirements: 'Archiving requires the waiting period to end, an authoritative unpaid result, and no payment, conflict, or unverified payment claim.',
+    reviewArchiveConflict: 'The case cannot be archived now. Reload its details and check the owner, archive waiting period, and authoritative unpaid evidence.',
+    reviewAssignedOther: 'This case is assigned to another handler and cannot be claimed by the current account.',
+    reviewClaimConflict: 'The case was assigned or processed. Reload its details to check the current owner and status.',
+    unmatchedCallbackHelp: 'No local order was found. Use these references to verify the provider transaction. Keep the case open while the outcome is unresolved.',
+    callbackNotificationID: 'Payment notification ID', callbackProvider: 'Verifying provider and version', callbackMerchantOrder: 'Merchant order number',
+    callbackTransaction: 'Channel transaction ID', callbackProviderOrder: 'Provider order reference',
+    completionJournal: 'Posted journal entry', completionDigest: 'Financial facts digest', financialCompletion: 'Confirm financial completion', financialCompletionHelp: 'Verify completed financial receipts without adding balance or entitlements. A different authorized administrator must review. Missing or conflicting evidence keeps the block. No-effect review queries the provider again.', completionProposer: 'Proposer', completionEvidence: 'Completion evidence', completionReference: 'Committed repair or refund receipt ID', proposeFinancialCompletion: 'Propose completion review', confirmFinancialCompletion: 'Independently review and confirm', completionProofs: { PAYMENT_REPAIR: 'Payment repair posted', REFUND: 'Original transaction fully refunded', NO_FINANCIAL_EFFECT: 'Authoritative failure with no financial effect' },
+    qrLoading: "Loading the payment QR code…",
+    paymentPreparing: "Order created. Preparing payment information…",
+    paymentSlow: "This is taking longer than usual. You can check payment status; do not create another order.",
+    qrLoadFailed: "The QR code could not load. Retry loading it or check payment status.",
+    qrRetry: "Reload QR code",
+    paymentOrderCreated: "Order created. Awaiting payment; payment is not yet confirmed.",
+    closureSerializationConflict: 'A concurrent update interrupted this closure attempt. Retry the same request with the same account and confirmation.',
+    forceCancelInflight: 'Cancel inflight calls', forceCancelInflightHelp: 'Requested only after approval and the effective time; actual usage remains billable.', forceCancelEnabled: 'Enabled', forceCancelDisabled: 'Disabled',
+    queryUnknown: 'The previous review query is unconfirmed. Retry only checks that original query and never dispatches it again.',
+    newQuery: 'Start a new review',
+    confirmNewQuery: 'Start a new review query?',
+    confirmQuery: 'Query the payment result for this review?',
+    newQueryHelp: 'This sends a new request to the payment provider. Previous unconfirmed records remain visible and are not marked successful.',
+    confirmQueryAction: 'Confirm query',
+    cancelQuery: 'Cancel',
+    queryRecorded: 'This review query and its evidence were recorded. Payment status follows the actual evidence.',
+    queryArchiveRecovery: 'The latest explicit query for this case is confirmed, so archiving can be attempted again. Previous unconfirmed commands remain; the server still checks the current generation and every archive condition.',
+    reauthenticationRecoveryUnavailable: "The original recharge request is unresolved, but the current identity, context or permissions cannot safely retry it. Restore the original account context and permissions; do not create a new request.",
+    inputInvalid: 'Invalid input. Check the amount or identifier and try again.',
+    resolutions: { CONFIRM_CHARGEBACK: 'Confirm chargeback', CONFIRM_FORCED_REFUND: 'Confirm forced refund', CONFIRM_PAYMENT: 'Confirm payment from evidence', CONFIRM_PROVIDER_FAILED: 'Confirm provider payment failure', RECONCILE_REFUND: 'Check and reconcile refund outcome', DISMISS: 'Dismiss anomaly', ESCALATE_FINANCIAL_REPAIR: 'Escalate to financial repair' },
+    refundReconcileHelp: 'Check the provider outcome using the original refund number; an idempotent provider call may complete the original refund request. Only trusted success or failure evidence can settle or release funds. Unknown outcomes remain under manual review.',
+    paidAt: 'Paid at', durationDays: days => `${days} days`, countdown: seconds => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} remaining`,
+    scanToPay: 'Scan with your phone to pay', scanToPayWithApps: apps => `Scan with: ${apps.join(' or ')}`, channels: { UNIONPAY: 'UnionPay', ALIPAY: 'Alipay', WECHAT: 'WeChat Pay' },
+    editSubmit: 'Edit and submit approval',
+    createProduct: 'Create product', productID: 'Product ID', nameZh: 'Simplified Chinese name', nameEn: 'English name', nameJa: 'Japanese name', displayOrder: 'Display order', validityDays: 'Validity in days', invoiceName: 'Invoice product name', provider: 'Payment provider', sku: 'Provider SKU', amountFen: 'Amount (fen)', admissionClass: 'Collection admission', formal: 'Formal collection', testOnly: 'Test only', saveDraft: 'Save product draft', saveNames: 'Save display names', admission: 'Collection admission verification', verify: 'Start verification', publish: 'Publish', unpublish: 'Unpublish', deleteProduct: 'Delete product', revoke: 'Revoke verification evidence',
+    title: 'Payments and entitlements', products: 'Recharge products', orders: 'Payment orders', packages: 'Entitlement packages', refresh: 'Refresh', loading: 'Loading…', empty: 'No records', product: 'Product', channel: 'Payment channel', amount: 'Amount (CNY)', status: 'Status', create: 'Create payment order', retry: 'Retry the same request', unknown: 'The result is unconfirmed. Retry the same request instead of creating another.', saved: 'The operation is confirmed.', query: 'Check payment', pay: 'Open payment page', close: 'Close payment order', confirmClose: 'Close this payment order? Completed payments are still handled according to actual payment facts.', claim: 'Submit payment claim', statement: 'Payment statement', expires: 'Payment deadline', remaining: 'Remaining credits', used: 'Used credits', total: 'Total credits', validUntil: 'Valid until', unavailable: 'Financial data is temporarily unavailable. Please retry.', invalid: 'The financial receipt is invalid. Refresh to confirm the result.', name: 'Name', type: 'Type', base: 'Recharge credits', bonus: 'Bonus credits', planNoRefund: 'PLAN packages do not support normal refunds.', mobileRequired: 'Verify your mobile number before recharging.', noChannel: 'No payment channel is currently available.', orderID: 'Order ID', return: 'Back', providerQR: 'Payment QR code', processing: 'Payment confirmation or entitlement delivery is processing.', history: 'Order details', finance: 'Finance', approvals: 'Approvals', refunds: 'Full refund', reason: 'Reason', transaction: 'Payment transaction', package: 'Entitlement package', confirmRefund: 'Request a full refund for the selected payment transaction and entitlement package?', refundUnavailable: 'Normal refunds are currently unavailable.', permissions: 'You do not have permission for this operation.', filters: 'Filters', search: 'Search', previous: 'Previous', next: 'Next', owner: 'Owner', severity: 'Severity', nextReview: 'Next review time', claimCase: 'Claim', schedule: 'Schedule review', archive: 'Archive confirmed unpaid', escalate: 'Escalate review', resolve: 'Resolve anomaly', resolution: 'Resolution', orderRepair: 'Repair using payment evidence', submit: 'Submit', details: 'Details', wallet: 'Wallet', delta: 'Credit adjustment (microcredits)', draft: 'Create approval draft', decision: 'Decision', approve: 'Approve', reject: 'Reject', withdraw: 'Withdraw', version: 'Version', command: 'Command', effects: 'Execution status', sla: 'Deadline', actions: 'Actions', productAdmin: 'Products', providerControls: 'Payment provider controls', resume: 'Resume collection', more: 'More', confirmAction: 'Submit this operation?', noActions: 'No action is currently available.', reload: 'Read current facts again', completed: 'Completed', sourceChanged: 'The resource or permissions changed. Read the current facts again.', newInvocation: 'Start a new operation', adjustment: 'Wallet adjustment'
+  },
+  ja: {
+    statusLanguage: 'ja',
+    reviewArchiveUnsupported: 'この決済サービスは未払いを確定する最終結果を提供しないため、このアーカイブ操作は利用できません。支払いを照会するか再確認を予約してください。理由の記入だけでは決済の証拠になりません。',
+    reviewArchiveRequirements: 'アーカイブには待機期間の経過、決済サービスによる未払いの確定、および入金・決済競合・未確認の支払い申告がないことが必要です。',
+    reviewArchiveConflict: '現在はアーカイブできません。詳細を再読み込みし、担当者、待機期間、未払いを確定する証拠を確認してください。',
+    reviewAssignedOther: 'この案件は別の担当者に割り当てられているため、現在のアカウントでは引き受けられません。',
+    reviewClaimConflict: '案件は割り当てまたは処理済みです。詳細を再読み込みして、現在の担当者と状態を確認してください。',
+    unmatchedCallbackHelp: 'ローカルに注文が見つかりませんでした。以下の番号で決済事業者の取引を照合してください。結果が未確定の間はケースを未解決のままにしてください。',
+    callbackNotificationID: '決済通知 ID', callbackProvider: '署名を検証した決済事業者とバージョン', callbackMerchantOrder: '加盟店注文番号',
+    callbackTransaction: '決済チャネル取引 ID', callbackProviderOrder: '決済事業者の注文番号',
+    completionJournal: '計上済み仕訳', completionDigest: '資金事実のダイジェスト', financialCompletion: '財務処理の完了確認', financialCompletionHelp: '完了済みの資金証跡のみを確認し、残高や利用権は追加しません。別の権限保有管理者による確認が必要です。証拠が不足または矛盾する場合は保留を続けます。資金効果がない場合は決済サービスに再照会します。', completionProposer: '提案者', completionEvidence: '完了証拠', completionReference: '確定済み修復または返金の証跡 ID', proposeFinancialCompletion: '財務完了の確認を提案', confirmFinancialCompletion: '独立して確認し完了を確定', completionProofs: { PAYMENT_REPAIR: '支払い修復の計上済み', REFUND: '元取引の全額返金完了', NO_FINANCIAL_EFFECT: '確定失敗かつ資金効果なし' },
+    qrLoading: "支払いQRコードを読み込み中…",
+    paymentPreparing: "注文を作成しました。支払い情報を準備中…",
+    paymentSlow: "通常より時間がかかっています。支払い結果を確認できます。重複注文は作成しないでください。",
+    qrLoadFailed: "QRコードを読み込めませんでした。再読み込みするか支払い結果を確認してください。",
+    qrRetry: "QRコードを再読み込み",
+    paymentOrderCreated: "注文を作成しました。支払い待ちで、支払い完了は未確認です。",
+    closureSerializationConflict: '同時更新の競合により今回の退会要求は中止されました。同じアカウントと確認内容のまま、同じ要求を再試行してください。',
+    forceCancelInflight: '実行中の呼び出しをキャンセル', forceCancelInflightHelp: '承認および適用後にのみ要求します。実際の使用量は精算されます。', forceCancelEnabled: '有効', forceCancelDisabled: '無効',
+    queryUnknown: '前回の照会結果は未確認です。再試行は元の照会を確認するだけで、再送信しません。',
+    newQuery: '新しい審査を開始',
+    confirmNewQuery: '新しい審査照会を開始しますか？',
+    confirmQuery: '今回の審査で支払結果を照会しますか？',
+    newQueryHelp: '新しいリクエストで決済事業者に照会します。前回の未確認記録は保持され、成功扱いにはなりません。',
+    confirmQueryAction: '照会を確認',
+    cancelQuery: 'キャンセル',
+    queryRecorded: '今回の照会と証拠を記録しました。支払状態は実際の証拠に従います。',
+    queryArchiveRecovery: 'この案件の最新の明示的な照会が確認されたため、アーカイブを再試行できます。以前の未確認コマンドは保持され、サーバーは現在の世代とすべての条件を引き続き検証します。',
+    reauthenticationRecoveryUnavailable: "元のチャージ要求は未確認ですが、現在の本人情報、コンテキストまたは権限では安全に再試行できません。元のアカウントのコンテキストと権限を復元し、新しい要求を作成しないでください。",
+    inputInvalid: '入力形式が無効です。金額または識別子を確認して再試行してください。',
+    resolutions: { CONFIRM_CHARGEBACK: 'チャージバックを確認', CONFIRM_FORCED_REFUND: '強制返金を確認', CONFIRM_PAYMENT: '支払い証拠で入金を確認', CONFIRM_PROVIDER_FAILED: '決済サービスの支払い失敗を確認', RECONCILE_REFUND: '返金結果を照会して照合', DISMISS: '異常を却下', ESCALATE_FINANCIAL_REPAIR: '財務修復へ引き継ぐ' },
+    refundReconcileHelp: '元の返金番号で決済サービスの結果を確認します。冪等な呼び出しにより元の返金処理が完了する場合があります。信頼できる成功または失敗の証拠がある場合のみ資金を精算または解放し、結果不明の場合は手動審査を継続します。',
+    paidAt: '支払日時', durationDays: days => `${days} 日`, countdown: seconds => `支払い残り時間 ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`,
+    scanToPay: 'スマートフォンで QR コードを読み取ってください', scanToPayWithApps: apps => `対応アプリでスキャン：${apps.join('・')}`, channels: { UNIONPAY: 'UnionPay', ALIPAY: 'Alipay', WECHAT: 'WeChat Pay' },
+    editSubmit: '承認下書きを編集して送信',
+    createProduct: '商品を作成', productID: '商品ID', nameZh: '簡体字中国語の名前', nameEn: '英語の名前', nameJa: '日本語の名前', displayOrder: '表示順序', validityDays: '有効日数', invoiceName: '請求書の商品名', provider: '支払いサービス', sku: 'サービスのSKU', amountFen: '金額（分）', admissionClass: '集金の許可', formal: '正式な集金', testOnly: 'テスト専用', saveDraft: '商品下書きを保存', saveNames: '表示名を保存', admission: '集金許可の検証', verify: '検証を開始', publish: '公開', unpublish: '公開を停止', deleteProduct: '商品を削除', revoke: '検証証拠を取り消す',
+    title: '支払いと利用権', products: 'チャージ商品', orders: '支払い注文', packages: '利用権パッケージ', refresh: '更新', loading: '読み込み中…', empty: '記録がありません', product: '商品', channel: '支払い方法', amount: '金額（人民元）', status: '状態', create: '支払い注文を作成', retry: '同じリクエストで再試行', unknown: '結果を確認できません。同じリクエストで再試行し、新しい注文は作成しないでください。', saved: '操作を確認しました。', query: '支払い結果を確認', pay: '支払いページを開く', close: '支払い注文を閉じる', confirmClose: 'この支払い注文を閉じますか？完了した支払いは実際の支払い情報に基づいて処理されます。', claim: '支払い申告を送信', statement: '支払い状況の説明', expires: '支払い期限', remaining: '残りポイント', used: '使用済みポイント', total: '合計ポイント', validUntil: '有効期限', unavailable: '財務データを取得できません。再試行してください。', invalid: '財務応答が無効です。更新して結果を確認してください。', name: '名前', type: '種類', base: 'チャージポイント', bonus: '追加ポイント', planNoRefund: 'PLAN パッケージは通常の返金に対応していません。', mobileRequired: 'チャージ前に携帯番号を認証してください。', noChannel: '現在利用できる支払い方法がありません。', orderID: '注文番号', return: '戻る', providerQR: '支払いQRコード', processing: '支払い確認または利用権の付与を処理中です。', history: '注文の詳細', finance: '財務管理', approvals: '承認', refunds: '全額返金', reason: '理由', transaction: '支払い取引', package: '利用権パッケージ', confirmRefund: '選択した支払い取引と利用権パッケージの全額返金を申請しますか？', refundUnavailable: '現在通常の返金を利用できません。', permissions: 'この操作の権限がありません。', filters: '絞り込み', search: '検索', previous: '前へ', next: '次へ', owner: '担当者', severity: '重要度', nextReview: '次回確認日時', claimCase: '担当する', schedule: '確認を予約', archive: '未払い確認済みとして保管', escalate: '手動確認へ引き継ぐ', resolve: '異常を処理', resolution: '処理方法', orderRepair: '支払い証拠で修復', submit: '送信', details: '詳細', wallet: 'ウォレット', delta: 'ポイント調整（マイクロポイント）', draft: '承認下書きを作成', decision: '承認判断', approve: '承認', reject: '拒否', withdraw: '取り下げ', version: 'バージョン', command: '操作種類', effects: '実行状態', sla: '処理期限', actions: '操作', productAdmin: '商品管理', providerControls: '支払いチャネル制御', resume: '集金を再開', more: 'その他', confirmAction: 'この操作を送信しますか？', noActions: '現在実行できる操作はありません。', reload: '最新情報を再取得', completed: '完了', sourceChanged: 'リソースまたは権限が変更されました。最新情報を再取得してください。', newInvocation: '新しい操作を開始', adjustment: 'ウォレット調整'
+  }
+};
+
+Object.assign(financeCopy.zh, { cancelClose: '取消关闭' });
+Object.assign(financeCopy.en, { cancelClose: 'Keep order open' });
+Object.assign(financeCopy.ja, { cancelClose: '注文を閉じない' });
+
+Object.assign(financeCopy.zh, { pendingOrders: '待支付订单', continuePayment: '继续支付', paymentDialog: '扫码支付', dismissPayment: '关闭扫码窗口' });
+Object.assign(financeCopy.en, { pendingOrders: 'Pending payments', continuePayment: 'Continue payment', paymentDialog: 'Pay this order', dismissPayment: 'Dismiss payment window' });
+Object.assign(financeCopy.ja, { pendingOrders: '支払い待ちの注文', continuePayment: '支払いを続ける', paymentDialog: '注文の支払い', dismissPayment: '支払い画面を閉じる' });
+
+Object.assign(financeCopy.zh, { approvalReadUnavailable: '暂时无法读取审批数据，请重试。' });
+Object.assign(financeCopy.en, { approvalReadUnavailable: 'Approval data could not be loaded. Please retry.' });
+Object.assign(financeCopy.ja, { approvalReadUnavailable: '承認データを取得できません。再試行してください。' });
+
+Object.assign(financeCopy.zh, {"catalogValueMissing":"未提供","catalogNameMissing":"名称未配置","catalogCurrencyMissing":"币种未提供","catalogConfigAmount":"目录配置金额","catalogEntitlement":"积分权益","catalogLifecycle":{"DRAFT":"草稿","ON_SALE":"在售","OFF_SALE":"停售","DELETED":"已删除"}});
+Object.assign(financeCopy.en, {"catalogValueMissing":"Not provided","catalogNameMissing":"Name not configured","catalogCurrencyMissing":"Currency not provided","catalogConfigAmount":"Catalog configured amount","catalogEntitlement":"Points entitlement","catalogLifecycle":{"DRAFT":"Draft","ON_SALE":"On sale","OFF_SALE":"Off sale","DELETED":"Deleted"}});
+Object.assign(financeCopy.ja, {"catalogValueMissing":"提供されていません","catalogNameMissing":"名称未設定","catalogCurrencyMissing":"通貨情報なし","catalogConfigAmount":"カタログ設定金額","catalogEntitlement":"付与ポイント","catalogLifecycle":{"DRAFT":"下書き","ON_SALE":"販売中","OFF_SALE":"販売停止","DELETED":"削除済み"}});
+
+Object.assign(financeCopy.zh, {"catalogMetricsMissing":"本次快照未提供全部指标。","catalogAdmissionStatus":{"PENDING":"待完成","MISSING":"缺少验证","FAILED":"验证失败","EXPIRED":"已过期","REVOKED":"已撤销"}});
+Object.assign(financeCopy.en, {"catalogMetricsMissing":"Some metrics were not provided in this snapshot.","catalogAdmissionStatus":{"PENDING":"Pending","MISSING":"Missing verification","FAILED":"Failed","EXPIRED":"Expired","REVOKED":"Revoked"}});
+Object.assign(financeCopy.ja, {"catalogMetricsMissing":"このスナップショットには一部の指標が含まれていません。","catalogAdmissionStatus":{"PENDING":"未完了","MISSING":"検証なし","FAILED":"失敗","EXPIRED":"期限切れ","REVOKED":"取り消し済み"}});
+
+Object.assign(financeCopy.zh, { catalogPagination: "商品目录分页" });
+Object.assign(financeCopy.en, { catalogPagination: "Product catalog pages" });
+Object.assign(financeCopy.ja, { catalogPagination: "商品カタログのページ" });

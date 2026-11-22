@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "oidc_issuer": "https://account.pinvou.com/realms/pinvou",
+  "oidc_token_url": "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/token",
+  "oidc_client_id": "pinvou-desktop",
+  "account_service_url": "https://account.pinvou.com/account",
+  "identity_service_url": "https://account.pinvou.com/identity",
+  "token_gateway_url": "https://account.pinvou.com/token",
+  "account_portal_url": "https://account.pinvou.com/"
+}

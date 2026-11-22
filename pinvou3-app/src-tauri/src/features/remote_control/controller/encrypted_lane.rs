@@ -11,6 +11,7 @@
 use base64::Engine as _;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::crypto::{
@@ -25,6 +26,10 @@ use super::protocol::{
 
 /// 有界错误码：不区分「解密失败/校验失败/代不符」，避免给出可区分信息。
 pub(crate) const ENCRYPTED_FRAME_INVALID: &str = "encrypted_frame_invalid";
+
+#[cfg(test)]
+#[path = "encrypted_lane/retirement_tests.rs"]
+mod retirement_tests;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum LaneFailure {
@@ -48,6 +53,7 @@ impl LaneFailure {
 
 /// 一条会话密钥对应的加密业务通道（一个 lease 一个方向）。
 pub(crate) struct EncryptedLane {
+    installation: Arc<()>,
     role: ControllerRole,
     lease: super::protocol::LeaseContext,
     send: SendCipher,
@@ -80,6 +86,7 @@ impl EncryptedLane {
             .into_role_ciphers(role, binding)
             .map_err(|_| LaneFailure::Invalid)?;
         Ok(Self {
+            installation: Arc::new(()),
             role,
             lease: lease.clone(),
             send: ciphers.send,
@@ -446,6 +453,24 @@ struct LaneStore {
 }
 
 impl LaneStore {
+    fn retirement_identity(&self) -> Option<LaneRetirementIdentity> {
+        self.lane
+            .lock()
+            .as_ref()
+            .map(|lane| LaneRetirementIdentity(lane.installation.clone()))
+    }
+
+    fn retire_if_identity(&self, expected: &LaneRetirementIdentity) {
+        let mut lane = self.lane.lock();
+        if lane
+            .as_ref()
+            .is_some_and(|lane| Arc::ptr_eq(&lane.installation, &expected.0))
+        {
+            *lane = None;
+            self.suspended.store(false, Ordering::SeqCst);
+        }
+    }
+
     /// 安装（或替换）通道：只有完整握手 + 租约安装之后才允许调用。
     pub(crate) fn install(
         &self,
@@ -616,7 +641,7 @@ macro_rules! lane_state {
         #[doc = $doc]
         #[derive(Default)]
         pub(crate) struct $name {
-            store: LaneStore,
+            store: Arc<LaneStore>,
         }
 
         impl $name {
@@ -717,6 +742,16 @@ lane_state!(ControllingLaneState, "A 端（主控）加密业务通道状态。"
 lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。");
 
 impl ControllingLaneState {
+    /// A secret-free installation identity, not a lease/session-id comparison.
+    /// The token keeps its allocation alive, so even a same-lease replacement
+    /// cannot be mistaken for the original key slot by delayed cleanup.
+    pub(crate) fn retire_on_exit(&self) -> ControllingLaneRetirement {
+        ControllingLaneRetirement {
+            store: self.store.clone(),
+            identity: self.store.retirement_identity(),
+        }
+    }
+
     pub(crate) fn seal_capability_and_send(
         &self,
         lease: &super::protocol::LeaseContext,
@@ -726,6 +761,21 @@ impl ControllingLaneState {
     ) -> Result<(), String> {
         self.store
             .seal_for_lease_and_send(lease, payload, capabilities, send)
+    }
+}
+
+struct LaneRetirementIdentity(Arc<()>);
+
+pub(crate) struct ControllingLaneRetirement {
+    store: Arc<LaneStore>,
+    identity: Option<LaneRetirementIdentity>,
+}
+
+impl Drop for ControllingLaneRetirement {
+    fn drop(&mut self) {
+        if let Some(identity) = &self.identity {
+            self.store.retire_if_identity(identity);
+        }
     }
 }
 
@@ -938,6 +988,108 @@ mod tests {
                 .unwrap_err(),
             LaneFailure::Invalid
         );
+    }
+
+    #[test]
+    fn controller_stop_clears_real_a_keys_and_preserves_the_b_lane() {
+        use crate::features::remote_control::controller::controlling::{
+            ControllerLease, ControllingDeviceManager,
+        };
+        for reconnecting in [false, true] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("2345678").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let fixture = pairing_fixture("relay-stop-keys");
+            let lease = lease_context(&fixture.reservation);
+            let (a_session, b_session) =
+                paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+            let a = ControllingLaneState::default();
+            let b = ControlledLaneState::default();
+            a.install(ControllerRole::A, &lease, a_session).unwrap();
+            b.install(ControllerRole::B, &lease, b_session).unwrap();
+            let transcript = fixture.reservation["transcript_hash"].as_str().unwrap();
+            let hash = std::array::from_fn(|index| {
+                u8::from_str_radix(&transcript[index * 2..index * 2 + 2], 16).unwrap()
+            });
+            manager
+                .complete_connected(
+                    operation,
+                    ControllerLease {
+                        context: lease.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "B".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: fixture.resume_token,
+                        transport_key_fingerprint: super::super::crypto::transport_key_fingerprint(
+                            hash,
+                            ControllerRole::A,
+                        )
+                        .unwrap(),
+                        negotiated_capabilities: capabilities(),
+                    },
+                )
+                .unwrap();
+            let payload = task_submit_payload(&lease);
+            assert!(a.seal("task_submit", &payload, &capabilities()).is_ok());
+            if reconnecting {
+                manager.mark_transport_disconnected(5_000, Some(30_000));
+                a.suspend();
+                assert_eq!(
+                    serde_json::to_value(manager.status()).unwrap()["status"],
+                    "reconnecting"
+                );
+                assert!(
+                    a.is_installed(),
+                    "resume retains keys until an explicit stop"
+                );
+            } else {
+                assert_eq!(
+                    serde_json::to_value(manager.status()).unwrap()["status"],
+                    "connected"
+                );
+            }
+            manager.stop(&a);
+            assert_eq!(
+                serde_json::to_value(manager.status()).unwrap()["status"],
+                "disconnected"
+            );
+            assert!(!a.is_installed());
+            assert!(a.seal("task_submit", &payload, &capabilities()).is_err());
+            assert!(a.resume_fingerprint("activation-0001").is_err());
+            assert!(
+                b.is_installed(),
+                "A stop must preserve B's distinct key owner"
+            );
+            manager.stop(&a);
+            assert!(b.is_installed());
+            let next = manager.connect("3455678").unwrap();
+            let fresh = pairing_fixture("relay-stop-keys-next");
+            let fresh_session = role_session_keys(
+                ControllerRole::A,
+                fresh.a_keys,
+                fresh.b_keys.public_key().to_bytes(),
+                &fresh.reservation,
+            );
+            manager
+                .with_lane_owner(&next, || {
+                    a.install(
+                        ControllerRole::A,
+                        &lease_context(&fresh.reservation),
+                        fresh_session,
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            assert!(
+                a.is_installed(),
+                "stop must allow the next legitimate lifecycle"
+            );
+            manager.stop(&a);
+            b.clear();
+        }
     }
 
     #[test]

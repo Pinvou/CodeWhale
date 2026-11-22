@@ -51,8 +51,9 @@ pub mod automation_foundation {
 /// the GUI keeps calling `crate::core::model_endpoint` directly.
 pub mod model_probe {
     pub use crate::core::model_endpoint::{
-        is_anthropic_api_url, is_opencode_gateway_base_url, model_probe_http_code,
-        model_probe_transport_code, models_probe_url, opencode_session_id_for, strip_v1_suffix,
+        error_chain_looks_like_tls, is_anthropic_api_url, is_opencode_gateway_base_url,
+        model_probe_http_code, model_probe_transport_code, models_probe_url,
+        opencode_session_id_for, strip_v1_suffix,
     };
 }
 
@@ -62,6 +63,7 @@ use crate::app::desktop_remote_composition::{
     DesktopRemoteProjectionPort,
 };
 use crate::features::{
+    account_platform::AccountPlatformState,
     assistant::{engine_pool::EnginePool, platform::bridge},
     connectors::{connector_cli, eip, zhidao},
     files::file_watcher,
@@ -797,6 +799,50 @@ pub(crate) async fn harvest_child_processes(app: &tauri::AppHandle) {
     {
         connector_conn.kill_all_pids();
     }
+    // computer_use arm: the linux virtual display stack (Xvfb/WM trees) is NOT
+    // kill_on_drop-wired, so a clean exit or restart would otherwise orphan it
+    // until the next startup sweep. Kill pidfile-recorded trees from THIS
+    // process now. Peer-instance safety: the single-instance plugin
+    // (tauri-plugin-single-instance) makes a concurrent second instance
+    // impossible, and the sweep only ever reaches pidfiles under THIS home's
+    // virtual-display root whose recorded identity (role + kernel start time)
+    // verifies — the worst a bypassed single-instance edge could hit is a
+    // same-user peer's genuine, correctly targeted trees (an availability
+    // loss, never a wrong kill). Sweep failures are logged inside the sweep
+    // and never block shutdown (non-fatal by contract).
+    features::computer_use::sweep_virtual_display_orphans();
+    // In-memory sessions: tool Drop is not guaranteed on the exit path, and
+    // process death does NOT undo a synthetic press already posted into a
+    // target app (a CGEventPostToPid press leaves the app button-held after
+    // our process is gone). Fire the same emergency release the stop paths
+    // use (releases all three buttons, closes persistent grants) and wait a
+    // bounded, completion-driven grace: healthy sub-second releases return
+    // early, a wedged cleanup gives up at the budget (R13 — the flat 2 s
+    // sleep paid the full budget even when every release finished in
+    // milliseconds). The grace is paid ONLY when a session is actually
+    // registered: the shared state is managed unconditionally, so an
+    // ungated wait taxed every quit and restart of the app — including
+    // users who never enabled computer use — with zero sessions live (R11
+    // minor). The blocking wait rides spawn_blocking so the harvest never
+    // parks a tokio worker; the exit path still awaits it via block_on.
+    // A worker wedged mid-action cannot be waited out here (the control
+    // request's budget is minutes) — that residual strand stays, disclosed
+    // by the macOS target note; the Linux stack evaporates with Xvfb and
+    // the Windows job's kill-on-close fires at process death regardless.
+    const RELEASE_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+    if let Some(shared) =
+        app.try_state::<std::sync::Arc<features::computer_use::ComputerUseShared>>()
+    {
+        if shared.backends.has_live_sessions() {
+            let shared = std::sync::Arc::clone(&shared);
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                shared
+                    .backends
+                    .emergency_release_all_and_wait(RELEASE_GRACE);
+            })
+            .await;
+        }
+    }
 }
 
 /// Every `app.restart()` call must pass through this funnel. The browser first saves
@@ -981,7 +1027,7 @@ pub fn run() {
                 .build()
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 crate::platform::window_startup::activate_main_window(window, "single_instance");
             }
         }))
@@ -1038,6 +1084,30 @@ pub fn run() {
         })
         .setup(|app| {
             startup::mark("setup:start");
+            // Steer terminal consumer assembly: the in-flight settlement of
+            // cross-session message delivery (features::messaging) is driven
+            // by the forwarder's SteerCommitted/SteerDropped events. The hook
+            // is injected along the dependency direction (messaging →
+            // assistant); assistant never depends back on the consumer
+            // feature (the architecture guard's feature-cycle line). Engines
+            // spawn lazily on a session's first send, so this registration
+            // precedes any steer event.
+            if features::assistant::steer_outcomes
+                ::register_steer_resolution_hook(features::messaging::resolve_pending_steer)
+                .is_err()
+            {
+                // Same best-effort stderr shape as the plugin-attach arm
+                // below: `eprintln!` panics when the stderr write fails
+                // (no console on packaged Windows) and a panic inside setup
+                // takes boot down. The branch is unreachable today (single
+                // registration site above), but it must stay harmless — the
+                // module doc's "logs the refusal" only holds if this write
+                // cannot take the process down.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[pinvou3] steer resolution hook registered twice; keeping the first"
+                );
+            }
             // The disabled_bundles migration verdict must be frozen here: the
             // broad upgrade signal (settings.json/session dirs exist ⇒ upgrade
             // install) gets polluted by bridge boot's first-startup behavior
@@ -1136,6 +1206,33 @@ pub fn run() {
             }
             startup::mark("retired_features:done");
 
+            // The Account Platform model cutover owns only client-local data.
+            // It must complete before SessionStore loads per-session model IDs.
+            startup::mark("account_platform_model_migrate:start");
+            match crate::features::account_platform::client_migration::migrate_if_needed() {
+                Ok(report) => {
+                    eprintln!(
+                        "[pinvou3-app] account platform model migration state={:?} session_bindings={} scheduled_profiles={} credentials_removed={} cleanup_errors={}",
+                        report.state,
+                        report.session_bindings_migrated,
+                        report.scheduled_profiles_migrated,
+                        report.credentials_removed,
+                        report.cleanup_errors.len()
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pinvou3-app] account platform model migration failed (will retry next boot): {error:#}"
+                    );
+                    startup::mark_with_detail(
+                        "rust",
+                        "account_platform_model_migrate:error",
+                        &error.to_string(),
+                    );
+                }
+            }
+            startup::mark("account_platform_model_migrate:done");
+
             // 多对话历史 store：用 ~/.pinvou3/sessions/ 隔离 deepseek-tui 全局目录。
             // 必须先 boot 这个，engine forwarder 需要它跟踪 active session 的 mode_state
             // 以便 TurnComplete 时判定是否 emit chat:plan_ready。
@@ -1198,6 +1295,9 @@ pub fn run() {
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
             let model_store =
                 std::sync::Arc::new(features::model_store::ModelStoreService::default());
+            model_store.set_models_changed_handler(
+                app::model_store_events::live_models_changed_handler(app.handle().clone()),
+            );
             // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
             // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
@@ -1206,6 +1306,21 @@ pub fn run() {
             // 这里原来还有一句 `run_startup_refresh()`：把已下载的**内置测试卡片**
             // 的固化脚本刷到当前应用版本（它们的正文编译在二进制里，应用升级就等于
             // 脚本升级）。内置测试商店 2026-09-30 整体拿掉，这一步也就没有对象了。
+            // r36 P2-1：原函数还顺带做了一次 linked-models 后台对账
+            // （sync_linked_models），随函数整体删除而丢失。这里补一句
+            // fire-and-forget 启动同步——启动后不依赖用户打开商店视图就能完成
+            // 路由/上下文修复对账；失败只记 stderr 不弹（打开视图时会重试）。
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = tokio::task::spawn_blocking(
+                    features::model_store::platform::linked_models_startup_sync,
+                )
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+                {
+                    eprintln!("[startup] linked-models 同步失败（下次打开商店视图会重试）：{error}");
+                }
+            });
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -1302,7 +1417,11 @@ pub fn run() {
             // the .manage()'d State. settings.json's computer_use.enabled is
             // the single source of truth for the toggle; it is replayed into
             // the AtomicBool at startup (the computer_use_set_enabled command
-            // owns the later persist-to-disk → flip-flag flow).
+            // owns the later persist-to-disk → flip-flag flow). The virtual
+            // display preference rides the same replay (same persist → flip
+            // command shape), followed by the cheap availability probe so
+            // the first status read answers "ready"/"unavailable" instead of
+            // the unprobed placeholder.
             let computer_use_shared =
                 std::sync::Arc::new(features::computer_use::ComputerUseShared::new());
             // Replay the persisted toggle through the same platform gate the
@@ -1310,10 +1429,23 @@ pub fn run() {
             // stale `enabled: true` in settings.json must not flip the
             // in-memory flag (it would keep the tool model-visible while
             // every call dies at the capability check).
+            let computer_use_prefs = crate::platform::prefs::UserPrefs::load().computer_use;
             computer_use_shared.set_enabled(
-                crate::platform::prefs::UserPrefs::load().computer_use.enabled
-                    && features::computer_use::backend_supported(),
+                computer_use_prefs.enabled && features::computer_use::backend_supported(),
             );
+            computer_use_shared.set_display_pref(computer_use_prefs.prefer_virtual_display);
+            // (set_display_pref already refreshed the availability snapshot —
+            // no second probe here.)
+            // Main-thread dispatch channel for the platform layer: the macOS
+            // virtual display creation hops onto the main run loop through
+            // it (linux/windows call sites ignore the helper). Stored once
+            // at setup; dispatching before this point answers false and the
+            // callers fall back explicitly.
+            features::computer_use::set_main_thread_app_handle(app.handle().clone());
+            // Crash-orphan sweep for the virtual display stacks (linux
+            // pidfiles; a no-op elsewhere). Once, at setup — never per
+            // session.
+            features::computer_use::sweep_virtual_display_orphans();
             app.manage(computer_use_shared.clone());
             let tool_factory: crate::features::assistant::engine_pool::EngineToolFactory = {
                 let computer_use_shared = computer_use_shared.clone();
@@ -1402,7 +1534,9 @@ pub fn run() {
                 tool_factory,
                 tool_policy,
                 std::sync::Arc::new(
-                    crate::features::llmapi_hub::runtime_model::LlmApiRuntimeModelProvider,
+                    crate::features::account_platform::runtime_model::AccountPlatformRuntimeModelProvider::new(
+                        handle.clone(),
+                    ),
                 ),
             ) {
                 Ok(mut pool) => {
@@ -1570,6 +1704,9 @@ pub fn run() {
                         handle.manage(CapabilitySnapshotManager::default());
                         let temporary_models = commands::desktop_remote_model::shared_model_store();
                         handle.manage(temporary_models.clone());
+                        temporary_models.register_controlled_cleanup(
+                            &handle.state::<ControlledDeviceManager>(),
+                        );
                         let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
                         permission_authority.register_controlled_cleanup(
                             &handle.state::<ControlledDeviceManager>(),
@@ -1780,6 +1917,10 @@ pub fn run() {
             // get_monitor_snapshot 时触发（监控页面 1s interval，离开页面停）。
             let monitor_state = MonitorState::new();
             app.handle().manage(monitor_state);
+            // MegaCube 设备管理：持有必须跨采样存续的 sysinfo System/Networks 实例
+            // （进程 CPU% 与网络速率都靠同一实例两次刷新求差）。非 MegaCube 平台
+            // 上无人调用，开销为零。
+            app.handle().manage(crate::features::device::DeviceState::new());
             app.handle()
                 .manage(notifications::NotificationState::default());
             app.handle()
@@ -1789,6 +1930,9 @@ pub fn run() {
 
             // CLI 连接器连接编排状态(按连接器 id 存长驻子进程 PID + 取消标志),
             // 飞书 / 企微共用,供 *_connect_begin / *_cancel 用。
+            app.handle().manage(
+                AccountPlatformState::new().map_err(std::io::Error::other)?,
+            );
             app.handle().manage(connector_cli::ConnectorConn::default());
 
             // EIP 连接编排状态:SSO 登录单飞门闩(进行中复用 / 取消 / 抢占有状态机,
@@ -1885,6 +2029,22 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::account_platform::account_platform_session,
+            commands::account_platform::account_platform_open_portal,
+            commands::account_platform::account_platform_login,
+            commands::account_platform::account_platform_send_sms,
+            commands::account_platform::account_platform_create_slider_captcha,
+            commands::account_platform::account_platform_prepare_registration_password,
+            commands::account_platform::account_platform_register_mobile,
+            commands::account_platform::account_platform_registration_status,
+            commands::account_platform::account_platform_login_sms,
+            commands::account_platform::account_platform_reset_password,
+            commands::account_platform::account_platform_logout,
+            commands::account_platform::account_platform_request,
+            commands::account_platform::account_platform_model_catalog,
+            commands::account_platform::account_platform_select_catalog_model,
+            commands::account_platform::account_platform_select_session_model,
+            commands::account_platform::account_platform_branch_replacement_session,
             commands::chat::chat,
             commands::chat::steer_chat,
             commands::chat::withdraw_steer,
@@ -1926,6 +2086,7 @@ pub fn run() {
             commands::computer_use::computer_use_deny,
             commands::computer_use::computer_use_confirm,
             commands::computer_use::computer_use_set_enabled,
+            commands::computer_use::computer_use_set_virtual_display_preference,
             commands::computer_use::computer_use_request_permissions,
             commands::computer_use::computer_use_permission_status,
             commands::connectors::refresh_connector_auth_gates,
@@ -2008,15 +2169,12 @@ pub fn run() {
             commands::sessions::clear_session,
             commands::monitor::get_monitor_snapshot,
             commands::monitor::get_backend_status,
-            commands::llmapi::ensure_llmapi_binding,
-            commands::llmapi::login_llmapi_user,
-            commands::llmapi::save_llmapi_user_session,
-            commands::llmapi::get_llmapi_status,
-            commands::llmapi::get_llmapi_models,
-            commands::llmapi::set_llmapi_default_model,
-            commands::llmapi::retry_llmapi_provisioning,
-            commands::llmapi::set_llmapi_user_enabled,
-            commands::llmapi::get_llmapi_admin_overview,
+            commands::device::get_device_snapshot,
+            commands::device::get_device_services,
+            commands::device::get_external_models,
+            commands::device::device_register_external_model,
+            commands::device::device_remove_external_model,
+            commands::device::device_doctor_prompt,
             commands::monitor::discover_local_vllm,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
@@ -2027,6 +2185,12 @@ pub fn run() {
             commands::model_store::model_store_memory_admission,
             commands::model_store::model_store_delete_engine,
             commands::model_store::model_store_start_card_scripts,
+            commands::model_store::model_store_follow_deployment_context,
+            commands::model_store::model_store_check_card_update,
+            commands::model_store::model_store_startup_update_check,
+            commands::model_store::model_store_versions,
+            commands::model_store::model_store_start_version_action,
+            commands::model_store::model_store_start_card_update,
             commands::model_store::model_store_start_download,
             commands::model_store::model_store_start_deploy,
             commands::model_store::model_store_start_lifecycle,
@@ -2050,9 +2214,12 @@ pub fn run() {
             commands::settings::probe_local_server_kind,
             commands::settings::save_model,
             commands::settings::delete_model,
+            commands::settings::delete_model_if_store_link,
+            commands::settings::delete_model_if_matches,
             commands::settings::set_active_model,
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,
+            commands::settings::get_session_model_ref,
             commands::settings::get_image_input_capability,
             commands::codex::list_acp_agents,
             commands::codex::get_acp_agent_status,
@@ -2100,6 +2267,7 @@ pub fn run() {
             commands::codex::open_code_reader,
             commands::codex::take_code_reader_pending,
             commands::settings::test_model_connection,
+            commands::settings::probe_endpoint_models,
             commands::settings::test_image_input_capability,
             commands::voice::transcribe_voice_audio,
             commands::voice::postprocess_voice_text,
@@ -2121,11 +2289,13 @@ pub fn run() {
             commands::projects::rebind_workspace_root,
             commands::sessions::list_sessions,
             commands::sessions::create_session,
+            commands::sessions::fork_session,
             commands::sessions::get_session_workspace_binding,
             commands::sessions::load_session,
             commands::sessions::delete_session,
             commands::sessions::rename_session,
             commands::sessions::export_session,
+            commands::sessions::import_session_archive,
             commands::sessions::set_session_pinned,
             commands::sessions::list_archived_sessions,
             commands::sessions::set_session_archived,
@@ -2189,6 +2359,7 @@ pub fn run() {
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_list,
             commands::desktop_remote_proxy::desktop_remote_proxy_archive_candidates,
             commands::desktop_remote_proxy::desktop_remote_proxy_load_status,
+            commands::desktop_remote_proxy::desktop_remote_proxy_recover,
             commands::desktop_remote_proxy::desktop_remote_proxy_open_live,
             commands::desktop_remote_model::desktop_remote_model_list_exportable,
             commands::desktop_remote_permission::desktop_remote_permission_deny_task,
@@ -2211,6 +2382,7 @@ pub fn run() {
             commands::remote_control::web_access_list_archived_sessions,
             commands::remote_control::web_access_create_session,
             commands::remote_control::web_access_create_session_and_chat,
+            commands::remote_control::web_access_create_session_and_chat_with_model,
             commands::remote_control::web_access_cancel_session_download,
             commands::remote_control::web_access_load_session_chunk,
             commands::remote_control::web_access_ingest_file,
@@ -2386,6 +2558,7 @@ pub fn run() {
             commands::knowledge::kb_remove_document,
             commands::knowledge::kb_embed_info,
             commands::knowledge::kb_model_status,
+            commands::knowledge::kb_model_cancel,
             commands::knowledge::kb_model_load_after_first_frame,
             commands::knowledge::kb_model_download,
             commands::knowledge::session_mount_collection,
@@ -2414,7 +2587,10 @@ pub fn run() {
             commands::remote_knowledge::remote_kb_download_model,
             commands::remote_knowledge::remote_kb_devices,
             commands::remote_knowledge::remote_kb_update_device,
+            commands::remote_knowledge::remote_kb_update_collection,
             commands::remote_knowledge::remote_kb_remove_device,
+            commands::remote_knowledge::remote_kb_trashed_collections,
+            commands::remote_knowledge::remote_kb_trashed_documents,
             commands::remote_knowledge::remote_kb_permanently_delete_collection,
             commands::remote_knowledge::remote_kb_permanently_delete_document,
             commands::shared_knowledge_host::shared_kb_host_status,
@@ -2767,7 +2943,12 @@ mod tool_allowlist_contract {
             "todo_write",
             "tool_search",
             "request_user_input",
-            "revert_turn",
+            // The base spillover footer and subagent worker records teach
+            // these two by name (retrieve_tool_result auto-activation,
+            // HANDLE_READ_ACTIVATION_HINT); excluding them recreates the
+            // phantom the allowlist exists to prevent.
+            "retrieve_tool_result",
+            "handle_read",
             "kb_search",
             "kb_open_source",
             "mcp_weather_get_weather",
@@ -2785,6 +2966,14 @@ mod tool_allowlist_contract {
         }
 
         for excluded in [
+            // Snapshot-based turn rollback is dead with `snapshots_enabled`
+            // false (app-side code_checkpoints owns rewind); admitting it
+            // would offer a permanently failing Required-approval tool.
+            "revert_turn",
+            // Taught by the base `agent` description as an alternative to
+            // `type=test` (the `Run` tool with action="verifiers");
+            // deliberately excluded, with the residual probe disclosed in
+            // tool_policy.rs.
             "Run",
             "tasks",
             "automation",

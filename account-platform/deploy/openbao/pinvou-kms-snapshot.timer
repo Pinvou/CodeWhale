@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly encrypted KMS snapshot
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=60
+Persistent=true
+Unit=pinvou-kms-snapshot.service
+
+[Install]
+WantedBy=timers.target

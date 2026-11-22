@@ -24,10 +24,10 @@ fn find_webkit_webdriver() -> Option<PathBuf> {
 
 #[derive(Debug, Clone)]
 pub struct Pinvou3Bundle {
-    pub root: PathBuf,
+    root: PathBuf,
     pub instructions_md: PathBuf,
     pub skills_dir: PathBuf,
-    pub mcp_json: PathBuf,
+    pub(super) mcp_json: PathBuf,
     pub deny_sensitive_sh: PathBuf,
     pub deny_sensitive_ps1: PathBuf,
     pub multiagent_depth_guard_sh: PathBuf,
@@ -91,6 +91,88 @@ pub(super) fn browser_last_error_hint(raw: &str, now: u64) -> Option<(&'static s
         .iter()
         .copied()
         .find(|(candidate, _)| *candidate == code)
+}
+
+fn bind_work_session_pptx_output(config: &mut serde_json::Value, session_id: &str) -> bool {
+    use crate::features::sessions::validators::validate_session_id;
+
+    if validate_session_id(session_id).is_err() {
+        return false;
+    }
+    let Some(server) = config
+        .pointer_mut("/servers/pptx")
+        .and_then(|entry| entry.as_object_mut())
+    else {
+        return false;
+    };
+    let Ok(entry) = serde_json::from_value::<deepseek_tui::mcp::McpServerConfig>(
+        serde_json::Value::Object(server.clone()),
+    ) else {
+        return false;
+    };
+    let Some(command) = entry.command.as_deref() else {
+        return false;
+    };
+    if entry.url.is_some()
+        || !entry.is_enabled()
+        || !entry.is_tool_enabled("make_pptx")
+        || (command != paths::python_command()
+            && paths::managed_python_command().ok().as_deref() != Some(command))
+        || entry
+            .env
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("PINVOU3_SESSION_ARTIFACTS"))
+    {
+        return false;
+    }
+    let python_runner = paths::bundle_mcp_python_runner();
+    let python_envs = paths::marketplace_python_envs_dir();
+    let script = match entry.args.as_slice() {
+        [script] => script,
+        [isolated, no_site, no_cache, runner, site_packages, script]
+            if isolated == "-I"
+                && no_site == "-S"
+                && no_cache == "-B"
+                && std::path::Path::new(runner) == python_runner.as_path()
+                && std::path::Path::new(site_packages)
+                    .strip_prefix(&python_envs)
+                    .ok()
+                    .and_then(|path| path.to_str())
+                    .is_some_and(|path| {
+                        let mut parts = path.split(['/', '\\']);
+                        parts.next().is_some_and(|key| {
+                            key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        }) && parts.next() == Some("site-packages")
+                            && parts.next().is_none()
+                    }) =>
+        {
+            script
+        }
+        _ => return false,
+    };
+    let script = std::path::Path::new(script);
+    let managed = paths::bundle_mcp_package_dir("pptx").join("server.py");
+    let legacy = paths::bundle_mcp_servers_dir()
+        .join("pptx")
+        .join("server.py");
+    // The server name can also belong to a user-defined connector. Only
+    // entries targeting the installed or legacy bundled script are scoped.
+    if script != managed.as_path() && script != legacy.as_path() {
+        return false;
+    }
+    let destination = paths::session_artifacts_dir(session_id);
+    let Some(destination) = destination.to_str() else {
+        return false;
+    };
+    // The engine expands ${...} in environment values. The launcher must
+    // receive this locally derived path literally, including such components.
+    let Some(args) = server.get_mut("args").and_then(|args| args.as_array_mut()) else {
+        return false;
+    };
+    args.push(serde_json::json!(format!(
+        "--session-artifacts-dir={destination}"
+    )));
+    true
 }
 
 impl Pinvou3Bundle {
@@ -177,7 +259,7 @@ impl Pinvou3Bundle {
         crate::platform::startup::mark("bundle_extract:migrate_mcp_secrets:done");
         // Built-in skills and workflow resources are immutable bundle assets.
         crate::platform::startup::mark("bundle_extract:write_builtin_skills:start");
-        self.write_builtin_skills()?;
+        self.write_builtin_skills(crate::platform::capabilities::is_megacube_device())?;
         crate::platform::startup::mark("bundle_extract:write_builtin_skills:done");
         // IT 内部 CLI 连接器(eip/zhidao)的包装脚本 + 平台二进制,连接与模型
         // shell 都按旧契约读 bundle/skills/{eip,zhidao}/bin(见 lib.rs PATH 前插、
@@ -251,7 +333,9 @@ impl Pinvou3Bundle {
         // 豁免集必须含 write_connector_cli_bins 的 eip/zhidao——本函数上方刚写出
         // 的 bin 目录若不在集内,会被这里的收敛步骤当残旧目录删掉（回归过一次）。
         let heal = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
-            .self_heal_skills(&Self::self_heal_protected_dirs());
+            .self_heal_skills(&Self::self_heal_protected_dirs(
+                crate::platform::capabilities::is_megacube_device(),
+            ));
         crate::platform::startup::mark_with_detail(
             "rust",
             "bundle_extract:skills_self_heal:done",
@@ -557,29 +641,48 @@ impl Pinvou3Bundle {
         crate::features::marketplace::retirement::retired_tool_residue_present_for_test()
     }
 
-    /// 当前构建内嵌释放到 `bundle/skills/` 的内置技能目录集合——与
-    /// [`Self::write_builtin_skills`] 的释放面保持一致。自愈对账
-    /// （`self_heal_skills` 第 4 步）以此为「本构建内嵌什么」的判定基准：
-    /// 不在集内且无归属证明的目录判残旧收敛；其它发行版构建内嵌更多技能
-    /// 时扩充本常量即可，天然保留。
+    /// 内置「设备管家」技能（MegaCube 设备管理排查，设计 §7）。编译期内嵌，
+    /// 解包到 `bundle/skills/device-doctor/SKILL.md`；目录名与 frontmatter 均为
+    /// 安全命令名 `device-doctor`，中文触发词由 description 承载。
+    const DEVICE_DOCTOR_SKILL_MD: &str =
+        include_str!("../../../../resources/common/bundle/builtin-skills/device-doctor/SKILL.md");
+
+    /// 当前构建内嵌的内置技能目录集合（**构建**内嵌什么；机器上实际释放哪些见
+    /// [`Self::released_builtin_skill_dirs`] 的按能力位过滤）。自愈对账
+    /// （`self_heal_skills` 第 4 步）的判定基准以过滤后的集合为准。
     /// Binding tests (same pattern as `wecom_skill_dirs_match_embedded_resources`):
     /// `builtin_released_skill_dirs_match_embedded_resources` and
     /// `write_builtin_skills_releases_exactly_the_listed_dirs` — a builtin
-    /// skill added to `write_builtin_skills` without extending this constant
+    /// skill added to the write path without extending this constant
     /// would be written and self-heal-deleted in the same run.
-    pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design"];
+    pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design", "device-doctor"];
+
+    /// 本机实际释放/豁免的内置技能目录（纯函数，测试直打）：device-doctor 仅在
+    /// MegaCube 设备上释放——技能清单可见性是非 MegaCube 平台的用户可见面，
+    /// 不按能力位收窄就违背设计 §10「非 MegaCube 平台零行为变化」（五轮评审
+    /// P2）。非 MegaCube 上已存在的旧安装副本由自愈第 4 步按同一过滤结果收敛。
+    pub(crate) fn released_builtin_skill_dirs(megacube: bool) -> Vec<&'static str> {
+        Self::BUILTIN_RELEASED_SKILL_DIRS
+            .iter()
+            .copied()
+            .filter(|dir| *dir != "device-doctor" || megacube)
+            .collect()
+    }
 
     /// IT 内部 CLI 连接器的运行时目录名（[`Self::write_connector_cli_bins`] 的
     /// 释放面）。无 SKILL.md、无归属记录，自愈对账（`self_heal_skills` 第 4 步
     /// 「内置释放目录收敛」）会当残旧收敛掉，故必须并入自愈豁免集。
     pub(crate) const CONNECTOR_CLI_BIN_DIRS: &[&str] = &["eip", "zhidao"];
 
-    /// 自愈对账的豁免集 = 内置释放技能（[`Self::BUILTIN_RELEASED_SKILL_DIRS`]）
-    /// ∪ IT 内部 CLI 连接器目录（[`Self::CONNECTOR_CLI_BIN_DIRS`]）。由两处
-    /// 真相源动态组合成单一豁免清单，扩充任一侧无须记得改这里（评审 P3：
-    /// 避免第二份硬编码清单漂移导致新增内置技能被自愈误删）。
-    pub(crate) fn self_heal_protected_dirs() -> Vec<&'static str> {
-        Self::BUILTIN_RELEASED_SKILL_DIRS
+    /// 自愈对账的豁免集 = **按能力位过滤后**的内置释放技能
+    /// （[`Self::released_builtin_skill_dirs`]）∪ IT 内部 CLI 连接器目录
+    /// （[`Self::CONNECTOR_CLI_BIN_DIRS`]）。由两处真相源动态组合成单一豁免
+    /// 清单，扩充任一侧无须记得改这里（评审 P3：避免第二份硬编码清单漂移导致
+    /// 新增内置技能被自愈误删）。注意真相源是过滤后的函数而非
+    /// [`Self::BUILTIN_RELEASED_SKILL_DIRS`] 常量——非 MegaCube 上豁免集不含
+    /// device-doctor（round-22 评审 P3 注释勘正）。
+    pub(crate) fn self_heal_protected_dirs(megacube: bool) -> Vec<&'static str> {
+        Self::released_builtin_skill_dirs(megacube)
             .iter()
             .chain(Self::CONNECTOR_CLI_BIN_DIRS.iter())
             .copied()
@@ -590,10 +693,22 @@ impl Pinvou3Bundle {
     /// 后 catalogue 与 `load_skill` 都只扫描此目录，不再写 `~/.agents/skills`。
     /// 每次启动防御性写出(immutable 内置资源);内容一致则跳过写——这些资源不进
     /// BUNDLE_VERSION 的 hash,升级改内容但 VERSION 不变时靠逐文件比对兜住。
-    /// 当前:视觉设计。
-    pub(super) fn write_builtin_skills(&self) -> std::io::Result<()> {
-        let dir = self.skills_dir.join("visual-design");
-        self.write_if_changed(&dir.join("SKILL.md"), VISUAL_DESIGN_SKILL_MD)?;
+    /// 释放面 = [`Self::released_builtin_skill_dirs`]：视觉设计全平台；设备管家
+    /// （device-doctor）仅 MegaCube（`megacube` 参数，五轮评审 P2）。
+    pub(super) fn write_builtin_skills(&self, megacube: bool) -> std::io::Result<()> {
+        for dir_name in Self::released_builtin_skill_dirs(megacube) {
+            let content = match dir_name {
+                "visual-design" => VISUAL_DESIGN_SKILL_MD,
+                "device-doctor" => Self::DEVICE_DOCTOR_SKILL_MD,
+                // 常量的互锁测试把守：builtin_released_skill_dirs_match_
+                // embedded_resources 钉常量↔内嵌资源树；漏登记 match 臂时
+                // unreachable! 会在 write_builtin_skills_releases_exactly_
+                // the_listed_dirs 的真臂内爆掉。新增技能时在此登记内容映射。
+                other => unreachable!("未登记的内置技能目录：{other}"),
+            };
+            let dir = self.skills_dir.join(dir_name);
+            self.write_if_changed(&dir.join("SKILL.md"), content)?;
+        }
         Ok(())
     }
 
@@ -1211,18 +1326,34 @@ impl Pinvou3Bundle {
     /// global configuration is unchanged. Concurrent Work-mode sessions rebuild the same
     /// deterministic file using an idempotent temporary-file-and-rename sequence.
     pub fn work_mode_mcp_config_path(&self) -> PathBuf {
-        self.write_work_mode_mcp_config(None)
+        self.write_work_mode_mcp_config(None).0
     }
 
     /// Returns a conversation-scoped Work-mode MCP configuration. It matches the global
-    /// Work-mode configuration, but the browser wrapper carries this conversation's
-    /// identity. Each Engine therefore has an isolated tool-routing context that another
-    /// conversation cannot change by switching pages.
+    /// Work-mode configuration, with this conversation's identity in the browser wrapper
+    /// and its private output directory in the bundled PPT server's arguments.
     pub fn work_mode_mcp_config_path_for_session(&self, session_id: &str) -> PathBuf {
-        self.write_work_mode_mcp_config(Some(session_id))
+        self.write_work_mode_mcp_config(Some(session_id)).0
     }
 
-    fn write_work_mode_mcp_config(&self, session_id: Option<&str>) -> PathBuf {
+    /// Retry a global fallback at spawn time. Derive the path and failure
+    /// together, from the same snapshot that was used to prepare the profile.
+    pub(crate) fn resolve_work_mode_mcp_fallback(
+        &self,
+        session_id: &str,
+        config_path: &std::path::Path,
+    ) -> Result<Option<PathBuf>, &'static str> {
+        if config_path != self.mcp_json.as_path() {
+            return Ok(None);
+        }
+        let (path, missing_ppt_scope) = self.write_work_mode_mcp_config(Some(session_id));
+        if missing_ppt_scope {
+            return Err("pptx_session_profile_unavailable");
+        }
+        Ok((path != self.mcp_json).then_some(path))
+    }
+
+    fn write_work_mode_mcp_config(&self, session_id: Option<&str>) -> (PathBuf, bool) {
         let base = self.mcp_json.clone();
         let browser_entry = self.browser_mcp_entry_for_session(session_id);
         // Fall back to the global configuration when parsing fails (for example, a manual
@@ -1233,20 +1364,23 @@ impl Pinvou3Bundle {
         // preserves the global behavior. The read is the hardened private-data read
         // (see `open_private_data_file_within`): every spawned session reaches this path,
         // so it must not hang the spawn.
-        let mcp: serde_json::Value =
+        let mut mcp: serde_json::Value =
             match crate::platform::filesystem::read_private_data_file(&base)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
             {
                 Some(v) if v.is_object() => v,
-                _ => return base,
+                _ => return (base, false),
             };
         let has_reserved_browser = mcp
             .get("servers")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|servers| servers.contains_key("browser"));
-        if browser_entry.is_none() && !has_reserved_browser {
-            return base;
+        // Remote Chat inventories the actual controlled session's artifact directory.
+        // Scope the PPT writer even when Browser MCP is unavailable.
+        let scoped_pptx = session_id.is_some_and(|id| bind_work_session_pptx_output(&mut mcp, id));
+        if browser_entry.is_none() && !has_reserved_browser && !scoped_pptx {
+            return (base, false);
         }
         let work_path = session_id.map_or_else(paths::browser_work_mcp_json, |session_id| {
             paths::browser_session_mcp_json(session_id)
@@ -1296,7 +1430,7 @@ impl Pinvou3Bundle {
                     .map(|existing| existing == json)
                     .unwrap_or(false)
                 {
-                    return work_path;
+                    return (work_path, false);
                 }
                 // The content includes a full global mcp.json copy and may contain secrets
                 // in user-defined server environments. Create it as 0600 immediately and
@@ -1304,16 +1438,16 @@ impl Pinvou3Bundle {
                 if crate::platform::filesystem::atomic_write_private(&work_path, json.as_bytes())
                     .is_ok()
                 {
-                    return work_path;
+                    return (work_path, false);
                 }
                 // On write failure, return the global configuration. Returning the
                 // session-specific path could make the Engine load stale or missing data;
                 // the global fallback degrades by omitting browser tools instead of failing.
-                base
+                (base, scoped_pptx)
             }
             // Serialization of a Value should not fail, but use the same global fallback
             // as a write failure if it does.
-            Err(_) => base,
+            Err(_) => (base, scoped_pptx),
         }
     }
 
@@ -1710,7 +1844,13 @@ mod tests {
     /// 同时守护组合结果无重复、且覆盖两侧全部条目。
     #[test]
     fn self_heal_protected_dirs_compose_builtin_and_connector_bins() {
-        let protected = super::Pinvou3Bundle::self_heal_protected_dirs();
+        let protected = super::Pinvou3Bundle::self_heal_protected_dirs(false);
+        // 非 MegaCube：device-doctor 不在豁免集（与释放面同一过滤，五轮评审 P2）。
+        assert!(
+            !protected.contains(&"device-doctor"),
+            "非 MegaCube 豁免集不得含 device-doctor"
+        );
+        let protected = super::Pinvou3Bundle::self_heal_protected_dirs(true);
         for dir in super::Pinvou3Bundle::BUILTIN_RELEASED_SKILL_DIRS {
             assert!(
                 protected.contains(dir),

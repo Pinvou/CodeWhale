@@ -13,6 +13,30 @@ use crate::platform::credential_store::{
     CredentialReference, CredentialState, CredentialStore, SystemCredentialStore,
 };
 
+// Test-only fault seam for the settings read used by transactions. Thread-local
+// state cannot affect unrelated tests or worker threads.
+#[cfg(test)]
+std::thread_local! {
+    static SETTINGS_READ_FAULT: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+fn read_settings_text(path: &std::path::Path) -> std::io::Result<String> {
+    #[cfg(test)]
+    SETTINGS_READ_FAULT.with(|fault| {
+        if let Some((reads, fail_on)) = fault.get() {
+            let next = reads + 1;
+            fault.set(Some((next, fail_on)));
+            if next == fail_on {
+                return Err(std::io::Error::other(
+                    "injected transient settings read failure",
+                ));
+            }
+        }
+        Ok(())
+    })?;
+    std::fs::read_to_string(path)
+}
+
 mod search;
 pub use search::{SearchCredential, SearchPrefs, SearchProvider};
 
@@ -337,9 +361,10 @@ impl Language {
 
 pub(crate) mod model;
 pub use model::{
-    BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL, BUILTIN_LLMAPI_DEFAULT_MODEL, BUILTIN_LLMAPI_MODEL_ID,
-    BUILTIN_LLMAPI_MODEL_NAME, MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM,
-    MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, select_builtin_llmapi_model,
+    BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+    BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME, BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL,
+    LEGACY_BUILTIN_LLMAPI_MODEL_ID, MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM,
+    MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, select_builtin_account_platform_model,
 };
 use model::{
     identify_coding_plan_endpoint, migrated_minimax_base_url, strip_chat_completions_suffix,
@@ -399,6 +424,100 @@ impl<'de> Deserialize<'de> for ImageCapabilityOverride {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+const EXPLICIT_MODEL_CONTEXT_SELECTION: &str = "user-context-choice-v1";
+
+/// Stable, source-aware model selection used by global defaults and session bindings.
+/// Platform catalog model IDs are deliberately not SavedModel IDs: the built-in
+/// SavedModel is only a runtime route carrier and must never collapse the catalog.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ModelSelectionRef {
+    AccountPlatform { model_id: String },
+    LocalConfig { saved_model_id: String },
+}
+
+impl<'de> Deserialize<'de> for ModelSelectionRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "source", rename_all = "SCREAMING_SNAKE_CASE")]
+        enum CurrentRef {
+            AccountPlatform { model_id: String },
+            LocalConfig { saved_model_id: String },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompatibleRef {
+            Current(CurrentRef),
+            LegacySavedModelId(String),
+        }
+
+        Ok(match CompatibleRef::deserialize(deserializer)? {
+            CompatibleRef::Current(CurrentRef::AccountPlatform { model_id }) => {
+                Self::AccountPlatform { model_id }
+            }
+            CompatibleRef::Current(CurrentRef::LocalConfig { saved_model_id }) => {
+                Self::LocalConfig { saved_model_id }
+            }
+            CompatibleRef::LegacySavedModelId(saved_model_id)
+                if saved_model_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+                    || saved_model_id == LEGACY_BUILTIN_LLMAPI_MODEL_ID =>
+            {
+                Self::AccountPlatform {
+                    model_id: String::new(),
+                }
+            }
+            CompatibleRef::LegacySavedModelId(saved_model_id) => {
+                Self::LocalConfig { saved_model_id }
+            }
+        })
+    }
+}
+
+impl ModelSelectionRef {
+    pub fn account_platform(model_id: impl Into<String>) -> Self {
+        Self::AccountPlatform {
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn local(saved_model_id: impl Into<String>) -> Self {
+        Self::LocalConfig {
+            saved_model_id: saved_model_id.into(),
+        }
+    }
+
+    pub fn runtime_saved_model_id(&self) -> &str {
+        match self {
+            Self::AccountPlatform { .. } => BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+            Self::LocalConfig { saved_model_id } => saved_model_id,
+        }
+    }
+}
+
+/// `auth_mode` 手改容错:非字符串 JSON 值(数字/布尔/数组/对象/null)一律按
+/// 未声明(None)处理,而不是让整份 settings.json 解析失败——解析失败会退化到
+/// 默认快照,下一次 `update_transaction` 落盘时会把默认快照+本次改动写回磁盘,
+/// 抹掉全部已存模型/偏好。字符串值(含空串、大小写、空白)仍交给
+/// `normalize_provider_metadata` 归一;缺字段走 `#[serde(default)]`。
+fn deserialize_auth_mode_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(text)) => Some(text),
+        _ => None,
+    })
+}
+
 /// 一条用户保存的模型配置:GUI「模型列表」的一项,也是热切换的最小单位。
 /// `id` 稳定(前端生成),被 `active_model_id` / session `model_id` 引用。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -426,12 +545,55 @@ pub struct SavedModel {
     pub reasoning_effort: Option<String>,
     pub model: String,
     pub base_url: String,
+    /// Stable link to a locally installed store card; wire model IDs may change on upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_store_card_id: Option<String>,
+    /// A manual route edit opts out of legacy migration until explicit re-linking.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub model_store_link_detached: bool,
+    /// Incoming explicit store-link intent; stale card endpoints must be rejected.
+    #[serde(default, skip_serializing)]
+    pub model_store_link_requested: bool,
+    /// Incoming repeat-link intent: apply only the reviewed store route to the
+    /// latest still-linked row, preserving user options and credentials.
+    #[serde(default, skip_serializing)]
+    pub model_store_link_only: bool,
+    /// Incoming editor intent only: untouched endpoint and protocol fields use
+    /// the latest persisted route and store association.
+    #[serde(default, skip_serializing)]
+    pub preserve_model_store_route: bool,
+    /// Incoming editor intent only: the context-window field was not edited,
+    /// so the persisted value (possibly raised by a background store sync)
+    /// wins over the stale editor snapshot. An edited field keeps its explicit
+    /// value, including a deliberate downgrade. Cleared before persisting.
+    #[serde(default, skip_serializing)]
+    pub preserve_context_window_tokens: bool,
+    /// Incoming explicit context-field edit. Distinct from an omitted legacy
+    /// field or a machine-created default; never persisted or returned to clients.
+    #[serde(default, skip_serializing)]
+    pub context_window_edit_requested: bool,
+    /// Incoming composer intent: update only reasoning effort on the latest row.
+    #[serde(default, skip_serializing)]
+    pub reasoning_effort_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_mode: Option<String>,
+    /// 用户对端点鉴权的显式声明（设置页「此端点无需鉴权」开关）：`Some("none")`
+    /// = 该端点不需要任何上游鉴权（自建网关/免鉴权服务）。落盘前经
+    /// `normalize_provider_metadata` 归一：仅保留底座
+    /// `auth_mode_disables_api_key` 认可的 no-auth 同义词并统一为 `"none"`，
+    /// 其余值（含空串）清空。None = 默认按 provider/端点规则决定是否要 Key。
+    /// 非字符串 JSON 值按未声明处理（见 `deserialize_auth_mode_lenient`），
+    /// 不让整份文档解析失败。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_auth_mode_lenient"
+    )]
+    pub auth_mode: Option<String>,
     /// 图片输入能力覆盖(设计 §6.3):Pinvou 走能力解析链;Enabled/Disabled 强制。
     #[serde(default)]
     pub image_capability_override: ImageCapabilityOverride,
@@ -470,6 +632,70 @@ pub(crate) fn legacy_official_deepseek_base_url(base_url: &str) -> bool {
     normalized == "https://api.deepseek.com"
 }
 
+/// K3.1 family spellings on the official Kimi routes (moonshot platform
+/// `https://api.moonshot.ai|cn/v1` and Kimi Code
+/// `https://api.kimi.com/coding/v1`), case-insensitive on the model string
+/// and bracket-tolerant on the documented `[1m]` 1M declaration suffix
+/// (2026-11-04 review round 4). The contract attaches when the record
+/// carries a kimi/moonshot vendor
+/// stamp (the catalog rows stamp "kimi"; test/loopback fixtures ride the
+/// same stamp) OR the base URL resolves to the vendor's own official route
+/// (legacy migrated records may carry an empty vendor or the `moonshot`
+/// alias on those endpoints — 2026-11-04 review round 3). Records with no
+/// stamp on a non-official base are custom relay endpoints and keep their
+/// existing contract (effort passthrough). Also consumed by the bridge's
+/// effort resolution (the send-path default arm must resolve K3.1 to None —
+/// see `request_reasoning_effort_for_provider`) and mirrored by the
+/// frontend `isMoonshotK31ModelName` + `moonshotK31ContractAttaches`.
+pub(crate) fn is_moonshot_k31_route(vendor: &Option<String>, base_url: &str, model: &str) -> bool {
+    let vendor_stamped = vendor.as_deref().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "kimi" | "moonshot"
+        )
+    });
+    if !vendor_stamped && !is_official_kimi_route_base_url(base_url) {
+        return false;
+    }
+    // The `[1m]` declaration forms (k3.1-pro[1m] is the documented Kimi Code
+    // Claude Code declaration and the ACP catalog's Kimi Code models1m
+    // suggestion; kimi-k3.1-pro[1m] is its prefixed-platform composite — no
+    // platform page declares that spelling, re-verified 2026-11-05) are the
+    // same K3.1 models — strip the suffix before the exact match so the
+    // contract covers them too (2026-11-04 review round 4: the bare-only
+    // match let a stored "off" on a bracket spelling wire the
+    // vendor-rejected disable shape). Only the 1M declaration suffix is
+    // tolerated; anything else
+    // (versions, quantization tags) stays outside the exact-match contract.
+    // Bracket forms of NON-K3.1 ids (k3[1m] / kimi-k3[1m]) strip to non-K3.1
+    // spellings and keep their own contracts, as before.
+    let normalized = model.trim().to_ascii_lowercase();
+    let bare = normalized
+        .strip_suffix("[1m]")
+        .unwrap_or(normalized.as_str());
+    matches!(
+        bare,
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
+    )
+}
+
+/// The vendor's own K3-family endpoints (mirrors the frontend
+/// `isExactMoonshotPlatformBaseUrl` / `isExactKimiCodeBaseUrl` and the
+/// foundation's exact-route gates). The normalization here is deliberately
+/// looser than the frontend mirror (all trailing slashes stripped and the
+/// whole URL lowercased, vs the frontend's single-slash strip and
+/// scheme/authority-only case folding), so the Rust attach set is a
+/// superset of the FE one: the FE can only hide the tier control for a
+/// record this side also treats, never the reverse — and the wire arm keys
+/// off this same predicate, so no illegal shape can slip through either
+/// way.
+fn is_official_kimi_route_base_url(base_url: &str) -> bool {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    normalized == "https://api.moonshot.ai/v1"
+        || normalized == "https://api.moonshot.cn/v1"
+        || normalized == "https://api.kimi.com/coding/v1"
+}
+
 pub(crate) fn legacy_local_route_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()
@@ -503,20 +729,29 @@ pub(crate) fn legacy_local_route_base_url(base_url: &str) -> bool {
 }
 
 impl SavedModel {
-    pub fn builtin_llmapi() -> Self {
+    pub fn builtin_account_platform() -> Self {
         Self {
-            id: BUILTIN_LLMAPI_MODEL_ID.to_string(),
-            name: BUILTIN_LLMAPI_MODEL_NAME.to_string(),
+            id: BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string(),
             alias: None,
+            reasoning_effort: None,
+            name: BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string(),
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
             max_output_tokens: None,
-            reasoning_effort: None,
-            model: BUILTIN_LLMAPI_DEFAULT_MODEL.to_string(),
-            base_url: BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string(),
+            model: BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL.to_string(),
+            base_url: BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
+            auth_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
             vision_model_id: None,
             api_key: String::new(),
@@ -527,8 +762,8 @@ impl SavedModel {
         }
     }
 
-    pub fn is_builtin_llmapi(&self) -> bool {
-        self.id == BUILTIN_LLMAPI_MODEL_ID
+    pub fn is_builtin_account_platform(&self) -> bool {
+        self.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
     }
 
     /// Operator-owned endpoint: locally self-hosted (LocalVllm) or a
@@ -544,6 +779,31 @@ impl SavedModel {
             || self.preset == ModelPreset::OpenaiCompatible
             || self.provider_kind.as_deref() == Some("custom"))
             && self.provider_kind.as_deref() != Some("coding_plan")
+    }
+
+    /// Compare the fields that jointly select an endpoint and wire protocol.
+    /// Normalize metadata as persistence does, so an omitted legacy provider
+    /// kind and its inferred value do not detach an otherwise unchanged route.
+    pub fn has_same_endpoint_route(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.normalize_provider_metadata();
+        right.normalize_provider_metadata();
+        left.preset == right.preset
+            && left.provider_kind == right.provider_kind
+            && left.vendor == right.vendor
+            && left.endpoint_mode == right.endpoint_mode
+            && left.model == right.model
+            && left.base_url == right.base_url
+    }
+
+    /// Whether this record explicitly declares the endpoint keyless
+    /// (`auth_mode = "none"` family, single source of truth
+    /// `codewhale_config::auth_mode_disables_api_key`). Probe surfaces
+    /// (app ladder, CLI `models test`) consult this so a residual stored
+    /// credential never rides a probe against a declared-keyless endpoint.
+    pub fn declares_keyless_auth(&self) -> bool {
+        codewhale_config::auth_mode_disables_api_key(self.auth_mode.as_deref())
     }
 
     fn normalize_alias(&mut self) {
@@ -639,10 +899,54 @@ impl SavedModel {
                 _ => None,
             };
         }
+        // Kimi K3.1 spellings (kimi-k3.1-pro[-highspeed] / k3.1-pro[-highspeed]):
+        // the vendor contract is always-reasoning — depth via top-level
+        // reasoning_effort low/high/max, and `thinking:{type:"disabled"}` is
+        // rejected with an error (models-overview: "参数约束也与 kimi-k3 完全
+        // 一致"). The base's exact-K3 route shapers only learn bare k3
+        // spellings, so ANY stored effort for these models — notably an
+        // "off" saved through the generic off/high switch the catalog used
+        // to offer — reaches the generic Moonshot arm and wires an illegal
+        // disable shape. Drop the field: the documented omission is valid
+        // and resolves to the vendor default (endpoint-specific — the Kimi
+        // Code models table documents omitted K3.1 effort as `high` on the
+        // coding-plan lane; the models-overview `max` wording is the
+        // platform-API surface). Downgrade note: this drop is one-way —
+        // configs saved by this build no longer carry K3.1 effort, and an
+        // older build reading them sees the field absent and re-applies
+        // its own ladder/default; the previously chosen tier is not
+        // recoverable (nothing corrupts). The contract attaches
+        // via the kimi/moonshot vendor stamp or the vendor's own official
+        // route (legacy migrated records may carry an empty vendor or the
+        // moonshot alias there); unstamped custom relay endpoints keep
+        // their existing contract. Mirrors the frontend tiers exit
+        // (isMoonshotK31ModelName) added in the same pass.
+        if self.reasoning_effort.is_some()
+            && is_moonshot_k31_route(&self.vendor, &self.base_url, &self.model)
+        {
+            self.reasoning_effort = None;
+        }
     }
 
     fn normalize_provider_metadata(&mut self) {
         self.base_url = strip_chat_completions_suffix(&self.base_url);
+        // auth_mode 归一:仅保留底座 `auth_mode_disables_api_key` 认可的
+        // no-auth 同义词并统一为 "none";其余值(含空串/未知档位)清空,
+        // 防止手改 settings.json 写入底座不认识的档位后行为不可预期。
+        // 判定直接复用底座谓词(底座谓词内部做 trim/小写归一),同义词表
+        // 保持单一来源,不会与引擎侧判定漂移(见 bridge::model_declares_no_auth)。
+        self.auth_mode = self
+            .auth_mode
+            .take()
+            .filter(|value| codewhale_config::auth_mode_disables_api_key(Some(value.as_str())))
+            .map(|_| "none".to_string());
+        // 本地档与托管档同理:设置页对 local_vllm 不渲染免鉴权开关(本地端点的
+        // 无凭据豁免已按 provider/环回规则内置),手改的声明同样不可在 UI 关闭
+        // (会让 api_key() 短路掉 LOCAL_VLLM_API_KEY 占位,鉴权 vLLM 逐轮 401),
+        // load 时一并清空;表单保存路径本就写 null。
+        if self.preset == ModelPreset::LocalVllm {
+            self.auth_mode = None;
+        }
         // MiniMax 旧域名 api.minimax.chat 已废弃,官方国内端点为 api.minimaxi.com;
         // 存量配置在 load 时一次性改写,避免继续打已下线域名。
         if let Some(migrated) = migrated_minimax_base_url(&self.base_url) {
@@ -655,9 +959,18 @@ impl SavedModel {
             if self.endpoint_mode.as_deref() == Some("full_chat_completions") {
                 self.endpoint_mode = None;
             }
+            // 托管入口的鉴权由平台管理,不接收免鉴权声明:清空手改/残留的
+            // auth_mode,避免托管条目带着声明走进引擎后逐轮 401 且无法在
+            // UI 关闭(设置页对 coding_plan 不渲染免鉴权开关)。
+            self.auth_mode = None;
             return;
         }
         if self.provider_kind.as_deref() == Some(MODEL_PROVIDER_KIND_CODING_PLAN) {
+            // 「coding_plan」戳但 URL 不是托管入口:降级为按 preset 重推的
+            // custom/official 记录(上方托管分支未命中)。此时 kind 被清、
+            // UI 重新按 URL 派生 isCodingPlan=false,免鉴权开关恢复渲染 ——
+            // 声明与分类重新自洽,无需像托管命中那样清 auth_mode(真正不可
+            // 关闭的死局只存在于托管入口,那里已在上方强制清空)。
             self.provider_kind = None;
         }
         if self.provider_kind.is_none() {
@@ -754,13 +1067,29 @@ pub struct AdvancedPrefs {
     /// (见 `UserPrefs::migrate_models`),把旧 model_preset+custom_* 合成一条。
     #[serde(default)]
     pub saved_models: Vec<SavedModel>,
+    /// One-time corrections of the store's erroneous 32K defaults, or a stable
+    /// explicit-user-choice receipt independent of a not-yet-migrated card link.
+    /// Kept with the model list so intentional limits survive restarts/upgrades.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_store_context_repairs: std::collections::BTreeMap<String, String>,
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
     #[serde(default)]
     pub active_model_id: Option<String>,
-    #[serde(default)]
-    pub builtin_llmapi_available_models: Vec<String>,
+    /// Source-aware default inherited by blank new sessions. This is the
+    /// authority; `active_model_id` and `account_platform_default_model` remain
+    /// compatibility mirrors for older clients and scheduled-task code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_llmapi_default_model: Option<String>,
+    pub default_model_ref: Option<ModelSelectionRef>,
+    /// Opaque local CAS identity. Even reselecting the same default is a new
+    /// intent and must not be retired by an earlier catalog observation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) default_model_selection_revision: String,
+    #[serde(
+        default,
+        alias = "builtin_llmapi_default_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub account_platform_default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,17 +1097,21 @@ pub struct AdvancedPrefs {
 pub struct NotificationPrefs {
     pub enabled: bool,
     pub task_completed: bool,
+    /// System notification when the model parks on `request_user_input`
+    /// waiting for the user's reply.
+    pub needs_input: bool,
 }
 
 impl Default for NotificationPrefs {
     fn default() -> Self {
         // Linux desktop notification portals vary widely by distro/session.
-        // Keep task completion notifications opt-in there, while preserving
-        // the previous default on Windows/macOS.
+        // Keep desktop notifications opt-in there, while preserving the
+        // previous default on Windows/macOS.
         let enabled = !cfg!(target_os = "linux");
         Self {
             enabled,
             task_completed: enabled,
+            needs_input: enabled,
         }
     }
 }
@@ -791,16 +1124,40 @@ pub struct PetPrefs {
     pub enabled: bool,
 }
 
-/// Computer Use preferences. Only the master switch is stored: off by default; only after
+/// serde default for [`ComputerUsePrefs::prefer_virtual_display`]: the
+/// isolated virtual display is preferred by default ("whenever possible",
+/// user-confirmed scope decision) — opting OUT is the explicit user action.
+fn default_true() -> bool {
+    true
+}
+
+/// Computer Use preferences. The master switch is stored: off by default; only after
 /// the user explicitly enables it can the model see the `computer_use` tool. The switch is
 /// written by the dedicated `computer_use_set_enabled` command via a field-level
 /// transaction (same as PetPrefs, not part of the generic settings patch), and replayed at
 /// startup by lib.rs into `ComputerUseShared`'s AtomicBool; session grants are never
 /// persisted (they live only in memory).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ComputerUsePrefs {
     pub enabled: bool,
+    /// Prefer the isolated virtual display ("whenever possible"); the user
+    /// can turn it off in settings. Defaults to TRUE via `default_true` (both
+    /// the serde field default for legacy settings.json without the key and
+    /// the manual `Default` impl below). Written by the dedicated
+    /// `computer_use_set_virtual_display_preference` command via a field-level
+    /// transaction and replayed at startup into `ComputerUseShared`.
+    #[serde(default = "default_true")]
+    pub prefer_virtual_display: bool,
+}
+
+impl Default for ComputerUsePrefs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prefer_virtual_display: true,
+        }
+    }
 }
 
 /// 侧栏任务列表偏好。
@@ -928,6 +1285,11 @@ fn default_global_shortcut_accelerator() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserPrefs {
+    /// Version of the built-in model path stored in this file. Version 1 is
+    /// the Account Platform + Token Gateway-only path.
+    pub model_path_schema_version: u32,
+    /// Version 1 stores source-aware global and per-session model references.
+    pub model_selection_schema_version: u32,
     pub theme: Theme,
     /// Color-scheme preference: `system` follows the OS (decided by the
     /// frontend, light when undeterminable), light/dark are explicit picks.
@@ -1053,24 +1415,73 @@ impl UserPrefs {
     /// must be handled by the normal settings flow before task submission.
     pub(crate) fn load_read_only_model_snapshot() -> Result<Self, &'static str> {
         let _guard = lock_user_prefs();
+        Self::load_read_only_model_snapshot_unlocked()
+    }
+
+    /// Cleanup admission requires an existing settings file. Preserve the same
+    /// model-only projection as remote task preparation, but never interpret a
+    /// removed settings file as a successful empty/default candidate list.
+    pub(crate) fn load_existing_read_only_model_snapshot() -> Result<Self, &'static str> {
+        let _guard = lock_user_prefs();
+        let raw = Self::read_model_settings_unlocked()?.ok_or("model_settings_unavailable")?;
+        let prefs = serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?;
+        Self::prepare_read_only_model_snapshot(prefs)
+    }
+
+    /// The caller owns `USER_PREFS_LOCK`; read bytes only once, so validation
+    /// and use cannot select different settings snapshots.
+    fn read_model_settings_unlocked() -> Result<Option<String>, &'static str> {
         let path = super::paths::settings_path();
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => Some(raw),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err("model_settings_unavailable"),
-        };
-        let mut prefs: Self = match raw {
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => Ok(Some(raw)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("model_settings_unavailable"),
+        }
+    }
+
+    /// Model-only projection used by remote task preparation. Preserve its
+    /// original in-memory model normalization and first-run defaults; it does
+    /// not perform whole-preferences legacy migrations or write anything.
+    fn load_read_only_model_snapshot_unlocked() -> Result<Self, &'static str> {
+        let prefs = match Self::read_model_settings_unlocked()? {
             Some(raw) => serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?,
             None => Self::default(),
         };
+        Self::prepare_read_only_model_snapshot(prefs)
+    }
+
+    /// A whole-preferences write must retain the same legacy interpretation as
+    /// an ordinary settings transaction, without its fallback or credential I/O.
+    /// Missing settings are rejected here instead of recreating a removed file.
+    fn load_readable_model_transaction_snapshot_unlocked() -> Result<Self, &'static str> {
+        let raw = Self::read_model_settings_unlocked()?.ok_or("model_settings_unavailable")?;
+        let system_locale = crate::platform::os::current_system_locale();
+        let mut prefs = Self::parse_existing_settings(&raw, system_locale.as_deref())
+            .map_err(|_| "model_settings_invalid")?
+            .prefs;
+        if prefs.has_unmigrated_credentials() {
+            return Err("model_credential_migration_required");
+        }
+        // Match the ordinary transaction: retire the legacy platform carrier
+        // before the one-time local-thinking predicate and model normalization.
+        prefs.migrate_account_platform_model_path();
+        prefs.migrate_legacy_local_thinking_default();
+        let mut prefs = Self::prepare_read_only_model_snapshot(prefs)?;
+        prefs.enforce_memory_locale_policy();
+        Ok(prefs)
+    }
+
+    fn prepare_read_only_model_snapshot(mut prefs: Self) -> Result<Self, &'static str> {
         if prefs.has_unmigrated_credentials() {
             return Err("model_credential_migration_required");
         }
         // Mirror the model-only in-memory part of load_unlocked. These methods
         // do not touch disk or keychain; the original settings bytes remain
         // untouched even when legacy route metadata is normalized here.
+        prefs.migrate_account_platform_model_path();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         prefs.sanitize_plaintext_api_keys();
         Ok(prefs)
@@ -1111,27 +1522,11 @@ impl UserPrefs {
         }
     }
 
-    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
-        let Some(raw) = raw else {
-            return ParsedSettings {
-                prefs: Self::defaults_for_system_locale(system_locale),
-                allow_normalization_persist: false,
-                color_scheme_derived: false,
-            };
-        };
-        let value: serde_json::Value = match serde_json::from_str(raw) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!(
-                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
-                );
-                return ParsedSettings {
-                    prefs: Self::defaults_for_system_locale(system_locale),
-                    allow_normalization_persist: false,
-                    color_scheme_derived: false,
-                };
-            }
-        };
+    fn parse_existing_settings(
+        raw: &str,
+        system_locale: Option<&str>,
+    ) -> Result<ParsedSettings, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(raw)?;
         let has_language = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("language"));
@@ -1140,24 +1535,12 @@ impl UserPrefs {
         // lack the key we cannot tell "the user explicitly picked theme" from
         // "never touched (default genesis, dark)", so derive from the legacy
         // effective appearance to keep the upgrade invisible; only a true
-        // fresh install (no settings.json, handled by the default branch
-        // above) stays on System and follows the OS.
+        // fresh install (no settings.json, handled by the caller's default
+        // branch) stays on System and follows the OS.
         let has_color_scheme = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("color_scheme"));
-        let mut prefs: Self = match serde_json::from_value(value) {
-            Ok(prefs) => prefs,
-            Err(error) => {
-                eprintln!(
-                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
-                );
-                return ParsedSettings {
-                    prefs: Self::defaults_for_system_locale(system_locale),
-                    allow_normalization_persist: false,
-                    color_scheme_derived: false,
-                };
-            }
-        };
+        let mut prefs: Self = serde_json::from_value(value)?;
         if !has_language {
             prefs.language = Language::from_system_locale(system_locale);
         }
@@ -1169,10 +1552,26 @@ impl UserPrefs {
             };
             color_scheme_derived = true;
         }
-        ParsedSettings {
+        Ok(ParsedSettings {
             prefs,
             allow_normalization_persist: true,
             color_scheme_derived,
+        })
+    }
+
+    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
+        if let Some(raw) = raw {
+            match Self::parse_existing_settings(raw, system_locale) {
+                Ok(parsed) => return parsed,
+                Err(error) => eprintln!(
+                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
+                ),
+            }
+        }
+        ParsedSettings {
+            prefs: Self::defaults_for_system_locale(system_locale),
+            allow_normalization_persist: false,
+            color_scheme_derived: false,
         }
     }
 
@@ -1190,7 +1589,15 @@ impl UserPrefs {
     /// as the GUI's `prepare_prefs_for_save`).
     fn load_unlocked_with_migration(persist_normalized: bool) -> (Self, CredentialMigrationResult) {
         let path = super::paths::settings_path();
-        let raw = std::fs::read_to_string(&path).ok();
+        let raw = read_settings_text(&path).ok();
+        Self::load_unlocked_with_migration_from_raw(raw, persist_normalized)
+    }
+
+    fn load_unlocked_with_migration_from_raw(
+        raw: Option<String>,
+        persist_normalized: bool,
+    ) -> (Self, CredentialMigrationResult) {
+        let path = super::paths::settings_path();
         let system_locale = crate::platform::os::current_system_locale();
         let mut parsed = Self::parse_settings_with_state(raw.as_deref(), system_locale.as_deref());
         let allow_normalization_persist = parsed.allow_normalization_persist;
@@ -1208,10 +1615,7 @@ impl UserPrefs {
                 .custom_base_url
                 .as_deref()
                 .is_some_and(|url| migrated_minimax_base_url(url).is_some());
-        let builtin_llmapi_endpoint_changed = prefs.advanced.saved_models.iter().any(|model| {
-            model.id == BUILTIN_LLMAPI_MODEL_ID
-                && model.base_url != BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
-        });
+        let account_platform_migration_changed = prefs.migrate_account_platform_model_path();
         let local_model_alias_changed = prefs
             .advanced
             .saved_models
@@ -1225,6 +1629,18 @@ impl UserPrefs {
         let local_output_sentinel_changed = prefs.advanced.saved_models.iter().any(|model| {
             model.preset == ModelPreset::LocalVllm && model.max_output_tokens == Some(24_576)
         });
+        // The K3.1 stored-effort drop (`normalize_route_limits` nulls the
+        // field on any kimi/moonshot-stamped or official-route K3.1 record)
+        // is the same class as the sentinel above — but the flag cannot be
+        // detected from RAW metadata before migrate/normalize run: a
+        // vendorless record on a recognized overseas coding URL or a full
+        // `/chat/completions` URL only acquires its Kimi identity during
+        // `normalize_saved_model_metadata` (2026-11-05 review 5783266663 /
+        // 5783312297), so a raw pre-check misses it and the dropped effort
+        // stays on disk forever for sessions that only ever load. Snapshot
+        // the records before the rewrite pass and detect the actual change
+        // across the normalized result instead.
+        let pre_normalize_saved_models = prefs.advanced.saved_models.clone();
         // The #622 machine-written-local-off migration must persist its
         // marker even when no record matched: "migration ran" is what keeps
         // a later explicitly-saved `off` from being stripped by a
@@ -1232,7 +1648,8 @@ impl UserPrefs {
         let local_thinking_default_migrated = !prefs.local_thinking_default_migrated;
         prefs.migrate_legacy_local_thinking_default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        let model_selection_migration_changed = prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         // deferred_search_deletes is intentionally ignored here: a Delete
         // action never reaches disk through the app's own flows
@@ -1241,10 +1658,18 @@ impl UserPrefs {
         // file, where not deleting is the benign orphan direction.
         let migration = prefs.migrate_plaintext_api_keys_with_store(&SystemCredentialStore::new());
         let memory_policy_changed = prefs.enforce_memory_locale_policy();
+        // Any saved_models drift across the rewrite pass — including a
+        // K3.1 record whose stored effort the drop arm cleared only after
+        // its vendor identity was stamped by the normalizers — counts as a
+        // normalization change (Snapshot comparison; see the comment above
+        // `pre_normalize_saved_models`).
+        let saved_models_changed = prefs.advanced.saved_models != pre_normalize_saved_models;
         let normalization_changed = minimax_endpoint_changed
-            || builtin_llmapi_endpoint_changed
+            || account_platform_migration_changed
+            || model_selection_migration_changed
             || local_model_alias_changed
             || local_output_sentinel_changed
+            || saved_models_changed
             || local_thinking_default_migrated
             || migration.settings_sanitized
             || memory_policy_changed
@@ -1408,10 +1833,53 @@ impl UserPrefs {
         F: FnOnce(&mut Self) -> Result<(), String>,
         C: FnOnce(),
     {
+        Self::update_transaction_impl(|prefs| mutate(prefs).map(|_| true), post_commit, false)
+    }
+
+    /// 破坏性事务的 fail-closed 变体（三十五轮评审 P2）：与
+    /// [`Self::update_transaction_with_post_commit`] 同一临界区与 post-commit
+    /// 契约，闭包改为返回「是否真正改动」（`Ok(false)` = 无改动），另加两道
+    /// 破坏性写入专用的收紧：
+    ///
+    /// 1. **严格读预检**：宽松加载把「文件存在但读取失败/解析失败」折叠成默认
+    ///    快照（`load_unlocked_with_migration` 的 `.ok()`），随后无条件整文档
+    ///    落盘——普通读改写只是既有默认值语义，破坏性命令却会在返回“未删除”
+    ///    的同时用默认快照覆盖用户配置。本变体在锁内先按
+    ///    `load_read_only_model_snapshot`（私有，三态口径同源）的口径预检：
+    ///    文件不存在（合法缺项）放行；存在但读不了/解析不了直接报错，
+    ///    整个事务不落盘。
+    /// 2. **无改动跳过落盘**：闭包返回 `Ok(false)`（该 id 已不存在或身份不
+    ///    匹配）时不调用 `save_unlocked`——「不改任何数据」的承诺落成字节级
+    ///    保证，也避免把「缺失 + `.bad` 残留」的隔离恢复态洗成全新默认文件。
+    pub fn update_transaction_fail_closed<F, C>(mutate: F, post_commit: C) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<bool, String>,
+        C: FnOnce(),
+    {
+        Self::update_transaction_impl(mutate, post_commit, true)
+    }
+
+    fn update_transaction_impl<F, C>(
+        mutate: F,
+        post_commit: C,
+        fail_closed_read: bool,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<bool, String>,
+        C: FnOnce(),
+    {
         let _guard = lock_user_prefs();
         let _file_lock = lock_settings_file()
             .map_err(|error| format!("acquire settings lock failed: {error}"))?;
-        let (mut prefs, migration) = Self::load_unlocked_with_migration(false);
+        let (mut prefs, migration) = if fail_closed_read {
+            // Validate and migrate the same bytes. A second, lenient read here
+            // could turn a transient I/O failure into a default snapshot and
+            // overwrite the settings this transaction just validated.
+            let raw = Self::read_settings_file_strictly()?;
+            Self::load_unlocked_with_migration_from_raw(raw, false)
+        } else {
+            Self::load_unlocked_with_migration(false)
+        };
         // round-41 review M1：迁移失败时明文 key 只存在于内存，而 save_unlocked
         // 无条件 sanitize 后整文档落盘——凭据会从它唯一的持久位置被抹掉，写入方
         // 还报成功。与 GUI `prepare_prefs_for_save` 同一闸门：拒绝整个事务，
@@ -1419,13 +1887,55 @@ impl UserPrefs {
         if migration.has_failures() {
             return Err(CREDENTIAL_STORE_UNAVAILABLE_ERROR.to_string());
         }
+        let mutated = mutate(&mut prefs)?;
+        if mutated {
+            prefs
+                .save_unlocked()
+                .map_err(|error| format!("save settings failed: {error:#}"))?;
+            post_commit();
+        }
+        // 返回再次从磁盘解析的规范化结果，保证桥接层内存状态与实际持久化内容一致。
+        Ok(Self::load_unlocked_with_migration(false).0)
+    }
+
+    /// Conditional model cleanup must never replace missing, unreadable or
+    /// invalid user settings with defaults, or migrate credentials as a side
+    /// effect. Keep both transaction locks through the disk commit and deferred
+    /// credential cleanup, then return the normalized persisted snapshot.
+    pub(crate) fn update_readable_model_transaction_with_post_commit<F, C>(
+        mutate: F,
+        post_commit: C,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<(), String>,
+        C: FnOnce(),
+    {
+        let _guard = lock_user_prefs();
+        let _file_lock = lock_settings_file()
+            .map_err(|error| format!("acquire settings lock failed: {error}"))?;
+        let mut prefs =
+            Self::load_readable_model_transaction_snapshot_unlocked().map_err(str::to_owned)?;
         mutate(&mut prefs)?;
         prefs
             .save_unlocked()
             .map_err(|error| format!("save settings failed: {error:#}"))?;
         post_commit();
-        // 返回再次从磁盘解析的规范化结果，保证桥接层内存状态与实际持久化内容一致。
-        Ok(Self::load_unlocked_with_migration(false).0)
+        Self::load_readable_model_transaction_snapshot_unlocked().map_err(str::to_owned)
+    }
+
+    /// 破坏性事务的严格读预检（口径同 [`Self::load_read_only_model_snapshot`]）：
+    /// NotFound 放行（合法缺项）；读取失败或解析失败报错——调用方不得在读不出
+    /// 现状时用默认快照覆盖磁盘。
+    fn read_settings_file_strictly() -> Result<Option<String>, String> {
+        let path = super::paths::settings_path();
+        let raw = match read_settings_text(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("settings file read failed: {error}")),
+        };
+        serde_json::from_str::<Self>(&raw)
+            .map_err(|error| format!("settings file parse failed: {error}"))?;
+        Ok(Some(raw))
     }
 
     /// Test-only probe for the deferred-delete barrier test: reports whether
@@ -1485,6 +1995,7 @@ impl UserPrefs {
         let api_key = self.advanced.custom_api_key.clone().unwrap_or_default();
         let id = "default".to_string();
         self.advanced.saved_models.push(SavedModel {
+            auth_mode: None,
             id: id.clone(),
             name: model.clone(),
             alias: None,
@@ -1493,6 +2004,14 @@ impl UserPrefs {
             max_output_tokens: None,
             reasoning_effort: None,
             model,
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url,
             provider_kind: None,
             vendor: None,
@@ -1514,28 +2033,174 @@ impl UserPrefs {
         }
     }
 
-    pub(crate) fn ensure_builtin_llmapi_model(&mut self) {
-        let builtin_model = select_builtin_llmapi_model(
-            &self.advanced.builtin_llmapi_available_models,
-            self.advanced.builtin_llmapi_default_model.as_deref(),
+    pub(crate) fn migrate_account_platform_model_path(&mut self) -> bool {
+        let mut changed = self.model_path_schema_version < 1;
+        let old_model = self
+            .advanced
+            .saved_models
+            .iter()
+            .find(|model| model.id == LEGACY_BUILTIN_LLMAPI_MODEL_ID)
+            .cloned();
+        if let Some(old_model) = old_model {
+            if self
+                .advanced
+                .account_platform_default_model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                self.advanced.account_platform_default_model = Some(old_model.model.clone());
+            }
+            self.advanced
+                .saved_models
+                .retain(|model| model.id != LEGACY_BUILTIN_LLMAPI_MODEL_ID);
+            if self.advanced.active_model_id.as_deref() == Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID) {
+                self.advanced.active_model_id = Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string());
+            }
+            changed = true;
+        }
+        if self.model_path_schema_version != 1 {
+            self.model_path_schema_version = 1;
+            changed = true;
+        }
+        changed
+    }
+
+    pub(crate) fn ensure_builtin_account_platform_model(&mut self) {
+        let builtin_model = select_builtin_account_platform_model(
+            self.advanced.account_platform_default_model.as_deref(),
         );
         if let Some(model) = self
             .advanced
             .saved_models
             .iter_mut()
-            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
         {
-            model.name = BUILTIN_LLMAPI_MODEL_NAME.to_string();
+            model.name = BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string();
             model.preset = ModelPreset::OpenaiCompatible;
             model.model = builtin_model;
-            model.base_url = BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string();
+            model.base_url = BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string();
             model.api_key.clear();
+            model.credential_ref = None;
+            model.credential_state = CredentialState::Missing;
+            model.has_secret = false;
             model.credential_action = None;
             return;
         }
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.model = builtin_model;
         self.advanced.saved_models.push(model);
+    }
+
+    /// Migrates the legacy pair (`active_model_id`,
+    /// `account_platform_default_model`) to a source-aware default. Existing
+    /// local and third-party SavedModels are never rewritten or removed.
+    pub(crate) fn migrate_model_selection_ref(&mut self) -> bool {
+        if self.model_selection_schema_version >= 1 {
+            return false;
+        }
+        if self.advanced.default_model_ref.is_none() {
+            self.advanced.default_model_ref =
+                self.advanced.active_model_id.clone().and_then(|active_id| {
+                    if active_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+                        || active_id == LEGACY_BUILTIN_LLMAPI_MODEL_ID
+                    {
+                        self.advanced
+                            .account_platform_default_model
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .or_else(|| {
+                                self.model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                                    .map(|model| model.model.clone())
+                            })
+                            .map(ModelSelectionRef::account_platform)
+                    } else if self.model_by_id(&active_id).is_some() {
+                        Some(ModelSelectionRef::local(active_id))
+                    } else {
+                        None
+                    }
+                });
+        }
+        self.model_selection_schema_version = 1;
+        true
+    }
+
+    /// Resolves a typed selection into the concrete runtime SavedModel without
+    /// mutating the global built-in route carrier.
+    pub fn resolve_model_ref(&self, selection: &ModelSelectionRef) -> Option<SavedModel> {
+        match selection {
+            ModelSelectionRef::LocalConfig { saved_model_id } => {
+                self.model_by_id(saved_model_id).cloned()
+            }
+            ModelSelectionRef::AccountPlatform { model_id } if !model_id.trim().is_empty() => {
+                let mut model = self
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                    .cloned()
+                    .unwrap_or_else(SavedModel::builtin_account_platform);
+                model.model = model_id.trim().to_string();
+                Some(model)
+            }
+            ModelSelectionRef::AccountPlatform { .. } => None,
+        }
+    }
+
+    /// Updates the source-aware default and its legacy mirrors atomically in
+    /// the caller's settings transaction.
+    pub fn set_default_model_ref(&mut self, selection: ModelSelectionRef) -> Result<(), String> {
+        let resolved = self
+            .resolve_model_ref(&selection)
+            .ok_or_else(|| "model selection reference is invalid".to_string())?;
+        match &selection {
+            ModelSelectionRef::LocalConfig { saved_model_id } => {
+                if resolved.is_builtin_account_platform() {
+                    return Err(
+                        "Account Platform selections require a concrete catalog model ID"
+                            .to_string(),
+                    );
+                }
+                self.advanced.active_model_id = Some(saved_model_id.clone());
+            }
+            ModelSelectionRef::AccountPlatform { model_id } => {
+                self.advanced.active_model_id = Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string());
+                self.advanced.account_platform_default_model = Some(model_id.clone());
+                if let Some(carrier) = self
+                    .advanced
+                    .saved_models
+                    .iter_mut()
+                    .find(|model| model.is_builtin_account_platform())
+                {
+                    carrier.model = resolved.model;
+                }
+            }
+        }
+        self.advanced.default_model_ref = Some(selection);
+        self.advanced.default_model_selection_revision = uuid::Uuid::new_v4().to_string();
+        self.model_selection_schema_version = 1;
+        Ok(())
+    }
+
+    /// Called only under the existing prefs transaction and a current Account
+    /// owner guard, after a catalog explicitly reports this model retired.
+    pub(crate) fn retire_observed_platform_default(
+        &mut self,
+        expected: &ModelSelectionRef,
+        revision: &str,
+    ) -> bool {
+        if !matches!(expected, ModelSelectionRef::AccountPlatform { .. })
+            || self.advanced.default_model_ref.as_ref() != Some(expected)
+            || self.advanced.default_model_selection_revision != revision
+        {
+            return false;
+        }
+        self.advanced.default_model_ref = None;
+        self.advanced.account_platform_default_model = None;
+        if self.advanced.active_model_id.as_deref().is_some_and(|id| {
+            id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID || id == LEGACY_BUILTIN_LLMAPI_MODEL_ID
+        }) {
+            self.advanced.active_model_id = None;
+        }
+        self.advanced.default_model_selection_revision = uuid::Uuid::new_v4().to_string();
+        self.model_selection_schema_version = 1;
+        true
     }
 
     pub fn migrate_plaintext_api_keys_with_store(
@@ -1545,7 +2210,7 @@ impl UserPrefs {
         let mut result = CredentialMigrationResult::default();
 
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -1722,7 +2387,7 @@ impl UserPrefs {
         }
         self.advanced.custom_api_key = None;
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -1738,11 +2403,21 @@ impl UserPrefs {
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
                 model.clear_plaintext_key();
+                continue;
+            }
+            // Keyless parity (round-5 review): a record that declares the
+            // endpoint keyless reads NO credential — the refresh must not
+            // stamp `EnvOverride` (the override variable is never consulted
+            // for a declared route: `bridge::api_key` short-circuits before
+            // the env read) nor probe the store for a residual reference.
+            // The record's own persisted state is exactly what the keyless
+            // display helper renders downstream, so leave it untouched.
+            if model.declares_keyless_auth() {
                 continue;
             }
             if env_override {
@@ -1826,9 +2501,35 @@ impl UserPrefs {
         }
     }
 
-    /// 删一条模型;若删的是当前 active,回退到列表首条。
+    /// New clients identify actual context-field edits explicitly. Remember the
+    /// choice even before a legacy store route has acquired its card association,
+    /// so an in-flight capability probe cannot replace a freshly confirmed 32K.
+    pub fn record_explicit_model_context_selection(&mut self, id: &str) {
+        self.advanced
+            .model_store_context_repairs
+            .insert(id.to_owned(), EXPLICIT_MODEL_CONTEXT_SELECTION.to_owned());
+    }
+
+    pub fn has_explicit_model_context_selection(&self, id: &str) -> bool {
+        self.advanced
+            .model_store_context_repairs
+            .get(id)
+            .is_some_and(|receipt| receipt == EXPLICIT_MODEL_CONTEXT_SELECTION)
+    }
+
+    /// 删除用户模型；删除当前 typed 默认配置时清空默认引用，不自动另选。
     pub fn remove_model(&mut self, id: &str) {
         self.advanced.saved_models.retain(|m| m.id != id);
+        self.advanced.model_store_context_repairs.remove(id);
+        let removed_default = matches!(
+            self.advanced.default_model_ref.as_ref(),
+            Some(ModelSelectionRef::LocalConfig { saved_model_id }) if saved_model_id == id
+        );
+        if removed_default {
+            self.advanced.default_model_ref = None;
+            self.advanced.active_model_id = None;
+            return;
+        }
         if self.advanced.active_model_id.as_deref() == Some(id) {
             self.advanced.active_model_id =
                 self.advanced.saved_models.first().map(|m| m.id.clone());
@@ -1838,6 +2539,40 @@ impl UserPrefs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn platform_default_retirement_rejects_reselection_aba_and_preserves_local_models() {
+        let mut prefs = super::UserPrefs::default();
+        let mut local = super::SavedModel::builtin_account_platform();
+        local.id = "controlled-local-config".into();
+        local.provider_kind = Some("custom".into());
+        prefs.advanced.saved_models = vec![super::SavedModel::builtin_account_platform(), local];
+        let selection =
+            super::ModelSelectionRef::account_platform("0199a100-0001-7000-8000-000000000106");
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        let old = prefs.advanced.default_model_selection_revision.clone();
+        let models = serde_json::to_value(&prefs.advanced.saved_models).unwrap();
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        assert_ne!(prefs.advanced.default_model_selection_revision, old);
+        assert!(!prefs.retire_observed_platform_default(&selection, &old));
+        prefs
+            .set_default_model_ref(super::ModelSelectionRef::account_platform(
+                "0199a100-0001-7000-8000-000000000107",
+            ))
+            .unwrap();
+        prefs.set_default_model_ref(selection.clone()).unwrap();
+        assert!(!prefs.retire_observed_platform_default(&selection, &old));
+        let current = prefs.advanced.default_model_selection_revision.clone();
+        assert!(prefs.retire_observed_platform_default(&selection, &current));
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.account_platform_default_model.is_none());
+        assert_eq!(
+            serde_json::to_value(&prefs.advanced.saved_models).unwrap(),
+            models
+        );
+        assert_eq!(prefs.model_selection_schema_version, 1);
+        assert!(!prefs.retire_observed_platform_default(&selection, &current));
+    }
+
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
     use crate::platform::paths::tests::ENV_LOCK;
@@ -1942,6 +2677,7 @@ mod tests {
         let mut prefs = UserPrefs::default();
         prefs.advanced.saved_models.clear();
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             alias: Some("  Daily assistant  ".to_string()),
             ..legacy.clone()
         });
@@ -1951,6 +2687,7 @@ mod tests {
         );
 
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             alias: Some("   ".to_string()),
             ..legacy
         });
@@ -1960,6 +2697,7 @@ mod tests {
     #[test]
     fn local_model_alias_is_cleared_by_upsert_and_normalization() {
         let local = SavedModel {
+            auth_mode: None,
             id: "local-model".into(),
             name: "Local model".into(),
             alias: Some("Must not persist".into()),
@@ -1968,6 +2706,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2015,6 +2761,7 @@ mod tests {
         // non-Linux while passing the ubuntu-only `rust-test` gate.
         let mut prefs = UserPrefs::default();
         prefs.advanced.saved_models.push(SavedModel {
+            auth_mode: None,
             id: "local-model".into(),
             name: "Local model".into(),
             alias: Some("Legacy local alias".into()),
@@ -2023,6 +2770,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2359,6 +3114,149 @@ mod tests {
         });
     }
 
+    /// Kimi K3.1 spellings are always-reasoning on the vendor wire (depth
+    /// via top-level reasoning_effort; `thinking:{type:"disabled"}` is
+    /// rejected) and the base's exact-K3 shapers only learn bare k3, so any
+    /// stored effort — notably an "off" saved through the generic off/high
+    /// switch the catalog used to offer — would wire an illegal shape. The
+    /// load-path normalization drops the field (documented omission resolves
+    /// to the endpoint-specific vendor default — `high` on the Kimi Code
+    /// coding lane, `max` on the platform-API surface); non-K3.1 records are
+    /// untouched.
+    #[test]
+    fn normalize_drops_stored_effort_for_kimi_k31_models() {
+        let base = SavedModel {
+            auth_mode: None,
+            id: "m1".into(),
+            name: "m1".into(),
+            alias: None,
+            preset: ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: Some("off".into()),
+            model: "kimi-k3.1-pro".into(),
+            base_url: "https://api.moonshot.cn/v1".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
+            provider_kind: None,
+            vendor: Some("kimi".into()),
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        };
+
+        for spelling in [
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            "KIMI-K3.1-PRO",
+            // The `[1m]` declaration forms are the same K3.1 models
+            // (k3.1-pro[1m] is the documented Kimi Code declaration and the
+            // ACP Kimi Code datalist entry; kimi-k3.1-pro[1m] its prefixed
+            // composite) — the stored-effort drop must cover them too, or a
+            // stored "off" picked through the generic ladder would wire the
+            // vendor-rejected disable shape (2026-11-04 review round 4).
+            "k3.1-pro[1m]",
+            "kimi-k3.1-pro[1m]",
+            "K3.1-PRO[1M]",
+            // The highspeed [1m] composites (round-9 review: the loop
+            // previously covered only the two non-highspeed composites;
+            // the matcher handles them via the same single-suffix strip).
+            "k3.1-pro-highspeed[1m]",
+            "kimi-k3.1-pro-highspeed[1m]",
+        ] {
+            let mut record = base.clone();
+            record.model = spelling.into();
+            record.normalize_route_limits();
+            assert_eq!(
+                record.reasoning_effort, None,
+                "stored effort is dropped for K3.1 spelling {spelling}"
+            );
+        }
+
+        // Legacy migrated records may carry an EMPTY vendor on the official
+        // endpoint: the resolved route plus the model spelling is the
+        // contract, so the drop applies there too (2026-11-04 review
+        // round 3 — the vendor stamp alone missed these).
+        let mut legacy = base.clone();
+        legacy.vendor = None;
+        legacy.normalize_route_limits();
+        assert_eq!(
+            legacy.reasoning_effort, None,
+            "an empty-vendor record on the official moonshot endpoint is still K3.1"
+        );
+        let mut aliased = base.clone();
+        aliased.vendor = Some("moonshot".into());
+        aliased.normalize_route_limits();
+        assert_eq!(
+            aliased.reasoning_effort, None,
+            "the moonshot vendor alias on the official endpoint is still K3.1"
+        );
+
+        // The `[1m]` suffix is only tolerated for K3.1 ids: bracket forms of
+        // NON-K3.1 spellings (k3[1m] / kimi-k3[1m]) strip to non-K3.1 models
+        // and keep their own contract — a stored value survives (2026-11-04
+        // review round 4).
+        for spelling in ["k3[1m]", "kimi-k3[1m]"] {
+            let mut record = base.clone();
+            record.model = spelling.into();
+            record.normalize_route_limits();
+            assert_eq!(
+                record.reasoning_effort,
+                Some("off".into()),
+                "non-K3.1 bracket spelling {spelling} keeps its stored effort"
+            );
+        }
+
+        // A custom relay endpoint with NO kimi vendor stamp keeps its
+        // existing contract (effort passthrough) — only the vendor's own
+        // routes (or a stamped record) carry the K3.1 thinking rejection.
+        let mut relay = base.clone();
+        relay.vendor = None;
+        relay.base_url = "https://relay.example/v1".into();
+        relay.normalize_route_limits();
+        assert_eq!(
+            relay.reasoning_effort,
+            Some("off".into()),
+            "an unstamped relay endpoint keeps the stored effort (its own contract)"
+        );
+
+        // The vendor STAMP arm alone (non-official base) also carries the
+        // contract — the main loop above exercises stamp+route combined, so
+        // pin the stamp arm in isolation, including the case/whitespace
+        // folding of the stamp value (2026-11-05 review).
+        for vendor_stamp in ["kimi", "Kimi", "MOONSHOT", " moonshot "] {
+            let mut stamped_relay = base.clone();
+            stamped_relay.vendor = Some(vendor_stamp.into());
+            stamped_relay.base_url = "https://relay.example/v1".into();
+            stamped_relay.normalize_route_limits();
+            assert_eq!(
+                stamped_relay.reasoning_effort, None,
+                "a kimi-stamped relay record drops the stored K3.1 effort (stamp arm alone; vendor {vendor_stamp:?})"
+            );
+        }
+
+        // A non-K3.1 kimi record (K3 rides the exact tiered route with its
+        // own off→low equivalence) keeps its stored effort.
+        let mut k3 = base.clone();
+        k3.model = "kimi-k3".into();
+        k3.reasoning_effort = Some("off".into());
+        k3.normalize_route_limits();
+        assert_eq!(k3.reasoning_effort, Some("off".into()));
+    }
+
     /// LocalVllm no longer forces a 24K output (stays None when not
     /// explicitly configured; declared uniformly by the runtime window
     /// tiers); the operator-owned predicate covers both local and custom
@@ -2366,6 +3264,7 @@ mod tests {
     #[test]
     fn normalize_keeps_local_output_unset_and_operator_owned_detection() {
         let mut local = SavedModel {
+            auth_mode: None,
             id: "m1".into(),
             name: "m1".into(),
             alias: None,
@@ -2374,6 +3273,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2465,6 +3372,7 @@ mod tests {
     #[test]
     fn normalize_reasoning_effort_canonicalizes_aliases_and_rejects_unknown() {
         let base = SavedModel {
+            auth_mode: None,
             id: "m1".into(),
             name: "m1".into(),
             alias: None,
@@ -2473,6 +3381,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "m1".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://example.invalid/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2563,6 +3479,54 @@ mod tests {
     }
 
     #[test]
+    fn fail_closed_transaction_uses_the_validated_bytes_before_transient_second_read_failure() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TemporaryPrefsHome::new("pinvou3-strict-transaction-read");
+        let path = super::super::paths::settings_path();
+        let original = UserPrefs {
+            global_shortcut_enabled: true,
+            global_shortcut_accelerator: "Ctrl+Shift+F9".into(),
+            ..Default::default()
+        };
+        original.save().unwrap();
+        struct ResetReadFault;
+        impl Drop for ResetReadFault {
+            fn drop(&mut self) {
+                SETTINGS_READ_FAULT.with(|fault| fault.set(None));
+            }
+        }
+        let _reset = ResetReadFault;
+        SETTINGS_READ_FAULT.with(|fault| fault.set(Some((0, 2))));
+        UserPrefs::update_transaction_fail_closed(
+            |prefs| {
+                assert!(
+                    prefs.global_shortcut_enabled,
+                    "the validated non-default snapshot must reach the mutation"
+                );
+                assert_eq!(prefs.global_shortcut_accelerator, "Ctrl+Shift+F9");
+                SETTINGS_READ_FAULT.with(|fault| {
+                    assert_eq!(
+                        fault.get(),
+                        Some((1, 2)),
+                        "mutation must follow exactly one strict settings read"
+                    );
+                    // The fault is scoped to the admission-to-use window. The
+                    // ordinary post-commit reload is outside that window.
+                    fault.set(None);
+                });
+                prefs.voice_shortcut_enabled = true;
+                Ok(true)
+            },
+            || (),
+        )
+        .unwrap();
+        let persisted: UserPrefs = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(persisted.global_shortcut_enabled);
+        assert_eq!(persisted.global_shortcut_accelerator, "Ctrl+Shift+F9");
+        assert!(persisted.voice_shortcut_enabled);
+    }
+
+    #[test]
     fn read_only_model_snapshot_normalizes_in_memory_without_touching_settings() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = TemporaryPrefsHome::new("pinvou3-remote-model-readonly");
@@ -2577,7 +3541,11 @@ mod tests {
 
         let snapshot = UserPrefs::load_read_only_model_snapshot().unwrap();
         assert!(snapshot.active_model().unwrap().alias.is_none());
-        assert!(snapshot.model_by_id(BUILTIN_LLMAPI_MODEL_ID).is_some());
+        assert!(
+            snapshot
+                .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .is_some()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
@@ -2665,16 +3633,42 @@ mod tests {
     #[test]
     fn computer_use_enabled_defaults_off_and_round_trips() {
         // Older settings.json lacks the field: the serde container-level
-        // default falls back to false (off by default).
+        // default falls back to false (off by default). The virtual-display
+        // preference defaults the other way (TRUE — "whenever possible";
+        // opting out is the explicit user action), via the field-level
+        // `default_true` serde fn that also covers a computer_use object
+        // with only `enabled`.
         let legacy = UserPrefs::parse_settings(Some(r#"{"theme":"genesis"}"#), Some("zh-CN"));
         assert!(!legacy.computer_use.enabled);
+        assert!(legacy.computer_use.prefer_virtual_display);
         let enabled = UserPrefs::parse_settings(
             Some(r#"{"theme":"genesis","computer_use":{"enabled":true}}"#),
             Some("zh-CN"),
         );
         assert!(enabled.computer_use.enabled);
+        assert!(enabled.computer_use.prefer_virtual_display);
         let serialized = serde_json::to_string(&enabled).expect("UserPrefs serialize");
-        assert!(serialized.contains("\"computer_use\":{\"enabled\":true}"));
+        assert!(serialized.contains("\"computer_use\":{\"enabled\":true"));
+        // An explicit opt-out parses and round-trips verbatim (the pref must
+        // not be resurrected by an unrelated settings write).
+        let opted_out = UserPrefs::parse_settings(
+            Some(
+                r#"{"theme":"genesis","computer_use":{"enabled":true,"prefer_virtual_display":false}}"#,
+            ),
+            Some("zh-CN"),
+        );
+        assert!(opted_out.computer_use.enabled);
+        assert!(!opted_out.computer_use.prefer_virtual_display);
+        let serialized = serde_json::to_string(&opted_out).expect("UserPrefs serialize");
+        assert!(
+            serialized
+                .contains("\"computer_use\":{\"enabled\":true,\"prefer_virtual_display\":false}"),
+            "the explicit opt-out must round-trip verbatim: {serialized}"
+        );
+        // Fresh-install default: enabled off, virtual preferred on.
+        let fresh = UserPrefs::default();
+        assert!(!fresh.computer_use.enabled);
+        assert!(fresh.computer_use.prefer_virtual_display);
     }
 
     #[test]
@@ -2711,48 +3705,113 @@ mod tests {
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_adds_fixed_option() {
-        let mut prefs = UserPrefs::default();
-        prefs.migrate_models();
-
-        prefs.ensure_builtin_llmapi_model();
-
-        let model = prefs
-            .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
-            .expect("built-in model");
-        assert_eq!(model.name, BUILTIN_LLMAPI_MODEL_NAME);
-        assert_eq!(model.preset, ModelPreset::OpenaiCompatible);
-        assert_eq!(model.model, BUILTIN_LLMAPI_DEFAULT_MODEL);
-        assert_eq!(model.base_url, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL);
-        assert!(model.credential_ref.is_none());
+    fn model_selection_refs_round_trip_with_explicit_sources() {
+        let selections = [
+            ModelSelectionRef::account_platform("deepseek-flash"),
+            ModelSelectionRef::local("third-party-model"),
+        ];
+        for selection in selections {
+            let encoded = serde_json::to_value(&selection).expect("serialize selection");
+            assert!(encoded.get("source").is_some());
+            let decoded: ModelSelectionRef =
+                serde_json::from_value(encoded).expect("deserialize selection");
+            assert_eq!(decoded, selection);
+        }
+        let legacy_local: ModelSelectionRef =
+            serde_json::from_str("\"third-party-model\"").expect("legacy local selection");
+        assert_eq!(legacy_local, ModelSelectionRef::local("third-party-model"));
+        let legacy_platform: ModelSelectionRef =
+            serde_json::from_str(&format!("\"{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID}\""))
+                .expect("legacy platform selection");
+        assert_eq!(legacy_platform, ModelSelectionRef::account_platform(""));
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_replaces_previous_path_endpoint() {
+    fn model_selection_migration_preserves_local_models_and_is_idempotent() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
+        let saved_models = prefs.advanced.saved_models.clone();
+
+        assert!(prefs.migrate_model_selection_ref());
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::local("default"))
+        );
+        assert_eq!(prefs.advanced.saved_models, saved_models);
+        assert!(!prefs.migrate_model_selection_ref());
+    }
+
+    #[test]
+    fn account_platform_default_ref_resolves_without_rewriting_local_models() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let local = prefs.model_by_id("default").cloned().expect("local model");
+
         prefs
-            .advanced
-            .saved_models
-            .iter_mut()
-            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
-            .expect("built-in model")
-            .base_url = "https://pinvou.com/llmapi/v1".into();
+            .set_default_model_ref(ModelSelectionRef::account_platform("catalog-model-v2"))
+            .expect("set platform default");
 
-        prefs.ensure_builtin_llmapi_model();
-
+        assert_eq!(prefs.model_by_id("default"), Some(&local));
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::account_platform("catalog-model-v2"))
+        );
         assert_eq!(
             prefs
-                .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
-                .expect("built-in model")
-                .base_url,
-            BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
+                .resolve_model_ref(prefs.advanced.default_model_ref.as_ref().unwrap())
+                .map(|model| model.model),
+            Some("catalog-model-v2".to_string())
         );
     }
 
     #[test]
-    fn load_persists_legacy_builtin_llmapi_endpoint_migration() {
+    fn ensure_builtin_account_platform_model_adds_fixed_option() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+
+        prefs.ensure_builtin_account_platform_model();
+
+        let model = prefs
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .expect("built-in model");
+        assert_eq!(model.name, BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME);
+        assert_eq!(model.preset, ModelPreset::OpenaiCompatible);
+        assert_eq!(model.model, BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL);
+        assert_eq!(
+            model.base_url,
+            BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL
+        );
+        assert!(model.credential_ref.is_none());
+    }
+
+    #[test]
+    fn ensure_builtin_account_platform_model_replaces_previous_path_endpoint() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        prefs
+            .advanced
+            .saved_models
+            .iter_mut()
+            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .expect("built-in model")
+            .base_url = "https://pinvou.com/llmapi/v1".into();
+
+        prefs.ensure_builtin_account_platform_model();
+
+        assert_eq!(
+            prefs
+                .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .expect("built-in model")
+                .base_url,
+            BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL
+        );
+    }
+
+    #[test]
+    fn load_persists_legacy_builtin_model_path_migration() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = TemporaryPrefsHome::new("pinvou3-prefs-builtin-llmapi-migration");
 
@@ -2763,12 +3822,21 @@ mod tests {
         ] {
             let mut prefs = UserPrefs::default();
             prefs.migrate_models();
-            prefs.ensure_builtin_llmapi_model();
+            prefs.ensure_builtin_account_platform_model();
+            let current = prefs
+                .advanced
+                .saved_models
+                .iter_mut()
+                .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .expect("built-in model");
+            current.id = LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string();
+            prefs.advanced.active_model_id = Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string());
+            prefs.model_path_schema_version = 0;
             prefs
                 .advanced
                 .saved_models
                 .iter_mut()
-                .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+                .find(|model| model.id == LEGACY_BUILTIN_LLMAPI_MODEL_ID)
                 .expect("built-in model")
                 .base_url = legacy_endpoint.into();
             std::fs::write(
@@ -2780,9 +3848,9 @@ mod tests {
             let loaded = UserPrefs::load();
             assert_eq!(
                 loaded
-                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .map(|model| model.base_url.as_str()),
-                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+                Some(BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL)
             );
 
             let persisted: UserPrefs =
@@ -2790,21 +3858,26 @@ mod tests {
                     .expect("parse migrated prefs");
             assert_eq!(
                 persisted
-                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .map(|model| model.base_url.as_str()),
-                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+                Some(BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL)
+            );
+            assert_eq!(loaded.model_path_schema_version, 1);
+            assert_eq!(
+                loaded.advanced.active_model_id.as_deref(),
+                Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             );
         }
     }
 
     #[test]
-    fn builtin_llmapi_model_is_not_treated_as_editable_secret_model() {
+    fn builtin_account_platform_model_is_not_treated_as_editable_secret_model() {
         let store = MemoryCredentialStore::default();
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
         let builtin = prefs
-            .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .cloned()
             .expect("built-in model");
         prefs.upsert_model(SavedModel {
@@ -2818,7 +3891,9 @@ mod tests {
         let result = prefs.migrate_plaintext_api_keys_with_store(&store);
 
         assert_eq!(result.migrated_count, 0);
-        let model = prefs.model_by_id(BUILTIN_LLMAPI_MODEL_ID).unwrap();
+        let model = prefs
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .unwrap();
         assert!(model.api_key.is_empty());
         assert!(model.credential_ref.is_none());
         assert_eq!(model.credential_state, CredentialState::Missing);
@@ -2830,6 +3905,7 @@ mod tests {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             id: "glm-coding".into(),
             name: "GLM-5-Turbo".into(),
             alias: None,
@@ -2838,6 +3914,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "glm-5-turbo".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/".into(),
             provider_kind: None,
             vendor: None,
@@ -2869,6 +3953,7 @@ mod tests {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             id: "glm-api".into(),
             name: "GLM API".into(),
             alias: None,
@@ -2877,6 +3962,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "glm-5.2".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             provider_kind: None,
             vendor: None,
@@ -2913,6 +4006,7 @@ mod tests {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             id: "minimax-api".into(),
             name: "MiniMax".into(),
             alias: None,
@@ -2921,6 +4015,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "MiniMax-M3".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.minimax.chat/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2938,6 +4040,376 @@ mod tests {
         assert_eq!(model.base_url, "https://api.minimaxi.com/v1");
     }
 
+    /// auth_mode 归一：底座 `auth_mode_disables_api_key` 认可的 no-auth 同义词
+    /// 统一存 "none"（大小写/首尾空白容忍）；未知档位与空串清空（落回默认的
+    /// provider/端点鉴权规则），防止手改 settings.json 写入无效档位后行为不可
+    /// 预期；None 原样保留。
+    #[test]
+    fn auth_mode_normalizes_to_the_none_family_or_clears() {
+        let build = |auth_mode: Option<&str>| {
+            let mut prefs = UserPrefs::default();
+            let mut model = SavedModel {
+                auth_mode: None,
+                id: "auth-mode-model".into(),
+                name: "auth mode".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "gateway-model".into(),
+                base_url: "https://gateway.example.com/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            };
+            model.auth_mode = auth_mode.map(str::to_string);
+            prefs.upsert_model(model);
+            prefs
+        };
+
+        for synonym in [
+            "none",
+            "NONE",
+            " no-auth ",
+            "OFF",
+            "Disabled",
+            "no_auth",
+            "anonymous",
+        ] {
+            let prefs = build(Some(synonym));
+            assert_eq!(
+                prefs
+                    .model_by_id("auth-mode-model")
+                    .expect("model")
+                    .auth_mode
+                    .as_deref(),
+                Some("none"),
+                "no-auth 同义词 {synonym:?} 必须归一为 \"none\""
+            );
+        }
+        for invalid in [Some("api_key"), Some("oauth"), Some(""), Some("   "), None] {
+            let prefs = build(invalid);
+            assert_eq!(
+                prefs
+                    .model_by_id("auth-mode-model")
+                    .expect("model")
+                    .auth_mode,
+                None,
+                "非免鉴权档位 {invalid:?} 必须清空（落回默认鉴权规则）"
+            );
+        }
+    }
+
+    /// 托管入口(coding_plan)的鉴权由平台管理,不接收免鉴权声明:按 URL 归类为
+    /// 托管端点的记录即使带着 auth_mode="none"(手改 settings.json)也在归一
+    /// 时清空,避免 UI 隐藏开关的托管条目带着声明走进引擎后逐轮 401。非托管
+    /// 端点的免鉴权声明不受影响。
+    #[test]
+    fn coding_plan_records_clear_keyless_declaration() {
+        let build = |base_url: &str, auth_mode: Option<&str>| {
+            let mut prefs = UserPrefs::default();
+            let mut model = SavedModel {
+                auth_mode: None,
+                id: "auth-mode-plan".into(),
+                name: "auth mode plan".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "plan-model".into(),
+                base_url: base_url.into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            };
+            model.auth_mode = auth_mode.map(str::to_string);
+            prefs.upsert_model(model);
+            prefs
+        };
+
+        let plan = build("https://coding.dashscope.aliyuncs.com/v1", Some("none"));
+        let plan_model = plan.model_by_id("auth-mode-plan").expect("model");
+        assert_eq!(
+            plan_model.provider_kind.as_deref(),
+            Some(MODEL_PROVIDER_KIND_CODING_PLAN),
+            "用例前置:该 URL 必须被归类为托管入口"
+        );
+        assert_eq!(plan_model.auth_mode, None, "托管入口不得携带免鉴权声明");
+
+        let custom = build("https://gateway.example.com/v1", Some("none"));
+        assert_eq!(
+            custom
+                .model_by_id("auth-mode-plan")
+                .expect("model")
+                .auth_mode
+                .as_deref(),
+            Some("none"),
+            "非托管端点的免鉴权声明必须保留"
+        );
+    }
+
+    /// 手改的免鉴权声明在 local_vllm 上同样不可在 UI 关闭(设置页不渲染该
+    /// 开关,本地无凭据豁免已按 provider/环回规则内置),load/upsert 归一时
+    /// 一并清空;云端自定义端点的声明不受影响。
+    #[test]
+    fn local_vllm_records_clear_keyless_declaration() {
+        let build = |preset: ModelPreset, auth_mode: Option<&str>| {
+            let mut prefs = UserPrefs::default();
+            let mut model = SavedModel {
+                auth_mode: None,
+                id: "auth-mode-local".into(),
+                name: "auth mode local".into(),
+                alias: None,
+                preset,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "local-model".into(),
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            };
+            model.auth_mode = auth_mode.map(str::to_string);
+            prefs.upsert_model(model);
+            prefs
+        };
+
+        let local = build(ModelPreset::LocalVllm, Some("none"));
+        assert_eq!(
+            local
+                .model_by_id("auth-mode-local")
+                .expect("model")
+                .auth_mode,
+            None,
+            "本地档不得携带免鉴权声明(设置页无法关闭的声明会让鉴权 vLLM 逐轮 401)"
+        );
+
+        let cloud = build(ModelPreset::OpenaiCompatible, Some("none"));
+        assert_eq!(
+            cloud
+                .model_by_id("auth-mode-local")
+                .expect("model")
+                .auth_mode
+                .as_deref(),
+            Some("none"),
+            "云端自定义端点的免鉴权声明必须保留"
+        );
+    }
+
+    /// 手改 settings.json 的 auth_mode 必须在 load 时归一并持久化:同义词统一
+    /// 为 "none" 且落盘,未知档位清空。upsert 与 load 共享同一归一函数,但
+    /// load 路径的触发与「归一差异才持久化」的门槛是独立行为,单独钉住。
+    #[test]
+    fn load_normalizes_and_persists_auth_mode_declaration() {
+        with_temp_home("pinvou3-prefs-auth-mode-load", || {
+            let mut prefs = UserPrefs::default();
+            prefs.advanced.saved_models.clear();
+            let mut model = SavedModel {
+                auth_mode: None,
+                id: "keyless-load".into(),
+                name: "Keyless".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "gateway-model".into(),
+                base_url: "https://gateway.example.com/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            };
+            model.auth_mode = Some(" No-Auth ".into());
+            prefs.advanced.saved_models.push(model);
+            prefs.advanced.active_model_id = Some("keyless-load".into());
+            let path = super::super::paths::settings_path();
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&prefs).expect("serialize hand-edited prefs"),
+            )
+            .expect("write hand-edited prefs");
+
+            let loaded = UserPrefs::load();
+            assert_eq!(
+                loaded
+                    .model_by_id("keyless-load")
+                    .expect("model")
+                    .auth_mode
+                    .as_deref(),
+                Some("none"),
+                "load 必须把同义词档位归一为 \"none\""
+            );
+            let persisted = std::fs::read_to_string(&path).expect("reread persisted prefs");
+            assert!(
+                persisted.contains("\"auth_mode\": \"none\""),
+                "归一结果必须落盘"
+            );
+            assert!(!persisted.contains("No-Auth"), "原始手改档位不得残留");
+        });
+    }
+
+    /// 手改 auth_mode 为非字符串 JSON 值(数字/布尔等)不得拖垮整份
+    /// settings.json:字段级 deserialize 容错把它按未声明处理,已存记录与
+    /// 偏好原样保留;随后的 update_transaction 也必须把真实文档(而非解析
+    /// 失败时的默认快照)写回磁盘——否则任何一次保存都会抹掉全部已存模型。
+    #[test]
+    fn wrong_typed_auth_mode_degrades_to_unset_without_document_loss() {
+        with_temp_home("pinvou3-prefs-auth-mode-wrong-type", || {
+            let mut prefs = UserPrefs::default();
+            prefs.advanced.saved_models.clear();
+            let model = SavedModel {
+                auth_mode: None,
+                id: "keyless-wrong-type".into(),
+                name: "Keyless".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                model: "gateway-model".into(),
+                base_url: "https://gateway.example.com/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            };
+            prefs.advanced.saved_models.push(model);
+            prefs.advanced.active_model_id = None;
+            let path = super::super::paths::settings_path();
+            // 结构体字面量写不出「auth_mode: 0」这个状态:序列化后向 JSON
+            // 注入非字符串值,模拟手改 settings.json。
+            let mut raw = serde_json::to_value(&prefs).expect("serialize prefs");
+            raw.get_mut("advanced")
+                .and_then(|advanced| advanced.get_mut("saved_models"))
+                .and_then(|models| models.as_array_mut())
+                .and_then(|models| models.first_mut())
+                .and_then(|model| model.as_object_mut())
+                .expect("saved_models array with a model object")
+                .insert("auth_mode".into(), serde_json::Value::from(0));
+            std::fs::write(
+                &path,
+                serde_json::to_string(&raw).expect("serialize raw prefs"),
+            )
+            .expect("write hand-edited prefs");
+
+            let loaded = UserPrefs::load();
+            assert!(
+                loaded.model_by_id("keyless-wrong-type").is_some(),
+                "非字符串 auth_mode 不得让整份 settings.json 解析失败(否则退化到默认快照,已存模型消失;Official 的内置账户模型可合法共存)"
+            );
+            assert_eq!(
+                loaded
+                    .model_by_id("keyless-wrong-type")
+                    .expect("model survives the wrong-typed auth_mode")
+                    .auth_mode,
+                None,
+                "非字符串 auth_mode 必须按未声明处理"
+            );
+
+            // 后续保存必须基于真实文档落盘:若此处仍从默认快照写回,下面的
+            // 记录就会从磁盘上消失(整文档解析失败类的真实破坏面)。
+            let updated = UserPrefs::update_transaction(|prefs| {
+                prefs.advanced.active_model_id = Some("keyless-wrong-type".into());
+                Ok(())
+            })
+            .expect("update after lenient parse");
+            assert_eq!(
+                updated
+                    .model_by_id("keyless-wrong-type")
+                    .expect("model survives the transaction")
+                    .name,
+                "Keyless",
+                "事务落盘必须携带真实已存记录"
+            );
+            let persisted = std::fs::read_to_string(&path).expect("reread persisted prefs");
+            assert!(
+                persisted.contains("keyless-wrong-type"),
+                "后续保存不得把已存模型抹掉"
+            );
+            assert!(
+                persisted.contains("\"active_model_id\": \"keyless-wrong-type\""),
+                "事务改动必须落盘"
+            );
+        });
+    }
+
     #[test]
     fn load_persists_legacy_minimax_domain_migration() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -2945,6 +4417,7 @@ mod tests {
 
         let mut prefs = UserPrefs::default();
         prefs.advanced.saved_models.push(SavedModel {
+            auth_mode: None,
             id: "minimax-api".into(),
             name: "MiniMax".into(),
             alias: None,
@@ -2953,6 +4426,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "MiniMax-M3".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.minimax.chat".into(),
             provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
             vendor: None,
@@ -2993,6 +4474,7 @@ mod tests {
         with_temp_home("pinvou3-prefs-local-output-sentinel", || {
             let mut prefs = UserPrefs::default();
             prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
                 id: "legacy-local".into(),
                 name: "Legacy Local".into(),
                 alias: None,
@@ -3003,6 +4485,14 @@ mod tests {
                 max_output_tokens: Some(24_576),
                 reasoning_effort: None,
                 model: "qwen36_35b_256k".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 base_url: "http://127.0.0.1:8000/v1".into(),
                 provider_kind: None,
                 vendor: None,
@@ -3016,6 +4506,7 @@ mod tests {
                 credential_action: None,
             });
             prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
                 id: "custom-explicit".into(),
                 name: "Custom Explicit".into(),
                 alias: None,
@@ -3026,6 +4517,14 @@ mod tests {
                 max_output_tokens: Some(24_576),
                 reasoning_effort: None,
                 model: "custom-model".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 base_url: "https://gateway.example.com/v1".into(),
                 provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
                 vendor: None,
@@ -3089,6 +4588,194 @@ mod tests {
         });
     }
 
+    /// The K3.1 stored-effort drop must persist through a load-only session,
+    /// not just the next explicit save: the drop flag feeds the
+    /// `normalization_changed` gate like every other load-path rewrite
+    /// (2026-11-05 review M1). One official-route K3.1 record (empty vendor —
+    /// the migrated-record shape) must lose the effort on disk; one unstamped
+    /// relay record carrying the same model id must keep its effort verbatim.
+    #[test]
+    fn load_persists_k31_effort_drop() {
+        with_temp_home("pinvou3-prefs-k31-effort-drop", || {
+            let mut prefs = UserPrefs::default();
+            // Already-migrated fixture (review 5783312297): the unrelated
+            // #622 migration independently triggers a save, which would let
+            // the disk assertion pass even without the K3.1 drop flag.
+            // Settling it here isolates this regression to the
+            // saved-models drift detection.
+            prefs.local_thinking_default_migrated = true;
+            prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
+                id: "k31-official".into(),
+                name: "K3.1 Official".into(),
+                alias: None,
+                preset: ModelPreset::Kimi,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                // A stored tier the older builds could write: the vendor
+                // rejects the shape for K3.1, so the drop must clear it and
+                // the load lane must persist the cleared value.
+                reasoning_effort: Some("off".into()),
+                model: "kimi-k3.1-pro".into(),
+                base_url: "https://api.moonshot.cn/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
+                id: "k31-relay".into(),
+                name: "K3.1 Relay".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                // The unstamped-relay passthrough negative: same model id on
+                // a custom endpoint keeps the contract it was saved with.
+                reasoning_effort: Some("high".into()),
+                model: "kimi-k3.1-pro".into(),
+                base_url: "https://relay.example.com/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.saved_models.push(SavedModel {
+                auth_mode: None,
+                id: "k31-suffixed".into(),
+                name: "K3.1 Suffixed Route".into(),
+                alias: None,
+                preset: ModelPreset::OpenaiCompatible,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                // The raw URL carries the full endpoint path users paste;
+                // the drop arm only matches after provider-metadata
+                // normalization strips the suffix, so this shape is the one
+                // the removed raw pre-check missed (round-8 review) — the
+                // snapshot-diff detection must keep covering it, and this
+                // pins the strip_chat_completions_suffix integration into
+                // normalize_provider_metadata (previously untested).
+                reasoning_effort: Some("off".into()),
+                model: "kimi-k3.1-pro".into(),
+                base_url: "https://api.moonshot.cn/v1/chat/completions".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
+                provider_kind: None,
+                vendor: None,
+                endpoint_mode: None,
+                image_capability_override: ImageCapabilityOverride::default(),
+                vision_model_id: None,
+                api_key: String::new(),
+                credential_ref: None,
+                credential_state: CredentialState::Missing,
+                has_secret: false,
+                credential_action: None,
+            });
+            prefs.advanced.active_model_id = Some("k31-official".into());
+            let path = super::super::paths::settings_path();
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&prefs).expect("serialize k31 prefs"),
+            )
+            .expect("write k31 prefs");
+
+            let loaded = UserPrefs::load();
+            let official = loaded
+                .model_by_id("k31-official")
+                .expect("official k31 model");
+            assert_eq!(
+                official.reasoning_effort, None,
+                "the in-memory stored K3.1 effort must already be dropped"
+            );
+            let relay = loaded.model_by_id("k31-relay").expect("relay k31 model");
+            assert_eq!(
+                relay.reasoning_effort,
+                Some("high".into()),
+                "the unstamped relay record must keep its effort passthrough"
+            );
+            let suffixed = loaded
+                .model_by_id("k31-suffixed")
+                .expect("suffixed k31 model");
+            assert_eq!(
+                suffixed.reasoning_effort, None,
+                "the suffixed official-route record must drop in memory"
+            );
+            assert_eq!(
+                suffixed.base_url, "https://api.moonshot.cn/v1",
+                "the suffix must be stripped by provider-metadata normalization"
+            );
+
+            // Key assertion: the drop was written back to disk (not just
+            // changed in memory) by the load-only session.
+            let persisted: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read migrated prefs"))
+                    .expect("parse migrated prefs");
+            let models = persisted["advanced"]["saved_models"]
+                .as_array()
+                .expect("saved_models array");
+            let official_on_disk = models
+                .iter()
+                .find(|model| model["id"] == "k31-official")
+                .expect("official k31 on disk");
+            assert!(
+                official_on_disk["reasoning_effort"].is_null(),
+                "the on-disk stored K3.1 effort must be cleared by the load-only session, got {}",
+                official_on_disk["reasoning_effort"]
+            );
+            let relay_on_disk = models
+                .iter()
+                .find(|model| model["id"] == "k31-relay")
+                .expect("relay k31 on disk");
+            assert_eq!(relay_on_disk["reasoning_effort"], "high");
+            let suffixed_on_disk = models
+                .iter()
+                .find(|model| model["id"] == "k31-suffixed")
+                .expect("suffixed k31 on disk");
+            assert!(
+                suffixed_on_disk["reasoning_effort"].is_null(),
+                "the on-disk suffixed-record effort must be cleared by the load-only session"
+            );
+            // PINVOU3_HOME restoration and temporary home reclamation are
+            // handled by `with_temp_home`'s Drop (also on assertion/panic
+            // paths); no hand-written restore block here.
+        });
+    }
+
     /// The legacy-local-alias fixture shared by the normalization-persist
     /// tests: one LocalVllm model still carrying the hand-written alias the
     /// normalization strips, pinned active — load() observes a real
@@ -3097,6 +4784,7 @@ mod tests {
     fn legacy_local_alias_prefs() -> UserPrefs {
         let mut prefs = UserPrefs::default();
         prefs.advanced.saved_models.push(SavedModel {
+            auth_mode: None,
             id: "local-model".into(),
             name: "Local model".into(),
             alias: Some("Legacy local alias".into()),
@@ -3105,6 +4793,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3131,6 +4827,7 @@ mod tests {
         reasoning_effort: Option<&str>,
     ) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.into(),
             name: id.into(),
             alias: None,
@@ -3139,6 +4836,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: reasoning_effort.map(str::to_string),
             model: "qwen3-32b".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: base_url.into(),
             provider_kind: Some(
                 match preset {
@@ -3412,6 +5117,7 @@ mod tests {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             id: "m2".into(),
             name: "Kimi".into(),
             alias: None,
@@ -3420,6 +5126,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "kimi-k2.6".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.moonshot.cn/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3436,6 +5150,35 @@ mod tests {
         prefs.remove_model("m2");
         assert_eq!(prefs.advanced.active_model_id.as_deref(), Some("default"));
         assert!(prefs.model_by_id("m2").is_none());
+    }
+
+    #[test]
+    fn remove_last_user_model_keeps_builtin_and_clears_local_default() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let user_model_id = prefs
+            .advanced
+            .saved_models
+            .iter()
+            .find(|model| !model.is_builtin_account_platform())
+            .expect("default user model")
+            .id
+            .clone();
+        prefs
+            .advanced
+            .saved_models
+            .retain(|model| model.is_builtin_account_platform() || model.id == user_model_id);
+        prefs
+            .set_default_model_ref(ModelSelectionRef::local(&user_model_id))
+            .expect("select last user model");
+
+        prefs.remove_model(&user_model_id);
+
+        assert_eq!(prefs.advanced.saved_models.len(), 1);
+        assert!(prefs.advanced.saved_models[0].is_builtin_account_platform());
+        assert!(prefs.advanced.default_model_ref.is_none());
+        assert!(prefs.advanced.active_model_id.is_none());
     }
 
     #[test]
@@ -3590,6 +5333,8 @@ mod tests {
     #[test]
     fn prefs_roundtrip() {
         let prefs = UserPrefs {
+            model_path_schema_version: 1,
+            model_selection_schema_version: 1,
             theme: Theme::LiquidDark,
             color_scheme: ColorScheme::Dark,
             language: Language::En,
@@ -3844,11 +5589,15 @@ mod tests {
             prefs.notifications.task_completed,
             !cfg!(target_os = "linux")
         );
+        assert_eq!(prefs.notifications.needs_input, !cfg!(target_os = "linux"));
 
         let json = r#"{"notifications":{"task_completed":false}}"#;
         let parsed: UserPrefs = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.notifications.enabled, !cfg!(target_os = "linux"));
         assert!(!parsed.notifications.task_completed);
+        // An uncarried needs_input is likewise filled from the platform
+        // Default and does not drift with partial patches.
+        assert_eq!(parsed.notifications.needs_input, !cfg!(target_os = "linux"));
     }
 
     #[test]
@@ -4252,6 +6001,7 @@ mod tests {
     fn refresh_classifies_a_fallback_miss_as_unavailable_not_missing() {
         let mut prefs = UserPrefs::default();
         prefs.upsert_model(SavedModel {
+            auth_mode: None,
             id: "m1".to_string(),
             name: "M1".to_string(),
             alias: None,
@@ -4260,6 +6010,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "deepseek-chat".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.deepseek.com".to_string(),
             provider_kind: None,
             vendor: None,
@@ -4313,6 +6071,111 @@ mod tests {
             CredentialState::Unavailable,
             "an unreachable-keyring miss on the search lane must read as Unavailable"
         );
+    }
+
+    /// Round-5 review: the env-override stamp used to land on EVERY record
+    /// with no declaration check, so with the override variable exported a
+    /// keyless-declared entry displayed `EnvOverride` for a route no code
+    /// path reads a credential for (and a residual reference displayed
+    /// `Configured`) — defeating the keyless-aware display helper that
+    /// `get_effective_model_config` feeds from this same state. A declared
+    /// record must keep its persisted record state and cost zero store
+    /// reads; undeclared records keep both old legs (reverse direction).
+    #[test]
+    fn refresh_leaves_declared_records_at_their_record_state() {
+        with_temp_home("pinvou3-prefs-refresh-keyless", || {
+            let _restore = crate::platform::test_support::EnvRestore::capture(&[
+                super::MODEL_API_KEY_ENV_OVERRIDE,
+            ]);
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            let reference =
+                crate::platform::credential_store::CredentialReference::for_model("default");
+
+            // Two records with identical residual state; only the migrated
+            // one declares keyless (the hand-edited settings.json dual state
+            // the review found). The clone keeps the full literal valid.
+            let mut prefs = UserPrefs::default();
+            prefs.migrate_models();
+            let mut undeclared = prefs.advanced.saved_models[0].clone();
+            undeclared.id = "undeclared-record".into();
+            undeclared.name = "Env".into();
+            undeclared.auth_mode = None;
+            prefs.upsert_model(undeclared);
+            for record in prefs.advanced.saved_models.iter_mut() {
+                record.credential_ref = Some(reference.clone());
+                record.credential_state = CredentialState::Configured;
+                record.has_secret = true;
+                if record.id != "undeclared-record" {
+                    record.auth_mode = Some("none".to_string());
+                }
+            }
+            let declared = prefs.advanced.saved_models[0].id.clone();
+
+            // Leg 1 — override exported: the declared record keeps its
+            // record state (Configured is truthful: a residual secret IS
+            // stored, it is just never read); the undeclared record flips
+            // to EnvOverride as before.
+            // SAFETY: with_temp_home holds ENV_LOCK; env writes are
+            // serialized in-process.
+            unsafe { std::env::set_var(super::MODEL_API_KEY_ENV_OVERRIDE, "x") };
+            let before = store.ops().len();
+            prefs.refresh_credential_states_with_store(&store);
+            let ops = &store.ops()[before..];
+            let declared_state = prefs
+                .model_by_id(&declared)
+                .expect("declared record present")
+                .credential_state;
+            let undeclared_state = prefs
+                .model_by_id("undeclared-record")
+                .expect("undeclared record present")
+                .credential_state;
+            // SAFETY: with_temp_home holds ENV_LOCK; env writes are
+            // serialized in-process.
+            unsafe { std::env::remove_var(super::MODEL_API_KEY_ENV_OVERRIDE) };
+            assert_eq!(
+                declared_state,
+                CredentialState::Configured,
+                "a declared record must keep its record state under an exported override"
+            );
+            assert_eq!(
+                undeclared_state,
+                CredentialState::EnvOverride,
+                "an undeclared record keeps the env-override classification"
+            );
+            assert!(
+                !ops.iter().any(|op| op.starts_with("get")),
+                "a declared record must cost no store read: {ops:?}"
+            );
+
+            // Leg 2 — no override: the declared record is still untouched
+            // (no store probe for the residual reference), while the
+            // undeclared record's reference resolves through the store.
+            let before = store.ops().len();
+            prefs.refresh_credential_states_with_store(&store);
+            let ops = &store.ops()[before..];
+            let declared_state = prefs
+                .model_by_id(&declared)
+                .expect("declared record present")
+                .credential_state;
+            let undeclared_state = prefs
+                .model_by_id("undeclared-record")
+                .expect("undeclared record present")
+                .credential_state;
+            assert_eq!(
+                declared_state,
+                CredentialState::Configured,
+                "a declared record keeps its record state with no override either"
+            );
+            assert_eq!(
+                undeclared_state,
+                CredentialState::Missing,
+                "an undeclared record resolves through the store (empty store: Missing)"
+            );
+            assert!(
+                ops.iter().filter(|op| op.starts_with("get")).count() == 1,
+                "only the undeclared record's reference is probed: {ops:?}"
+            );
+        });
     }
 
     #[test]

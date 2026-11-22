@@ -44,6 +44,66 @@ pub struct EngineAcquireTiming {
     pub sync_session_ms: u64,
 }
 
+/// Fixed, content-free model lifecycle evidence owned by one admitted turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ModelRejectionCode {
+    #[serde(rename = "MODEL_UNAVAILABLE")]
+    Unavailable,
+    #[serde(rename = "MODEL_DEPRECATED")]
+    Deprecated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelRejection {
+    pub schema_version: u8,
+    pub code: ModelRejectionCode,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "false_legacy_binding")]
+    pub legacy_binding: bool,
+}
+
+fn false_legacy_binding(value: &bool) -> bool {
+    !*value
+}
+
+impl ModelRejection {
+    pub(crate) fn new(code: ModelRejectionCode, model_id: &str) -> Option<Self> {
+        let model_id = uuid::Uuid::parse_str(model_id).ok()?;
+        if model_id.is_nil() {
+            return None;
+        }
+        Some(Self {
+            schema_version: 1,
+            code,
+            model_id: model_id.to_string(),
+            legacy_binding: false,
+        })
+    }
+
+    // Produced only by local runtime preparation after a fully decoded catalog
+    // proves the saved legacy name absent. No fabricated UUID or model name is
+    // persisted, and the ordinary UUID/header constructor remains unchanged.
+    pub(crate) fn legacy_unavailable() -> Self {
+        Self {
+            schema_version: 1,
+            code: ModelRejectionCode::Unavailable,
+            model_id: String::new(),
+            legacy_binding: true,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.schema_version == 1
+            && if self.legacy_binding {
+                self.code == ModelRejectionCode::Unavailable && self.model_id.is_empty()
+            } else {
+                uuid::Uuid::parse_str(&self.model_id).is_ok_and(|id| {
+                    !id.is_nil() && id.to_string() == self.model_id.to_ascii_lowercase()
+                })
+            }
+    }
+}
+
 #[derive(Debug)]
 struct ActiveTurnTiming {
     turn_id: String,
@@ -51,6 +111,8 @@ struct ActiveTurnTiming {
     /// remains stable for the local timeline, while value signals must join
     /// the task lifecycle on the engine-provided id.
     behavior_turn_id: Option<String>,
+    billing_notice: Option<serde_json::Value>,
+    model_rejection: Option<ModelRejection>,
     engine_acquire: Option<EngineAcquireTiming>,
     engine_ready_timestamp: Option<i64>,
     engine_turn_started_timestamp: Option<i64>,
@@ -68,6 +130,8 @@ impl ActiveTurnTiming {
         Self {
             turn_id,
             behavior_turn_id: None,
+            billing_notice: None,
+            model_rejection: None,
             engine_acquire: None,
             engine_ready_timestamp: None,
             engine_turn_started_timestamp: None,
@@ -254,6 +318,52 @@ pub(crate) fn has_extra_queued_turns(session_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Capture the timing owner before asynchronous preparation or delivery.
+pub(crate) fn current_turn_id(session_id: &str) -> Option<String> {
+    active_turns()
+        .lock()
+        .ok()?
+        .get(session_id)?
+        .back()
+        .map(|turn| turn.turn_id.clone())
+}
+
+/// Never attach old evidence to a later turn or a recreated session with the same id.
+pub(crate) fn record_model_rejection_for_turn(
+    session_id: &str,
+    turn_id: &str,
+    rejection: ModelRejection,
+) -> bool {
+    if !rejection.is_valid() {
+        return false;
+    }
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let turn = map.get_mut(session_id)?.back_mut()?;
+            if turn.turn_id != turn_id {
+                return None;
+            }
+            turn.model_rejection = Some(rejection);
+            Some(())
+        })
+        .is_some()
+}
+
+/// Attach the structured notice to the timing owner already active for this turn.
+pub fn record_billing_notice(session_id: &str, notice: serde_json::Value) -> bool {
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let active = map.get_mut(session_id)?.back_mut()?;
+            active.billing_notice = Some(notice);
+            Some(())
+        })
+        .is_some()
+}
+
 /// 旧调用点(无 usage):落盘不带 usage 字段,reader API 反序列化为 None。
 /// 保留是为了不强迫所有调用点同步升级(app/commands 各命令的 send_error 兜底等)。
 pub fn finish_turn(session_id: &str, status: &str, error: Option<&str>) {
@@ -398,6 +508,12 @@ fn finish_turn_internal(
     });
     if let Some(behavior_turn_id) = active_turn.behavior_turn_id {
         entry["behavior_turn_id"] = json!(behavior_turn_id);
+    }
+    if let Some(billing_notice) = active_turn.billing_notice {
+        entry["billing_notice"] = billing_notice;
+    }
+    if let Some(model_rejection) = active_turn.model_rejection {
+        entry["model_rejection"] = json!(model_rejection);
     }
     if let Some(engine_acquire) = active_turn.engine_acquire {
         entry["engine_startup"] = json!({
@@ -569,6 +685,10 @@ pub struct TimelineEvent {
     pub ts: String,     // RFC3339
     pub status: Option<String>, // assistant_done only
     pub error: Option<String>, // assistant_done only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_notice: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model_rejection: Option<ModelRejection>,
     pub usage: Option<TurnUsage>, // assistant_done / context_snapshot(老事件为 None)
     #[cfg(any(feature = "benchmark-hooks", test))]
     pub tool_name: Option<String>,
@@ -723,6 +843,12 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        billing_notice: v.get("billing_notice").cloned(),
+        model_rejection: v
+            .get("model_rejection")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ModelRejection>(value).ok())
+            .filter(ModelRejection::is_valid),
         usage,
         #[cfg(any(feature = "benchmark-hooks", test))]
         tool_name: v
@@ -767,35 +893,56 @@ pub struct SessionTimelineStats {
     pub total_cache_miss_tokens: u64,
     pub total_cache_write_tokens: u64,
     pub total_reasoning_tokens: u64,
+    /// 首个有 user_start 的 turn 的首个事件时间(产线上即该轮的
+    /// user_start 写入时刻)。
     pub first_turn_ts: Option<String>,
+    /// 最后一个有 user_start 的 turn 的最后一个事件时间——已收口时是
+    /// 该轮 assistant_done(即结束时刻),不是该轮的开始时刻;两侧口径
+    /// 因此不对称(首=开始,末=结束)。末轮未收口(崩溃/截断/提交前取消,
+    /// 见 incomplete_turns)时,该值是这轮 user_start 的时刻。
     pub last_turn_ts: Option<String>,
     pub completed_turns: usize,
     pub failed_turns: usize,
-    /// 用户主动 Ctrl-C / 超时中断的轮次(engine 上游 TurnOutcomeStatus::Interrupted)。
-    /// 之前被 `_ => {}` 静默丢弃,导致 turn_count 与 completed+failed 对不上。
+    /// 用户主动 Ctrl-C / 超时中断的轮次(engine TurnOutcomeStatus::Interrupted、
+    /// ACP Cancelled 映射、调度取消兜底均落此桶)。
     pub interrupted_turns: usize,
-    /// 有 user_start 但没有 assistant_done 的轮次,常见于进程退出或文件尾部截断。
+    /// ACP 会话因 MaxTokens / MaxTurnRequests 上限收口的轮次(codex_acp 落盘
+    /// "LimitReached"):既非失败也非中断,单独成桶避免落进 unknown。
+    pub limit_reached_turns: usize,
+    /// ACP 会话模型拒绝(StopReason::Refusal → "Refused")收口的轮次。
+    pub refused_turns: usize,
+    /// 有 user_start 但没有 assistant_done 的轮次:进程退出、文件尾部截断、
+    /// 提交前取消(start_turn 后走 unsubmitted-interrupt 通道,不落终态)、
+    /// 或 user_start 之后的写盘失败,都落在这里。
     pub incomplete_turns: usize,
-    /// assistant_done 存在,但状态不是当前已知枚举。单独暴露,避免静默制造差值。
+    /// assistant_done 存在,但状态不是当前已知枚举(含缺失 status 的脏数据)。
+    /// 单独暴露,避免静默制造差值。
     pub unknown_status_turns: usize,
 }
 
 /// 聚合 session timeline 为单个 stats 对象。
 ///
 /// 算法:遍历 read_timeline(),按 turn_id 配对 (user_start, assistant_done),
-/// 每对算一个 turn。token / 状态从 assistant_done 取(失败时 usage 可能为 None)。
+/// 每个有 user_start 的 turn 算一个(未收口的轮计入 incomplete_turns,
+/// 不是只有配齐两半才计数)。token / 状态从 assistant_done 取(ACP 收口与
+/// send_error 兜底不写 usage,token 计 0;引擎正常链路的失败轮可能携带
+/// usage 并计入)。
+/// 孤儿 assistant_done(无 user_start,多来自 user_start
+/// 写盘失败)不配对:不计 turn_count、不入任何分桶或 token 总和。
 pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> {
     let events = read_timeline(session_id)?;
     let mut stats = SessionTimelineStats::default();
-    // 按 turn_id 索引;一个 turn 由 user_start + assistant_done 组成
-    let mut by_turn: HashMap<String, (Option<&TimelineEvent>, Option<&TimelineEvent>)> =
+    // 按 turn_id 索引;一个 turn 由 user_start + assistant_done 组成。
+    // 键借用 events,避免逐事件克隆 turn_id(克隆件在去重后即被丢弃)。
+    let mut by_turn: HashMap<&str, (Option<&TimelineEvent>, Option<&TimelineEvent>)> =
         HashMap::new();
     for e in &events {
-        let entry = by_turn.entry(e.turn_id.clone()).or_insert((None, None));
+        // 只为两种配对事件建 entry:context_snapshot 等其余事件
+        // (context-snapshot-<ms> 独立 id)不会留下 (None, None) 空位。
         if e.event == "assistant_done" {
-            entry.1 = Some(e);
+            by_turn.entry(e.turn_id.as_str()).or_default().1 = Some(e);
         } else if e.event == "user_start" {
-            entry.0 = Some(e);
+            by_turn.entry(e.turn_id.as_str()).or_default().0 = Some(e);
         }
     }
     stats.turn_count = by_turn
@@ -806,7 +953,7 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
         .iter()
         .find(|event| {
             by_turn
-                .get(&event.turn_id)
+                .get(event.turn_id.as_str())
                 .is_some_and(|pair| pair.0.is_some())
         })
         .map(|event| event.ts.clone());
@@ -815,7 +962,7 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
         .rev()
         .find(|event| {
             by_turn
-                .get(&event.turn_id)
+                .get(event.turn_id.as_str())
                 .is_some_and(|pair| pair.0.is_some())
         })
         .map(|event| event.ts.clone());
@@ -849,6 +996,8 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
                 stats.failed_turns += 1;
             }
             Some(s) if s.eq_ignore_ascii_case("Interrupted") => stats.interrupted_turns += 1,
+            Some(s) if s.eq_ignore_ascii_case("LimitReached") => stats.limit_reached_turns += 1,
+            Some(s) if s.eq_ignore_ascii_case("Refused") => stats.refused_turns += 1,
             _ => stats.unknown_status_turns += 1,
         }
     }
@@ -858,7 +1007,156 @@ pub fn compute_stats(session_id: &str) -> std::io::Result<SessionTimelineStats> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_model_rejection_is_explicit_and_does_not_weaken_uuid_evidence() {
+        let legacy = ModelRejection::legacy_unavailable();
+        assert!(legacy.is_valid());
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(
+            encoded,
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":true})
+        );
+        assert_eq!(
+            serde_json::from_value::<ModelRejection>(encoded).unwrap(),
+            legacy
+        );
+        for marker in [
+            json!({"schema_version":1,"code":"MODEL_DEPRECATED","model_id":"","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"deepseek-v4-flash","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"0199a100-0001-7000-8000-000000000107","legacy_binding":true}),
+            json!({"schema_version":1,"code":"MODEL_UNAVAILABLE","model_id":"","legacy_binding":false}),
+        ] {
+            assert!(
+                !serde_json::from_value::<ModelRejection>(marker)
+                    .unwrap()
+                    .is_valid()
+            );
+        }
+        assert!(
+            ModelRejection::new(ModelRejectionCode::Unavailable, "deepseek-v4-flash").is_none()
+        );
+        let uuid = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "0199a100-0001-7000-8000-000000000107",
+        )
+        .unwrap();
+        assert!(uuid.is_valid());
+        assert!(
+            !serde_json::to_value(uuid)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("legacy_binding")
+        );
+    }
     use crate::platform::paths::tests::ENV_LOCK;
+
+    #[test]
+    fn model_rejection_requires_exact_timing_owner_and_typed_reader() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("pinvou-timing-model-{}", uuid::Uuid::new_v4()));
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: ENV_LOCK serializes process environment changes in tests.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let sid = "typed-model-owner";
+        let old = start_turn(sid);
+        let value = ModelRejection::new(
+            ModelRejectionCode::Unavailable,
+            "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+        )
+        .unwrap();
+        clear_session(sid);
+        let current = start_turn(sid);
+        assert!(!record_model_rejection_for_turn(sid, &old, value.clone()));
+        assert!(record_model_rejection_for_turn(
+            sid,
+            &current,
+            value.clone()
+        ));
+        finish_turn(sid, "send_error", Some("generic prepared model error"));
+        let terminal = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .unwrap();
+        assert_eq!(terminal.turn_id, current);
+        assert_eq!(terminal.model_rejection, Some(value.clone()));
+        assert!(!record_model_rejection_for_turn(sid, &current, value));
+        let mut line = json!({ "turn_id": "legacy", "event": "assistant_done", "timestamp": 1, "ts": "legacy", "status": "Failed" });
+        assert!(
+            parse_timeline_line(&line.to_string())
+                .unwrap()
+                .model_rejection
+                .is_none()
+        );
+        for marker in [
+            json!({ "schema_version": 1, "code": "MODEL_REMOVED", "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c" }),
+            json!({ "schema_version": 2, "code": "MODEL_UNAVAILABLE", "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c" }),
+            json!({ "schema_version": 1, "code": "MODEL_UNAVAILABLE", "model_id": "bad" }),
+            json!({ "schema_version": 1, "code": "MODEL_UNAVAILABLE", "model_id": "00000000-0000-0000-0000-000000000000" }),
+        ] {
+            line["model_rejection"] = marker;
+            assert!(
+                parse_timeline_line(&line.to_string())
+                    .unwrap()
+                    .model_rejection
+                    .is_none()
+            );
+        }
+        clear_session(sid);
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn billing_notice_survives_timeline_hydration() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-billing-notice-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-billing-notice";
+        start_turn(sid);
+        assert!(record_billing_notice(
+            sid,
+            json!({
+                "schema_version": 1,
+                "code": "WALLET_INSUFFICIENT",
+                "stage": "INITIAL_RESERVATION",
+                "turn_outcome": "REJECTED",
+                "settlement_status": "NOT_STARTED",
+                "action": "CONTACT_ORG_ADMIN",
+                "context_type": "ORGANIZATION",
+                "usage_request_id": "0199a100-0001-7000-8000-000000000106"
+            })
+        ));
+        finish_turn(sid, "Failed", Some("wallet reservation rejected"));
+
+        let done = read_timeline(sid)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event == "assistant_done")
+            .expect("assistant terminal");
+        let notice = done.billing_notice.expect("persisted billing notice");
+        assert_eq!(notice["code"], "WALLET_INSUFFICIENT");
+        assert_eq!(notice["context_type"], "ORGANIZATION");
+        assert_eq!(notice["action"], "CONTACT_ORG_ADMIN");
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
 
     #[test]
     fn timing_events_append_and_pair_turn_id() {
@@ -1104,7 +1402,8 @@ mod tests {
 
     #[test]
     fn compute_stats_aggregates_usage_and_status() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
         let tmp = std::env::temp_dir().join(format!(
             "pinvou3-timing-stats-{}",
             std::time::SystemTime::now()
@@ -1112,7 +1411,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        // SAFETY: platform::paths::tests::ENV_LOCK held via _env_guard.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let sid = "session-stats";
@@ -1128,6 +1427,8 @@ mod tests {
                     output_tokens: 200,
                     cache_hit_tokens: 500,
                     cache_miss_tokens: 500,
+                    cache_write_tokens: 300,
+                    reasoning_tokens: 50,
                     ..Default::default()
                 }),
             );
@@ -1143,16 +1444,24 @@ mod tests {
         assert_eq!(stats.total_output_tokens, 400);
         assert_eq!(stats.total_cache_hit_tokens, 1000);
         assert_eq!(stats.total_cache_miss_tokens, 1000);
+        assert_eq!(stats.total_cache_write_tokens, 600);
+        assert_eq!(stats.total_reasoning_tokens, 100);
         assert!(stats.first_turn_ts.is_some());
         assert!(stats.last_turn_ts.is_some());
+        // 两侧口径:首=首个 user_start,末=最后收口的 assistant_done,
+        // 同 offset RFC3339 字典序即时间序(同毫秒并发轮允许相等)。
+        assert!(stats.first_turn_ts.clone().unwrap() <= stats.last_turn_ts.clone().unwrap());
 
         let _ = std::fs::remove_dir_all(tmp);
     }
 
+    /// 缺失 session(sidecar 不存在)返回全零 stats,而不是报错——
+    /// 老 session 没有侧车文件,诊断入口按零值展示。
     #[test]
     fn compute_stats_on_missing_session_is_default() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held via _env_guard.
         unsafe {
             std::env::set_var(
                 "PINVOU3_HOME",
@@ -1162,15 +1471,18 @@ mod tests {
         let stats = compute_stats("does-not-exist").unwrap();
         assert_eq!(stats.turn_count, 0);
         assert_eq!(stats.total_input_tokens, 0);
+        assert_eq!(stats.completed_turns, 0);
         assert!(stats.first_turn_ts.is_none());
+        assert!(stats.last_turn_ts.is_none());
     }
 
     /// [F2] Interrupted 终态之前被 `_ => {}` 静默丢弃,导致 turn_count 与
-    /// completed+failed 对不上。验证 compute_stats 现在能正确分类三个终态,
-    /// 且大小写不敏感(engine 上游落盘是 PascalCase,但脏数据可能是 lowercase)。
+    /// completed+failed 对不上。验证终态分桶且大小写不敏感(产线写入
+    /// PascalCase,脏数据可能是 lowercase)。
     #[test]
     fn compute_stats_counts_interrupted_terminal_state() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
         let tmp = std::env::temp_dir().join(format!(
             "pinvou3-timing-interrupted-{}",
             std::time::SystemTime::now()
@@ -1178,7 +1490,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        // SAFETY: platform::paths::tests::ENV_LOCK held via _env_guard.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let sid = "session-interrupted";
@@ -1198,18 +1510,28 @@ mod tests {
         assert_eq!(stats.completed_turns, 1);
         assert_eq!(stats.failed_turns, 1);
         assert_eq!(stats.interrupted_turns, 2);
-        // 三个终态加起来必须等于 turn_count——这是 F2 修复的本质保证
+        // 全部终态桶加 incomplete/unknown 必须等于 turn_count。
         assert_eq!(
-            stats.completed_turns + stats.failed_turns + stats.interrupted_turns,
+            stats.completed_turns
+                + stats.failed_turns
+                + stats.interrupted_turns
+                + stats.limit_reached_turns
+                + stats.refused_turns
+                + stats.incomplete_turns
+                + stats.unknown_status_turns,
             stats.turn_count
         );
 
         let _ = std::fs::remove_dir_all(tmp);
     }
 
+    /// 真实产线写出的边缘终态全部归位:send_error 归 failed、未知状态归
+    /// unknown、未收口 turn 归 incomplete、ACP 的 LimitReached/Refused 归
+    /// 各自的桶。每个终态同时覆盖非产线大小写变体。
     #[test]
     fn compute_stats_classifies_real_terminal_edges() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
         let tmp = std::env::temp_dir().join(format!(
             "pinvou3-timing-terminal-edges-{}",
             std::time::SystemTime::now()
@@ -1217,7 +1539,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        // SAFETY: platform::paths::tests::ENV_LOCK held via _env_guard.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let sid = "session-terminal-edges";
@@ -1226,23 +1548,40 @@ mod tests {
         start_turn(sid);
         finish_turn(sid, "FutureStatus", None);
         start_turn(sid);
+        finish_turn(sid, "LimitReached", None);
+        start_turn(sid);
+        finish_turn(sid, "refused", None);
+        start_turn(sid);
+        finish_turn(sid, "Refused", None);
+        start_turn(sid);
+        finish_turn(sid, "limitreached", None);
+        start_turn(sid);
+        finish_turn(sid, "failed", None);
+        start_turn(sid);
+        finish_turn(sid, "completed", None);
+        start_turn(sid);
 
         let stats = compute_stats(sid).unwrap();
-        assert_eq!(stats.turn_count, 3);
-        assert_eq!(stats.failed_turns, 1);
+        assert_eq!(stats.turn_count, 9);
+        assert_eq!(stats.completed_turns, 1);
+        assert_eq!(stats.failed_turns, 2);
+        assert_eq!(stats.limit_reached_turns, 2);
+        assert_eq!(stats.refused_turns, 2);
         assert_eq!(stats.incomplete_turns, 1);
         assert_eq!(stats.unknown_status_turns, 1);
         assert_eq!(
             stats.completed_turns
                 + stats.failed_turns
                 + stats.interrupted_turns
+                + stats.limit_reached_turns
+                + stats.refused_turns
                 + stats.incomplete_turns
                 + stats.unknown_status_turns,
             stats.turn_count
         );
 
-        // 清掉进程内 ACTIVE_TURNS 的未完成记录,避免影响同进程后续测试。
-        finish_turn(sid, "Interrupted", None);
+        // clear_session 只清内存队列,不写 sidecar 事件。
+        clear_session(sid);
         let _ = std::fs::remove_dir_all(tmp);
     }
 
@@ -1329,6 +1668,146 @@ mod tests {
         file.set_len(MAX_TIMING_FILE_BYTES + 1).unwrap();
         let error = read_timeline("session-too-large").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    /// 孤儿 assistant_done(同 turn_id 无 user_start,多来自 user_start
+    /// 写盘失败或截断)不得计入 turn_count、任何终态分桶或 token 总和。
+    #[test]
+    fn compute_stats_excludes_orphan_assistant_done() {
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-orphan-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held via _env_guard.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-orphan-done";
+        start_turn(sid);
+        finish_turn_with_usage(
+            sid,
+            "Completed",
+            None,
+            Some(TurnUsage {
+                input_tokens: 11,
+                ..Default::default()
+            }),
+        );
+        let path = crate::platform::paths::session_timing_events(sid);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| {
+                f.write_all(
+                    br#"{"event":"assistant_done","turn_id":"orphan_done_probe","timestamp":1767225600000,"ts":"2026-01-01T00:00:00+00:00","status":"Completed","usage":{"input_tokens":999}}
+"#,
+                )
+            })
+            .unwrap();
+
+        let stats = compute_stats(sid).unwrap();
+        assert_eq!(stats.turn_count, 1, "孤儿 done 不得计入 turn_count");
+        assert_eq!(stats.completed_turns, 1);
+        assert_eq!(
+            stats.total_input_tokens, 11,
+            "孤儿 done 的 usage 不得计入总和"
+        );
+        assert_eq!(stats.incomplete_turns + stats.unknown_status_turns, 0);
+        assert_eq!(
+            stats.completed_turns
+                + stats.failed_turns
+                + stats.interrupted_turns
+                + stats.limit_reached_turns
+                + stats.refused_turns
+                + stats.incomplete_turns
+                + stats.unknown_status_turns,
+            stats.turn_count
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    /// 首末时间戳只取有 user_start 的真实轮次,头部和尾部的孤儿事件及
+    /// context_snapshot 不得影响结果;末轮未收口时使用其 user_start。
+    #[test]
+    fn compute_stats_first_last_ts_semantics() {
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-ts-semantics-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held via _env_guard.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        // 头孤儿 done(T0)→ 轮A(T1,T2)→ 轮B(T3,T4)
+        // → 尾部 context_snapshot(T5)→ 尾孤儿 done(T6)。
+        let settled = "session-ts-settled";
+        let settled_lines = r#"{"event":"assistant_done","turn_id":"orphan_head","timestamp":1000,"ts":"2026-02-01T00:00:00+00:00","status":"Completed"}
+{"event":"user_start","turn_id":"turn_a","timestamp":2000,"ts":"2026-02-01T00:00:01+00:00"}
+{"event":"assistant_done","turn_id":"turn_a","timestamp":3000,"ts":"2026-02-01T00:00:02+00:00","status":"Completed"}
+{"event":"user_start","turn_id":"turn_b","timestamp":4000,"ts":"2026-02-01T00:00:03+00:00"}
+{"event":"assistant_done","turn_id":"turn_b","timestamp":5000,"ts":"2026-02-01T00:00:04+00:00","status":"Completed"}
+{"event":"context_snapshot","turn_id":"context-snapshot-42","timestamp":6000,"ts":"2026-02-01T00:00:05+00:00"}
+{"event":"assistant_done","turn_id":"orphan_tail","timestamp":7000,"ts":"2026-02-01T00:00:06+00:00","status":"Completed"}
+"#;
+        let settled_path = crate::platform::paths::session_timing_events(settled);
+        std::fs::create_dir_all(settled_path.parent().unwrap()).unwrap();
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&settled_path)
+            .and_then(|mut f| f.write_all(settled_lines.as_bytes()))
+            .unwrap();
+        let stats = compute_stats(settled).unwrap();
+        assert_eq!(stats.turn_count, 2);
+        assert_eq!(stats.completed_turns, 2);
+        assert_eq!(
+            stats.first_turn_ts.as_deref(),
+            Some("2026-02-01T00:00:01+00:00"),
+            "first 必须是首个真实轮的 user_start,头孤儿/带外事件不得当选"
+        );
+        assert_eq!(
+            stats.last_turn_ts.as_deref(),
+            Some("2026-02-01T00:00:04+00:00"),
+            "末轮已收口时 last 必须是该轮 assistant_done,尾部带外事件不得当选"
+        );
+
+        // 再加一轮只有 user_start(T7)→ 尾孤儿 done(T8)。
+        let unsettled = "session-ts-unsettled";
+        let unsettled_lines = format!(
+            "{settled_lines}{{\"event\":\"user_start\",\"turn_id\":\"turn_c\",\"timestamp\":8000,\"ts\":\"2026-02-01T00:00:07+00:00\"}}\n{{\"event\":\"assistant_done\",\"turn_id\":\"orphan_tail2\",\"timestamp\":9000,\"ts\":\"2026-02-01T00:00:08+00:00\",\"status\":\"Completed\"}}\n"
+        );
+        let unsettled_path = crate::platform::paths::session_timing_events(unsettled);
+        std::fs::create_dir_all(unsettled_path.parent().unwrap()).unwrap();
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&unsettled_path)
+            .and_then(|mut f| f.write_all(unsettled_lines.as_bytes()))
+            .unwrap();
+        let stats = compute_stats(unsettled).unwrap();
+        assert_eq!(stats.turn_count, 3);
+        assert_eq!(stats.completed_turns, 2);
+        assert_eq!(stats.incomplete_turns, 1);
+        assert_eq!(
+            stats.first_turn_ts.as_deref(),
+            Some("2026-02-01T00:00:01+00:00")
+        );
+        assert_eq!(
+            stats.last_turn_ts.as_deref(),
+            Some("2026-02-01T00:00:07+00:00"),
+            "末轮未收口时 last 必须是该轮 user_start,尾孤儿 done 不得当选"
+        );
 
         let _ = std::fs::remove_dir_all(tmp);
     }

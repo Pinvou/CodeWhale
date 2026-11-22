@@ -957,6 +957,7 @@ mod tests {
 
     fn saved_model(id: &str, wire_name: &str) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.to_string(),
             name: id.to_string(),
             alias: None,
@@ -965,6 +966,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: wire_name.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,
             vendor: None,

@@ -31,9 +31,13 @@ def git(*args: str) -> str:
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
-def added_tokens(tree_a: str, tree_b: str) -> dict[str, set[str]]:
+def changed_paths(tree_a: str, tree_b: str) -> set[str]:
+    return set(git("diff", "--name-only", tree_a, tree_b).splitlines())
+
+
+def added_tokens(tree_a: str, tree_b: str, paths: set[str]) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
-    for path in git("diff", "--name-only", tree_a, tree_b).splitlines():
+    for path in sorted(paths):
         toks: set[str] = set()
         for line in git("diff", "--unified=0", tree_a, tree_b, "--", path).splitlines():
             if line.startswith("+") and not line.startswith("+++"):
@@ -51,8 +55,12 @@ def main() -> None:
     for m in merges:
         p1 = git("rev-parse", f"{m}^1").strip()
         p2 = git("rev-parse", f"{m}^2").strip()
-        vs_branch = added_tokens(p1, m)
-        vs_main = added_tokens(p2, m)
+        # Only paths changed against both parents can produce a finding. Keep
+        # the original per-path diff/token semantics, without diffing every
+        # unrelated file inherited from a long-lived branch's other parent.
+        paths = changed_paths(p1, m) & changed_paths(p2, m)
+        vs_branch = added_tokens(p1, m, paths)
+        vs_main = added_tokens(p2, m, paths)
         for path in sorted(set(vs_branch) & set(vs_main)):
             authored = vs_branch[path] & vs_main[path]
             if authored:

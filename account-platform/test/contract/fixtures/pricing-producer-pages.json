@@ -1,0 +1,200 @@
+{
+  "formula-page-one": {
+    "body": {
+      "items": [
+        {
+          "formula_version_id": "00000000-0000-4000-8000-000000000301",
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 1,
+          "status": "PUBLISHED",
+          "required_unit_versions": {
+            "INPUT": "00000000-0000-4000-8000-000000000401"
+          },
+          "expression": {
+            "INPUT": "input_tokens"
+          },
+          "evaluator_version": "v1",
+          "etag": "05c70c71f157d8c45951a6d4957a2db248d8478eb0b8959703dffde267b9325f",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ],
+      "next_cursor": "public-fixture-cursor-two",
+      "has_more": true,
+      "limit": 50,
+      "as_of": "2026-10-24T00:00:00Z",
+      "snapshot_expires_at": "2026-10-24T00:15:00Z",
+      "request_id": "00000000-0000-4000-8000-000000000102"
+    },
+    "status": 200
+  },
+  "formula-page-two": {
+    "body": {
+      "items": [
+        {
+          "formula_version_id": "00000000-0000-4000-8000-000000000302",
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 2,
+          "status": "PUBLISHED",
+          "required_unit_versions": {
+            "INPUT": "00000000-0000-4000-8000-000000000401"
+          },
+          "expression": {
+            "INPUT": "input_tokens"
+          },
+          "evaluator_version": "v1",
+          "etag": "92a9ec510154b702ce632366ba21a9d0aef85f59240aaa00536bd3cb801798cc",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ],
+      "next_cursor": null,
+      "has_more": false,
+      "limit": 50,
+      "as_of": "2026-10-24T00:00:00Z",
+      "snapshot_expires_at": "2026-10-24T00:15:00Z",
+      "request_id": "00000000-0000-4000-8000-000000000102"
+    },
+    "status": 200
+  },
+  "formulas-disabled": {
+    "body": {
+      "code": "PAGINATION_SNAPSHOT_UNAVAILABLE",
+      "message": "the paginated Token administration query could not be completed",
+      "request_id": "00000000-0000-4000-8000-000000000102"
+    },
+    "status": 503
+  },
+  "legacy-aggregate": {
+    "body": {
+      "formulas": [
+        {
+          "formula_version_id": "00000000-0000-4000-8000-000000000301",
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 1,
+          "status": "PUBLISHED",
+          "required_unit_versions": {
+            "INPUT": "00000000-0000-4000-8000-000000000401"
+          },
+          "expression": {
+            "INPUT": "input_tokens"
+          },
+          "evaluator_version": "v1",
+          "etag": "05c70c71f157d8c45951a6d4957a2db248d8478eb0b8959703dffde267b9325f",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        },
+        {
+          "formula_version_id": "00000000-0000-4000-8000-000000000302",
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 2,
+          "status": "PUBLISHED",
+          "required_unit_versions": {
+            "INPUT": "00000000-0000-4000-8000-000000000401"
+          },
+          "expression": {
+            "INPUT": "input_tokens"
+          },
+          "evaluator_version": "v1",
+          "etag": "92a9ec510154b702ce632366ba21a9d0aef85f59240aaa00536bd3cb801798cc",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ],
+      "protocols": [
+        {
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 1,
+          "status": "PUBLISHED",
+          "request_schema": {
+            "type": "object"
+          },
+          "etag": "e0f9a94420ce15ec4808911bf21eb8f2a9f375072de6eede7077d16f2efea86d",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ]
+    },
+    "status": 200
+  },
+  "protocol-page": {
+    "body": {
+      "items": [
+        {
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 1,
+          "status": "PUBLISHED",
+          "request_schema": {
+            "type": "object"
+          },
+          "etag": "e0f9a94420ce15ec4808911bf21eb8f2a9f375072de6eede7077d16f2efea86d",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ],
+      "next_cursor": null,
+      "has_more": false,
+      "limit": 50,
+      "as_of": "2026-10-24T00:00:00Z",
+      "snapshot_expires_at": "2026-10-24T00:15:00Z",
+      "request_id": "00000000-0000-4000-8000-000000000102"
+    },
+    "status": 200
+  },
+  "protocol-page-one": {
+    "body": {
+      "items": [
+        {
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000201",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 1,
+          "status": "PUBLISHED",
+          "request_schema": {
+            "type": "object"
+          },
+          "etag": "e0f9a94420ce15ec4808911bf21eb8f2a9f375072de6eede7077d16f2efea86d",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ],
+      "next_cursor": "public-protocol-cursor-two",
+      "has_more": true,
+      "limit": 50,
+      "as_of": "2026-10-24T00:00:00Z",
+      "snapshot_expires_at": "2026-10-24T00:15:00Z",
+      "request_id": "00000000-0000-4000-8000-000000000102"
+    },
+    "status": 200
+  },
+  "protocol-page-two": {
+    "body": {
+      "items": [
+        {
+          "protocol_definition_id": "00000000-0000-4000-8000-000000000202",
+          "protocol_code": "PUBLIC_PROTOCOL",
+          "version": 2,
+          "status": "PUBLISHED",
+          "request_schema": {
+            "type": "object"
+          },
+          "etag": "89caa9bd44bcff555c73617378310832d5d5c380bd1187b7a2bda02495ecad58",
+          "created_at": "2026-10-24T00:00:00Z",
+          "published_at": "2026-10-24T00:00:00Z"
+        }
+      ],
+      "next_cursor": null,
+      "has_more": false,
+      "limit": 50,
+      "as_of": "2026-10-24T00:00:00Z",
+      "snapshot_expires_at": "2026-10-24T00:15:00Z",
+      "request_id": "00000000-0000-4000-8000-000000000102"
+    },
+    "status": 200
+  }
+}

@@ -49,8 +49,10 @@ pub async fn cancel_generation(
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformCapabilities {
+    pub account_platform_supported: bool,
     pub os: &'static str,
     pub show_megacube_site: bool,
+    pub megacube_device: bool,
     pub show_super_permission_settings: bool,
     pub uses_bundled_dependency_installer: bool,
     pub uses_homebrew_dependency_installer: bool,
@@ -67,6 +69,12 @@ pub struct PlatformCapabilities {
     pub paste_image_clipboard_read: bool,
     pub local_embed_supported: bool,
     pub global_shortcuts_available: bool,
+    /// Semantic selector for the computer-use virtual-display note row
+    /// ("windows" | "macos" | "linux" | "", serialized camelCase as
+    /// `virtualDisplayNote`). Its own capability, not an installer-bit
+    /// proxy: the note and the dependency installers can change
+    /// independently.
+    pub virtual_display_note: &'static str,
 }
 
 impl PlatformCapabilities {
@@ -87,8 +95,11 @@ impl PlatformCapabilities {
             && capabilities.browser_agent_automation
             && browser_runtime_ready;
         Self {
+            account_platform_supported: crate::features::account_platform::account_platform_enabled(
+            ),
             os: capabilities.os,
             show_megacube_site: capabilities.show_megacube_site,
+            megacube_device: capabilities.megacube_device,
             show_super_permission_settings: capabilities.show_super_permission_settings,
             uses_bundled_dependency_installer: capabilities.uses_bundled_dependency_installer,
             uses_homebrew_dependency_installer: capabilities.uses_homebrew_dependency_installer,
@@ -104,6 +115,7 @@ impl PlatformCapabilities {
             paste_image_clipboard_read: capabilities.paste_image_clipboard_read,
             local_embed_supported: capabilities.local_embed_supported,
             global_shortcuts_available: capabilities.global_shortcuts_available,
+            virtual_display_note: capabilities.virtual_display_note,
         }
     }
 }
@@ -163,9 +175,28 @@ mod platform_capability_tests {
     }
 
     #[test]
+    fn capabilities_wire_names_are_camel_case() {
+        // 线名契约：JS 消费 platformCapabilities.megacubeDevice（camelCase）。
+        // 删掉 rename_all 会让线上变 megacube_device、前端读 undefined、设备管理
+        // 入口静默消失而全部测试照绿（五轮评审 P3）——把线名钉在这里。
+        let app = tauri::test::mock_app();
+        let value = serde_json::to_value(get_platform_capabilities(app.handle().clone()))
+            .expect("capabilities serialize");
+        assert!(
+            value.get("megacubeDevice").is_some(),
+            "wire name must be megacubeDevice, got {value:?}"
+        );
+        assert!(value.get("megacube_device").is_none(), "snake_case leak");
+        assert!(value.get("showMegacubeSite").is_some());
+        assert!(value.get("taskCompletionNotificationsDefault").is_some());
+    }
+
+    #[test]
     fn semantic_capabilities_match_the_compiled_target() {
         let capabilities = PlatformCapabilities::current();
         let expected = crate::platform::capabilities::current();
+        assert_eq!(capabilities.show_megacube_site, expected.show_megacube_site);
+        assert_eq!(capabilities.megacube_device, expected.megacube_device);
         assert_eq!(
             capabilities.uses_bundled_dependency_installer,
             expected.uses_bundled_dependency_installer
@@ -202,6 +233,29 @@ mod platform_capability_tests {
         assert_eq!(
             capabilities.global_shortcuts_available,
             expected.global_shortcuts_available
+        );
+        // The serialized capability must carry the exact note selector the
+        // platform layer resolved: the settings page gates its Windows/macOS
+        // virtual-display note rows on this field (never on the installer
+        // bits), so a divergence would show the wrong platform's note.
+        assert_eq!(
+            capabilities.virtual_display_note,
+            expected.virtual_display_note
+        );
+        // The serialized spelling is the frozen frontend contract
+        // (`virtualDisplayNote`, camelCase via rename_all) with the
+        // vocabulary pinned here too.
+        let Ok(value) = serde_json::to_value(&capabilities) else {
+            panic!("PlatformCapabilities must serialize");
+        };
+        assert!(
+            matches!(
+                value
+                    .get("virtualDisplayNote")
+                    .and_then(|note| note.as_str()),
+                Some("") | Some("windows") | Some("macos") | Some("linux")
+            ),
+            "virtualDisplayNote must stay in the frozen vocabulary: {value}"
         );
     }
 

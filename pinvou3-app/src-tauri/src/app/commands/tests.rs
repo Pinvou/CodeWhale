@@ -1,5 +1,5 @@
 // Command-layer tests borrow platform::paths::tests::ENV_LOCK (a std Mutex) to serialize global env; cargo test runs on multiple threads, but env-writing tests are serialized by the mutex, and within a current_thread runtime holding the lock across await has no reentrant path, so it cannot deadlock.
-// architecture-guard: allow-target-cfg -- artifact 调用链回归需用 Windows 独占句柄模拟 ReplaceFileW 1177 布局
+// architecture-guard: allow-target-cfg -- artifact 调用链需 Windows 独占句柄；模型保存集成回归需 Linux 商店真实数据库与平台校验
 
 use super::prelude::*;
 use super::{
@@ -2927,6 +2927,30 @@ fn install_consent_sync_persist_failure_is_honest_and_keeps_pack() {
     });
 }
 
+/// Pin 3 (round-2 review P2 routing): the post-install legs thread the
+/// remote validation's discovered inventory through to the command return —
+/// a pack that declares no validation reports the empty inventory (the same
+/// Ok shape `validate_remote_connection` returns on this path), so the UI
+/// install report has a real producer even without the validation leg.
+#[test]
+fn install_post_install_returns_inventory_shape() {
+    crate::platform::test_support::with_temp_home("install-post-inventory", || {
+        write_test_marketplace_files("yuandian-noinv-test", serde_json::json!({}), false);
+        let inventory = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(install_marketplace_tool_post_install(
+                "yuandian-mcp".to_string(),
+            ))
+            .unwrap();
+        assert!(
+            inventory.is_empty(),
+            "a pack without remote validation reports the empty inventory: {inventory:?}"
+        );
+    });
+}
+
 // ---- model deletion ordering (delete_model saves prefs before the keyring) ----
 
 fn model_deletion_test_model(id: &str, with_credential: bool) -> SavedModel {
@@ -3014,23 +3038,144 @@ fn delete_model_keyring_success_removes_the_secret() {
 #[test]
 fn delete_model_rejects_the_last_model_without_touching_the_keyring() {
     crate::platform::test_support::with_temp_home("delete-model-last", || {
-        // Official 适配：load 路径的 `ensure_builtin_llmapi_model` 会在每次事务前
-        // 自动补回 builtin llmapi 模型，纯用户模型永远不可能是「最后一个」；可稳定
-        // 触发的拒绝路径是 builtin 守卫（内置模型不可删除）。夹具给该 builtin 模型
-        // 挂上 credential_ref，钉住「拒绝先于任何钥匙串交互」这一来源语义。
-        seed_model_deletion_prefs(&[model_deletion_test_model("builtin_llmapi", true)]);
+        // Account Platform 适配：load 路径会在每次事务前
+        // 自动补回账户平台内置模型，纯用户模型永远不可能是「最后一个」；可稳定
+        // 触发的拒绝路径是 builtin 守卫（内置模型不可删除）。磁盘夹具带残留凭据引用，
+        // load 会将它规范化为账户内置模型；删除必须拒绝且不能与钥匙串交互。
+        let builtin_id = crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID;
+        seed_model_deletion_prefs(&[model_deletion_test_model(builtin_id, true)]);
         let store = crate::platform::credential_store::RecordingCredentialStore::new();
 
-        let error = super::settings::delete_model_inner("builtin_llmapi", &store)
+        let error = super::settings::delete_model_inner(builtin_id, &store)
             .expect_err("the last (builtin) model must not be deletable");
 
         assert!(error.contains("delete_model"));
+        assert!(error.contains("内置模型不可删除"));
         assert!(
             store.ops().is_empty(),
             "a rejected deletion must not reach the keyring: {:?}",
             store.ops()
         );
-        assert!(UserPrefs::load().model_by_id("builtin_llmapi").is_some());
+        assert!(UserPrefs::load().model_by_id(builtin_id).is_some());
+    });
+}
+
+#[test]
+fn delete_model_if_store_link_rechecks_current_ownership_and_preserves_detached_rows() {
+    use serde_json::json;
+    for (label, patch) in [
+        ("detached", json!({ "model_store_link_detached": true })),
+        ("unlinked", json!({ "model_store_card_id": null })),
+        ("other-card", json!({ "model_store_card_id": "other-card" })),
+        (
+            "remote",
+            json!({ "base_url": "https://api.example.com/v1" }),
+        ),
+        (
+            "managed-provider",
+            // Provider metadata is normalized from the endpoint on load.
+            json!({
+                "provider_kind": "coding_plan",
+                "base_url": "https://open.bigmodel.cn/api/coding/paas/v4"
+            }),
+        ),
+        (
+            "non-operator",
+            json!({ "preset": "deepseek", "provider_kind": null }),
+        ),
+        (
+            "not-chat",
+            json!({ "base_url": "http://127.0.0.1:30001/api" }),
+        ),
+        (
+            "credentials-in-url",
+            json!({ "base_url": "http://user:pw@localhost:30001/v1" }),
+        ),
+        (
+            "bad-localhost",
+            json!({ "base_url": "http://localhost..:30001/v1" }),
+        ),
+    ] {
+        crate::platform::test_support::with_temp_home(
+            &format!("conditional-delete-{label}"),
+            || {
+                let mut linked = model_deletion_test_model("m-linked", true);
+                linked.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                linked.provider_kind = Some("custom".to_string());
+                linked.base_url = "http://127.0.0.1:30001/v1".to_string();
+                linked.model_store_card_id = Some("store-card".to_string());
+                seed_model_deletion_prefs(&[model_deletion_test_model("m-keep", false), linked]);
+                // The uninstall UI has already selected this row from its old snapshot.
+                assert_eq!(
+                    UserPrefs::load()
+                        .model_by_id("m-linked")
+                        .unwrap()
+                        .model_store_card_id
+                        .as_deref(),
+                    Some("store-card")
+                );
+                UserPrefs::update_transaction(|prefs| {
+                    let mut current =
+                        serde_json::to_value(prefs.model_by_id("m-linked").unwrap()).unwrap();
+                    for (key, value) in patch.as_object().unwrap() {
+                        current[key] = value.clone();
+                    }
+                    prefs.upsert_model(serde_json::from_value(current).unwrap());
+                    Ok(())
+                })
+                .unwrap();
+                let before = UserPrefs::load().model_by_id("m-linked").cloned().unwrap();
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                assert!(
+                    !super::settings::delete_model_if_store_link_inner(
+                        "m-linked",
+                        "store-card",
+                        &store
+                    )
+                    .unwrap(),
+                    "{label}"
+                );
+                let after = UserPrefs::load().model_by_id("m-linked").cloned().unwrap();
+                assert_eq!(
+                    serde_json::to_value(after).unwrap(),
+                    serde_json::to_value(before).unwrap(),
+                    "{label}"
+                );
+                assert!(store.ops().is_empty(), "{label}: must preserve credentials");
+            },
+        );
+    }
+}
+
+#[test]
+fn delete_model_if_store_link_removes_only_the_matching_route_and_secret() {
+    crate::platform::test_support::with_temp_home("conditional-delete-linked", || {
+        let mut linked = model_deletion_test_model("m-linked", true);
+        linked.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        linked.provider_kind = Some("custom".to_string());
+        linked.base_url = "http://[::1]:30001/v1/chat/completions".to_string();
+        linked.model_store_card_id = Some("store-card".to_string());
+        seed_model_deletion_prefs(&[model_deletion_test_model("m-keep", false), linked]);
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        assert!(
+            super::settings::delete_model_if_store_link_inner("m-linked", "store-card", &store)
+                .unwrap()
+        );
+        assert!(UserPrefs::load().model_by_id("m-linked").is_none());
+        assert!(UserPrefs::load().model_by_id("m-keep").is_some());
+        assert_eq!(
+            store.ops(),
+            vec!["delete:pinvou3-model-api-key:model:m-linked".to_string()]
+        );
+        assert!(
+            !super::settings::delete_model_if_store_link_inner("m-linked", "store-card", &store)
+                .unwrap()
+        );
+        assert_eq!(
+            store.ops().len(),
+            1,
+            "idempotent cleanup must not touch credentials twice"
+        );
     });
 }
 
@@ -3098,6 +3243,1117 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
             "exactly one deferred keyring delete, attempted after the commit"
         );
     });
+}
+
+#[test]
+fn save_model_rejects_a_new_stale_store_link_before_settings_or_credentials_change() {
+    crate::platform::test_support::with_temp_home("store-model-stale-new-link", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model("keep-existing", false)]);
+        // Main's load-time normalization persists the builtin account-platform
+        // carrier row on the first load after seeding; run that load once so
+        // the frozen `before` snapshot is the normalized form the rejected
+        // save must leave byte-identical.
+        let _ = UserPrefs::load();
+        let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        let mut new_link = model_deletion_test_model("new-store-link", false);
+        new_link.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        new_link.base_url = "http://127.0.0.1:8000/v1".into();
+        new_link.model_store_card_id = Some("no-longer-available-card".into());
+        new_link.api_key = "local-test-key".into();
+        new_link.credential_action = Some(CredentialEditAction::Replace);
+
+        let error = super::settings::save_model_inner(new_link, &store).unwrap_err();
+        assert!(error.contains("refresh the card and retry"), "{error}");
+        assert!(UserPrefs::load().model_by_id("new-store-link").is_none());
+        assert_eq!(
+            std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+            before,
+            "a stale link must not commit a detached row or overwrite existing settings"
+        );
+        assert!(store.ops().is_empty(), "reject before writing credentials");
+    });
+}
+
+#[test]
+fn save_model_rejects_an_existing_explicit_stale_store_link_without_mutation() {
+    for same_route in [false, true] {
+        crate::platform::test_support::with_temp_home("store-model-stale-relink", || {
+            let mut latest = model_deletion_test_model("existing-store-link", true);
+            latest.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+            latest.provider_kind = Some("custom".into());
+            latest.model = "new-wire".into();
+            latest.base_url = "http://127.0.0.1:8001/v1".into();
+            latest.model_store_card_id = Some("unavailable-card".into());
+            seed_model_deletion_prefs(&[latest.clone()]);
+            let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            let mut stale = latest;
+            if !same_route {
+                // An open detail dialog still holds the pre-upgrade endpoint.
+                stale.model = "old-wire".into();
+                stale.base_url = "http://127.0.0.1:8000/v1".into();
+            }
+            stale.model_store_link_requested = true;
+            // Explicit linking must validate the reviewed route even if another
+            // editor's route-preservation intent was accidentally carried over.
+            stale.preserve_model_store_route = true;
+            stale.api_key = "replacement-local-key".into();
+            stale.credential_action = Some(CredentialEditAction::Replace);
+
+            let error = super::settings::save_model_inner(stale, &store).unwrap_err();
+            assert!(error.contains("refresh the card and retry"), "{error}");
+            assert_eq!(
+                std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+                before,
+                "reject both changed routes and unavailable same-route re-links"
+            );
+            assert!(store.ops().is_empty(), "reject before writing credentials");
+            let saved = UserPrefs::load()
+                .model_by_id("existing-store-link")
+                .unwrap()
+                .clone();
+            assert_eq!(saved.model, "new-wire");
+            assert_eq!(saved.base_url, "http://127.0.0.1:8001/v1");
+            assert_eq!(
+                saved.model_store_card_id.as_deref(),
+                Some("unavailable-card")
+            );
+            assert!(!saved.model_store_link_detached);
+        });
+    }
+}
+
+#[test]
+fn explicit_store_link_intent_is_incoming_only() {
+    let model = model_deletion_test_model("incoming-intent", false);
+    assert!(!model.model_store_link_requested);
+    let mut request = serde_json::to_value(&model).unwrap();
+    request["model_store_link_requested"] = serde_json::json!(true);
+    let model: SavedModel = serde_json::from_value(request).unwrap();
+    assert!(model.model_store_link_requested);
+    let serialized = serde_json::to_value(&model).unwrap();
+    assert!(serialized.get("model_store_link_requested").is_none());
+    let reloaded: SavedModel = serde_json::from_value(serialized).unwrap();
+    assert!(!reloaded.model_store_link_requested);
+}
+
+#[test]
+fn save_model_preserves_store_provenance_for_options_but_clears_it_for_route_edits() {
+    crate::platform::test_support::with_temp_home("store-model-link-edit", || {
+        let mut original = model_deletion_test_model("local-store", false);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        original.model_store_card_id = Some("stable-card".into());
+        seed_model_deletion_prefs(&[original.clone()]);
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        let mut options_edit = original.clone();
+        options_edit.model_store_card_id = None;
+        options_edit.name = "My custom label".into();
+        options_edit.context_window_tokens = Some(131072);
+        super::settings::save_model_inner(options_edit, &store).unwrap();
+        let persisted = UserPrefs::load()
+            .model_by_id("local-store")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            persisted.model_store_card_id.as_deref(),
+            Some("stable-card")
+        );
+        assert!(!persisted.model_store_link_detached);
+        // A full-object client may retain the old optional field while editing
+        // its local port. That must not silently opt back into route rewrites.
+        let mut full_route_edit = persisted.clone();
+        full_route_edit.base_url = "http://127.0.0.1:9998/v1".into();
+        super::settings::save_model_inner(full_route_edit, &store).unwrap();
+        assert!(
+            UserPrefs::load()
+                .model_by_id("local-store")
+                .unwrap()
+                .model_store_card_id
+                .is_none()
+        );
+        let mut route_edit = persisted;
+        route_edit.model_store_card_id = None;
+        route_edit.base_url = "http://127.0.0.1:9999/v1".into();
+        super::settings::save_model_inner(route_edit, &store).unwrap();
+        assert!(
+            UserPrefs::load()
+                .model_by_id("local-store")
+                .unwrap()
+                .model_store_card_id
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn stale_store_model_form_keeps_the_latest_route_and_explicit_detach_is_durable() {
+    crate::platform::test_support::with_temp_home("store-model-stale-form", || {
+        let mut original = model_deletion_test_model("store-form", false);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.model = "old-wire".into();
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        // The form opens before legacy provenance migration has run.
+        original.model_store_card_id = None;
+        seed_model_deletion_prefs(&[original.clone()]);
+        let mut stale_form = original.clone();
+        stale_form.name = "My edited label".into();
+        stale_form.context_window_tokens = Some(131072);
+        stale_form.preserve_model_store_route = true;
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.model_store_card_id = Some("stable-card".into());
+            latest.model = "new-wire".into();
+            latest.base_url = "http://127.0.0.1:8001/v1".into();
+            prefs.upsert_model(latest);
+            Ok(())
+        })
+        .unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale_form, &store).unwrap();
+        let latest = UserPrefs::load().model_by_id("store-form").unwrap().clone();
+        assert_eq!(latest.model, "new-wire");
+        assert_eq!(latest.base_url, "http://127.0.0.1:8001/v1");
+        assert_eq!(latest.name, "My edited label");
+        assert_eq!(latest.context_window_tokens, Some(131072));
+        assert_eq!(latest.model_store_card_id.as_deref(), Some("stable-card"));
+        assert!(!latest.model_store_link_detached);
+        assert!(!latest.preserve_model_store_route);
+        assert!(
+            serde_json::to_value(&latest)
+                .unwrap()
+                .get("preserve_model_store_route")
+                .is_none()
+        );
+        let mut manual = latest;
+        manual.model = original.model;
+        manual.base_url = original.base_url;
+        super::settings::save_model_inner(manual, &store).unwrap();
+        let mut detached = UserPrefs::load().model_by_id("store-form").unwrap().clone();
+        assert!(detached.model_store_card_id.is_none());
+        assert!(detached.model_store_link_detached);
+        // An older editor omits the additive detached field on an options edit.
+        detached.model_store_link_detached = false;
+        detached.name = "Another label".into();
+        super::settings::save_model_inner(detached, &store).unwrap();
+        let reloaded = UserPrefs::load().model_by_id("store-form").unwrap().clone();
+        assert!(reloaded.model_store_link_detached);
+        assert_eq!(reloaded.model, "old-wire");
+    });
+}
+
+#[test]
+fn explicit_context_edit_records_a_choice_without_claiming_untouched_or_machine_saves() {
+    for (case, requested, preserve, reasoning_only, expected) in [
+        ("explicit", true, false, false, true),
+        ("untouched-wins", true, true, false, false),
+        ("composer-wins", true, false, true, false),
+        ("legacy-machine", false, false, false, false),
+        ("alias-only", false, true, false, false),
+    ] {
+        crate::platform::test_support::with_temp_home(case, || {
+            // No card association yet: the first store sync may already be
+            // probing a preview in which this legacy route has been associated.
+            let mut original = model_deletion_test_model("context-choice", false);
+            original.context_window_tokens = Some(32768);
+            seed_model_deletion_prefs(&[original.clone()]);
+            let mut request = original.clone();
+            request.context_window_edit_requested = requested;
+            request.preserve_context_window_tokens = preserve;
+            request.reasoning_effort_only = reasoning_only;
+            request.reasoning_effort = Some("high".into());
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(request, &store).unwrap();
+            let prefs = UserPrefs::load();
+            assert_eq!(
+                prefs.has_explicit_model_context_selection("context-choice"),
+                expected,
+                "{case} must retain its actual edit intent"
+            );
+            let saved = prefs.model_by_id("context-choice").unwrap();
+            assert_eq!(saved.context_window_tokens, Some(32768));
+            assert!(!saved.context_window_edit_requested);
+            assert!(
+                serde_json::to_value(saved)
+                    .unwrap()
+                    .get("context_window_edit_requested")
+                    .is_none(),
+                "the incoming edit signal must never return with settings"
+            );
+            if expected {
+                UserPrefs::update_transaction(|prefs| {
+                    prefs.upsert_model(model_deletion_test_model("spare", false));
+                    Ok(())
+                })
+                .unwrap();
+                super::settings::delete_model_inner("context-choice", &store).unwrap();
+                super::settings::save_model_inner(original, &store).unwrap();
+                assert!(
+                    !UserPrefs::load().has_explicit_model_context_selection("context-choice"),
+                    "deleting and recreating an id must not inherit its old choice receipt"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn untouched_context_window_save_keeps_a_background_store_repair() {
+    crate::platform::test_support::with_temp_home("store-model-context-repair-save", || {
+        // The row as an editor snapshot saw it: the legacy 32K cap.
+        let mut original = model_deletion_test_model("store-context", false);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.provider_kind = Some("custom".into());
+        original.model = "stable-wire".into();
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        original.model_store_card_id = Some("stable-card".into());
+        original.context_window_tokens = Some(32768);
+        seed_model_deletion_prefs(&[original.clone()]);
+        // A background store sync raises the cap to the verified 256K and
+        // records the one-time migration marker (which suppresses later
+        // corrections), while the editor stays open on the stale snapshot.
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.context_window_tokens = Some(262144);
+            prefs.upsert_model(latest);
+            prefs.advanced.model_store_context_repairs.insert(
+                "store-context".into(),
+                "verified-256k-v1/stable-card".into(),
+            );
+            Ok(())
+        })
+        .unwrap();
+        // The editor submits only an alias edit carrying its stale 32K snapshot
+        // plus the untouched-field intent.
+        let mut stale_form = original;
+        stale_form.name = "Renamed only".into();
+        stale_form.context_window_tokens = Some(32768);
+        stale_form.preserve_context_window_tokens = true;
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale_form, &store).unwrap();
+        let saved = UserPrefs::load()
+            .model_by_id("store-context")
+            .unwrap()
+            .clone();
+        assert_eq!(saved.name, "Renamed only");
+        assert_eq!(
+            saved.context_window_tokens,
+            Some(262144),
+            "the untouched field must keep the background repair, not the stale 32K"
+        );
+        assert!(!saved.preserve_context_window_tokens);
+        assert!(
+            serde_json::to_value(&saved)
+                .unwrap()
+                .get("preserve_context_window_tokens")
+                .is_none(),
+            "the editor intent flag is transient and never persists"
+        );
+        // An explicitly edited value is honored, including a deliberate
+        // downgrade the migration marker must not "correct" back.
+        let mut explicit = saved;
+        explicit.context_window_tokens = Some(32768);
+        super::settings::save_model_inner(explicit, &store).unwrap();
+        assert_eq!(
+            UserPrefs::load()
+                .model_by_id("store-context")
+                .unwrap()
+                .context_window_tokens,
+            Some(32768),
+            "an explicitly edited 32K must win"
+        );
+        // An explicit clear (system default) is honored the same way.
+        let mut auto = UserPrefs::load()
+            .model_by_id("store-context")
+            .unwrap()
+            .clone();
+        auto.context_window_tokens = None;
+        super::settings::save_model_inner(auto, &store).unwrap();
+        assert_eq!(
+            UserPrefs::load()
+                .model_by_id("store-context")
+                .unwrap()
+                .context_window_tokens,
+            None,
+            "an explicitly cleared window stays cleared"
+        );
+        // The repair marker itself is untouched throughout: the backend repair
+        // lane keeps its own suppression semantics.
+        assert_eq!(
+            UserPrefs::load()
+                .advanced
+                .model_store_context_repairs
+                .get("store-context")
+                .map(String::as_str),
+            Some("verified-256k-v1/stable-card")
+        );
+    });
+}
+
+#[test]
+fn reasoning_effort_only_save_preserves_the_latest_model_and_repair_receipt() {
+    for detached in [false, true] {
+        for clear_effort in [false, true] {
+            crate::platform::test_support::with_temp_home("reasoning-only-latest-model", || {
+                let mut original = model_deletion_test_model("reasoning-row", false);
+                original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                original.provider_kind = Some("custom".into());
+                original.model = "old-wire".into();
+                original.base_url = "http://127.0.0.1:8000/v1".into();
+                original.model_store_card_id = Some("old-card".into());
+                original.context_window_tokens = Some(32768);
+                original.reasoning_effort = Some("low".into());
+                seed_model_deletion_prefs(&[original.clone()]);
+
+                // The composer captured A before a background repair and a
+                // second editor either detached it or linked it to card B.
+                UserPrefs::update_transaction(|prefs| {
+                    let mut latest = model_deletion_test_model("reasoning-row", true);
+                    latest.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                    latest.provider_kind = Some("custom".into());
+                    latest.name = "Latest name".into();
+                    latest.alias = Some("Latest alias".into());
+                    latest.model = "latest-wire".into();
+                    latest.base_url = "http://127.0.0.1:8001/v1".into();
+                    latest.context_window_tokens = Some(262144);
+                    latest.max_output_tokens = Some(8192);
+                    latest.reasoning_effort = Some("medium".into());
+                    latest.model_store_card_id = (!detached).then(|| "new-card".into());
+                    latest.model_store_link_detached = detached;
+                    prefs.upsert_model(latest);
+                    prefs
+                        .advanced
+                        .model_store_context_repairs
+                        .insert("reasoning-row".into(), "verified-256k-v1/old-card".into());
+                    Ok(())
+                })
+                .unwrap();
+                let before = UserPrefs::load();
+                let mut expected = before.model_by_id("reasoning-row").unwrap().clone();
+                let selected_effort = (!clear_effort).then(|| "high".into());
+                expected.reasoning_effort = selected_effort.clone();
+
+                let mut stale = original;
+                stale.reasoning_effort_only = true;
+                stale.reasoning_effort = selected_effort;
+                // A narrow option update must ignore even credential and link
+                // intents retained by a stale complete-object client.
+                stale.model_store_link_requested = true;
+                stale.api_key = "stale-test-key".into();
+                stale.credential_action = Some(if clear_effort {
+                    CredentialEditAction::Delete
+                } else {
+                    CredentialEditAction::Replace
+                });
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                super::settings::save_model_inner(stale, &store).unwrap();
+
+                let after = UserPrefs::load();
+                assert_eq!(
+                    after.model_by_id("reasoning-row"),
+                    Some(&expected),
+                    "only the selected tier may change; route, ownership, name, alias, provider, limits and credential metadata must use the latest row"
+                );
+                assert_eq!(
+                    after.advanced.model_store_context_repairs,
+                    before.advanced.model_store_context_repairs,
+                    "the permanent receipt must remain paired with the repaired context"
+                );
+                assert!(
+                    store.ops().is_empty(),
+                    "an effort edit must not touch secrets"
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn reasoning_effort_only_save_cannot_recreate_a_deleted_model_or_touch_its_secret() {
+    crate::platform::test_support::with_temp_home("reasoning-only-deleted-model", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model("keep-model", false)]);
+        let mut stale = model_deletion_test_model("deleted-model", true);
+        stale.reasoning_effort_only = true;
+        stale.reasoning_effort = Some("high".into());
+        stale.api_key = "stale-test-key".into();
+        stale.credential_action = Some(CredentialEditAction::Replace);
+        let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+
+        let error = super::settings::save_model_inner(stale, &store).unwrap_err();
+        assert!(error.contains("model not found"), "{error}");
+        assert_eq!(
+            std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+            before,
+            "a stale composer snapshot must not resurrect the deleted row"
+        );
+        assert!(UserPrefs::load().model_by_id("deleted-model").is_none());
+        assert!(
+            store.ops().is_empty(),
+            "reject before any credential access"
+        );
+    });
+}
+
+#[test]
+fn untouched_route_form_preserves_a_later_detach_or_different_card_link() {
+    for detached in [false, true] {
+        crate::platform::test_support::with_temp_home("store-form-latest-ownership", || {
+            let mut original = model_deletion_test_model("latest-route", false);
+            original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+            original.provider_kind = Some("custom".into());
+            original.model = "old-wire".into();
+            original.base_url = "http://127.0.0.1:8000/v1".into();
+            original.model_store_card_id = Some("old-card".into());
+            seed_model_deletion_prefs(&[original.clone()]);
+            UserPrefs::update_transaction(|prefs| {
+                let mut latest = original.clone();
+                latest.model = "latest-wire".into();
+                latest.base_url = "http://127.0.0.1:8001/v1".into();
+                latest.model_store_card_id = (!detached).then(|| "new-card".into());
+                latest.model_store_link_detached = detached;
+                prefs.upsert_model(latest);
+                Ok(())
+            })
+            .unwrap();
+
+            let mut stale_form = original;
+            stale_form.name = "Edited label".into();
+            stale_form.preserve_model_store_route = true;
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(stale_form, &store).unwrap();
+            let saved = UserPrefs::load()
+                .model_by_id("latest-route")
+                .unwrap()
+                .clone();
+            assert_eq!(saved.name, "Edited label");
+            assert_eq!(saved.model, "latest-wire");
+            assert_eq!(saved.base_url, "http://127.0.0.1:8001/v1");
+            assert_eq!(saved.model_store_link_detached, detached);
+            assert_eq!(
+                saved.model_store_card_id.as_deref(),
+                if detached { None } else { Some("new-card") }
+            );
+            assert!(!saved.preserve_model_store_route);
+            assert!(store.ops().is_empty());
+        });
+    }
+}
+
+#[test]
+fn untouched_route_form_preserves_a_later_responses_route_context_and_credentials() {
+    crate::platform::test_support::with_temp_home("store-form-latest-responses", || {
+        let mut original = model_deletion_test_model("latest-protocol", true);
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        original.provider_kind = Some("custom".into());
+        original.model = "old-wire".into();
+        original.base_url = "http://127.0.0.1:8000/v1".into();
+        original.model_store_card_id = Some("old-card".into());
+        original.context_window_tokens = Some(32768);
+        seed_model_deletion_prefs(&[original.clone()]);
+        // The CLI can choose Responses through its supported OpenAI preset,
+        // official endpoint and a Responses model, while detaching the card.
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.preset = crate::platform::prefs::ModelPreset::Openai;
+            latest.provider_kind = Some("official_api".into());
+            latest.vendor = Some("openai".into());
+            latest.endpoint_mode = Some("full_chat_completions".into());
+            latest.model = "gpt-6-sol".into();
+            latest.base_url = "https://api.openai.com/v1".into();
+            latest.model_store_card_id = None;
+            latest.model_store_link_detached = true;
+            latest.context_window_tokens = Some(262144);
+            prefs.upsert_model(latest);
+            prefs
+                .advanced
+                .model_store_context_repairs
+                .insert("latest-protocol".into(), "verified-256k-v1/old-card".into());
+            Ok(())
+        })
+        .unwrap();
+        let before = UserPrefs::load();
+        let latest = before.model_by_id("latest-protocol").unwrap().clone();
+        let mut stale_form = original;
+        stale_form.alias = Some("Edited alias".into());
+        stale_form.preserve_model_store_route = true;
+        stale_form.preserve_context_window_tokens = true;
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale_form, &store).unwrap();
+        let after = UserPrefs::load();
+        let saved = after.model_by_id("latest-protocol").unwrap();
+        let mut expected = latest;
+        expected.alias = Some("Edited alias".into());
+        assert_eq!(saved, &expected);
+        assert_eq!(
+            after.advanced.model_store_context_repairs,
+            before.advanced.model_store_context_repairs
+        );
+        assert_eq!(
+            crate::core::model_wire::model_route_wire_api(
+                saved.preset.as_str(),
+                saved.vendor.as_deref(),
+                &saved.model,
+                &saved.base_url,
+            ),
+            "openai_responses"
+        );
+        assert!(store.ops().is_empty());
+    });
+}
+
+#[test]
+fn route_preservation_keeps_latest_metadata_even_when_the_old_form_was_not_operator_owned() {
+    crate::platform::test_support::with_temp_home("store-form-old-official-route", || {
+        let original = model_deletion_test_model("changed-provider", false);
+        seed_model_deletion_prefs(std::slice::from_ref(&original));
+        UserPrefs::update_transaction(|prefs| {
+            let mut latest = original.clone();
+            latest.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+            latest.provider_kind = Some("custom".into());
+            latest.vendor = Some("custom-vendor".into());
+            latest.endpoint_mode = Some("full_chat_completions".into());
+            latest.model = "custom-wire".into();
+            latest.base_url = "https://relay.example.test/v1".into();
+            latest.model_store_link_detached = true;
+            prefs.upsert_model(latest);
+            Ok(())
+        })
+        .unwrap();
+        let mut expected = UserPrefs::load()
+            .model_by_id("changed-provider")
+            .unwrap()
+            .clone();
+        expected.name = "Edited label".into();
+        let mut stale = original;
+        stale.name.clone_from(&expected.name);
+        stale.preserve_model_store_route = true;
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(stale, &store).unwrap();
+        assert_eq!(
+            UserPrefs::load().model_by_id("changed-provider"),
+            Some(&expected)
+        );
+        assert!(store.ops().is_empty());
+    });
+}
+
+#[test]
+fn explicit_protocol_metadata_edits_at_the_same_address_save_and_detach() {
+    use serde_json::json;
+    for (field, value) in [
+        ("preset", json!("openai_compatible")),
+        ("provider_kind", json!("official_api")),
+        ("vendor", json!("anthropic")),
+        ("endpoint_mode", json!("full_chat_completions")),
+    ] {
+        crate::platform::test_support::with_temp_home(&format!("route-edit-{field}"), || {
+            let mut original = model_deletion_test_model("protocol-edit", true);
+            original.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+            original.provider_kind = Some("custom".into());
+            original.model = "custom-wire".into();
+            original.base_url = "http://127.0.0.1:8000/v1".into();
+            original.model_store_card_id = Some("old-card".into());
+            original.context_window_tokens = Some(262144);
+            seed_model_deletion_prefs(&[original.clone()]);
+            let before = UserPrefs::load()
+                .model_by_id("protocol-edit")
+                .unwrap()
+                .clone();
+            let mut request = serde_json::to_value(&before).unwrap();
+            request[field] = value.clone();
+            request["model_store_card_id"] = json!(null);
+            request["context_window_tokens"] = json!(32768);
+            request["preserve_context_window_tokens"] = json!(true);
+            // Missing legacy flags remain false: explicit route edits must
+            // never acquire the untouched-route behavior implicitly.
+            let incoming: SavedModel = serde_json::from_value(request).unwrap();
+            assert!(!incoming.preserve_model_store_route);
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(incoming, &store).unwrap();
+            let saved = UserPrefs::load()
+                .model_by_id("protocol-edit")
+                .unwrap()
+                .clone();
+            assert_eq!(serde_json::to_value(&saved).unwrap()[field], value);
+            assert_eq!(saved.model, before.model);
+            assert_eq!(saved.base_url, before.base_url);
+            assert!(saved.model_store_card_id.is_none());
+            assert!(saved.model_store_link_detached);
+            assert_eq!(saved.context_window_tokens, before.context_window_tokens);
+            assert_eq!(saved.credential_ref, before.credential_ref);
+            assert!(store.ops().is_empty());
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn seed_running_store_card_for_model_save() -> rusqlite::Connection {
+    // Initialize the production schema through its public read boundary. The
+    // absent card returns before runtime/GPU inspection, with no HTTP or script.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let error = runtime
+        .block_on(crate::features::model_store::model_detail(
+            "running-card".into(),
+        ))
+        .unwrap_err();
+    assert!(error.contains("模型不存在"), "{error}");
+    let path = crate::platform::paths::pinvou3_home().join("model-store/models.db");
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute(
+        "INSERT INTO store_models \
+         (card_id,model_name,card_name,engine_name,status,running,downloaded_at,endpoint_url,endpoint_model) \
+         VALUES ('running-card','wire','Running card','native','deployed',1,'fixture', \
+                 'http://127.0.0.1:8000/v1','wire')",
+        [],
+    )
+    .unwrap();
+    assert!(crate::features::model_store::matches_current_model_route(
+        "running-card",
+        "http://127.0.0.1:8000/v1",
+        "wire"
+    ));
+    conn
+}
+
+#[cfg(target_os = "linux")]
+fn repeat_store_link_payload(id: &str) -> SavedModel {
+    let mut payload = model_deletion_test_model(id, false);
+    payload.name = "Store default name".into();
+    payload.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+    payload.provider_kind = Some("custom".into());
+    payload.model = "wire".into();
+    payload.base_url = "http://127.0.0.1:8000/v1".into();
+    payload.model_store_card_id = Some("running-card".into());
+    payload.model_store_link_requested = true;
+    payload.model_store_link_only = true;
+    payload.api_key = "local".into();
+    payload.credential_action = Some(CredentialEditAction::Replace);
+    payload
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repeat_store_link_preserves_latest_user_options_credentials_and_context_receipt() {
+    for context in [None, Some(32768), Some(262144)] {
+        for with_credential in [false, true] {
+            crate::platform::test_support::with_temp_home("repeat-store-link-latest", || {
+                let _conn = seed_running_store_card_for_model_save();
+                let original = repeat_store_link_payload("repeat-store-link");
+                seed_model_deletion_prefs(std::slice::from_ref(&original));
+                // A detail dialog prepared this default import payload before
+                // another editor and background repair updated the real row.
+                let mut stale = original;
+                stale.context_window_edit_requested = true;
+                stale.preserve_context_window_tokens = true;
+                stale.preserve_model_store_route = true;
+                UserPrefs::update_transaction(|prefs| {
+                    let mut latest =
+                        model_deletion_test_model("repeat-store-link", with_credential);
+                    latest.name = "User's latest name".into();
+                    latest.alias = Some("User's latest alias".into());
+                    latest.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                    latest.provider_kind = Some("custom".into());
+                    latest.model = "wire".into();
+                    latest.base_url = "http://127.0.0.1:8000/v1".into();
+                    latest.model_store_card_id = Some("running-card".into());
+                    latest.context_window_tokens = context;
+                    latest.max_output_tokens = Some(8192);
+                    latest.reasoning_effort = Some("high".into());
+                    latest.image_capability_override =
+                        crate::platform::prefs::ImageCapabilityOverride::Enabled;
+                    latest.vision_model_id = Some("user-vision-model".into());
+                    if let Some(reference) = latest.credential_ref.as_mut() {
+                        reference.account = "user-latest-credential".into();
+                    }
+                    prefs.upsert_model(latest);
+                    prefs.advanced.active_model_id = Some("repeat-store-link".into());
+                    prefs.advanced.model_store_context_repairs.insert(
+                        "repeat-store-link".into(),
+                        "verified-256k-v1/running-card".into(),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+                let before = UserPrefs::load();
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                store.fail_set();
+                store.fail_delete();
+                super::settings::save_model_inner(stale, &store).unwrap();
+                let after = UserPrefs::load();
+                assert_eq!(
+                    after.model_by_id("repeat-store-link"),
+                    before.model_by_id("repeat-store-link"),
+                    "a repeated import must preserve the complete latest row, not defaults or a stale client snapshot"
+                );
+                assert_eq!(after.advanced.saved_models, before.advanced.saved_models);
+                assert_eq!(
+                    after.advanced.active_model_id,
+                    before.advanced.active_model_id
+                );
+                assert_eq!(
+                    after.advanced.model_store_context_repairs,
+                    before.advanced.model_store_context_repairs,
+                    "repeat-link is not an explicit context edit"
+                );
+                assert!(
+                    store.ops().is_empty(),
+                    "repeat-link must not read, replace or delete secrets"
+                );
+                let encoded =
+                    serde_json::to_value(after.model_by_id("repeat-store-link").unwrap()).unwrap();
+                assert!(encoded.get("model_store_link_only").is_none());
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repeat_store_link_updates_only_the_reviewed_complete_route() {
+    crate::platform::test_support::with_temp_home("repeat-store-link-route", || {
+        let _conn = seed_running_store_card_for_model_save();
+        let mut original = repeat_store_link_payload("route-only-link");
+        original.name = "Keep this user label".into();
+        original.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+        original.vendor = Some("custom-user-vendor".into());
+        original.endpoint_mode = Some("full_chat_completions".into());
+        original.model = "old-wire".into();
+        original.base_url = "http://127.0.0.1:7999/v1".into();
+        original.api_key.clear();
+        original.credential_action = None;
+        original.model_store_link_requested = false;
+        original.model_store_link_only = false;
+        seed_model_deletion_prefs(std::slice::from_ref(&original));
+        let mut expected = UserPrefs::load()
+            .model_by_id("route-only-link")
+            .unwrap()
+            .clone();
+        expected.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+        expected.provider_kind = Some("custom".into());
+        expected.vendor = None;
+        expected.endpoint_mode = None;
+        expected.model = "wire".into();
+        expected.base_url = "http://127.0.0.1:8000/v1".into();
+        let store = crate::platform::credential_store::RecordingCredentialStore::new();
+        super::settings::save_model_inner(repeat_store_link_payload("route-only-link"), &store)
+            .unwrap();
+        assert_eq!(
+            UserPrefs::load().model_by_id("route-only-link"),
+            Some(&expected)
+        );
+        assert!(store.ops().is_empty());
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repeat_store_link_rejects_stale_ownership_or_endpoint_before_any_write() {
+    for change in [
+        "deleted",
+        "detached",
+        "other-card",
+        "not-operator-owned",
+        "stopped",
+        "changed-url",
+        "changed-model",
+        "missing-link-intent",
+        "missing-card",
+        "incoming-detached",
+        "reasoning-only",
+    ] {
+        crate::platform::test_support::with_temp_home("repeat-store-link-stale", || {
+            let conn = seed_running_store_card_for_model_save();
+            let mut original = repeat_store_link_payload("repeat-store-link");
+            original.api_key.clear();
+            original.credential_action = None;
+            original.model_store_link_requested = false;
+            original.model_store_link_only = false;
+            seed_model_deletion_prefs(&[model_deletion_test_model("keep", false), original]);
+            let mut incoming = repeat_store_link_payload("repeat-store-link");
+            UserPrefs::update_transaction(|prefs| {
+                let mut latest = prefs.model_by_id("repeat-store-link").unwrap().clone();
+                match change {
+                    "deleted" => prefs.remove_model("repeat-store-link"),
+                    "detached" => {
+                        latest.model_store_card_id = None;
+                        latest.model_store_link_detached = true;
+                        prefs.upsert_model(latest);
+                    }
+                    "other-card" => {
+                        latest.model_store_card_id = Some("other-card".into());
+                        prefs.upsert_model(latest);
+                    }
+                    "not-operator-owned" => {
+                        latest.preset = crate::platform::prefs::ModelPreset::Deepseek;
+                        latest.provider_kind = Some("official_api".into());
+                        latest.base_url = "https://api.deepseek.com".into();
+                        prefs.upsert_model(latest);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+            .unwrap();
+            match change {
+                "stopped" => {
+                    conn.execute("UPDATE store_models SET running=0", [])
+                        .unwrap();
+                }
+                "changed-url" => {
+                    conn.execute(
+                        "UPDATE store_models SET endpoint_url='http://127.0.0.1:8001/v1'",
+                        [],
+                    )
+                    .unwrap();
+                }
+                "changed-model" => {
+                    conn.execute("UPDATE store_models SET endpoint_model='new-wire'", [])
+                        .unwrap();
+                }
+                "missing-link-intent" => incoming.model_store_link_requested = false,
+                "missing-card" => incoming.model_store_card_id = None,
+                "incoming-detached" => incoming.model_store_link_detached = true,
+                "reasoning-only" => incoming.reasoning_effort_only = true,
+                _ => {}
+            }
+            let before = std::fs::read(crate::platform::paths::settings_path()).unwrap();
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            let error = super::settings::save_model_inner(incoming, &store).unwrap_err();
+            assert!(
+                error.contains("model store endpoint changed or is unavailable"),
+                "{change}: {error}"
+            );
+            assert_eq!(
+                std::fs::read(crate::platform::paths::settings_path()).unwrap(),
+                before,
+                "{change}: reject without a prefs commit"
+            );
+            assert!(
+                store.ops().is_empty(),
+                "{change}: reject before any credential operation"
+            );
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ordinary_store_link_saves_still_apply_explicit_fields_and_create_new_rows() {
+    for existing in [false, true] {
+        crate::platform::test_support::with_temp_home("ordinary-store-link-save", || {
+            let _conn = seed_running_store_card_for_model_save();
+            if existing {
+                let mut original = repeat_store_link_payload("ordinary-store-link");
+                original.api_key.clear();
+                original.credential_action = None;
+                original.model_store_link_requested = false;
+                original.model_store_link_only = false;
+                seed_model_deletion_prefs(&[original]);
+            } else {
+                seed_model_deletion_prefs(&[model_deletion_test_model("keep", false)]);
+            }
+            let mut incoming = repeat_store_link_payload("ordinary-store-link");
+            incoming.model_store_link_only = false;
+            incoming.name = "Explicitly edited label".into();
+            incoming.context_window_tokens = Some(65536);
+            incoming.max_output_tokens = Some(1024);
+            incoming.reasoning_effort = Some("medium".into());
+            incoming.vision_model_id = Some("explicit-vision".into());
+            incoming.api_key = "explicit-test-key".into();
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(incoming, &store).unwrap();
+            let saved = UserPrefs::load()
+                .model_by_id("ordinary-store-link")
+                .unwrap()
+                .clone();
+            assert_eq!(saved.name, "Explicitly edited label");
+            assert_eq!(saved.context_window_tokens, Some(65536));
+            assert_eq!(saved.max_output_tokens, Some(1024));
+            assert_eq!(saved.reasoning_effort.as_deref(), Some("medium"));
+            assert_eq!(saved.vision_model_id.as_deref(), Some("explicit-vision"));
+            assert_eq!(saved.model_store_card_id.as_deref(), Some("running-card"));
+            assert_eq!(
+                store.ops(),
+                vec!["set:pinvou3-model-api-key:model:ordinary-store-link=explicit-test-key"]
+            );
+        });
+    }
+}
+
+#[test]
+fn repeat_store_link_intent_is_incoming_only_and_absent_for_legacy_clients() {
+    let legacy = model_deletion_test_model("repeat-link-intent", false);
+    assert!(!legacy.model_store_link_only);
+    let mut payload = serde_json::to_value(&legacy).unwrap();
+    assert!(payload.get("model_store_link_only").is_none());
+    payload["model_store_link_only"] = serde_json::json!(true);
+    let incoming: SavedModel = serde_json::from_value(payload).unwrap();
+    assert!(incoming.model_store_link_only);
+    let encoded = serde_json::to_value(&incoming).unwrap();
+    assert!(encoded.get("model_store_link_only").is_none());
+    let reloaded: SavedModel = serde_json::from_value(encoded).unwrap();
+    assert!(!reloaded.model_store_link_only);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_object_model_save_detaches_six_field_route_edits_while_the_card_is_running() {
+    use serde_json::json;
+    for (field, value) in [
+        ("preset", json!("openai_responses")),
+        ("provider_kind", json!("official_api")),
+        ("vendor", json!("anthropic")),
+        ("endpoint_mode", json!("full_chat_completions")),
+        ("model", json!("another-wire")),
+        ("base_url", json!("http://127.0.0.1:8001/v1")),
+    ] {
+        crate::platform::test_support::with_temp_home(
+            &format!("running-route-edit-{field}"),
+            || {
+                let _conn = seed_running_store_card_for_model_save();
+                let mut original = model_deletion_test_model("full-object", true);
+                original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                original.provider_kind = Some("custom".into());
+                original.model = "wire".into();
+                original.base_url = "http://127.0.0.1:8000/v1".into();
+                original.model_store_card_id = Some("running-card".into());
+                seed_model_deletion_prefs(&[model_deletion_test_model("keep", false), original]);
+                let before = UserPrefs::load()
+                    .model_by_id("full-object")
+                    .unwrap()
+                    .clone();
+                let mut request = serde_json::to_value(&before).unwrap();
+                request[field] = value.clone();
+                // A full-object API client returns the old association as read.
+                assert_eq!(request["model_store_card_id"], "running-card");
+                let incoming: SavedModel = serde_json::from_value(request).unwrap();
+                assert!(!incoming.has_same_endpoint_route(&before));
+                assert!(!incoming.model_store_link_requested);
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                super::settings::save_model_inner(incoming, &store).unwrap();
+                let saved = UserPrefs::load()
+                    .model_by_id("full-object")
+                    .unwrap()
+                    .clone();
+                assert_eq!(serde_json::to_value(&saved).unwrap()[field], value);
+                assert!(saved.model_store_card_id.is_none(), "{field} must detach");
+                assert!(
+                    saved.model_store_link_detached,
+                    "{field} must stay detached"
+                );
+                assert_eq!(saved.credential_ref, before.credential_ref);
+                assert!(
+                    !super::settings::delete_model_if_store_link_inner(
+                        "full-object",
+                        "running-card",
+                        &store
+                    )
+                    .unwrap(),
+                    "a later uninstall must not remove the edited {field} route"
+                );
+                assert!(store.ops().is_empty());
+            },
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_object_model_option_saves_keep_links_with_or_without_card_id_and_when_stopped() {
+    for running in [true, false] {
+        for include_card_id in [true, false] {
+            crate::platform::test_support::with_temp_home("running-option-edit", || {
+                let conn = seed_running_store_card_for_model_save();
+                conn.execute(
+                    "UPDATE store_models SET running=?1 WHERE card_id='running-card'",
+                    [running],
+                )
+                .unwrap();
+                let mut original = model_deletion_test_model("full-options", true);
+                original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+                original.provider_kind = Some("custom".into());
+                original.model = "wire".into();
+                original.base_url = "http://127.0.0.1:8000/v1".into();
+                original.model_store_card_id = Some("running-card".into());
+                seed_model_deletion_prefs(&[original]);
+                let mut request =
+                    serde_json::to_value(UserPrefs::load().model_by_id("full-options").unwrap())
+                        .unwrap();
+                request["name"] = serde_json::json!("Updated label");
+                if !include_card_id {
+                    request
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("model_store_card_id");
+                }
+                let store = crate::platform::credential_store::RecordingCredentialStore::new();
+                super::settings::save_model_inner(serde_json::from_value(request).unwrap(), &store)
+                    .unwrap();
+                let saved = UserPrefs::load()
+                    .model_by_id("full-options")
+                    .unwrap()
+                    .clone();
+                assert_eq!(saved.name, "Updated label");
+                assert_eq!(saved.model_store_card_id.as_deref(), Some("running-card"));
+                assert!(!saved.model_store_link_detached);
+                assert!(store.ops().is_empty());
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_object_model_save_keeps_explicit_relinks_and_new_card_associations() {
+    for (previous_card, explicit_link) in [
+        (Some("running-card"), true),
+        (Some("previous-card"), false),
+        (None, false),
+    ] {
+        crate::platform::test_support::with_temp_home("running-card-relink", || {
+            let _conn = seed_running_store_card_for_model_save();
+            let mut original = model_deletion_test_model("relink", true);
+            original.preset = crate::platform::prefs::ModelPreset::OpenaiCompatible;
+            original.provider_kind = Some("custom".into());
+            original.model = "wire".into();
+            original.base_url = "http://127.0.0.1:8000/v1".into();
+            original.model_store_card_id = previous_card.map(str::to_owned);
+            seed_model_deletion_prefs(&[original]);
+            let mut incoming = UserPrefs::load().model_by_id("relink").unwrap().clone();
+            incoming.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+            incoming.model_store_card_id = Some("running-card".into());
+            incoming.model_store_link_requested = explicit_link;
+            let store = crate::platform::credential_store::RecordingCredentialStore::new();
+            super::settings::save_model_inner(incoming, &store).unwrap();
+            let saved = UserPrefs::load().model_by_id("relink").unwrap().clone();
+            assert_eq!(
+                saved.preset,
+                crate::platform::prefs::ModelPreset::OpenaiResponses
+            );
+            assert_eq!(saved.model_store_card_id.as_deref(), Some("running-card"));
+            assert!(!saved.model_store_link_detached);
+            assert!(store.ops().is_empty());
+        });
+    }
+}
+
+#[test]
+fn reasoning_effort_only_intent_is_incoming_only_and_legacy_defaults_to_full_save() {
+    let legacy = model_deletion_test_model("reasoning-intent", false);
+    assert!(!legacy.reasoning_effort_only);
+    let mut request = serde_json::to_value(&legacy).unwrap();
+    request["reasoning_effort_only"] = serde_json::json!(true);
+    let incoming: SavedModel = serde_json::from_value(request).unwrap();
+    assert!(incoming.reasoning_effort_only);
+    let serialized = serde_json::to_value(&incoming).unwrap();
+    assert!(serialized.get("reasoning_effort_only").is_none());
+    let reloaded: SavedModel = serde_json::from_value(serialized).unwrap();
+    assert!(!reloaded.reasoning_effort_only);
 }
 
 #[test]
@@ -3630,6 +4886,173 @@ fn web_settings_deferred_delete_serializes_with_a_concurrent_replacement() {
             store,
             gate,
             delete_started,
+        );
+    });
+}
+
+// ---- conditional model cleanup: the deferred delete must stay inside the prefs lock ----
+// 三十五轮评审 P2：`delete_model_if_matches` 此前在事务返回（锁已释放）后才删
+// 凭据——A 的行删除提交后、凭据删除前，B 可为同 id 保存新配置与新密钥（同一
+// 确定性 `model:{id}` 引用），A 迟到的删除毁掉 B 的新密钥，两次操作都报成功。
+
+const BARRIER_MODEL_ID: &str = "m-recycle";
+const BARRIER_MODEL_ORIGINAL_KEY: &str = "model-original-secret-1234567890";
+const BARRIER_MODEL_REPLACEMENT_KEY: &str = "model-replacement-secret-1234567890";
+
+fn model_barrier_reference() -> crate::platform::credential_store::CredentialReference {
+    crate::platform::credential_store::CredentialReference::for_model(BARRIER_MODEL_ID)
+}
+
+fn model_barrier_store() -> (
+    std::sync::Arc<GatedDeleteStore>,
+    DeleteGate,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let inner = MemoryCredentialStore::default();
+    inner
+        .set(&model_barrier_reference(), BARRIER_MODEL_ORIGINAL_KEY)
+        .expect("seed the original model keyring secret");
+    let (delete_started, delete_started_rx) = std::sync::mpsc::channel();
+    let gate = DeleteGate::default();
+    let store = std::sync::Arc::new(GatedDeleteStore {
+        inner,
+        delete_started,
+        gate: gate.clone(),
+    });
+    (store, gate, delete_started_rx)
+}
+
+fn model_barrier_replacement() -> SavedModel {
+    let mut model = model_deletion_test_model(BARRIER_MODEL_ID, true);
+    // 用户在等待窗口里把同 id 配置改属到另一端点/模型并保存；Replace 臂在
+    // prefs 锁内写入同一确定性引用的新密钥。
+    model.base_url = "http://127.0.0.1:8000/v1".to_string();
+    model.model = "user-picked-model".to_string();
+    model.api_key = BARRIER_MODEL_REPLACEMENT_KEY.to_string();
+    model.credential_action = Some(CredentialEditAction::Replace);
+    model
+}
+
+/// 与 [`run_delete_replacement_barrier`] 同一驱动结构，终态断言换成模型域：
+/// B 的替换密钥必须存活、同 id 行必须是 B 的改属配置。
+fn run_model_delete_replacement_barrier(
+    a_delete: impl FnOnce() -> Result<bool, String> + Send + 'static,
+    b_replace: impl FnOnce() -> Result<(), String> + Send + 'static,
+    store: std::sync::Arc<GatedDeleteStore>,
+    gate: DeleteGate,
+    delete_started: std::sync::mpsc::Receiver<()>,
+) {
+    let a = std::thread::spawn(a_delete);
+    // Deterministic pause: A's save committed and its deferred delete is
+    // blocked before the keyring removal.
+    delete_started
+        .recv()
+        .expect("the deferred delete must start once A's save committed");
+
+    let b = std::thread::spawn(b_replace);
+    if crate::platform::prefs::UserPrefs::user_prefs_lock_free_for_test() {
+        // Racy ordering (pre-fix): the deferred delete runs OUTSIDE the prefs
+        // lock, so B's replacement commits first; resuming A's delete
+        // afterwards destroys B's fresh secret and the final assertions fail
+        // red.
+        b.join()
+            .unwrap()
+            .expect("B's replacement save must succeed");
+        gate.open();
+    } else {
+        // Fixed ordering: the deferred delete runs INSIDE the prefs-lock
+        // critical section, so B's replacement is blocked on the lock until
+        // the delete finished; opening the gate now lands the delete strictly
+        // before B's keyring write.
+        gate.open();
+        b.join()
+            .unwrap()
+            .expect("B's replacement save must succeed");
+    }
+    assert!(
+        a.join()
+            .unwrap()
+            .expect("A's conditional delete must succeed"),
+        "A's snapshot-identical row must be recycled"
+    );
+
+    let secret = store
+        .inner
+        .get(&model_barrier_reference())
+        .expect("the keyring read must succeed");
+    assert_eq!(
+        secret.as_deref(),
+        Some(BARRIER_MODEL_REPLACEMENT_KEY),
+        "B's committed replacement secret must survive A's deferred delete"
+    );
+    let prefs = UserPrefs::load();
+    let row = prefs
+        .model_by_id(BARRIER_MODEL_ID)
+        .expect("B's upsert must keep the row");
+    assert_eq!(
+        row.base_url, "http://127.0.0.1:8000/v1",
+        "the surviving row must be B's re-homed configuration"
+    );
+    assert_eq!(row.model, "user-picked-model");
+}
+
+#[test]
+fn delete_model_if_matches_credential_delete_serializes_with_a_concurrent_replacement() {
+    crate::platform::test_support::with_temp_home("delete-if-matches-race", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model(BARRIER_MODEL_ID, true)]);
+        let (store, gate, delete_started) = model_barrier_store();
+        let a_store = store.clone();
+        let b_store = store.clone();
+
+        run_model_delete_replacement_barrier(
+            move || {
+                super::settings::delete_model_if_matches_inner(
+                    BARRIER_MODEL_ID,
+                    Some("https://api.deepseek.com".to_string()),
+                    Some("deepseek-v4-pro".to_string()),
+                    a_store.as_ref(),
+                )
+            },
+            move || {
+                super::settings::save_model_inner(model_barrier_replacement(), b_store.as_ref())
+            },
+            store,
+            gate,
+            delete_started,
+        );
+    });
+}
+
+// architecture-guard: allow-target-cfg -- 条件删除 fail-closed 的读失败（EACCES）
+// 回归需要 chmod 000 拿真实 io::Error，unix 专属权限语义（Windows 侧由
+// delete_model_if_matches_read_failure 的解析失败臂覆盖同一折叠点）。
+#[cfg(unix)]
+#[test]
+fn delete_model_if_matches_unreadable_file_fails_closed_without_writing() {
+    use std::os::unix::fs::PermissionsExt;
+    crate::platform::test_support::with_temp_home("delete-if-matches-unreadable", || {
+        seed_model_deletion_prefs(&[model_deletion_test_model(BARRIER_MODEL_ID, true)]);
+        let path = crate::platform::paths::settings_path();
+        let original = std::fs::read_to_string(&path).expect("seeded settings");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("drop read permission");
+        let store = MemoryCredentialStore::default();
+        let result = super::settings::delete_model_if_matches_inner(
+            BARRIER_MODEL_ID,
+            Some("https://api.deepseek.com".to_string()),
+            Some("deepseek-v4-pro".to_string()),
+            &store,
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore read permission");
+        assert!(
+            result.is_err(),
+            "EACCES on the settings file must refuse the destructive transaction"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("file back to readable"),
+            original,
+            "an unreadable settings file must survive the failed cleanup byte-exactly"
         );
     });
 }

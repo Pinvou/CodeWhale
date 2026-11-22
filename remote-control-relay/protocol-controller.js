@@ -120,7 +120,7 @@ export const TASK_REJECTION_CODES = [
   "task_payload_replay",
 ];
 
-export const CONTROLLER_CONTRACT_SHA256 = "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
+export const CONTROLLER_CONTRACT_SHA256 = "20ba5b032e06ad7dd8902da538f6570d36059c568622c7ea73c9e1e7d89cde19";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -144,7 +144,8 @@ export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
   "remote_action_request", "remote_action_result", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
 ]);
 export const REMOTE_ACTION_OPERATIONS = Object.freeze([
-  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort",
+  "user_input_list", "user_input_respond",
+  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort", "attachment_abort_confirmed",
   "artifact_index", "artifact_preview", "artifact_download_begin", "artifact_download_chunk", "artifact_download_abort",
 ]);
 export const LEASE_INSTALL_MESSAGE_TYPES = Object.freeze(["controller_joined"]);
@@ -256,7 +257,7 @@ const PARSED_TRANSCRIPT_TOKEN = Symbol("parsed-controller-transcript");
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
   temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
-  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "task_id"], [], []),
+  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"], [], []),
   vision_fallback: schema(["route", "credential"], [], []),
   route: schema(ROUTE_REQUIRED, ROUTE_OPTIONAL, []),
   credential: schema(["kind", "secret"], [], []),
@@ -779,7 +780,7 @@ export function validateControllerRuntimePayload(input, senderRole, runtimeConte
   const lease = requireRuntimeLease(runtimeContext);
   const payload = validateControllerPayload(input, senderRole, lease);
   if (payload.type === "remote_action_request" || payload.type === "remote_action_result") {
-    const required = payload.operation.startsWith("permission_") ? "permission_v1"
+    const required = (payload.operation.startsWith("permission_") || payload.operation.startsWith("user_input_")) ? "permission_v1"
       : payload.operation.startsWith("attachment_") ? "attachment_v1" : "artifact_v1";
     if (!runtimeContext.negotiated_capabilities.includes(required)) fail("unsupported_capability", required);
   }
@@ -931,11 +932,14 @@ function validateRemoteActionArtifacts(value) {
 function validateRemoteAction(payload, result) {
   const operation = payload.operation;
   const requests = {
+    user_input_list: ["task_id"],
+    user_input_respond: ["task_id", "input_id", "cancel", "answers"],
     permission_list: ["task_id"],
     permission_decide: ["task_id", "permission_request_id", "decision"],
     attachment_begin: ["task_id", "file_name", "mime_type", "total_bytes", "sha256"],
     attachment_chunk: ["task_id", "transfer_id", "chunk_index", "chunk_b64", "chunk_bytes"],
     attachment_abort: ["task_id", "transfer_id"],
+    attachment_abort_confirmed: ["task_id", "transfer_id"],
     artifact_index: [],
     artifact_preview: ["artifact_id"],
     artifact_download_begin: ["task_id", "artifact_id"],
@@ -943,11 +947,14 @@ function validateRemoteAction(payload, result) {
     artifact_download_abort: ["task_id", "artifact_id", "transfer_id"],
   };
   const responses = {
+    user_input_list: [["requests"], []],
+    user_input_respond: [["state"], []],
     permission_list: [["permissions"], []],
     permission_decide: [["state"], []],
     attachment_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
     attachment_chunk: [["state", "received_bytes"], ["sha256"]],
     attachment_abort: [["aborted"], []],
+    attachment_abort_confirmed: [["transfer_id", "cleanup_confirmed"], []],
     artifact_index: [["artifacts"], []],
     artifact_preview: [["artifact_id", "preview_kind", "truncated"], ["text"]],
     artifact_download_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
@@ -966,8 +973,14 @@ function validateRemoteAction(payload, result) {
   const body = exactObject(payload.body, required, optional, "body");
   for (const field of [...required, ...optional]) {
     if (body[field] === undefined) continue;
-    if (["aborted", "completed", "truncated"].includes(field)) {
+    if (["aborted", "completed", "truncated", "cleanup_confirmed", "cancel"].includes(field)) {
       if (typeof body[field] !== "boolean") fail("invalid_field", `body.${field}`);
+    } else if (field === "requests") {
+      validateUserInputRequests(body.requests);
+    } else if (field === "answers") {
+      validateUserInputAnswers(body.answers);
+    } else if (field === "input_id") {
+      identifier(body.input_id, "body.input_id");
     } else if (field === "permissions") {
       if (!Array.isArray(body.permissions) || body.permissions.length > 8) fail("invalid_field", "body.permissions");
       const fields = ["permission_request_id", "task_id", "operation_type", "risk_level", "target_scope", "preview", "expires_at_ms", "state", "dispatch_state"];
@@ -994,15 +1007,59 @@ function validateRemoteAction(payload, result) {
   }
 }
 
+function inputText(value, limit, empty = false) {
+  if (typeof value !== "string" || (!empty && !value.length) || [...value].length > limit) fail("invalid_field", "user_input");
+  if ([...value].some(char => { const code = char.codePointAt(0); return code >= 0xd800 && code <= 0xdfff; })) fail("invalid_field", "user_input");
+}
+
+function validateUserInputRequests(requests) {
+  if (!Array.isArray(requests) || requests.length > 8 || Buffer.byteLength(JSON.stringify(requests), "utf8") > 192 * 1024) fail("invalid_field", "body.requests");
+  const ids = new Set();
+  for (const entry of requests) {
+    const request = exactObject(entry, ["input_id", "questions"], [], "user_input");
+    identifier(request.input_id, "user_input.input_id");
+    if (ids.has(request.input_id)) fail("invalid_field", "user_input");
+    ids.add(request.input_id);
+    if (!Array.isArray(request.questions) || !request.questions.length || request.questions.length > 3) fail("invalid_field", "user_input");
+    request.questions.forEach((entry, index) => {
+      const q = exactObject(entry, ["id", "header", "question", "options", "multi_select"], [], "user_input");
+      if (q.id !== String(index) || typeof q.multi_select !== "boolean") fail("invalid_field", "user_input");
+      inputText(q.header, 64); inputText(q.question, 2048);
+      if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 4) fail("invalid_field", "user_input");
+      q.options.forEach((entry, index) => {
+        const option = exactObject(entry, ["value", "label", "description"], [], "user_input");
+        if (option.value !== String(index)) fail("invalid_field", "user_input");
+        inputText(option.label, 256); inputText(option.description, 512, true);
+      });
+    });
+  }
+}
+
+function validateUserInputAnswers(answers) {
+  if (!Array.isArray(answers) || answers.length > 3) fail("invalid_field", "body.answers");
+  const ids = new Set();
+  for (const entry of answers) {
+    const answer = exactObject(entry, ["question_id", "option_ids"], ["custom_text"], "user_input");
+    if (!["0", "1", "2"].includes(answer.question_id) || ids.has(answer.question_id)) fail("invalid_field", "user_input");
+    ids.add(answer.question_id);
+    if (!Array.isArray(answer.option_ids) || answer.option_ids.length > 4 || new Set(answer.option_ids).size !== answer.option_ids.length
+      || answer.option_ids.some(id => !["0", "1", "2", "3"].includes(id))) fail("invalid_field", "user_input");
+    if (answer.custom_text !== undefined && answer.custom_text !== null) {
+      inputText(answer.custom_text, 4096);
+      if (!/\P{White_Space}/u.test(answer.custom_text)) fail("invalid_field", "user_input");
+    }
+  }
+}
+
 function validateTemporaryModelPackage(value, task) {
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_TEMPORARY_MODEL_PACKAGE_BYTES) fail("message_too_large", "temporary_model_package");
   const object = exactObject(value, NESTED_SCHEMAS.temporary_model_package_v1.required, NESTED_SCHEMAS.temporary_model_package_v1.optional, "temporary_model_package");
   if (object.schema !== "temporary_model_package/v1") fail("unsupported_version", "temporary_model_package.schema");
   identifier(object.package_id, "temporary_model_package.package_id");
   const binding = exactObject(object.binding, NESTED_SCHEMAS.temporary_model_binding.required, NESTED_SCHEMAS.temporary_model_binding.optional, "temporary_model_package.binding");
-  for (const field of ["connection_id", "controller_lease_id", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
+  for (const field of ["connection_id", "controller_lease_id", "relay_epoch", "remote_control_generation", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
   decimal(binding.lease_epoch, "temporary_model_package.binding.lease_epoch");
-  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
+  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
   validateRoute(object.primary, "temporary_model_package.primary");
   validateCredential(object.primary_credential, "temporary_model_package.primary_credential");
   if (object.vision_fallback !== undefined) {
@@ -1327,6 +1384,8 @@ export function controllerContractManifest() {
   return {
     protocol_version: CONTROLLER_PROTOCOL_VERSION,
     subprotocol: CONTROLLER_SUBPROTOCOL,
+    remote_action_operations: REMOTE_ACTION_OPERATIONS,
+    user_input_limits: { pending: 8, questions: 3, custom_chars: 4096, view_bytes: 192 * 1024 },
     integer_wire_format: "canonical-u64-decimal-string",
     json_object_keys: "unique-after-unescape",
     limits: {

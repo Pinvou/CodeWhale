@@ -1,0 +1,46 @@
+{
+  "name": "public-bind-config-probe",
+  "networks": {
+    "default": {
+      "name": "public-bind-config-probe_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "probe": {
+      "command": null,
+      "entrypoint": null,
+      "image": "registry.example.invalid/config-only:never-run",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/opt/fixture-bind-false",
+          "target": "/false",
+          "read_only": true,
+          "bind": {}
+        },
+        {
+          "type": "bind",
+          "source": "/opt/fixture-bind-true",
+          "target": "/true",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/opt/fixture-bind-short",
+          "target": "/short",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    }
+  }
+}
