@@ -137,6 +137,18 @@ pub const MCP_PACKAGES: &[McpPackageSpec] = &[
             include_str!("../../../../resources/mcp-servers/app-automations/server.py"),
         )],
     },
+    // MegaCube 模型服务（内置系统插件）。**只有元数据，没有包文件**：server 脚本
+    // 由 runtime_bundle 总是释放到 bundle/mcp-servers/，mcp.json 注册由引擎侧按
+    // cmsd socket 在场条件 upsert（extraction.rs 的 ensure_builtin_mcp_servers）——
+    // 市场安装管线永远不碰它（builtin 拒绝 install/uninstall，builtin.rs 兜底）。
+    // 目录条目的展示另有条件过滤：socket 缺席的机器不列出（available_tools）。
+    McpPackageSpec {
+        id: "megacube-admin",
+        manifest_json: include_str!(
+            "../../../../resources/mcp-servers/megacube-admin/manifest.json"
+        ),
+        files: &[],
+    },
 ];
 
 /// Look up an embedded package by id (absent from the catalog = custom /
@@ -506,7 +518,14 @@ mod tests {
             }
         }
         // 13 known embedded packages
-        assert_eq!(MCP_PACKAGES.len(), 13);
+        assert_eq!(MCP_PACKAGES.len(), 14);
+        // megacube-admin 只带元数据：脚本由 runtime_bundle 引擎侧条件注册，
+        // 市场管线永不释放（builtin 拒绝 install/uninstall）
+        let mc = spec_for("megacube-admin").expect("megacube-admin 应在目录里");
+        assert!(mc.files.is_empty(), "megacube-admin 不带市场释放文件");
+        let manifest: serde_json::Value = serde_json::from_str(mc.manifest_json).unwrap();
+        assert_eq!(manifest["builtin"], true);
+        assert_eq!(manifest["visibility"], "system");
     }
 
     /// ADR-0024 E6: the byte-compare upgrade leg — an existing 1.0.0 install

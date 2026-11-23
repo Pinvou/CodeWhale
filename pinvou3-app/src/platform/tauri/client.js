@@ -40,6 +40,12 @@ export function emitTauri(eventName, payload) {
 export const tauriCommands = Object.freeze({ invoke: invokeTauri });
 export const tauriEvents = Object.freeze({ listen: listenTauri, emit: emitTauri });
 
+export function listenManualModelSelection(handler) {
+  const listener = event => handler(event.detail || {});
+  globalThis.addEventListener('pinvou:manual-model-selection', listener);
+  return () => globalThis.removeEventListener('pinvou:manual-model-selection', listener);
+}
+
 export function openTauriDialog(options) {
   const open = runtime()?.dialog?.open;
   if (typeof open !== 'function') {

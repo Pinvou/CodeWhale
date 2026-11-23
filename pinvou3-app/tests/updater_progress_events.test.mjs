@@ -39,7 +39,7 @@ test('download progress is displayed, throttled, and ignored after cancellation'
 });
 
 for (const platform of ['linux', 'macos']) {
-  test(`${platform} progress events retain the existing behavior`, async () => {
+  test(`${platform} download progress events remain available until the download receipt`, async () => {
     const source = readFileSync(new URL('../src/platform/tauri/bridge/updater.js', import.meta.url), 'utf8');
     let listener, rejectDownload;
     const window = { setTimeout, clearTimeout, PinvouBridgeShared: { create: () => ({}) } };
@@ -53,7 +53,7 @@ for (const platform of ['linux', 'macos']) {
     });
     const pending = updater.downloadAndInstallUpdate();
     listener({ payload: { downloaded: 37, total: 100 } });
-    assert.equal(state.updateProgress, 0);
+    assert.equal(state.updateProgress, 37);
     rejectDownload(new Error('fixture'));
     assert.equal(await pending, false);
   });

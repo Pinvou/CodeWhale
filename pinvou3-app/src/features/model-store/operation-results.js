@@ -20,8 +20,10 @@ function replaceResults(next) {
 
 export function rememberTaskOperationResult(task, outcome) {
   if (!outcome?.ok || !task) return;
+  const resultTruncated = outcome.resultTruncated === true;
+  const resultUnavailable = resultTruncated && outcome.result == null;
   if (!['version_stage', 'version_switch', 'version_delete'].includes(task.kind)
-    && !(task.kind === 'uninstall' && outcome.result?.remaining_paths?.length)) return;
+    && !(task.kind === 'uninstall' && (outcome.result?.remaining_paths?.length || resultUnavailable))) return;
   const id = task.runId || task.id;
   if (results.some((result) => result.id === id)) return;
   replaceResults([...results, {
@@ -29,7 +31,10 @@ export function rememberTaskOperationResult(task, outcome) {
     title: task.title,
     cardName: task.cardName,
     kind: task.kind,
-    result: {
+    // Null with truncation means the facts were not retrieved. Preserve it;
+    // an empty object would turn unknown cleanup amounts/paths into zero/none.
+    ...(resultTruncated ? { resultTruncated: true } : {}),
+    result: resultUnavailable ? null : {
       ...outcome.result,
       remaining_paths: Array.isArray(outcome.result?.remaining_paths) ? [...outcome.result.remaining_paths] : [],
     },

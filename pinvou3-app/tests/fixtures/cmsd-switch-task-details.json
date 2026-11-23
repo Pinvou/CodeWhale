@@ -1,0 +1,89 @@
+{
+  "succeeded": {
+    "http_status": 200,
+    "body": {
+      "id": "t-old-switch",
+      "kind": "switch",
+      "card": "target",
+      "requested_card": "target",
+      "selected_version": "v1",
+      "deployment_revision": "rev1",
+      "status": "succeeded",
+      "created_at": 1792598400,
+      "finished_at": 1792598401,
+      "error": null,
+      "result": "target ready",
+      "store_run_id": null,
+      "source": "cmsd",
+      "events_count": 1,
+      "events": [
+        {
+          "ts": 1792598401,
+          "stage": "ready",
+          "message": "target ready"
+        }
+      ]
+    }
+  },
+  "failed": {
+    "http_status": 200,
+    "body": {
+      "id": "t-old-switch",
+      "kind": "switch",
+      "card": "target",
+      "requested_card": "target",
+      "selected_version": "v1",
+      "deployment_revision": "rev1",
+      "status": "failed",
+      "created_at": 1792598400,
+      "finished_at": 1792598401,
+      "error": "target failed readiness",
+      "result": "target ready",
+      "store_run_id": null,
+      "source": "cmsd",
+      "events_count": 1,
+      "events": [
+        {
+          "ts": 1792598401,
+          "stage": "ready",
+          "message": "target ready"
+        }
+      ]
+    }
+  },
+  "cancelled": {
+    "http_status": 200,
+    "body": {
+      "id": "t-old-switch",
+      "kind": "switch",
+      "card": "target",
+      "requested_card": "target",
+      "selected_version": "v1",
+      "deployment_revision": "rev1",
+      "status": "cancelled",
+      "created_at": 1792598400,
+      "finished_at": 1792598401,
+      "error": null,
+      "result": "target ready",
+      "store_run_id": null,
+      "source": "cmsd",
+      "events_count": 1,
+      "events": [
+        {
+          "ts": 1792598401,
+          "stage": "ready",
+          "message": "target ready"
+        }
+      ]
+    }
+  },
+  "not_found": {
+    "http_status": 404,
+    "body": {
+      "error": {
+        "code": "unknown_task",
+        "message": "task not found"
+      }
+    }
+  }
+}

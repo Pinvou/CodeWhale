@@ -196,6 +196,12 @@ on:
       - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
       - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
       - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+      - 'components/cmsd/**'
+      - 'scripts/check-cmsd-bundled-package.py'
+      - 'scripts/release-deb.sh'
+      - 'scripts/tests/test_cmsd_release_policy.py'
+      - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+      - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
       - 'VERSION'
       - 'scripts/sync-version.mjs'
       - 'scripts/windows-release-workspace.ps1'
@@ -218,7 +224,9 @@ on:
       - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
       # END GENERATED release paths
   pull_request:
-    branches: [main]
+    branches:
+      - main
+    # Stacked feature-base PRs need the same lightweight release contracts.
     paths:
       # BEGIN GENERATED release paths
       - '.github/workflows/pr-check.yml'
@@ -380,6 +388,12 @@ on:
       - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
       - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
       - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+      - 'components/cmsd/**'
+      - 'scripts/check-cmsd-bundled-package.py'
+      - 'scripts/release-deb.sh'
+      - 'scripts/tests/test_cmsd_release_policy.py'
+      - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+      - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
       - 'VERSION'
       - 'scripts/sync-version.mjs'
       - 'scripts/windows-release-workspace.ps1'

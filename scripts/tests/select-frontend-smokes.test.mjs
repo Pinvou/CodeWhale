@@ -149,6 +149,13 @@ test("diagnostics consent smoke is executable and selected for all entry points"
   }
 });
 
+test("MegaCube changes include bundled component confirmation coverage", () => {
+  const target = "node:tests/megacube_bundled_install_smoke.mjs";
+  assert.ok(fullLabels.includes(target));
+  assert.ok(labels(selectFrontendSmokes(["pinvou3-app/src/features/megacube/CmsDaemonPanel.jsx"])).includes(target));
+
+});
+
 test("model versions regression is an executable package script and full CI smoke", () => {
   const packageJson = JSON.parse(readFileSync(
     new URL("../../pinvou3-app/package.json", import.meta.url), "utf8",
@@ -172,6 +179,7 @@ test("model store changes run the real versions and settings regression", () => 
   for (const path of paths) {
     assert.deepEqual(labels(selectFrontendSmokes([path])), [
       "npm:test:ui-smoke", "npm:test:model-store-versions-ui",
+      "node:tests/model_store_ownership_smoke.mjs",
     ]);
   }
   assert.equal(labels(selectFrontendSmokes([

@@ -26,6 +26,17 @@ const STORE_UI = read('src', 'features', 'model-store', 'model-store-ui.jsx');
 const LANGS = ['zh', 'en', 'ja'];
 const DICTS = new Map(LANGS.map((lang) => [lang, read('src', 'shared', 'i18n', `${lang}.js`)]));
 
+test('key list and creation stay unconditionally available like the base dialog', () => {
+  // r7 P1-1：api_key_enforced 无任何后端生产者（唯一出处是本测试旧版铸造的门控），
+  // 基线行为是无条件并行拉取与展示。钉住回退后的形态，防止死门控回归。
+  // megacube 合并后 Key 列表带 known 标志（Key 服务不可达≠致命，详情照常
+  // 显示）；仍是无条件并行拉取 + catch 兜底，钉住这个回退后的形态。
+  assert.match(DETAIL_DIALOG, /Promise\.all\(\[\s*fetchModelDetail\(cardId\),\s*fetchApiKeys\(cardId\)\.then[\s\S]*?\.catch/);
+  assert.doesNotMatch(DETAIL_DIALOG, /api_key_enforced/);
+  assert.match(DETAIL_DIALOG, /data-testid="model-store-add-key"/);
+  assert.doesNotMatch(DETAIL_DIALOG, /model-store-key-auth-unavailable/);
+});
+
 /**
  * 取出词典里某个键的字符串字面量值。
  *

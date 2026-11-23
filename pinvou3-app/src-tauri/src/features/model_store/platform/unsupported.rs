@@ -59,6 +59,20 @@ pub async fn library(_service: Arc<ModelStoreService>) -> Result<Value, String> 
     nope()
 }
 
+pub async fn preview_incomplete(
+    _service: &Arc<ModelStoreService>,
+    _run_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+pub fn retry_incomplete(
+    _service: &Arc<ModelStoreService>,
+    _run_id: String,
+    _expected_sha256: String,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub async fn model_detail(_card_id: String) -> Result<Value, String> {
     nope()
 }
@@ -138,6 +152,14 @@ pub fn start_download(
     nope()
 }
 
+/// 本地卡片安装只在 Linux 上有；桩返回同样的「不支持」。
+pub fn start_install_local(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub async fn start_deploy(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
@@ -162,6 +184,7 @@ pub async fn run_log(
     _run_id: String,
     _from: usize,
     _wait: Option<u64>,
+    _from_byte: Option<usize>,
 ) -> Result<Value, String> {
     nope()
 }
@@ -241,14 +264,20 @@ pub fn set_storage_settings(
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
 
 /// 非 Linux 无 linked-models 可对账：no-op 而非报错（同上，启动路径不冒错）。
-pub(crate) fn linked_models_startup_sync() -> Result<(), String> {
-    Ok(())
-}
+pub fn run_startup_linked_sync(_service: &Arc<ModelStoreService>) {}
 
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }
 
+impl ModelStoreService {
+    pub fn for_desktop() -> Self {
+        Self::default()
+    }
+    pub fn is_remote(&self) -> bool {
+        false
+    }
+}
 // ── 商店边界（与 linux/boundary.rs 同名同签名，见 platform/mod.rs 的转发）──
 
 /// 非 Linux 没有商店，恒为未命中（宽松版，登记端用）。

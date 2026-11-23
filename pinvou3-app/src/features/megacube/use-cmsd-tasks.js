@@ -1,0 +1,207 @@
+/**
+ * 换胎任务监听（维护模式窗口的数据源）。
+ *
+ * 轮询 cmsd /v1/tasks：有 running 的 switch 任务就浮出维护窗。只有「切换模型」
+ * （停旧启新挪别名）会打断当前对话，需要挡住操作；商店启停有自己的 run 日志
+ * 长轮询呈现进度，MCP 启停有工具应答，都不弹窗（用户拍板 2026-10-13）。
+ * 任务从 running 翻成终结态的瞬间回调一次（自动切换模型选择用）。
+ * 管理面不在场时完全不轮询（无感缺席）。
+ */
+import { useEffect, useRef, useState } from 'react';
+import { fetchCmsStatus, fetchCmsTasks, fetchCmsTask, probeCmsAvailable } from './cms-api.js';
+
+const POLL_MS = 3000;
+const MAX_PENDING_RUNTIME_TASKS = 50;
+const MAX_RUNTIME_RETRY_MS = 30000;
+// 只盯 switch：唯一会打断当前对话的任务类型。enable/disable/set_default
+// 由发起方（商店 run 日志 / MCP 应答）自行呈现结果，维护窗不掺和。
+const WATCHED_KINDS = ['switch'];
+
+/**
+ * @param {{ onTaskSettled?: (task: object) => void, onActiveChanged?: (card: string) => void, onTaskObserved?: (task: object) => void, onRuntimeTasksSucceeded?: (tasks: object[]) => Promise<{confirmed: string[], superseded: string[], irrelevant: string[]}> }} opts -
+ *   任务终结回调 + 默认模型（活跃指针）变化回调。
+ * @returns {{ cmsAvailable: boolean|null, activeTask: import('./CmsdTaskModal.jsx').CmsdTask|null, settledTask: import('./CmsdTaskModal.jsx').CmsdTask|null, dismissSettled: () => void }}
+ */
+export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserved, onRuntimeTasksSucceeded } = {}) {
+  const [cmsAvailable, setCmsAvailable] = useState(/** @type {boolean|null} */ (null));
+  const [activeTask, setActiveTask] = useState(null);
+  const [recoveredActiveTask, setRecoveredActiveTask] = useState(null);
+  const [settledTask, setSettledTask] = useState(null);
+  const [hiddenTaskId, setHiddenTaskId] = useState(null);
+  const settledRef = useRef(new Set());
+  // r14 R3：观察回调按 (id, status) 迁移触发。终结任务在公开索引里可长期
+  // 可见（索引返回最新 20 条，实际淘汰要等 100 条 prune），若每 tick 都重放
+  // succeeded 观察，消费方的 reconcileRoutes → refreshStoreRoutes(fresh) 会
+  // 无限重跑（docker ps + sqlite + cmsd HTTP，安静设备上永不停止）。
+  const observedStatusRef = useRef(new Map());
+  // These are fact confirmations, not executable task receipts. Keep observed
+  // unknowns outside the latest-20 index; one batch read per retry confirms all.
+  const runtimeSettledRef = useRef(new Set());
+  const runtimePendingRef = useRef(new Map());
+  const runtimeCursorRef = useRef(0);
+  const runtimeRetryRef = useRef({ after: 0, delay: POLL_MS });
+  const runtimeCallbackRef = useRef(onRuntimeTasksSucceeded);
+  runtimeCallbackRef.current = onRuntimeTasksSucceeded;
+  // 首轮基线：已在终结态的历史任务只登记不回调——否则每次启动都把昨天的
+  // 失败/成功重放成弹窗（真机实证：启动后弹出昨天 failtest 的熔断失败卡）。
+  const firstPollDoneRef = useRef(false);
+  const callbackRef = useRef(onTaskSettled);
+  callbackRef.current = onTaskSettled;
+  const activeCallbackRef = useRef(onActiveChanged);
+  activeCallbackRef.current = onActiveChanged;
+  const observedCallbackRef = useRef(onTaskObserved);
+  observedCallbackRef.current = onTaskObserved;
+  // 活跃指针基线：首轮记录不回溯（不在场的变化不追），之后每次变化跟一次
+  //（跟完用户再手选是用户的自由，不强制回压）。
+  const lastActiveRef = useRef(null);
+
+  useEffect(() => {
+    let alive = true;
+    const probe = () => { void probeCmsAvailable().then(ok => { if (alive) setCmsAvailable(ok); }); };
+    probe();
+    const timer = setInterval(probe, 15000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    if (cmsAvailable !== true) return undefined;
+    let alive = true;
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetchCmsTasks().catch(() => ({ available: false }));
+        if (!alive) return;
+        // r12 P2-8：cmsd 不可用且无待恢复运行时清空活动任务——否则任务弹窗
+        // 无限停留在「切换中」，cmsd 不恢复就永远无法关闭。
+        if (!res?.available && !runtimePendingRef.current.size) {
+          setActiveTask(null);
+          return;
+        }
+        if (res?.available) setCmsAvailable(true);
+        const tasks = Array.isArray(res.data?.tasks) ? res.data.tasks : [];
+        const running = tasks.find(
+          (task) => task && task.status === 'running' && WATCHED_KINDS.includes(task.kind)
+        ) || null;
+        if (res?.available) setActiveTask(running);
+        // 终结检测：running 集合里没有了的被跟踪任务 → 找它的最新记录回调一次。
+        // 首轮只建基线不回调（历史终结任务登记为已见）。
+        const isFirstPoll = !firstPollDoneRef.current;
+        // A first-poll terminal enable also needs a fresh current-fact baseline:
+        // startup's scan may predate its success. Never replay its UI/selection.
+        for (const task of tasks) {
+          if (!task?.id) continue;
+          if (task.kind === 'enable') {
+            if (['failed', 'cancelled'].includes(task.status)) {
+              runtimePendingRef.current.delete(task.id); runtimeSettledRef.current.add(task.id);
+            }
+            if (task.status === 'succeeded' && !runtimeSettledRef.current.has(task.id)
+              && (runtimePendingRef.current.has(task.id) || runtimePendingRef.current.size < MAX_PENDING_RUNTIME_TASKS)) {
+              runtimePendingRef.current.set(task.id, task);
+            }
+            continue;
+          }
+          if (!WATCHED_KINDS.includes(task.kind)) continue;
+          if (observedStatusRef.current.get(task.id) !== task.status) {
+            observedStatusRef.current.set(task.id, task.status);
+            observedCallbackRef.current?.(task);
+          }
+          if (task.status === 'running') continue;
+          if (settledRef.current.has(task.id)) continue;
+          settledRef.current.add(task.id);
+          if (isFirstPoll) continue;
+          setSettledTask(task);
+          callbackRef.current?.(task);
+        }
+        if (runtimePendingRef.current.size && runtimeCallbackRef.current
+          && Date.now() >= runtimeRetryRef.current.after) {
+          const retryDelay = runtimeRetryRef.current.delay;
+          try {
+            // Tick's inFlight gate serializes this single batch read. There is
+            // no expiry that turns unknown into success; failures back off.
+            // Known accepted IDs survive omission from the public index. At
+            // most eight exact details are queried serially per retry pass.
+            const unresolved = [...runtimePendingRef.current.values()].filter(task => task.status !== 'succeeded');
+            const count = Math.min(8, unresolved.length);
+            for (let index = 0; index < count; index++) {
+              const task = unresolved[(runtimeCursorRef.current + index) % unresolved.length];
+              try {
+                const detail = await fetchCmsTask(task.id);
+                if (!alive) return;
+                if (detail?.available !== true || detail.data?.id !== task.id || detail.data?.kind !== 'enable') continue;
+                if (['failed', 'cancelled'].includes(detail.data.status)) {
+                  runtimePendingRef.current.delete(task.id); runtimeSettledRef.current.add(task.id);
+                } else runtimePendingRef.current.set(task.id, detail.data);
+              } catch { /* Unknown is retained; another ID can still complete. */ }
+            }
+            runtimeCursorRef.current = unresolved.length ? (runtimeCursorRef.current + count) % unresolved.length : 0;
+            const succeeded = [...runtimePendingRef.current.values()].filter(task => task.status === 'succeeded');
+            const result = succeeded.length ? await runtimeCallbackRef.current(succeeded) : null;
+            for (const id of [...(result?.confirmed || []), ...(result?.superseded || []), ...(result?.irrelevant || [])]) {
+              if (runtimePendingRef.current.delete(id)) runtimeSettledRef.current.add(id);
+            }
+            runtimeRetryRef.current.delay = runtimePendingRef.current.size
+              ? Math.min(MAX_RUNTIME_RETRY_MS, runtimeRetryRef.current.delay * 2) : POLL_MS;
+          } catch (error) {
+            console.warn('[megacube] runtime facts pending', error);
+            runtimeRetryRef.current.delay = Math.min(MAX_RUNTIME_RETRY_MS, runtimeRetryRef.current.delay * 2);
+          }
+          runtimeRetryRef.current.after = Date.now() + retryDelay;
+        }
+        const indexedIds = new Set(tasks.map(task => task?.id));
+        for (const id of runtimeSettledRef.current) {
+          if (!indexedIds.has(id)) runtimeSettledRef.current.delete(id);
+        }
+        for (const id of observedStatusRef.current.keys()) {
+          if (!indexedIds.has(id)) observedStatusRef.current.delete(id);
+        }
+        if (res?.available) firstPollDoneRef.current = true;
+        // 活跃指针跟随（set_default 这类无任务长操作的唯一可见通道）
+        const statusRes = await fetchCmsStatus();
+        if (alive && statusRes?.available) {
+          const current = statusRes.data?.active_model || null;
+          if (lastActiveRef.current === null) {
+            lastActiveRef.current = current ?? '';
+          } else if ((current ?? '') !== lastActiveRef.current) {
+            lastActiveRef.current = current ?? '';
+            if (current) activeCallbackRef.current?.(current);
+          }
+        }
+      } catch (error) {
+        console.warn('[megacube] 任务轮询失败：', error);
+      } finally {
+        inFlight = false;
+      }
+    };
+    tick();
+    const timer = setInterval(tick, POLL_MS);
+    return () => { alive = false; clearInterval(timer); };
+  }, [cmsAvailable]);
+
+  const observeAcceptedRuntimeTask = task => {
+    if (task?.kind !== 'enable' || !task.id || runtimeSettledRef.current.has(task.id)) return;
+    if (['failed', 'cancelled'].includes(task.status)) {
+      runtimePendingRef.current.delete(task.id); runtimeSettledRef.current.add(task.id); return true;
+    }
+    if (runtimePendingRef.current.has(task.id) || runtimePendingRef.current.size < MAX_PENDING_RUNTIME_TASKS) {
+      runtimePendingRef.current.set(task.id, task);
+      return true;
+    }
+    console.warn('[megacube] runtime confirmation queue full; task remains unconfirmed', task.id);
+    return false;
+  };
+  const currentTask = activeTask || recoveredActiveTask;
+  // Details of an accepted receipt may be older than the public index. Running
+  // work keeps the normal backgroundable overlay; old terminal work must never
+  // replay the completion dialog or the first-poll history callbacks.
+  const observeRecoveredTask = task => {
+    if (task?.kind !== 'switch') return;
+    if (task.status === 'running') setRecoveredActiveTask(task);
+    else if (['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+      setRecoveredActiveTask(current => current?.id === task.id ? null : current);
+    }
+  };
+  const dismissSettled = () => { setSettledTask(null); if (currentTask) setHiddenTaskId(currentTask.id); };
+  return { cmsAvailable, activeTask: currentTask?.id === hiddenTaskId ? null : currentTask, settledTask, dismissSettled, observeRecoveredTask, observeAcceptedRuntimeTask };
+}

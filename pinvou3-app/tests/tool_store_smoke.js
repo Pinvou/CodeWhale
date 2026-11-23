@@ -60,7 +60,10 @@ function injectSource() {
       // visibility:system go to the read-only "builtin plugins" subpage, not
       // the regular card flow; the audit fields (tool list/security level/
       // data access/bundle version) ride along in list_marketplace_tools.
-      .concat([{id:'session-reader',name:'会话读取',description:'只读读取本机其他会话',version:'1.0.0',icon:'',category:'test',installed:true,companion_skills:[],builtin:true,visibility:'system',security_level:'L0',data_access:['sessions.read'],mcp_tools:['mcp_session-reader_read_session','mcp_session-reader_list_sessions'],bundle_version:'8.8.8'}]);
+      .concat([{id:'session-reader',name:'会话读取',description:'只读读取本机其他会话',version:'1.0.0',icon:'',category:'test',installed:true,companion_skills:[],builtin:true,visibility:'system',security_level:'L0',data_access:['sessions.read'],mcp_tools:['mcp_session-reader_read_session','mcp_session-reader_list_sessions'],bundle_version:'8.8.8'}])
+      // MegaCube 管理面内置条目（目录下发形态；socket 条件过滤是后端的事，
+      // 前端只按 builtin+system 渲染）
+      .concat([{id:'megacube-admin',name:'MegaCube 模型服务',description:'管理本机 MegaCube 模型服务',version:'1.0.0',icon:'',category:'系统',installed:false,companion_skills:[],builtin:true,visibility:'system',security_level:'L1',data_access:['models.manage','network.download'],mcp_tools:['mcp_megacube_admin_cube_get_status','mcp_megacube_admin_cube_install_model'],bundle_version:'9.9.9'}]);
     const skills=()=>[
       // companion 技能安装态 = 所属 MCP 已装 或 技能独立已装（G3 混合态）。
       {id:'government-writing',title:'党政机关公文写作',installed:!!(state.installed.gongwen||state.skills['government-writing']),user_uploaded:false},
@@ -177,7 +180,7 @@ function injectSource() {
           }
           // Builtin plugins: no actions (the read-only subpage does not
           // consume readiness; batch lookups must not error on it either).
-          if(id==='session-reader'){
+          if(id==='session-reader'||id==='megacube-admin'){
             return Promise.resolve(mk(true,true,null,[]));
           }
           if(id==='government-writing'){
@@ -884,6 +887,7 @@ async function visibilityBox(page, cardText, modeLabel, click) {
     const cards=[...list.querySelectorAll('[data-testid="builtin-plugin-card"]')];
     const text=c=>(c&&(c.textContent||''))||'';
     const sr=cards.find(c=>c.getAttribute('data-tool-id')==='session-reader');
+    const mc=cards.find(c=>c.getAttribute('data-tool-id')==='megacube-admin');
     return {
       list:true,
       sr:!!sr,
@@ -892,6 +896,16 @@ async function visibilityBox(page, cardText, modeLabel, click) {
       level:text(sr).includes('L0'),
       version:text(sr).includes('v8.8.8'),
       access:text(sr).includes('本机会话存储（只读）'),
+      // MegaCube 内置条目：标题走 uiToolDetails 三语 overlay，安全级别/工具
+      // 清单/数据访问 scope 芯片按后端下发渲染
+      mc:!!mc,
+      mcTitle:text(mc).includes('MegaCube 模型服务'),
+      mcBadge:text(mc).includes('内置 · 始终启用'),
+      mcTools:text(mc).includes('cube_get_status')&&text(mc).includes('cube_install_model'),
+      mcLevel:text(mc).includes('L1'),
+      mcVersion:text(mc).includes('v9.9.9'),
+      mcAccess:text(mc).includes('本机模型服务')&&text(mc).includes('联网下载'),
+      mcNoAction:!!mc&&mc.querySelector('button')===null,
       // Read-only: the card carries no buttons at all (no uninstall/toggle/
       // configure actions).
       noAction:!!sr&&sr.querySelector('button')===null,
@@ -905,6 +919,9 @@ async function visibilityBox(page, cardText, modeLabel, click) {
   rec('builtin subpage card fields (badge/tool list/security level/version/data access/read-only without buttons)',
     builtinPage.list&&builtinPage.sr&&builtinPage.badge&&builtinPage.tools&&builtinPage.level&&builtinPage.version&&builtinPage.access&&builtinPage.noAction&&builtinPage.skill,
     builtinPage.list?'':JSON.stringify(builtinPage));
+  rec('builtin subpage shows megacube-admin (localized title/L1/tool list/data access/version/no buttons)',
+    builtinPage.mc&&builtinPage.mcTitle&&builtinPage.mcBadge&&builtinPage.mcTools&&builtinPage.mcLevel&&builtinPage.mcVersion&&builtinPage.mcAccess&&builtinPage.mcNoAction,
+    JSON.stringify(builtinPage));
   rec('builtin subpage mode-controlled skill badge agrees with the store card',
     !!builtinPage.skillCardText&&builtinPage.skillCardText.includes('内置 · 受模式控制')&&!builtinPage.skillCardText.includes('内置 · 始终启用'),
     builtinPage.skillCardText===null?'card missing':builtinPage.skillCardText);

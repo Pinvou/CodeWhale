@@ -48,10 +48,9 @@ fn connection() -> Result<rusqlite::Connection, String> {
     Ok(conn)
 }
 
-/// Shared holders retain references throughout preparation, download, deployment
-/// and enablement, including queue waits: scripts may create shared resources at
-/// any of those stages. Destructive operations wait for those holders rather
-/// than failing immediately; all waiting is cancellable before any mutation.
+/// Preparation, downloads, queue waits and enablement hold shared references.
+/// Deployment, local installation, updates and removal hold the exclusive lock.
+/// Conflicting operations wait with cancellation before any resource mutation.
 fn operation_lock_file(name: &str) -> Result<std::fs::File, String> {
     let root = super::config::data_dir();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
@@ -83,7 +82,8 @@ pub(super) fn try_exclusive_resource_operation_lock() -> Result<std::fs::File, S
     }
 }
 
-#[cfg(test)]
+/// Try once for local import and best-effort startup refresh; queued tasks
+/// use the cancellable waiting variant below.
 pub fn resource_operation_lock(exclusive: bool) -> Result<std::fs::File, String> {
     let lock = operation_lock_file("version-operations.lock")?;
     try_resource_lock(&lock, exclusive).map_err(|e| e.to_string())?;

@@ -1,0 +1,24 @@
+[Unit]
+Description=Cube Manage Software daemon (MegaCube model service manager)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cmsd
+# Required: CMSD_RUN_USER, PINVOU3_HOME, CMSD_ENGINE_ROOT. Never infer the
+# desktop user's paths or model service account from root's HOME/USER.
+EnvironmentFile=/etc/megacube/cmsd.env
+Group=megacube
+RuntimeDirectory=megacube
+RuntimeDirectoryMode=0770
+StateDirectory=megacube
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=2
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

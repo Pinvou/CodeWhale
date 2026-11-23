@@ -180,6 +180,8 @@ function taskSubtitle(task, copy) {
   // 用户会以为是出错了。
   if (task.status === 'cancelled') return copy.taskCancelled;
   if (task.status === 'cancelling') return copy.taskCancelling;
+  if (task.unconfirmed) return copy.taskBackendUnconfirmed;
+  if (task.status === 'running' && task.backendPending) return copy.taskBackendPending;
   if (task.prompt) return copy.taskWaitingInput;
   const view = taskProgressView(task);
   if (view?.awaitingCompletion) return copy.taskAwaitingCompletion;
@@ -350,19 +352,15 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         {task.status === 'running' ? <Spinner size={14} tone="brand" className="mt-1" /> : null}
         <div className="min-w-0 flex-1">
           <div className={`truncate text-[13px] font-medium ${TEXT_PRIMARY}`}>{task.title}</div>
-          {/* 终态失败、以及「还在跑但有错要说」的情况，都走这一条红字。
-              后者是取消/作答的 IPC 自己失败时回灌的：任务其实还在跑、状态是
-              running，但用户必须看见「取消没有生效」，否则按钮恢复可点却不知道
-              为什么。原先只判 isError，那条错误写进了 state 却没有任何出口。
-
-              渲染的必须是 `errorText` 而不是 `task.error`：上面那三处回灌只写
-              `errorKey`/`errorDetail`，`task.error` 此刻就是 `createTask` 给的
-              `null`。条件判 errorText、渲染体取 task.error 的话这里是一次
-              `null.split`，被 main.jsx 的 ViewErrorBoundary 兜住之后**整个模型
-              商店视图**会被替换成「页面加载失败」。守卫见
-              tests/model_store_task_panel_render.test.mjs。 */}
+          {/* 终态失败、以及「还在跑但有错要说」（取消/作答 IPC 失败回灌）的
+              情况都走这一条红字；errorTruncated 时补一行摘要说明。 */}
           {errorText ? (
-            <div data-testid="model-store-task-error" className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
+            <>
+              <div data-testid="model-store-task-error" className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
+              {task.errorTruncated ? (
+                <div className={`mt-0.5 text-[11px] ${TEXT_SECONDARY}`}>{copy.taskErrorSummarized}</div>
+              ) : null}
+            </>
           ) : (
             <div className={`mt-0.5 truncate text-[11px] ${TEXT_SECONDARY}`}>{taskSubtitle(task, copy)}</div>
           )}
@@ -377,6 +375,8 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           <ChevronIcon size={14} />
         </button>
       </div>
+
+      {task.cancelError && !isTerminal ? <p role="alert" className={`mx-4 mt-2 break-words text-[11px] ${TEXT_DANGER}`}>{copy.taskCancelUnconfirmed} {task.cancelError}</p> : null}
 
       {view === null || isTerminal ? null : (
         <div className="mt-2 px-4">
@@ -451,7 +451,10 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
             data-testid="model-store-task-log"
             className="h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-[#202124] p-2.5 text-[11px] leading-4 text-[#E3E3E3] dark:bg-[#131314]"
           >
-            {logText || copy.taskNoOutput}
+            {[
+              ...(task.historyTruncated ? [copy.taskLogRetained] : []),
+              ...(logText ? logText.split('\n') : []),
+            ].join('\n') || copy.taskNoOutput}
           </pre>
         </div>
       ) : null}

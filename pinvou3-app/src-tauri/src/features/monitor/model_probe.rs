@@ -3714,6 +3714,7 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
     fn keyless_declaration_suppresses_monitor_probe_key() {
         let (_lock, _env) = crate::platform::test_support::locked_env(&["DEEPSEEK_API_KEY"]);
         let mut model = SavedModel {
+            store_card_id: None,
             auth_mode: None,
             id: "keyless-monitor-model".into(),
             name: "keyless monitor model".into(),

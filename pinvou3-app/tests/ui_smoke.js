@@ -123,7 +123,18 @@ function injectSource() {
         // the capability to false (fail-closed) until the snapshot lands, so
         // a missing key silently gates the knowledge download/repair UI.
         case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true,browserNativeDisplay:true,localModelSetup:true,localEmbedSupported:true,dependencyInstall:true});
-        case 'get_effective_model_config': return Promise.resolve({model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
+        case 'get_effective_model_config': return Promise.resolve(window.__EFFECTIVE_MODEL_CONFIG__ || {model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
+        // Idle local services do not matter to cloud chat. Explicit local
+        // selection failures still need their own actionable warning.
+        case 'cms_device_status': return Promise.resolve({supported:true,detected:true,hardware:{state:'compatible'}});
+        case 'cms_service_status': return Promise.resolve({supported:true,installed:true,recoveryScope:'a'.repeat(64)});
+        case 'cms_status': return Promise.resolve({available:true,data:{}});
+        case 'cms_models': return Promise.resolve({available:true,data:{models:[]}});
+        case 'cms_tasks': return Promise.resolve({available:true,data:{tasks:[]}});
+        case 'discover_local_vllm': return Promise.resolve({candidates:window.__LOCAL_DISCOVERY_CANDIDATES__ || []});
+        case 'test_model_connection':
+          if(window.__DEFER_MODEL_CONNECTION__) return new Promise(resolve=>window.__PENDING_MODEL_CONNECTIONS__.push(resolve));
+          return Promise.resolve(window.__MODEL_CONNECTION_RESULT__ || {ok:true,code:'ok'});
         case 'list_models': return window.__MODEL_LIST_ERROR__ ? Promise.reject(new Error('temporary model catalog failure')) : Promise.resolve(window.__MODEL_CATALOG__ || {models:[],active_model_id:null});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
@@ -358,6 +369,130 @@ async function expand(page) {
       && visualShell.backgroundColor !== 'rgba(0, 0, 0, 0)',
     JSON.stringify(visualShell),
   );
+
+  const { modelAccessCopy } = await import('../src/shared/model-access-i18n.js');
+  const modelServiceNotices = await page.evaluate(async (copy) => {
+    const bridge = window.TauriBridge;
+    const hasBanner = () => !!document.querySelector('[data-testid="model-guidance"]');
+    const accessPrompt = () => document.querySelector('[data-testid="model-access-gate"], [data-testid="model-access-notice"]');
+    const previousCatalog = window.__MODEL_CATALOG__;
+    const result = { localChatClear: !hasBanner() && !accessPrompt() };
+    try {
+      const modelRef = { source: 'LOCAL_CONFIG', saved_model_id: 'cloud-smoke' };
+      window.__EFFECTIVE_MODEL_CONFIG__ = {
+        preset: 'openai_compatible', model: 'cloud-example',
+        base_url: 'https://api.example.test/v1', credential_state: 'configured',
+        model_ref: modelRef,
+      };
+      window.__MODEL_CATALOG__ = {
+        models: [{ id: 'cloud-smoke', ...window.__EFFECTIVE_MODEL_CONFIG__ }],
+        active_model_id: 'cloud-smoke', default_model_ref: modelRef,
+      };
+      await bridge.models.loadModels();
+      await bridge.models.loadSessionModel(null);
+      await window.__uiStable__(() => document.body.innerText);
+      result.cloudChatClear = !hasBanner() && !accessPrompt();
+      for (const credentialState of ['missing', 'unavailable']) {
+        window.__EFFECTIVE_MODEL_CONFIG__.credential_state = credentialState;
+        window.__MODEL_CATALOG__.models[0].credential_state = credentialState;
+        await bridge.models.loadModels();
+        await bridge.models.loadSessionModel(null);
+        // The updated parent presents credential failures as a nonblocking
+        // notice. Pin the current model's specific reason and recovery action.
+        result[credentialState] = await window.__uiWait__(() => {
+          const prompt = accessPrompt();
+          return prompt?.textContent.includes(copy.titles['credential_' + credentialState])
+            && !!prompt.querySelector('[data-testid="model-access-external"]')
+            && (credentialState !== 'unavailable' || !!prompt.querySelector('[data-testid="model-access-retry"]'));
+        });
+        result[credentialState + 'WithoutBanner'] = !hasBanner();
+      }
+      result.noAutomaticLocalDiscovery = !window.__TAURI_INVOKES__
+        .some(call => call.cmd === 'discover_local_vllm');
+    } finally {
+      delete window.__EFFECTIVE_MODEL_CONFIG__;
+      if (previousCatalog === undefined) delete window.__MODEL_CATALOG__;
+      else window.__MODEL_CATALOG__ = previousCatalog;
+      await bridge.models.loadModels();
+      await bridge.models.loadSessionModel(null);
+      result.localRestored = await window.__uiWait__(() => !accessPrompt() && !hasBanner());
+    }
+    return result;
+  }, modelAccessCopy.zh);
+  rec(
+    '云端聊天无本地服务横幅，凭据缺失或不可读仍显示准确接入提示与恢复操作',
+    Object.values(modelServiceNotices).every(Boolean),
+    JSON.stringify(modelServiceNotices),
+  );
+
+  const { CMS_MODEL_GUIDANCE_COPY } = await import('../src/shared/i18n/cms-model-guidance.js');
+  const localModelFailure = await page.evaluate(async (copy) => {
+    const bridge = window.TauriBridge;
+    const previousCatalog = window.__MODEL_CATALOG__;
+    const previousConfig = window.__EFFECTIVE_MODEL_CONFIG__;
+    const banner = () => document.querySelector('[data-testid="model-guidance"]');
+    const select = async (id, baseUrl) => {
+      const modelRef = { source: 'LOCAL_CONFIG', saved_model_id: id };
+      window.__EFFECTIVE_MODEL_CONFIG__ = {
+        preset: 'openai_compatible', model: 'selected-local-example', base_url: baseUrl,
+        credential_state: 'configured', model_ref: modelRef,
+      };
+      window.__MODEL_CATALOG__ = {
+        models: [{ id, name: id, ...window.__EFFECTIVE_MODEL_CONFIG__ }],
+        active_model_id: id, default_model_ref: modelRef,
+      };
+      await bridge.models.loadModels();
+      await bridge.models.loadSessionModel(null);
+    };
+    const result = {};
+    try {
+      window.__MODEL_CONNECTION_RESULT__ = { ok: false, code: 'server_unavailable', http_status: 503 };
+      await select('failing-local', 'http://127.0.0.1:8000/v1');
+      result.failureVisible = await window.__uiWait__(() => banner()?.textContent.includes(copy.titles.connectionUnavailable));
+      result.noGenericReminder = !banner()?.textContent.includes(copy.titles.recover);
+      result.noUnrelatedStart = !banner()?.textContent.includes(copy.tryDefault);
+      window.__MODEL_CONNECTION_RESULT__ = { ok: true, code: 'ok' };
+      window.__LOCAL_DISCOVERY_CANDIDATES__ = [{
+        base_url: 'http://127.0.0.1:8000/v1',
+        models: [{ id: 'selected-local-example', loaded: true }],
+      }];
+      banner()?.querySelector('summary')?.click();
+      [...(banner()?.querySelectorAll('button') || [])].find(button => button.textContent === copy.refresh)?.click();
+      result.recoveryHidesWarning = await window.__uiWait__(() => !banner());
+
+      // A late result from the previous local selection must not appear after
+      // switching to cloud, even when the local probe actually failed.
+      window.__PENDING_MODEL_CONNECTIONS__ = [];
+      window.__DEFER_MODEL_CONNECTION__ = true;
+      await select('pending-local', 'http://127.0.0.1:18080/v1');
+      result.localProbeStarted = await window.__uiWait__(() => window.__PENDING_MODEL_CONNECTIONS__.length > 0);
+      await select('cloud-after-local', 'https://api.example.test/v1');
+      window.__DEFER_MODEL_CONNECTION__ = false;
+      for (const resolve of window.__PENDING_MODEL_CONNECTIONS__.splice(0)) resolve({ ok: false, code: 'connection_refused' });
+      result.cloudClear = await window.__uiWait__(() => !banner());
+      let lateWarning = false;
+      for (let tick = 0; tick < 15; tick++) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        if (banner()) lateWarning = true;
+      }
+      result.lateFailureIgnored = !lateWarning;
+    } finally {
+      window.__DEFER_MODEL_CONNECTION__ = false;
+      for (const resolve of window.__PENDING_MODEL_CONNECTIONS__ || []) resolve({ ok: true, code: 'ok' });
+      delete window.__PENDING_MODEL_CONNECTIONS__;
+      delete window.__MODEL_CONNECTION_RESULT__;
+      delete window.__LOCAL_DISCOVERY_CANDIDATES__;
+      if (previousConfig === undefined) delete window.__EFFECTIVE_MODEL_CONFIG__;
+      else window.__EFFECTIVE_MODEL_CONFIG__ = previousConfig;
+      if (previousCatalog === undefined) delete window.__MODEL_CATALOG__;
+      else window.__MODEL_CATALOG__ = previousCatalog;
+      await bridge.models.loadModels();
+      await bridge.models.loadSessionModel(null);
+    }
+    return result;
+  }, CMS_MODEL_GUIDANCE_COPY.zh);
+  rec('当前本地模型连接失败显示横幅，恢复或切换云端后隐藏且忽略迟到结果',
+    Object.values(localModelFailure).every(Boolean), JSON.stringify(localModelFailure));
 
   const searchOverlayFirstOpen = await page.evaluate(async () => {
     const trigger = [...document.querySelectorAll('[aria-label], [title]')]

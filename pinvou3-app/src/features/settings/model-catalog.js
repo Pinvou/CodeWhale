@@ -2014,15 +2014,38 @@ function localUserNamed(m, localModelNameFn) {
   return !defaults.has(m.name);
 }
 
+/**
+ * 自定义行的名字是不是被改成过「真显示名」：存在、不是通用兜底（供应商
+ * 标签，如「OpenAI 兼容」）、且不是预设命中行（预设行命名另有规则）。
+ * 为真时选择器主标签用 name 而不是 wire id——wire id 可能是引擎自报的
+ * 容器内路径（/models/target），不是人看的名字；卡片身份标记被旧版品悟
+ * 回写剥掉时（store_card_id 是后加字段，旧版 serde 回写即丢，真机实证
+ * 2026-10-16）显示也不退化。
+ * local_vllm 行不适用：本地行的默认名是各语言「本地 <model>」系列，
+ * 跨语言判重由 localUserNamed 分支专门处理，这里不能误判成真显示名。
+ * @param {object} m 模型行。
+ * @param {object} t i18n 词典。
+ * @returns {boolean}
+ */
+function customUserNamed(m, t) {
+  if (!m || !m.name || m.preset === 'local_vllm' || isPresetModel(m)) return false;
+  return m.name !== providerLabelForModel(m, t);
+}
+
 function selectorMainLabel(m, t) {
   if (!m) return '';
   const alias = m.preset === 'local_vllm' ? '' : String(m.alias || '').trim();
   if (alias) return alias;
+  // 商店接入行（带卡片身份标记）：显示名带引擎变体（「本地 · Qwen3.8-27B
+  // (NVFP4 · 驭光)」），同名模型多引擎供应时按它区分。wire 模型名不动
+  //（D0：既有直连客户端的兼容性不破）。
+  if (m.store_card_id && m.name) return m.name;
   const localModelNameFn = t && t.uiSettingsDetail && t.uiSettingsDetail.localModelName;
   if (localUserNamed(m, localModelNameFn)) return m.name;
   if (m.preset === 'local_vllm' && isPresetModel(m) && typeof localModelNameFn === 'function') {
     return localModelNameFn(m.model);
   }
+  if (customUserNamed(m, t)) return m.name;
   return isPresetModel(m) ? (m.name || m.model) : (m.model || m.name);
 }
 
@@ -2031,6 +2054,7 @@ function selectorSubLabel(m, t) {
   if (m.preset !== 'local_vllm' && String(m.alias || '').trim()) return m.model || m.name || '';
   const localModelNameFn = t && t.uiSettingsDetail && t.uiSettingsDetail.localModelName;
   if (localUserNamed(m, localModelNameFn)) return m.model;   // 主=name -> 副=model
+  if (customUserNamed(m, t)) return m.model;                 // 主=name -> 副=model
   if (isPresetModel(m)) return providerLabelForModel(m, t);  // 主=name/title -> 副=provider 归属
   // 自定义:主=model -> 副=provider 归属
   if (m.preset === 'local_vllm') return localModelNameFn ? localModelNameFn(m.model) : m.model;

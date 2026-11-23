@@ -65,6 +65,10 @@ enum ScriptsSource {
         blobs: BTreeMap<String, Blob>,
         assets: BTreeMap<String, String>,
     },
+    // 合并同步（r23）：PR 侧 ScriptsSource 新增的「已物化本地卡片目录」形态。
+    // prepare() 正文逐字编译，其 `if let Self::LocalDir { dir, .. }` 臂只读
+    // dir 并做 is_file/元数据检查——夹具提供目录形状即可，不参与本夹具断言。
+    LocalDir { dir: PathBuf },
     Unavailable,
 }
 struct PreparedScript {

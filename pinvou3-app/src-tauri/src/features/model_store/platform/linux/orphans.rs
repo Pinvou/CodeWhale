@@ -34,6 +34,8 @@ pub(super) use recovery::is_recovery_blocked;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub pid: i32,
     /// 进程组号。非 root 脚本由 script_runner 建成独立进程组（pgid == pid），
     /// 脚本自己 fork 出来的孙子进程（curl/hf/docker…）都在这个组里。
@@ -158,7 +160,7 @@ impl RunGuard {
 
     #[cfg(test)]
     pub fn register(pid: i32, need_root: bool, label: &str) -> Self {
-        Self::register_for_card(pid, need_root, label, None)
+        Self::register_association(pid, need_root, label, None, None)
     }
 
     pub fn register_for_card(
@@ -167,6 +169,25 @@ impl RunGuard {
         label: &str,
         card_id: Option<&str>,
     ) -> Self {
+        Self::register_association(pid, need_root, label, card_id, None)
+    }
+
+    pub fn register_with_run_id(
+        pid: i32,
+        need_root: bool,
+        label: &str,
+        run_id: Option<&str>,
+    ) -> Self {
+        Self::register_association(pid, need_root, label, None, run_id)
+    }
+
+    pub fn register_association(
+        pid: i32,
+        need_root: bool,
+        label: &str,
+        card_id: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Self {
         let _lk = lock();
         if let Some((pgid, starttime)) = proc_stat(pid) {
             let app_pid = std::process::id() as i32;
@@ -174,6 +195,7 @@ impl RunGuard {
             let mut records = load_unlocked();
             records.retain(|r| r.pid != pid);
             records.push(RunRecord {
+                run_id: run_id.map(str::to_owned),
                 pid,
                 pgid,
                 boot_id: read_boot_id(),
@@ -188,6 +210,61 @@ impl RunGuard {
         }
         Self { pid, keep: false }
     }
+}
+
+/// Read-only retry admission. A terminal task can still have a privileged
+/// installer alive. Old records lacking a run association cannot prove that an
+/// active script belongs to another installation, so they block retry too.
+pub(super) fn ensure_run_quiet(run_id: &str) -> Result<(), String> {
+    ensure_quiet(Some(run_id))
+}
+pub(super) fn ensure_host_quiet() -> Result<(), String> {
+    ensure_quiet(None)
+}
+fn ensure_quiet(run_id: Option<&str>) -> Result<(), String> {
+    let _lock = lock();
+    let path = record_file();
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("installation_process_evidence_unavailable".into()),
+    };
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err("installation_process_evidence_unavailable".into());
+    }
+    let bytes = fs::read(path).map_err(|_| "installation_process_evidence_unavailable")?;
+    let records: Vec<RunRecord> =
+        serde_json::from_slice(&bytes).map_err(|_| "installation_process_evidence_unavailable")?;
+    let boot = read_boot_id();
+    if boot.is_empty() {
+        return Err("installation_process_evidence_unavailable".into());
+    }
+    for record in records {
+        if run_id
+            .is_some_and(|requested| record.run_id.as_deref().is_some_and(|id| id != requested))
+        {
+            continue;
+        }
+        if record.boot_id.is_empty() {
+            return Err("installation_process_evidence_unavailable".into());
+        }
+        if record.boot_id != boot {
+            continue;
+        }
+        if record.pid <= 0 || record.starttime == 0 {
+            return Err("installation_process_evidence_unavailable".into());
+        }
+        match proc_stat(record.pid) {
+            Some((_, start)) if start == record.starttime => {
+                return Err("installation_process_still_alive".into());
+            }
+            None if std::path::Path::new(&format!("/proc/{}", record.pid)).exists() => {
+                return Err("installation_process_evidence_unavailable".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 impl Drop for RunGuard {
@@ -596,6 +673,7 @@ mod tests {
             let (pgid, starttime) = proc_stat(pid).unwrap();
             // 机器重启过：boot_id 对不上，这个 pid 现在属于谁都不知道，绝不能杀
             store_unlocked(&[RunRecord {
+                run_id: None,
                 pid,
                 pgid,
                 boot_id: "00000000-0000-0000-0000-000000000000".to_string(),
@@ -616,6 +694,53 @@ mod tests {
         });
     }
 
+    #[test]
+    fn retry_admission_tracks_the_original_installer_and_never_signals_it() {
+        with_temp_data_dir(|| {
+            let mut child = spawn_sleeper();
+            let pid = child.id() as i32;
+            let guard = RunGuard::register_with_run_id(
+                pid,
+                true,
+                "privileged-shaped test record",
+                Some("original-run"),
+            );
+            assert!(
+                ensure_run_quiet("original-run")
+                    .unwrap_err()
+                    .contains("still_alive")
+            );
+            assert!(ensure_run_quiet("other-run").is_ok());
+            let mut records = load_unlocked();
+            records[0].run_id = None;
+            store_unlocked(&records);
+            assert!(
+                ensure_run_quiet("other-run")
+                    .unwrap_err()
+                    .contains("still_alive")
+            );
+            assert!(
+                proc_stat(pid).is_some(),
+                "admission must not kill any installer"
+            );
+            records[0].starttime = records[0].starttime.saturating_sub(1);
+            store_unlocked(&records);
+            assert!(
+                ensure_run_quiet("original-run").is_ok(),
+                "PID reuse is not evidence about this installer"
+            );
+            fs::write(record_file(), b"{").unwrap();
+            assert!(
+                ensure_run_quiet("original-run")
+                    .unwrap_err()
+                    .contains("evidence_unavailable")
+            );
+            drop(guard);
+            let _ = child.0.kill();
+            let _ = child.wait();
+        });
+    }
+
     /// 用户重复点桌面图标开出第二个实例时，第二个实例不能把第一个实例正在跑
     /// 的下载杀掉——这是清理逻辑最容易误伤自己人的地方。
     #[test]
@@ -629,6 +754,7 @@ mod tests {
             let (_, owner_starttime) = proc_stat(owner_pid).unwrap();
 
             store_unlocked(&[RunRecord {
+                run_id: None,
                 pid: script_pid,
                 pgid,
                 boot_id: read_boot_id(),
@@ -665,6 +791,7 @@ mod tests {
             let (pgid, starttime) = proc_stat(pid).unwrap();
             // starttime 对不上 = 这个 pid 已经被回收给别的进程用了
             store_unlocked(&[RunRecord {
+                run_id: None,
                 pid,
                 pgid,
                 boot_id: read_boot_id(),
