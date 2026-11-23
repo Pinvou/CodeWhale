@@ -37,6 +37,14 @@ Tauri 命令按 `app/commands/<domain>.rs` 组织，`app/mod.rs` 与 `app/comman
 （`platform/path_policy.rs`）属于跨功能基础设施，位于 `platform/`；内置资源 bundle
 的解包由 `features/runtime_bundle/` 承担。
 
+## Windows 默认应用打开
+
+个人中心、授权页面和产物外链通过 `platform::os::open_target` 调用 Windows
+系统协议关联，使用默认浏览器打开网页；文件和目录交给对应的系统默认应用。
+该接口不经过命令行 shell，原样传递 URL 查询参数、片段及 Unicode 路径；
+系统拒绝打开时返回错误，错误信息不包含可能携带一次性凭据的目标 URL。
+文件管理器定位继续使用独立的 `reveal_target` 接口。
+
 ## 市场授权与生命周期的窄接口
 
 assistant 持有一次 manifest 快照并枚举技能来源，拒绝判定由
