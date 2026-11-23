@@ -3,6 +3,233 @@ use clap::Parser;
 use std::fs;
 use tempfile::TempDir;
 
+fn recovery_locator_fixture(
+    contents: &str,
+) -> (TempDir, Cli, Vec<crate::test_support::EnvVarGuard>) {
+    use crate::test_support::EnvVarGuard;
+    let directory = TempDir::new().unwrap();
+    let mut guards: Vec<_> = [
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "CODEWHALE_PROFILE",
+        "DEEPSEEK_PROFILE",
+        "CODEWHALE_BASE_URL",
+        "DEEPSEEK_BASE_URL",
+        "CODEWHALE_HTTP_HEADERS",
+        "DEEPSEEK_HTTP_HEADERS",
+        "OPENROUTER_BASE_URL",
+        codewhale_config::CLI_API_KEY_SOURCE_ENV,
+        codewhale_config::LEGACY_CLI_API_KEY_SOURCE_ENV,
+        codewhale_config::CLI_API_KEY_ENV,
+        "CODEWHALE_MANAGED_CONFIG_PATH",
+        "DEEPSEEK_MANAGED_CONFIG_PATH",
+        "CODEWHALE_REQUIREMENTS_PATH",
+        "DEEPSEEK_REQUIREMENTS_PATH",
+    ]
+    .into_iter()
+    .map(EnvVarGuard::remove)
+    .collect();
+    guards.push(EnvVarGuard::set(
+        "CODEWHALE_HOME",
+        directory.path().join("home"),
+    ));
+    let path = directory.path().join("config.toml");
+    fs::write(&path, contents).unwrap();
+    let cli = Cli::try_parse_from([
+        std::ffi::OsString::from("codewhale"),
+        "--config".into(),
+        path.into_os_string(),
+        "--workspace".into(),
+        directory.path().as_os_str().to_owned(),
+        "doctor".into(),
+        "--recovery-json".into(),
+    ])
+    .unwrap();
+    (directory, cli, guards)
+}
+
+#[test]
+fn recovery_locator_is_explicit_and_cannot_enable_probes_or_repairs() {
+    use std::cell::Cell;
+    for (args, expected) in [
+        (vec!["codewhale", "doctor"], 1),
+        (vec!["codewhale", "doctor", "--recovery-json"], 2),
+    ] {
+        let phase = Cell::new(0);
+        let (_, command) = prepare_cli_startup(
+            Cli::try_parse_from(args).unwrap(),
+            || phase.set(1),
+            || {
+                assert_eq!(phase.get(), 1);
+                phase.set(2);
+            },
+        );
+        assert_eq!(phase.get(), expected);
+        assert!(matches!(command, Some(Commands::Doctor(_))));
+    }
+    for option in [
+        "--json",
+        "--context-json",
+        "--probe-api",
+        "--probe-local",
+        "--probe-mcp",
+        "--probe-search",
+        "--check-updates",
+        "--fix",
+        "--yes",
+    ] {
+        assert!(Cli::try_parse_from(["codewhale", "doctor", "--recovery-json", option]).is_err());
+    }
+}
+
+#[test]
+fn recovery_locator_follows_fleet_without_logging_private_configuration() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tracing_subscriber::prelude::*;
+    struct CountEvents(Arc<AtomicUsize>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
+        fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let _lock = crate::test_support::lock_test_env();
+    let _ambient_source = crate::test_support::EnvVarGuard::set(
+        codewhale_config::LEGACY_CLI_API_KEY_SOURCE_ENV,
+        "cli",
+    );
+    let _ambient_key = crate::test_support::EnvVarGuard::set(
+        codewhale_config::CLI_API_KEY_ENV,
+        "fixture-ambient-cli",
+    );
+    let (directory, mut cli, _guards) = recovery_locator_fixture(
+        r#"
+provider = "openrouter"
+base_url = "https://ignored.example.invalid/private-root-canary?token=locator-url-canary"
+[providers.openrouter]
+api_key = "locator-default-key-canary"
+[providers.locator-route]
+kind = "openai-compatible"
+api_key = "locator-selected-key-canary"
+base_url = "https://locator.example.invalid/v1"
+model = "locator-model"
+"#,
+    );
+    let fleets = directory.path().join(".codewhale/fleets");
+    fs::create_dir_all(&fleets).unwrap();
+    let selection = fleets.join("selected");
+    let definition = fleets.join("locator.toml");
+    fs::write(&selection, "Locator\n").unwrap();
+    fs::write(
+        &definition,
+        r#"schema = "fleet"
+schema_revision = 2
+name = "Locator"
+[operator]
+provider = "locator-route"
+model = "locator-model"
+"#,
+    )
+    .unwrap();
+    let config_bytes = fs::read(cli.config.as_ref().unwrap()).unwrap();
+    let fleet_bytes = fs::read(&definition).unwrap();
+    let events = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(CountEvents(events.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        // This ignored-root warning really emits with the outer subscriber.
+        let mut expected = load_config_from_cli(&cli).unwrap();
+        assert!(events.load(Ordering::SeqCst) > 0);
+        let base_receipt = crate::client::recovery_receipt_location(&expected).unwrap();
+        assert!(apply_selected_fleet_operator_for_launch(
+            &mut expected, directory.path(), false, false,
+        ).unwrap());
+        assert_eq!(expected.provider.as_deref(), Some("locator-route"));
+        let selected_receipt = crate::client::recovery_receipt_location(&expected).unwrap();
+        assert_ne!(base_receipt, selected_receipt);
+        let before = events.load(Ordering::SeqCst);
+        let report = doctor_recovery_report(&cli);
+        assert_eq!(events.load(Ordering::SeqCst), before);
+        assert_eq!(report["status"], "located");
+        assert_eq!(report["receipt"], selected_receipt.to_str().unwrap());
+        for secret in [
+            "locator-default-key-canary",
+            "locator-selected-key-canary",
+            "private-root-canary",
+            "locator-url-canary",
+        ] {
+            assert!(!report.to_string().contains(secret));
+        }
+        {
+            let _provider =
+                crate::test_support::EnvVarGuard::set("CODEWHALE_PROVIDER", "openrouter");
+            assert_eq!(
+                doctor_recovery_report(&cli)["receipt"],
+                base_receipt.to_str().unwrap()
+            );
+        }
+        fs::write(
+            directory.path().join(".codewhale/config.toml"),
+            "model = 'other'\n",
+        )
+        .unwrap();
+        assert_eq!(doctor_recovery_report(&cli)["status"], "unavailable");
+        cli.no_project_config = true;
+        assert_eq!(
+            doctor_recovery_report(&cli)["receipt"],
+            selected_receipt.to_str().unwrap()
+        );
+    });
+    assert_eq!(
+        fs::read(cli.config.as_ref().unwrap()).unwrap(),
+        config_bytes
+    );
+    assert_eq!(fs::read(&definition).unwrap(), fleet_bytes);
+    assert_eq!(fs::read_to_string(&selection).unwrap(), "Locator\n");
+    assert!(!directory.path().join("home").exists());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn recovery_locator_rejects_unrepresentable_paths_without_lossy_filenames() {
+    use crate::test_support::EnvVarGuard;
+    let _lock = crate::test_support::lock_test_env();
+    let (directory, cli, _guards) = recovery_locator_fixture(
+        r#"
+provider = "custom"
+api_key = "locator-path-key-canary"
+base_url = "https://locator.example.invalid/v1"
+"#,
+    );
+    #[cfg(unix)]
+    let invalid_home = {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let mut bytes = directory.path().as_os_str().as_bytes().to_vec();
+        bytes.extend_from_slice(b"/home-\xff");
+        std::ffi::OsString::from_vec(bytes)
+    };
+    #[cfg(windows)]
+    let invalid_home = {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut wide: Vec<_> = directory.path().as_os_str().encode_wide().collect();
+        wide.extend([b'\\' as u16, 0xd800]);
+        std::ffi::OsString::from_wide(&wide)
+    };
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", invalid_home);
+    // An explicit route bypasses Fleet discovery, which is unrelated to encoding.
+    let _provider = EnvVarGuard::set("CODEWHALE_PROVIDER", "custom");
+    let config = load_config_from_cli(&cli).unwrap();
+    let exact_path = crate::client::recovery_receipt_location(&config).unwrap();
+    assert!(exact_path.to_str().is_none());
+    assert_eq!(
+        doctor_recovery_report(&cli),
+        serde_json::json!({"status": "unavailable"})
+    );
+}
+
 #[test]
 fn doctor_api_key_rows_never_name_the_retired_antigravity_slot() {
     let rows: Vec<crate::config::ApiProvider> = doctor_api_key_providers().collect();
