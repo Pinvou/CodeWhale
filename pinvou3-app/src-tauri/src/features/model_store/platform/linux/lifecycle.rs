@@ -3566,9 +3566,17 @@ impl ModelManager {
     /// 用户锁进无自愈路径（stop() 的脚本步 `?` 先行返回 → running 恒 true →
     /// 再启用被拒、更新脚本被「确已停止」拒、卸载被拒）。r23 P2-2：fail-closed，
     /// 缺失或读不到脚本源时都视为没有 stop，维持拒绝口径。
+    ///
+    /// `LocalDir`（install_local 就地执行的本地卡）与 `Local` 同按 blobs 判，与
+    /// [`ScriptsSource::script_hash`] / [`ScriptsSource::optional_script_blob`]
+    /// 的分组一致；load_local_card 要求六个入口脚本齐全才放行，blobs 里必有 stop。
+    /// 刻意不写通配臂：脚本源再添形态时让编译期报 E0004，而不是静默判成「没有
+    /// stop」把接管全拒掉（#2340 合并队列集成失败即此类）。
     fn local_stop_script_present(&self, rec: &db::StoreModelRecord) -> bool {
         match self.local_scripts_source(rec) {
-            Ok(ScriptsSource::Local { blobs, .. }) => blobs.contains_key("stop"),
+            Ok(ScriptsSource::Local { blobs, .. } | ScriptsSource::LocalDir { blobs, .. }) => {
+                blobs.contains_key("stop")
+            }
             Ok(ScriptsSource::Remote { scripts, .. }) => scripts.contains_key("stop"),
             Err(_) => false,
         }
