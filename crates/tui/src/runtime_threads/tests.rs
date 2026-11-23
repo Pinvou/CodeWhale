@@ -3764,6 +3764,88 @@ fn settlement_snapshot_built_after_the_settles_keeps_records_staged_in_the_gap()
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// (#847 review: a late report after the settlement save used to be lost on
+/// a normal exit) Once the settlement save completes and the turn is marked
+/// settled, a detached child's routed-usage record must be written THROUGH
+/// to disk instead of joining the in-memory stage batch: the lease can
+/// still be held across process exit, and neither the stage map nor any
+/// static runs Drops then. Pins the write-through, its exactly-once
+/// dedupe, and its durability across a fresh store open (the "normal exit
+/// and restart" step).
+#[test]
+fn late_report_after_settlement_is_written_through_and_survives_reopen() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn("thr_late", "turn_late", RuntimeTurnStatus::InProgress);
+    store.save_turn(&turn).expect("persist base turn");
+
+    // Settlement boundary, exactly as the monitor does it: the terminal
+    // save under the mutation hold, then the settled marker.
+    {
+        let _turn_mutation = store.turn_mutation.lock();
+        let mut settled = store.load_turn(&turn.id).expect("settlement load");
+        settled.status = RuntimeTurnStatus::Completed;
+        store.save_turn(&settled).expect("settlement save");
+    }
+    store.mark_turn_settled(&turn.id);
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = crate::cost_status::EffectiveRouteUsage {
+        route,
+        usage: Usage {
+            input_tokens: 13,
+            ..Usage::default()
+        },
+    };
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "sink:late-child", record)
+            .expect("late append after settlement"),
+        "the late record must be newly delivered"
+    );
+    // Write-through: the stage map holds nothing for this turn.
+    assert!(
+        store.routed_usage_staged.lock().is_empty(),
+        "a settled turn's late record must not stage"
+    );
+    // Exactly-once: a re-delivery of the same source id is a no-op.
+    let duplicate = crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek-primary",
+            "deepseek-v4-flash",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            Utc::now(),
+        ),
+        usage: Usage {
+            input_tokens: 13,
+            ..Usage::default()
+        },
+    };
+    assert!(
+        !store
+            .append_routed_usage_staged(&turn.id, "sink:late-child", duplicate)
+            .expect("duplicate delivery answers false"),
+        "the source fingerprint dedupe must survive the write-through path"
+    );
+    // "Normal exit and restart": a fresh store over the same root must see
+    // the record — it is on disk, not in process memory.
+    drop(store);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 13);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test]
 async fn monitor_failure_settlement_carries_records_staged_while_the_settles_await() {
     let dir = test_runtime_dir();

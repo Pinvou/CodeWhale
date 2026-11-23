@@ -1075,6 +1075,17 @@ pub struct RuntimeThreadStore {
     /// supersedes the stage, which keeps read-after-write intact; see
     /// [`ROUTED_USAGE_FLUSH_BATCH`] for the batching trade-off.
     routed_usage_staged: Arc<parking_lot::Mutex<HashMap<String, StagedRoutedUsage>>>,
+    /// Turns whose settlement save has completed. A routed-usage record
+    /// arriving for a settled turn is written through to disk immediately
+    /// instead of joining an in-memory stage batch: a detached child's late
+    /// report after the parent's final settlement save used to sit in the
+    /// stage map until the last lease dropped, so a normal exit with the
+    /// lease still held lost it (the stage map is process memory; statics
+    /// and maps never run Drops at exit). Shared across store clones like
+    /// [`Self::routed_usage_staged`]. In-memory only, which is safe: the
+    /// marker exists to keep LATE records durable within a live process;
+    /// after a restart nothing is staged and a fresh settlement re-marks.
+    settled_turns: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
     /// Serializes envelope claim/state transitions. The durable envelope is
     /// the queue; this guard prevents concurrent replay/wake requests from
     /// starting more than one turn for the same message.
@@ -1138,6 +1149,7 @@ impl RuntimeThreadStore {
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
             routed_usage_staged: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            settled_turns: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
             #[cfg(test)]
             turn_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1517,6 +1529,15 @@ impl RuntimeThreadStore {
         Ok(())
     }
 
+    /// Record that `turn_id`'s settlement save completed: drop any stage
+    /// entry (the just-saved on-disk form supersedes it) and switch this
+    /// turn's late routed-usage appends to settled write-through. Called by
+    /// the turn monitor right after the settlement `save_turn`.
+    pub(crate) fn mark_turn_settled(&self, turn_id: &str) {
+        self.routed_usage_staged.lock().remove(turn_id);
+        self.settled_turns.lock().insert(turn_id.to_string());
+    }
+
     /// Deliver one routed-usage record for `turn_id`. Appends stage in memory
     /// ([`ROUTED_USAGE_FLUSH_BATCH`]) instead of rewriting the whole turn file
     /// per record; the batch flush and the turn settlement save persist the
@@ -1535,6 +1556,19 @@ impl RuntimeThreadStore {
         usage: EffectiveRouteUsage,
     ) -> Result<bool> {
         let _turn_mutation = self.turn_mutation.lock();
+        // Settled write-through: the parent's settlement save already
+        // persisted the turn's final form, so a late record from a detached
+        // child lands on disk in one atomic write instead of an in-memory
+        // stage batch that a normal exit would drop (#847 review: the lease
+        // can still be held across exit, and neither the stage map nor any
+        // static runs Drops at process end).
+        if self.settled_turns.lock().contains(turn_id) {
+            let mut turn = self.load_turn(turn_id)?;
+            if !append_routed_usage_record(&mut turn, source_id, usage) {
+                return Ok(false);
+            }
+            return self.save_turn(&turn).map(|_| true);
+        }
         // Fast path: extend the staged turn in place, keeping the staged form
         // visible to `load_turn` readers for the whole critical section.
         {
@@ -10268,6 +10302,10 @@ impl RuntimeThreadManager {
                 .saturating_add(background_usage.dropped_records);
             turn.error = turn_error;
             self.store.save_turn(&turn)?;
+            // Settlement boundary: the on-disk turn is now authoritative, so
+            // drop the stage copy and write through any late detached
+            // child's report instead of staging it (#847 review).
+            self.store.mark_turn_settled(&turn_id);
             turn
         };
         {
