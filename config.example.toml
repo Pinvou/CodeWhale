@@ -5,6 +5,11 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 # See `docs/CONFIGURATION.md` for how config is loaded (profiles, env overrides, etc.).
+# Provider reset receipts default to $CODEWHALE_HOME/rate-limit-recovery/
+# (~/.codewhale/rate-limit-recovery/ without a home override).
+# Optional root-level path, before any [table]; see docs/rate-limit-recovery.md
+# for private inspection and recovery before changing saved deadlines.
+# rate_limit_recovery_dir = "/absolute/path/to/owned/recovery-state"
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Active provider + DeepSeek defaults
@@ -1083,8 +1088,9 @@ stream_chunk_timeout_secs = 900 # optional SSE idle timeout per chunk (0 = defau
 # maximum. `0` is an invalid value that falls back to the default — it is
 # never a "0 means unlimited" sentinel.
 max_model_steps = 200        # model steps one turn may take (0 = default, 1-100000)
-turn_wall_clock_secs = 3600  # cumulative wall clock for one turn, excluding time
-                             # blocked on a human approval (0 = default, 30-86400)
+turn_wall_clock_secs = 3600  # cumulative active-work clock (0 = default, 30-86400)
+                             # excludes human approvals and eligible provider
+                             # recovery waits; active parallel work stays charged
 stream_max_content_mb = 10   # per-step cap on streamed content (0 = default, 1-512)
 stream_max_duration_secs = 1800 # per-step cap on one stream's duration (0 = default, 10-86400)
 osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTerm2/Ghostty/Kitty/WezTerm/Terminal.app 13+); set false for terminals that misrender
@@ -1164,6 +1170,16 @@ max_retries = 3
 initial_delay = 1.0
 max_delay = 60.0
 exponential_base = 2.0
+
+# HTTP 429 recovery has a separate budget from ordinary transport retries.
+# max_attempts includes the first attempt; valid range 1..1000.
+# recovery_budget_secs: 1..86400; 1 <= initial_delay_secs <= max_delay_secs <= 86400.
+# Provider minima are not shortened by max_delay_secs or this budget.
+[retry.rate_limit]
+max_attempts = 20
+recovery_budget_secs = 600
+initial_delay_secs = 5
+max_delay_secs = 60
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Context Compaction
