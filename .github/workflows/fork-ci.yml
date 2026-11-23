@@ -59,6 +59,33 @@ jobs:
       - name: Check lockfile drift
         run: git diff --exit-code -- Cargo.lock
 
+  msrv:
+    name: msrv (1.89)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Check workspace under the declared MSRV floor
+        run: cargo +1.89.0 check --workspace --locked --all-targets --all-features
+
   gitleaks:
     name: Gitleaks
     runs-on: ubuntu-latest
@@ -97,14 +124,16 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [check, gitleaks]
+    needs: [check, msrv, gitleaks]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require successful validation
         env:
           CHECK_RESULT: ${{ needs.check.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
           GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
         run: |
           test "$CHECK_RESULT" = success
+          test "$MSRV_RESULT" = success
           test "$GITLEAKS_RESULT" = success
