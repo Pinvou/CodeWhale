@@ -1256,8 +1256,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn handshake_times_out_when_the_child_never_answers() {
+        // Timeout cleanup must own the sleeper itself, rather than its shell.
         let err = ChildProcessMcpClient::spawn_with_timeouts(
-            &config("/bin/sh", &["-c", "sleep 30"]),
+            &config("/bin/sh", &["-c", "exec sleep 30"]),
             Duration::from_millis(250),
             Duration::from_millis(250),
         )

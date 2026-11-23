@@ -676,10 +676,14 @@ pub(crate) fn chat_route_shape(
     if url.contains("/beta/chat/completions") {
         return RouteShape::DeepseekBetaStrictTools;
     }
-    if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model) {
+    if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model)
+        || crate::config::is_kimi_code_k31_route(provider, base_url, wire_model)
+    {
         return RouteShape::KimiCodeK3;
     }
-    if crate::config::is_exact_direct_moonshot_k3_route(provider, base_url, wire_model) {
+    if crate::config::is_exact_direct_moonshot_k3_route(provider, base_url, wire_model)
+        || crate::config::is_kimi_k31_on_direct_platform_route(provider, base_url, wire_model)
+    {
         return RouteShape::DirectMoonshotK3;
     }
     if provider == ApiProvider::Custom {
@@ -692,6 +696,49 @@ pub(crate) fn chat_route_shape(
 mod tests {
     use super::*;
     use serde_json::{Map, json};
+
+    /// The K3.1 family runs the same builder branches as bare K3, so the
+    /// manifest shape label must say so — the enum exists to keep the
+    /// manifest honest about which builder branch ran.
+    #[test]
+    fn kimi_k31_routes_classify_into_the_k3_shapes() {
+        use crate::config::{DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL};
+
+        for base_url in [DEFAULT_KIMI_CODE_BASE_URL, "https://api.kimi.ai/coding/v1"] {
+            assert_eq!(
+                chat_route_shape(
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "k3.1-pro",
+                    "https://api.kimi.com/coding/v1/chat/completions",
+                ),
+                RouteShape::KimiCodeK3,
+                "{base_url}"
+            );
+        }
+        for base_url in [DEFAULT_MOONSHOT_BASE_URL, "https://api.moonshot.cn/v1"] {
+            assert_eq!(
+                chat_route_shape(
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "kimi-k3.1-pro",
+                    "https://api.moonshot.ai/v1/chat/completions",
+                ),
+                RouteShape::DirectMoonshotK3,
+                "{base_url}"
+            );
+        }
+        // Outside the vendor routes the shape stays standard.
+        assert_eq!(
+            chat_route_shape(
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                "k3.1-pro",
+                "https://gateway.example/v1/chat/completions",
+            ),
+            RouteShape::Standard,
+        );
+    }
 
     fn endpoint() -> EndpointIdentity {
         EndpointIdentity {
