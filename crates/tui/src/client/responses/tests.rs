@@ -108,6 +108,7 @@ fn test_codex_config(server: &MockServer) -> Config {
     Config {
         provider: Some("openai-codex".to_string()),
         retry: Some(RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(true),
             max_retries: Some(1),
             initial_delay: Some(0.0),

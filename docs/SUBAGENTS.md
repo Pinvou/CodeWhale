@@ -502,6 +502,12 @@ looks like an issued id, pass that source's actual receipt id in `resume_from`.
 The `name` field on `action=start` names the new child, not the continuation
 source. A missing issued id never falls back to a same-named source.
 
+`action=start` with `resume_from` creates an independent history fork; it does
+not consume the source child's parked parent mail. To continue an interrupted
+assignment together with its accepted mail, use `action=followup` with the source
+`agent_id` and a `message`. A newly admitted child already has a checkpoint of
+its initial prompt, so this handoff also works before its worker first polls.
+
 Records hydrated from an older boot remain history for name resolution: they
 never outrank the current boot's live child. Two live holders of one name are
 ambiguous; use the exact `agent_id` rather than guessing a holder.
@@ -749,6 +755,14 @@ target, usage provenance, and verification provenance.
 inside `worker_record`. The normal parent contract is not polling: keep working
 and consume the completion event when the child finishes. If audit detail is
 needed, inspect the returned `transcript_handle` with `handle_read`.
+
+Parent-message receipts acknowledge admission, not model processing. During
+normal completion, the final live-input check closes admission atomically:
+later `message` and `followup` calls fail before changing the inbox. Accepted
+live inputs remaining at the step limit are retained in the final checkpoint,
+even beyond the usual tail budget; they do not authorize another model call.
+Only the winning terminal result acknowledges that snapshot. Queue-only mail
+is not automatically drained or resumed by this completion path.
 
 Legacy follow-up delivery is retained only for old transcripts and internal
 recovery. If a message was delivered, the worker record stores a bounded preview

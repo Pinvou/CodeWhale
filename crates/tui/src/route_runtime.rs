@@ -11,7 +11,7 @@ use crate::codex_model_cache::{CodexModelCacheFreshness, model_roster};
 use crate::config::{
     ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL, KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS,
     ProviderIdentity, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_bare_k3_route,
-    validate_kimi_code_api_model_id,
+    is_kimi_code_k31_route, is_kimi_k31_on_direct_platform_route, validate_kimi_code_api_model_id,
 };
 use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 
@@ -607,11 +607,13 @@ fn plan_limit_overrides(
     let mut overrides = Vec::new();
     let configured = context_window_override.filter(|window| *window > 0);
     let mut effective_context = resolved.limits().context_tokens;
-    if is_exact_direct_moonshot_k3_route(
-        provider,
-        &resolved.endpoint().base_url,
-        resolved.wire_model_id().as_str(),
-    ) {
+    let wire_model = resolved.wire_model_id().as_str();
+    if is_exact_direct_moonshot_k3_route(provider, &resolved.endpoint().base_url, wire_model)
+        || is_kimi_k31_on_direct_platform_route(provider, &resolved.endpoint().base_url, wire_model)
+    {
+        // The K3.1 direct spellings inherit the documented K3-series route
+        // maximum (models-overview's K3-series column transfers the parameter
+        // constraints; the quickstart documents the 1,048,576 ceiling).
         overrides.push(SourcedLimitOverride {
             field: LimitField::OutputTokens,
             value: Some(u64::from(DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS)),
@@ -666,13 +668,14 @@ fn plan_limit_overrides(
         };
     }
 
-    let is_exact_kimi_code_k3 = is_exact_kimi_code_bare_k3_route(
-        provider,
-        &resolved.endpoint().base_url,
-        resolved.wire_model_id().as_str(),
-    );
+    // The membership-plan routes: Kimi Code's bare `k3` and the K3.1 family
+    // spellings on the exact membership endpoint — plan-tier products, not
+    // aliases for Moonshot's public `kimi-k3` catalog entry.
+    let is_membership_plan_route =
+        is_exact_kimi_code_bare_k3_route(provider, &resolved.endpoint().base_url, wire_model)
+            || is_kimi_code_k31_route(provider, &resolved.endpoint().base_url, wire_model);
     let now = Utc::now();
-    if is_exact_kimi_code_k3
+    if is_membership_plan_route
         && provider_reported_context.is_some_and(|reported| {
             reported.context_tokens == 1_048_576
                 && reported.observed_at <= now
@@ -695,11 +698,10 @@ fn plan_limit_overrides(
         };
     }
 
-    // Kimi Code's bare `k3` is a membership-plan route, not an alias for
-    // Moonshot's public `kimi-k3` catalog entry.  The safe all-plan floor is
-    // the route's next precedence after an explicit config or fresh, scoped
-    // provider report.
-    if is_exact_kimi_code_k3 {
+    // The safe all-plan floor is the route's next precedence after an
+    // explicit config or a fresh, scoped provider report, and covers the
+    // K3.1 membership spellings on the same terms as bare `k3`.
+    if is_membership_plan_route {
         overrides.push(SourcedLimitOverride {
             field: LimitField::ContextTokens,
             value: Some(u64::from(KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS)),
@@ -915,7 +917,9 @@ fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
         "siliconflow",
         "arcee.ai",
         "moonshot.ai",
+        "moonshot.cn",
         "api.kimi.com",
+        "api.kimi.ai",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -925,6 +929,33 @@ fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
+
+    /// The DeepSeek identity switch clears a foreign Kimi Code root
+    /// `base_url` on both membership hosts, so a saved Kimi Code route cannot
+    /// survive a Deepseek/DeepseekCN identity change as a stale root.
+    /// Moonshot's China-region direct host is covered by the same rule —
+    /// it belongs to the same non-DeepSeek vendor as the `.ai` host — and
+    /// non-vendor and own-vendor roots stay untouched.
+    #[test]
+    fn deepseek_identity_clears_kimi_code_roots_on_both_membership_hosts() {
+        for host in ["api.kimi.com", "api.kimi.ai"] {
+            assert!(
+                root_base_url_belongs_to_non_deepseek_provider(&format!(
+                    "https://{host}/coding/v1"
+                )),
+                "https://{host}/coding/v1 belongs to a non-DeepSeek vendor and must be cleared"
+            );
+        }
+        assert!(root_base_url_belongs_to_non_deepseek_provider(
+            "https://api.moonshot.cn/v1"
+        ));
+        assert!(!root_base_url_belongs_to_non_deepseek_provider(
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(!root_base_url_belongs_to_non_deepseek_provider(
+            "https://gateway.example/v1"
+        ));
+    }
 
     /// Every rung keeps its own label and round-trips through it, and only
     /// the guesses read as unverified.  Two rungs sharing a label would let a
@@ -1435,6 +1466,106 @@ mod tests {
         assert_eq!(candidate.limits().context_tokens, Some(1_048_576));
     }
 
+    /// The K3.1 family inherits the K3 route-limit facts with the same
+    /// provenance: the direct spellings get the documented 1M output maximum
+    /// (endpoint-aware override), and the membership spellings ride the
+    /// plan safe floor — with a fresh 1M entitlement report winning and a
+    /// stale one falling back, exactly like bare `k3`.
+    #[test]
+    fn kimi_k31_routes_inherit_the_k3_documented_limits_with_provenance() {
+        let direct = resolve_route_candidate(
+            ApiProvider::Moonshot,
+            Some("kimi-k3.1-pro"),
+            None,
+            None,
+            None,
+        )
+        .expect("Moonshot K3.1 direct route");
+        // The bundled catalog the config resolver reads is still K3-era, so
+        // the context may arrive absent here — the capability path (the
+        // model-facts rows) is then the source of truth for budget/display,
+        // same doctrine as the OpenCode Go route above.
+        if let Some(ctx) = direct.limits().context_tokens {
+            assert_eq!(ctx, 1_048_576);
+        } else {
+            assert_eq!(
+                crate::route_budget::route_context_window_tokens(
+                    ApiProvider::Moonshot,
+                    "kimi-k3.1-pro",
+                    Some(direct.limits()),
+                ),
+                1_048_576
+            );
+        }
+        assert_eq!(direct.limits().output_tokens, Some(1_048_576));
+        assert!(direct.applied_limit_overrides().contains(
+            &codewhale_config::route::SourcedLimitOverride {
+                field: codewhale_config::route::LimitField::OutputTokens,
+                value: Some(1_048_576),
+                source: codewhale_config::route::OverrideSource::DocumentedRouteOutputMaximum,
+            }
+        ));
+
+        let base = Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string());
+        for spelling in ["k3.1-pro", "k3.1-pro-highspeed"] {
+            let floor = resolve_route_candidate_with_context_metadata(
+                ApiProvider::Moonshot,
+                Some(spelling),
+                None,
+                base.clone(),
+                None,
+                None,
+                None,
+            )
+            .expect("membership K3.1 route");
+            assert_eq!(floor.context_window.tokens, 262_144, "{spelling}");
+            assert_eq!(
+                floor.context_window.source,
+                ContextWindowSource::StaticKimiCodeSafeFloor,
+                "{spelling}"
+            );
+
+            let reported = resolve_route_candidate_with_context_metadata(
+                ApiProvider::Moonshot,
+                Some(spelling),
+                None,
+                base.clone(),
+                None,
+                Some(ProviderReportedKimiCodeContext {
+                    context_tokens: 1_048_576,
+                    observed_at: Utc::now(),
+                }),
+                None,
+            )
+            .expect("fresh documented provider metadata");
+            assert_eq!(reported.context_window.tokens, 1_048_576, "{spelling}");
+            assert_eq!(
+                reported.context_window.source,
+                ContextWindowSource::ProviderReported,
+                "{spelling}"
+            );
+
+            let stale = resolve_route_candidate_with_context_metadata(
+                ApiProvider::Moonshot,
+                Some(spelling),
+                None,
+                base.clone(),
+                None,
+                Some(ProviderReportedKimiCodeContext {
+                    context_tokens: 1_048_576,
+                    observed_at: Utc::now() - Duration::hours(25),
+                }),
+                None,
+            )
+            .expect("stale metadata falls back safely");
+            assert_eq!(
+                stale.context_window.source,
+                ContextWindowSource::StaticKimiCodeSafeFloor,
+                "{spelling}"
+            );
+        }
+    }
+
     #[test]
     fn kimi_code_rejects_claude_only_k3_1m_alias_for_selected_and_saved_models() {
         for (selected, saved) in [(Some("k3[1m]"), None), (None, Some("k3[1m]"))] {
@@ -1536,6 +1667,16 @@ mod tests {
         assert_eq!(
             moonshot_k3_route_display_name(DEFAULT_MOONSHOT_BASE_URL, "kimi-k3"),
             Some("Moonshot direct / kimi-k3")
+        );
+        // The K3.1 family gets its own family labels instead of falling off
+        // the route-header display entirely.
+        assert_eq!(
+            moonshot_k3_route_display_name(DEFAULT_KIMI_CODE_BASE_URL, "k3.1-pro"),
+            Some("Kimi Code membership / k3.1")
+        );
+        assert_eq!(
+            moonshot_k3_route_display_name("https://api.moonshot.cn/v1", "kimi-k3.1-pro"),
+            Some("Moonshot direct / kimi-k3.1")
         );
     }
 

@@ -14,10 +14,7 @@ use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{
-    Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock,
-    Semaphore,
-};
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use codewhale_config::catalog::{
     CatalogOffering, CatalogRefreshError, CatalogSnapshot, CatalogSource, CatalogStatus,
@@ -255,6 +252,14 @@ pub struct DeepSeekClient {
     pub(super) http1_client: reqwest::Client,
     request_idempotency_header: Option<HeaderName>,
     operation_id: Option<uuid::Uuid>,
+    operation_recovery: Arc<
+        std::sync::Mutex<
+            HashMap<
+                uuid::Uuid,
+                Arc<std::sync::Mutex<crate::llm_client::rate_limit::OperationRecovery>>,
+            >,
+        >,
+    >,
     // In-memory only: includes frozen auth/context headers without exposing
     // their values in receipts, logs, prompts, or persisted session state.
     operation_route_identity: String,
@@ -296,6 +301,8 @@ pub struct DeepSeekClient {
     connection_health: Arc<AsyncMutex<ConnectionHealth>>,
     rate_limiter: Arc<AsyncMutex<TokenBucket>>,
     request_concurrency: Option<ProviderConcurrencyLimiter>,
+    shared_quota: Arc<SharedQuota>,
+    operation_permit: Arc<std::sync::Mutex<std::sync::Weak<ProviderRequestPermit>>>,
     path_suffix: Option<String>,
     /// Unit tests keep the semantic route exact while sending the actual
     /// production request through a local capture server. This field is
@@ -363,9 +370,8 @@ const RATE_LIMIT_PAUSE_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 /// Retry-After included). Streaming paths never carry it: their opens go
 /// through `send_stream_open_with_retry`, which sets no per-request total
 /// (a total would ride on the returned body), so a stream stays bounded by
-/// its open cap and per-chunk idle checks only. Also applied to the
-/// Anthropic dialect's non-streaming Messages request, which has no retry
-/// loop of its own.
+/// its open cap and per-chunk idle checks only. This also covers
+/// non-streaming Anthropic Messages and isolated requests.
 pub(crate) const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(1800);
 
 #[cfg(test)]
@@ -420,38 +426,299 @@ struct TokenBucket {
     capacity: f64,
     tokens: f64,
     refill_per_sec: f64,
+    normal_refill_per_sec: f64,
     last_refill: Instant,
+}
+
+struct SharedQuota {
+    key: String,
+    last_used: std::sync::Mutex<Instant>,
+    storage: Option<std::path::PathBuf>,
+    pause: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    loaded: tokio::sync::OnceCell<()>,
+    persistence: AsyncMutex<()>,
+    limiter: Arc<AsyncMutex<TokenBucket>>,
+    concurrency: Option<ProviderConcurrencyLimiter>,
+    episode: std::sync::Mutex<(Option<Instant>, u32, u32)>,
+    adaptive: AsyncMutex<()>,
+}
+
+const QUOTA_SCOPE_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_QUOTA_SCOPES: usize = 65_536;
+
+fn quota_registry() -> &'static std::sync::Mutex<HashMap<String, Arc<SharedQuota>>> {
+    static QUOTAS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<SharedQuota>>>> =
+        std::sync::OnceLock::new();
+    QUOTAS.get_or_init(Default::default)
+}
+
+fn shared_quota(
+    key: String,
+    limit: Option<usize>,
+    storage: Option<std::path::PathBuf>,
+) -> Result<Arc<SharedQuota>> {
+    let mut quotas = quota_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Retain recent episodes across short-lived auxiliary clients. Never
+    // retire an active holder or a still-live server minimum. The idle window
+    // covers the maximum configurable recovery budget; the map is bounded.
+    quotas.retain(|_, quota| {
+        Arc::strong_count(quota) > 1
+            || quota
+                .last_used
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .elapsed()
+                < QUOTA_SCOPE_RETENTION
+            || quota.remaining().is_some()
+    });
+    if let Some(quota) = quotas.get(&key) {
+        quota.touch();
+        if let (Some(limiter), Some(limit)) = (quota.concurrency.as_ref(), limit) {
+            limiter.restrict(limit);
+        }
+        return Ok(quota.clone());
+    }
+    anyhow::ensure!(
+        quotas.len() < MAX_QUOTA_SCOPES,
+        "Provider quota scope capacity exhausted; inactive scopes must retire before adding another route"
+    );
+    let quota = Arc::new(SharedQuota {
+        key: key.clone(),
+        last_used: std::sync::Mutex::new(Instant::now()),
+        storage,
+        pause: std::sync::Mutex::new(None),
+        loaded: tokio::sync::OnceCell::new(),
+        persistence: AsyncMutex::new(()),
+        limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
+        concurrency: Some(ProviderConcurrencyLimiter::new(limit.unwrap_or(16))),
+        episode: std::sync::Mutex::new((None, 0, 0)),
+        adaptive: AsyncMutex::new(()),
+    });
+    quotas.insert(key, quota.clone());
+    Ok(quota)
+}
+
+impl SharedQuota {
+    fn touch(&self) {
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+    fn pause(&self, delay: Duration) {
+        self.touch();
+        let deadline = chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|d| chrono::Utc::now().checked_add_signed(d))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        let mut pause = self
+            .pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *pause = Some(pause.map_or(deadline, |old| old.max(deadline)));
+    }
+    fn remaining(&self) -> Option<Duration> {
+        self.pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .and_then(|deadline| (deadline - chrono::Utc::now()).to_std().ok())
+            .filter(|delay| !delay.is_zero())
+    }
+    async fn initialize(&self) -> Result<()> {
+        self.touch();
+        self.loaded.get_or_try_init(|| async {
+            if cfg!(test) && self.storage.is_none() { return Ok::<(), String>(()); }
+            let storage = self.storage.clone().or_else(|| codewhale_paths::codewhale_home().ok().flatten().map(|p| p.join("rate-limit-recovery")));
+            let Some(storage) = storage else { return Ok(()); };
+            let path = storage.join(format!("{}.json", self.key));
+            let file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(_) => return Err("Cannot read saved provider recovery deadline; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".into()),
+            };
+            let mut limited = tokio::io::AsyncReadExt::take(file, 4097);
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut bytes).await
+                .map_err(|_| "Cannot read saved provider recovery deadline; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".to_owned())?;
+            if bytes.len() > 4096 { return Err("Saved provider recovery deadline is invalid; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".into()); }
+            let reset: chrono::DateTime<chrono::Utc> = serde_json::from_slice(&bytes)
+                .map_err(|_| "Saved provider recovery deadline is invalid; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".to_owned())?;
+            if let Ok(delay) = (reset - chrono::Utc::now()).to_std() { self.pause(delay); }
+            Ok(())
+        }).await.map(|_| ()).map_err(anyhow::Error::msg)
+    }
+    async fn persist(&self) -> std::result::Result<(), String> {
+        if cfg!(test) && self.storage.is_none() {
+            return Ok(());
+        }
+        let _io = self.persistence.lock().await;
+        let reset = *self
+            .pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(reset) = reset else {
+            return Ok(());
+        };
+        let Some(dir) = self.storage.clone().or_else(|| {
+            codewhale_paths::codewhale_home()
+                .ok()
+                .flatten()
+                .map(|p| p.join("rate-limit-recovery"))
+        }) else {
+            return Ok(());
+        };
+        let temporary = dir.join(format!("{}.{}.tmp", self.key, uuid::Uuid::new_v4()));
+        let result = async {
+            tokio::fs::create_dir_all(&dir).await?;
+            let path = dir.join(format!("{}.json", self.key));
+            let mut file = tokio::fs::File::create(&temporary).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &serde_json::to_vec(&reset)?).await?;
+            tokio::io::AsyncWriteExt::flush(&mut file).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&temporary, &path).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            logging::warn(
+                "Could not persist provider recovery deadline; in-memory pause remains active",
+            );
+            return Err("Provider recovery deadline could not be saved; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".into());
+        }
+        Ok(())
+    }
+    fn admit_recovery(&self, policy: &crate::config::RateLimitRetryPolicy) -> Option<Duration> {
+        self.touch();
+        let mut episode = self
+            .episode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let started = episode.0?;
+        let remaining =
+            Duration::from_secs(policy.recovery_budget_secs).saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            *episode = (None, 0, 0);
+            return None;
+        }
+        if episode.1 >= policy.max_attempts {
+            return Some(remaining);
+        }
+        episode.1 += 1;
+        None
+    }
+    async fn refused(&self) {
+        self.touch();
+        let _adaptive = self.adaptive.lock().await;
+        {
+            let mut episode = self
+                .episode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if episode.0.is_none() {
+                episode.0 = Some(Instant::now());
+                episode.1 = 1;
+            }
+            episode.2 = 0;
+        }
+        if let Some(limiter) = &self.concurrency {
+            limiter
+                .gate
+                .set_capacity((limiter.gate.capacity() / 2).max(1));
+        }
+        let mut bucket = self.limiter.lock().await;
+        if bucket.enabled {
+            bucket.refill_per_sec = (bucket.refill_per_sec / 2.0).max(0.1);
+            bucket.tokens = bucket.tokens.min(1.0);
+        }
+    }
+    async fn recovered(&self) {
+        self.touch();
+        let _adaptive = self.adaptive.lock().await;
+        {
+            let mut episode = self
+                .episode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A real HTTP success ends the shared refusal episode. Logical
+            // operation budgets remain owned by their operation, while AIMD
+            // restoration still requires three successful admissions per step.
+            episode.0 = None;
+            episode.1 = 0;
+            episode.2 += 1;
+            if episode.2 < 3 {
+                return;
+            }
+            episode.2 = 0;
+        }
+        if let Some(limiter) = &self.concurrency {
+            limiter
+                .gate
+                .set_capacity((limiter.gate.capacity() + 1).min(limiter.limit()));
+        }
+        let mut bucket = self.limiter.lock().await;
+        bucket.refill_per_sec = (bucket.refill_per_sec + 1.0).min(bucket.normal_refill_per_sec);
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ProviderConcurrencyLimiter {
-    semaphore: Arc<Semaphore>,
+    gate: Arc<crate::core::capacity::DynamicGate>,
     active: Arc<AtomicUsize>,
-    limit: usize,
+    limit: Arc<AtomicUsize>,
 }
 
 struct ProviderRequestPermit {
-    _permit: OwnedSemaphorePermit,
+    lease: std::sync::Mutex<Option<ProviderRequestLease>>,
+    limiter: ProviderConcurrencyLimiter,
+}
+
+struct ProviderRequestLease {
+    _permit: crate::core::capacity::DynamicGatePermit,
     active: Arc<AtomicUsize>,
+}
+
+impl ProviderRequestPermit {
+    fn suspend(&self) {
+        self.lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+    async fn resume(&self) {
+        if self
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return;
+        }
+        {
+            let permit = self.limiter.gate.acquire().await;
+            self.limiter.active.fetch_add(1, Ordering::AcqRel);
+            *self
+                .lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderRequestLease {
+                _permit: permit,
+                active: self.limiter.active.clone(),
+            });
+        }
+    }
 }
 
 impl ProviderConcurrencyLimiter {
     fn new(limit: usize) -> Self {
         let limit = limit.max(1);
         Self {
-            semaphore: Arc::new(Semaphore::new(limit)),
+            gate: Arc::new(crate::core::capacity::DynamicGate::new(limit)),
             active: Arc::new(AtomicUsize::new(0)),
-            limit,
+            limit: Arc::new(AtomicUsize::new(limit)),
         }
-    }
-
-    async fn acquire(&self) -> Option<ProviderRequestPermit> {
-        let permit = Arc::clone(&self.semaphore).acquire_owned().await.ok()?;
-        self.active.fetch_add(1, Ordering::AcqRel);
-        Some(ProviderRequestPermit {
-            _permit: permit,
-            active: Arc::clone(&self.active),
-        })
     }
 
     fn active(&self) -> usize {
@@ -459,11 +726,16 @@ impl ProviderConcurrencyLimiter {
     }
 
     fn limit(&self) -> usize {
-        self.limit
+        self.limit.load(Ordering::Acquire)
+    }
+    fn restrict(&self, limit: usize) {
+        self.limit.fetch_min(limit.max(1), Ordering::AcqRel);
+        self.gate
+            .set_capacity(self.gate.capacity().min(self.limit()));
     }
 }
 
-impl Drop for ProviderRequestPermit {
+impl Drop for ProviderRequestLease {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::AcqRel);
     }
@@ -489,6 +761,7 @@ impl TokenBucket {
             capacity: burst,
             tokens: burst,
             refill_per_sec: rps,
+            normal_refill_per_sec: rps,
             last_refill: Instant::now(),
         }
     }
@@ -591,6 +864,7 @@ impl Clone for DeepSeekClient {
             http1_client: self.http1_client.clone(),
             request_idempotency_header: self.request_idempotency_header.clone(),
             operation_id: self.operation_id,
+            operation_recovery: self.operation_recovery.clone(),
             operation_route_identity: self.operation_route_identity.clone(),
             api_key: self.api_key.clone(),
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
@@ -610,6 +884,8 @@ impl Clone for DeepSeekClient {
             connection_health: self.connection_health.clone(),
             rate_limiter: self.rate_limiter.clone(),
             request_concurrency: self.request_concurrency.clone(),
+            shared_quota: self.shared_quota.clone(),
+            operation_permit: self.operation_permit.clone(),
             path_suffix: self.path_suffix.clone(),
             #[cfg(test)]
             test_chat_transport_base_url: self.test_chat_transport_base_url.clone(),
@@ -792,15 +1068,29 @@ pub(super) const NON_STREAMING_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Read an error response body with a size limit to prevent unbounded allocation.
 pub(super) async fn bounded_error_text(response: reqwest::Response, max_bytes: usize) -> String {
+    bounded_error_text_until(response, max_bytes, None).await
+}
+
+async fn bounded_error_text_until(
+    response: reqwest::Response,
+    max_bytes: usize,
+    deadline: Option<tokio::time::Instant>,
+) -> String {
     use futures_util::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buf = Vec::with_capacity(max_bytes.min(8192));
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else { break };
-        let remaining = max_bytes.saturating_sub(buf.len());
-        if remaining == 0 {
+    while buf.len() < max_bytes {
+        let next = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .ok()
+                .flatten(),
+            None => stream.next().await,
+        };
+        let Some(Ok(chunk)) = next else {
             break;
-        }
+        };
+        let remaining = max_bytes - buf.len();
         buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
     }
     String::from_utf8_lossy(&buf).into_owned()
@@ -1185,6 +1475,17 @@ impl DeepSeekClient {
             return Self::from_candidate(&route.config, &route.candidate);
         }
         let default_model = config.default_model();
+        let base_url = config.deepseek_base_url();
+        // The route resolution below is best-effort on this arm — its limits
+        // are advisory and a resolution failure must not take the whole
+        // client down. The pairing gate is different: `.ok()` here used to
+        // swallow the cross-pairing rejection, so a client built through
+        // this fallback (the per-turn auto-router classifier sends real
+        // requests with one) could carry a known-bad Kimi model/endpoint
+        // pairing that the request path would have refused with guidance.
+        // Validate exactly the pairing this client will bind to.
+        crate::config::validate_kimi_code_api_model_id(api_provider, &base_url, &default_model)
+            .map_err(anyhow::Error::msg)?;
         let route_limits =
             crate::route_runtime::resolve_runtime_route(config, api_provider, Some(&default_model))
                 .ok()
@@ -1192,7 +1493,7 @@ impl DeepSeekClient {
                     crate::route_budget::known_route_limits(route.candidate.limits())
                 });
         Self::from_parts(
-            config.deepseek_base_url(),
+            base_url,
             default_model,
             provider_wire_format_for_config(api_provider, Some(config)),
             route_limits,
@@ -1237,6 +1538,24 @@ impl DeepSeekClient {
         route_limits: Option<RouteLimits>,
         config: &Config,
     ) -> Result<Self> {
+        Self::from_parts_with_exact_key(
+            base_url,
+            default_model,
+            wire_format,
+            route_limits,
+            config,
+            None,
+        )
+    }
+
+    fn from_parts_with_exact_key(
+        base_url: String,
+        default_model: String,
+        wire_format: WireFormat,
+        route_limits: Option<RouteLimits>,
+        config: &Config,
+        exact_api_key: Option<&str>,
+    ) -> Result<Self> {
         let api_provider = config.api_provider();
         let provider_identity = config.provider_identity_for(api_provider);
         let billing_surface = crate::route_billing::billing_surface_for_dispatch(
@@ -1249,7 +1568,11 @@ impl DeepSeekClient {
         if api_provider == ApiProvider::OpencodeGo {
             validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
         }
-        let (api_key, codex_account_id) = if api_provider == ApiProvider::OpenaiCodex {
+        let (api_key, codex_account_id) = if let Some(api_key) = exact_api_key {
+            // A dedicated auxiliary endpoint owns this already-resolved key.
+            // Re-reading main CLI overrides here could cross a credential boundary.
+            (api_key.to_owned(), None)
+        } else if api_provider == ApiProvider::OpenaiCodex {
             // The official endpoint requires Codex OAuth credentials. A custom
             // endpoint prefers its own configured key, but an explicit
             // `OPENAI_CODEX_ACCESS_TOKEN` still wins (`codex_credentials`
@@ -1281,7 +1604,7 @@ impl DeepSeekClient {
             &provider_identity,
             &base_url,
             &api_key,
-            sorted_headers,
+            &sorted_headers,
         ))?);
         let request_idempotency_header = config
             .request_idempotency_header
@@ -1317,6 +1640,22 @@ impl DeepSeekClient {
             .provider_config_for(api_provider)
             .and_then(|p| p.reasoning_stream_style.clone());
         let request_concurrency_limit = config.provider_max_concurrency(api_provider);
+        // All models on a credential share a conservative quota group until a provider declares finer groups.
+        let effective_headers = build_default_headers(
+            &api_key,
+            &http_headers,
+            api_provider,
+            &base_url,
+            wire_format,
+            auth_disabled,
+        )?;
+        let quota_key =
+            recovery_scope_key(&base_url, &effective_headers, codex_account_id.as_deref())?;
+        let shared_quota = shared_quota(
+            quota_key,
+            request_concurrency_limit,
+            config.rate_limit_recovery_dir.clone(),
+        )?;
 
         logging::info(format!("API provider: {}", api_provider.as_str()));
         logging::info(format!(
@@ -1380,6 +1719,7 @@ impl DeepSeekClient {
             http1_client,
             request_idempotency_header,
             operation_id: None,
+            operation_recovery: Arc::new(std::sync::Mutex::new(HashMap::new())),
             operation_route_identity,
             api_key,
             model_bound_secret_values,
@@ -1398,8 +1738,10 @@ impl DeepSeekClient {
                 && !config.runtime_thread_inference_unrelated,
             default_model,
             connection_health: Arc::new(AsyncMutex::new(ConnectionHealth::default())),
-            rate_limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
-            request_concurrency: request_concurrency_limit.map(ProviderConcurrencyLimiter::new),
+            rate_limiter: shared_quota.limiter.clone(),
+            request_concurrency: shared_quota.concurrency.clone(),
+            shared_quota,
+            operation_permit: Arc::default(),
             path_suffix,
             #[cfg(test)]
             test_chat_transport_base_url: None,
@@ -1762,6 +2104,121 @@ impl DeepSeekClient {
             true,
         )
     }
+}
+
+/// One scope recipe for dispatch and the explicit, private doctor locator.
+fn recovery_scope_key(
+    base_url: &str,
+    effective_headers: &HeaderMap,
+    codex_account_id: Option<&str>,
+) -> Result<String> {
+    let mut quota_headers = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    for (name, value) in effective_headers {
+        let name = name.as_str();
+        if [
+            "key",
+            "token",
+            "auth",
+            "account",
+            "project",
+            "organization",
+            "workspace",
+            "secret",
+            "credential",
+            "cookie",
+        ]
+        .iter()
+        .any(|part| name.contains(part))
+        {
+            quota_headers.insert(name.to_owned(), value.as_bytes().to_vec());
+        }
+    }
+    if let Some(account_id) = codex_account_id {
+        quota_headers.insert("chatgpt-account-id".into(), account_id.as_bytes().to_vec());
+    }
+    let quota_endpoint = reqwest::Url::parse(base_url)?
+        .to_string()
+        .trim_end_matches('/')
+        .to_owned();
+    Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+        &quota_endpoint,
+        &quota_headers,
+    ))?))
+}
+
+/// Locate only the currently selected route. Never construct a client, register
+/// quota state, load a receipt, refresh OAuth, or contact a provider. The result
+/// is private correlation metadata and belongs only in explicit local output.
+pub(crate) fn recovery_receipt_location(config: &Config) -> Result<std::path::PathBuf> {
+    let mut config = config.clone();
+    let provider = config.api_provider();
+    let (base_url, wire_format) = if provider.metadata().is_some_and(|metadata| {
+        metadata.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
+    }) {
+        let route = crate::route_runtime::resolve_runtime_route(&config, provider, None)
+            .map_err(anyhow::Error::msg)?;
+        let endpoint = route.candidate.endpoint().base_url.clone();
+        let protocol = route.candidate.protocol();
+        config = *route.config;
+        (endpoint, protocol)
+    } else {
+        (
+            config.deepseek_base_url(),
+            provider_wire_format_for_config(provider, Some(&config)),
+        )
+    };
+    validate_base_url_security(&base_url)?;
+    let (api_key, account_id) = if provider == ApiProvider::OpenaiCodex {
+        if let Some(credentials) = crate::oauth::credentials_from_env() {
+            (credentials.access_token, credentials.account_id)
+        } else if config.provider_uses_custom_endpoint(provider) {
+            (config.deepseek_api_key_read_only()?, None)
+        } else {
+            // The runtime may refresh owned OAuth even when credentials_valid
+            // is true. Do not enter that lifecycle from a read-only diagnostic.
+            anyhow::ensure!(
+                !crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Chatgpt, &config),
+                "Owned OAuth scope cannot be located without entering its credential lifecycle"
+            );
+            let path = crate::oauth::auth_file_path();
+            let grant = config.external_credential_read_grant(
+                provider,
+                codewhale_config::ExternalCredentialSource::CodexCli,
+                &path,
+            )?;
+            let credentials = crate::oauth::get_credentials(&grant)?;
+            (credentials.access_token, credentials.account_id)
+        }
+    } else {
+        anyhow::ensure!(
+            provider != ApiProvider::Xai
+                || config.provider_uses_custom_endpoint(provider)
+                || !config
+                    .auth_mode_for_provider(provider)
+                    .as_deref()
+                    .is_some_and(crate::oauth::auth_mode_uses_xai_oauth),
+            "Owned OAuth scope cannot be located without entering its credential lifecycle"
+        );
+        (config.deepseek_api_key_read_only()?, None)
+    };
+    let headers = build_default_headers(
+        &api_key,
+        &config.http_headers(),
+        provider,
+        &base_url,
+        wire_format,
+        auth_mode_disables_api_key(config.auth_mode_for_provider(provider).as_deref()),
+    )?;
+    let key = recovery_scope_key(&base_url, &headers, account_id.as_deref())?;
+    let directory = config.rate_limit_recovery_dir.clone().or_else(|| {
+        codewhale_paths::codewhale_home()
+            .ok()
+            .flatten()
+            .map(|home| home.join("rate-limit-recovery"))
+    });
+    Ok(directory
+        .context("Recovery storage location is unavailable")?
+        .join(format!("{key}.json")))
 }
 
 fn build_default_headers(
@@ -2342,11 +2799,13 @@ impl DeepSeekClient {
         requested_model: &str,
         route_limits: Option<RouteLimits>,
     ) -> u32 {
-        let wire_model =
-            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
-        crate::route_budget::effective_max_output_tokens_for_route(
+        // Delegate to the shared normalize-then-intersect copy in
+        // `route_budget`; the host-facing engine wrapper calls the same
+        // helper, so this clamp cannot drift from what hosts compute.
+        crate::route_budget::route_effective_max_output_tokens(
             self.api_provider,
-            &wire_model,
+            &self.base_url,
+            requested_model,
             route_limits,
         )
     }
@@ -2412,11 +2871,17 @@ impl DeepSeekClient {
             .map_or(0, ProviderConcurrencyLimiter::active)
     }
 
-    async fn acquire_provider_request_permit(&self) -> Option<ProviderRequestPermit> {
-        match self.request_concurrency.as_ref() {
-            Some(limiter) => limiter.acquire().await,
-            None => None,
-        }
+    async fn acquire_provider_request_permit(&self) -> Option<Arc<ProviderRequestPermit>> {
+        let limiter = self.request_concurrency.as_ref()?;
+        let permit = Arc::new(ProviderRequestPermit {
+            lease: std::sync::Mutex::new(None),
+            limiter: limiter.clone(),
+        });
+        *self
+            .operation_permit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&permit);
+        Some(permit)
     }
 
     pub(crate) async fn acquire_remote_control_inference_permit(
@@ -2430,7 +2895,7 @@ impl DeepSeekClient {
 
     fn hold_provider_request_permit_for_stream(
         stream: crate::llm_client::StreamEventBox,
-        permit: Option<ProviderRequestPermit>,
+        permit: Option<Arc<ProviderRequestPermit>>,
     ) -> crate::llm_client::StreamEventBox {
         Box::pin(async_stream::stream! {
             let _permit = permit;
@@ -2503,10 +2968,10 @@ impl DeepSeekClient {
         target_language: &str,
     ) -> Result<String> {
         let _inference = self.acquire_remote_control_inference_permit().await;
-        let _permit = self.acquire_provider_request_permit().await;
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
         let max_tokens = self.effective_max_output_tokens(&model);
         let call = self.for_operation(uuid::Uuid::new_v4());
+        let _permit = call.acquire_provider_request_permit().await;
         if self.wire_format != WireFormat::ChatCompletions {
             // Non-Chat dialects reuse the prepared-request seam so translation
             // cannot drift from production shaping. Translation is still an
@@ -2862,7 +3327,6 @@ impl DeepSeekClient {
         request: SpeechSynthesisRequest,
     ) -> Result<SpeechSynthesisResponse> {
         let _inference = self.acquire_remote_control_inference_permit().await;
-        let _permit = self.acquire_provider_request_permit().await;
         if self.api_provider != crate::config::ApiProvider::XiaomiMimo {
             anyhow::bail!(
                 "speech synthesis requires provider 'xiaomi-mimo' (current: {})",
@@ -2916,6 +3380,7 @@ impl DeepSeekClient {
 
         let url = api_url(&self.base_url, "chat/completions");
         let call = self.for_operation(uuid::Uuid::new_v4());
+        let _permit = call.acquire_provider_request_permit().await;
         let response = call.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
@@ -2953,6 +3418,11 @@ impl DeepSeekClient {
         if let Some(delay) = maybe_delay {
             tokio::time::sleep(delay).await;
         }
+    }
+
+    pub(crate) async fn provider_quota_pause_remaining(&self) -> Result<Option<Duration>> {
+        self.shared_quota.initialize().await?;
+        Ok(self.shared_quota.remaining())
     }
 
     async fn mark_request_success(&self) {
@@ -3013,10 +3483,7 @@ impl DeepSeekClient {
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
-        if self.isolated_request_state {
-            return self.send_with_isolated_retry(build).await;
-        }
-        self.send_retry_loop(build, Some(non_streaming_request_envelope()))
+        self.send_with_retry_total(non_streaming_request_envelope(), build)
             .await
     }
 
@@ -3032,10 +3499,8 @@ impl DeepSeekClient {
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
-        if self.isolated_request_state {
-            return self.send_with_isolated_retry(build).await;
-        }
-        self.send_retry_loop(build, Some(total)).await
+        self.send_with_retry_policy(build, Some(total), self.retry.clone().into())
+            .await
     }
 
     /// The streaming-open twin of [`Self::send_with_retry`]: the same retry
@@ -3049,25 +3514,154 @@ impl DeepSeekClient {
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
+        self.send_with_retry_policy(build, None, self.retry.clone().into())
+            .await
+    }
+
+    async fn send_with_retry_policy<F>(
+        &self,
+        build: F,
+        attempt_total: Option<Duration>,
+        retry_cfg: LlmRetryConfig,
+    ) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
         if self.isolated_request_state {
-            return self.send_with_isolated_retry(build).await;
+            return self
+                .send_with_isolated_retry(build, attempt_total, &retry_cfg)
+                .await;
         }
-        self.send_retry_loop(build, None).await
+        self.send_retry_loop(build, attempt_total, retry_cfg).await
+    }
+
+    async fn remember_retry_minimum(&self, error: &LlmError) -> std::result::Result<(), LlmError> {
+        if matches!(
+            error,
+            LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }
+        ) && let Some(delay) = error.suggested_retry_delay()
+        {
+            self.shared_quota.pause(delay);
+            self.shared_quota
+                .persist()
+                .await
+                .map_err(|message| LlmError::QuotaWindow {
+                    message,
+                    retry_after: Some(delay),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn disclose_http_error(&self, status: u16, raw: &str) -> String {
+        fn redact_strings(value: &mut serde_json::Value, secrets: &[String]) {
+            match value {
+                serde_json::Value::String(text) => *text = redact_model_bound_text(text, secrets),
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        redact_strings(value, secrets);
+                    }
+                }
+                serde_json::Value::Object(fields) => {
+                    for value in fields.values_mut() {
+                        redact_strings(value, secrets);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let raw = match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(mut value) => {
+                redact_strings(&mut value, &self.model_bound_secret_values);
+                value.to_string()
+            }
+            Err(_) => raw.to_owned(),
+        };
+        let raw = redact_model_bound_text(&raw, &self.model_bound_secret_values);
+        let safe = sanitize_http_error_body(Some(self.api_provider.display_name()), status, &raw);
+        let safe = if self.wire_format == WireFormat::AnthropicMessages && status >= 400 {
+            let (error_type, _) = anthropic::parse_anthropic_error_envelope(&raw);
+            let error_type = if error_type.len() <= 64
+                && error_type
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                error_type.as_str()
+            } else {
+                "unknown"
+            };
+            format!("Anthropic API error (HTTP {status} {error_type}): {safe}")
+        } else {
+            safe
+        };
+        redact_model_bound_text(&safe, &self.model_bound_secret_values)
+    }
+
+    fn classify_http_error(
+        &self,
+        status: u16,
+        raw: &str,
+        safe: &str,
+        hint: Option<Duration>,
+    ) -> LlmError {
+        let hint = hint
+            .max(crate::llm_client::rate_limit::body_delay(raw))
+            .max(crate::llm_client::retry_delay_from_error_body(raw));
+        let route = LlmError::from_http_response_with_retry_after(status, safe, hint);
+        match crate::llm_client::rate_limit::provider_error(
+            self.retry_provider_surface(),
+            status,
+            raw,
+            safe,
+            hint,
+        ) {
+            Some(LlmError::QuotaExhausted(_)) if matches!(route, LlmError::QuotaExhausted(_)) => {
+                route
+            }
+            Some(native) => native,
+            None => route,
+        }
+    }
+
+    fn retry_provider_surface(&self) -> &str {
+        if self.api_provider == ApiProvider::Custom
+            && let Ok(url) = reqwest::Url::parse(&self.base_url)
+            && url.host_str().is_some_and(|host| {
+                host == "dashscope.aliyuncs.com"
+                    || host.ends_with(".dashscope.aliyuncs.com")
+                    || host == "dashscope-intl.aliyuncs.com"
+            })
+        {
+            return "dashscope";
+        }
+        self.api_provider.as_str()
     }
 
     async fn send_retry_loop<F>(
         &self,
         mut build: F,
         attempt_total: Option<Duration>,
+        retry_cfg: LlmRetryConfig,
     ) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
-        let retry_cfg: LlmRetryConfig = self.retry.clone().into();
+        self.shared_quota.initialize().await?;
+        let operation_recovery = match self.operation_id {
+            Some(id) => self.recovery_for_operation(id)?,
+            None => crate::llm_client::rate_limit::operation(),
+        };
+        operation_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wire_attempts
+            .get_or_insert(0);
+        let callback_quota = self.shared_quota.clone();
+        let callback_permit = self.operation_permit.clone();
         // Two bounded layers around the non-streaming completion
         // (`attempt_total` = `Some`): the per-attempt request total (connect
         // through body end) and an envelope around the whole retry loop (all
-        // attempts + backoff + honored Retry-After). The shared client
+        // active attempts, excluding backoff and honored Retry-After). The shared client
         // intentionally has no client-level total timeout — streaming is
         // protected per-chunk instead — so without these nothing bounds a
         // non-streaming completion: a provider that accepts the connection
@@ -3077,61 +3671,293 @@ impl DeepSeekClient {
         // any total here would be inherited by the returned body and
         // truncate the stream, so those calls keep only the caller's own
         // open budget.
-        let retry_future = with_retry(
-            &retry_cfg,
-            || {
-                // Per-attempt total: unlike the loop envelope below,
-                // reqwest's per-request timeout also covers the response
-                // body, so a slow-drip body cannot outlive the budget.
-                let request = match attempt_total {
-                    Some(total) => self.with_operation_header(build()).timeout(total),
-                    None => self.with_operation_header(build()),
-                };
-                async move {
-                    // Sleep in bounded slices rather than the full remaining
-                    // window: the pause is process-global, so a concurrent
-                    // `clear_rate_limit()` (or a shortened deadline) must
-                    // release requests that are already waiting instead of
-                    // stranding them for the whole original window.
-                    while let Some(delay) = crate::retry_status::rate_limit_remaining() {
-                        tokio::time::sleep(delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL)).await;
+        // Auxiliary callers also need one recovery/receipt owner throughout admission and retry.
+        let retry_future = crate::llm_client::rate_limit::with_operation(
+            operation_recovery.clone(),
+            with_retry(
+                &retry_cfg,
+                || {
+                    // Per-attempt total: unlike the loop envelope below,
+                    // reqwest's per-request timeout also covers the response
+                    // body, so a slow-drip body cannot outlive the budget.
+                    let request = match attempt_total {
+                        Some(total) => self.with_operation_header(build()).timeout(total),
+                        None => self.with_operation_header(build()),
+                    };
+                    async move {
+                        let recovery = crate::llm_client::rate_limit::operation();
+                        let started = recovery
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .started;
+                        let recovery_budget =
+                            Duration::from_secs(self.retry.rate_limit.recovery_budget_secs);
+                        let admission_deadline =
+                            started.unwrap_or_else(tokio::time::Instant::now) + recovery_budget;
+                        let permit = self
+                            .operation_permit
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .upgrade();
+                        let mut observed_deadline = None;
+                        loop {
+                            while let Some(delay) = self.shared_quota.remaining() {
+                                let deadline = *self
+                                    .shared_quota
+                                    .pause
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let Some(permit) = &permit {
+                                    permit.suspend();
+                                }
+                                if delay
+                                    >= admission_deadline
+                                        .saturating_duration_since(tokio::time::Instant::now())
+                                {
+                                    return Err(LlmError::QuotaWindow { message: "Shared quota recovery paused; continue after the provider reset".into(), retry_after: Some(delay) });
+                                }
+                                if deadline != observed_deadline {
+                                    observed_deadline = deadline;
+                                    let attempts = recovery
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .attempts;
+                                    crate::llm_client::rate_limit::observe(
+                                        attempts,
+                                        self.retry.rate_limit.max_attempts,
+                                        Some(delay),
+                                        "waiting",
+                                    )
+                                    .await;
+                                }
+                                crate::llm_client::rate_limit::wait(
+                                    delay.min(RATE_LIMIT_PAUSE_RECHECK_INTERVAL),
+                                )
+                                .await;
+                            }
+                            let admission = async {
+                                self.wait_for_rate_limit().await;
+                                if let Some(permit) = &permit {
+                                    crate::llm_client::rate_limit::without_active_time(
+                                        permit.resume(),
+                                    )
+                                    .await;
+                                }
+                            };
+                            if started.is_some() || observed_deadline.is_some() {
+                                let admitted =
+                                    tokio::time::timeout_at(admission_deadline, admission).await;
+                                if admitted.is_err()
+                                    || tokio::time::Instant::now() >= admission_deadline
+                                {
+                                    return Err(LlmError::QuotaWindow {
+                                        message: "Model recovery budget exhausted while waiting for admission".into(),
+                                        retry_after: self.shared_quota.remaining(),
+                                    });
+                                }
+                            } else {
+                                admission.await;
+                            }
+                            // A peer may have refused while this request queued for tokens or a slot.
+                            if self.shared_quota.remaining().is_some() {
+                                if let Some(permit) = &permit {
+                                    permit.suspend();
+                                }
+                                continue;
+                            }
+                            if let Some(remaining) =
+                                self.shared_quota.admit_recovery(&self.retry.rate_limit)
+                            {
+                                return Err(LlmError::QuotaWindow {
+                                    message: "Shared quota recovery attempt budget exhausted"
+                                        .into(),
+                                    retry_after: Some(remaining),
+                                });
+                            }
+                            break;
+                        }
+                        {
+                            let recovery = crate::llm_client::rate_limit::operation();
+                            let mut recovery = recovery
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let attempts = recovery.wire_attempts.get_or_insert(0);
+                            *attempts = attempts.saturating_add(1);
+                        }
+                        crate::llm_client::rate_limit::set_response_headers_received(false);
+                        let response = request
+                            .send()
+                            .await
+                            .map_err(|err| LlmError::from_reqwest(&err))?;
+                        crate::llm_client::rate_limit::set_response_headers_received(true);
+                        let open_timeout = stream_entry::stream_open_timeout();
+                        let inspection =
+                            crate::llm_client::rate_limit::inspect_json_envelope_with_disclosure(
+                                self.api_provider.as_str(),
+                                response,
+                                Some((open_timeout, self.stream_idle_timeout)),
+                                |status, raw| self.disclose_http_error(status, raw),
+                            );
+                        let inspected = if attempt_total.is_none() {
+                            let envelope_timeout =
+                                open_timeout.saturating_add(self.stream_idle_timeout);
+                            crate::llm_client::rate_limit::without_active_time(async {
+                                tokio::time::timeout(envelope_timeout, inspection)
+                                    .await
+                                    .unwrap_or(Err(LlmError::Timeout(envelope_timeout)))
+                            })
+                            .await
+                            .map_err(|error| match error {
+                                // The provider already accepted this POST. An
+                                // incomplete JSON envelope is a response error,
+                                // never a reason to open another stream.
+                                LlmError::Timeout(_)
+                                | LlmError::NetworkError(_)
+                                | LlmError::Other(_) => LlmError::ParseError(format!(
+                                    "Could not read the provider JSON envelope: {error}"
+                                )),
+                                error => error,
+                            })
+                        } else {
+                            inspection.await
+                        };
+                        let start_recovery = || {
+                            let mut recovery = recovery
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let started = *recovery
+                                .started
+                                .get_or_insert_with(tokio::time::Instant::now);
+                            started + recovery_budget
+                        };
+                        let response = match inspected {
+                            Ok(response) => response,
+                            Err(error) => {
+                                crate::llm_client::rate_limit::record_stream_response_error(&error);
+                                if matches!(
+                                    error,
+                                    LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }
+                                ) {
+                                    let deadline = start_recovery();
+                                    let retry_after = error.suggested_retry_delay();
+                                    if let Some(delay) = retry_after {
+                                        self.shared_quota.pause(delay);
+                                    }
+                                    let record_refusal = async {
+                                        self.shared_quota.refused().await;
+                                        self.remember_retry_minimum(&error).await
+                                    };
+                                    match tokio::time::timeout_at(deadline, record_refusal).await {
+                                        Ok(result) => result?,
+                                        Err(_) => return Err(LlmError::QuotaWindow {
+                                            message: "Model recovery deadline reached while recording the provider quota response".into(),
+                                            retry_after,
+                                        }),
+                                    }
+                                }
+                                return Err(error);
+                            }
+                        };
+                        let status = response.status();
+                        if status.is_success() {
+                            self.shared_quota.recovered().await;
+                            return Ok(response);
+                        }
+                        let retry_after = extract_retry_after(response.headers());
+                        let quota_response = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                        let recovery_deadline = if quota_response {
+                            crate::llm_client::rate_limit::record_stream_open_quota(retry_after);
+                            // Honor the explicit header for this quota before
+                            // diagnostic reads or another operation's admission.
+                            if let Some(delay) = retry_after {
+                                self.shared_quota.pause(delay);
+                            }
+                            Some(start_recovery())
+                        } else {
+                            None
+                        };
+                        let classify = async {
+                            if quota_response {
+                                if let Some(delay) = retry_after {
+                                    self.shared_quota.persist().await.map_err(|message| {
+                                        LlmError::QuotaWindow {
+                                            message,
+                                            retry_after: Some(delay),
+                                        }
+                                    })?;
+                                }
+                                self.shared_quota.refused().await;
+                            }
+                            record_provider_response(self.api_provider, status.as_u16());
+                            let deadline = if attempt_total.is_none() {
+                                let diagnostic_deadline = tokio::time::Instant::now()
+                                    + self
+                                        .stream_idle_timeout
+                                        .min(stream_entry::stream_open_timeout());
+                                Some(recovery_deadline.map_or(diagnostic_deadline, |deadline| {
+                                    deadline.min(diagnostic_deadline)
+                                }))
+                            } else {
+                                recovery_deadline
+                            };
+                            let body_read =
+                                bounded_error_text_until(response, ERROR_BODY_MAX_BYTES, deadline);
+                            let raw_body = if attempt_total.is_none() {
+                                crate::llm_client::rate_limit::without_active_time(body_read).await
+                            } else {
+                                body_read.await
+                            };
+                            let body = self.disclose_http_error(status.as_u16(), &raw_body);
+                            let error = self.classify_http_error(
+                                status.as_u16(),
+                                &raw_body,
+                                &body,
+                                retry_after,
+                            );
+                            crate::llm_client::rate_limit::record_stream_response_error(&error);
+                            self.remember_retry_minimum(&error).await?;
+                            Err(error)
+                        };
+                        if let Some(deadline) = recovery_deadline {
+                            match tokio::time::timeout_at(deadline, classify).await {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    let error = LlmError::QuotaWindow {
+                                        message: "Model recovery deadline reached while processing the provider response".into(),
+                                        retry_after,
+                                    };
+                                    crate::llm_client::rate_limit::record_stream_response_error(
+                                        &error,
+                                    );
+                                    Err(error)
+                                }
+                            }
+                        } else {
+                            classify.await
+                        }
                     }
-                    self.wait_for_rate_limit().await;
-                    let response = request
-                        .send()
-                        .await
-                        .map_err(|err| LlmError::from_reqwest(&err))?;
-                    let status = response.status();
-                    if status.is_success() {
-                        return Ok(response);
+                },
+                Some(Box::new(move |err: &LlmError, attempt, delay| {
+                    if let Some(permit) = callback_permit
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .upgrade()
+                    {
+                        permit.suspend();
                     }
-                    let retry_after = extract_retry_after(response.headers());
-                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                    let body = sanitize_http_error_body(
-                        Some(self.api_provider.display_name()),
-                        status.as_u16(),
-                        &body,
-                    );
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
-                }
-            },
-            Some(Box::new(|err: &LlmError, attempt, delay| {
-                let (reason_label, human_reason) = retry_reason_label_and_human(err);
-                logging::warn(format!(
-                    "HTTP retry reason={} attempt={} delay={:.2}s",
-                    reason_label,
-                    attempt + 1,
-                    delay.as_secs_f64(),
-                ));
-                if matches!(err, LlmError::RateLimited { .. }) {
-                    crate::retry_status::note_rate_limit(delay);
-                }
-                crate::retry_status::start(attempt + 1, delay, human_reason);
-            })),
+                    let (reason_label, human_reason) = retry_reason_label_and_human(err);
+                    logging::warn(format!(
+                        "HTTP retry reason={} attempt={} delay={:.2}s",
+                        reason_label,
+                        attempt + 1,
+                        delay.as_secs_f64(),
+                    ));
+                    if matches!(err, LlmError::RateLimited { .. }) {
+                        callback_quota.pause(delay);
+                    }
+                    crate::retry_status::start(attempt + 1, delay, human_reason);
+                })),
+            ),
         );
         let request_result = if let Some(total) = attempt_total {
             // The loop envelope must dominate the per-attempt total it
@@ -3139,7 +3965,9 @@ impl DeepSeekClient {
             // the shared envelope, and the envelope must never strangle
             // its own attempts.
             let loop_envelope = total.max(non_streaming_request_envelope());
-            match tokio::time::timeout(loop_envelope, retry_future).await {
+            match crate::llm_client::rate_limit::active_timeout_total(loop_envelope, retry_future)
+                .await
+            {
                 Ok(result) => result,
                 Err(_elapsed) => {
                     let last = LlmError::Timeout(loop_envelope);
@@ -3165,11 +3993,27 @@ impl DeepSeekClient {
                 Ok(response)
             }
             Err(err) => {
-                if let LlmError::RateLimited { retry_after, .. } = &err.last_error {
-                    crate::retry_status::note_rate_limit(
+                if let LlmError::RateLimited { retry_after, .. }
+                | LlmError::QuotaWindow { retry_after, .. } = &err.last_error
+                {
+                    self.shared_quota.pause(
                         retry_after
                             .unwrap_or_else(|| retry_cfg.delay_for_attempt(retry_cfg.max_retries)),
                     );
+                    let deadline = operation_recovery
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .started
+                        .map(|started| {
+                            started
+                                + Duration::from_secs(self.retry.rate_limit.recovery_budget_secs)
+                        });
+                    if let Some(deadline) = deadline {
+                        let _ =
+                            tokio::time::timeout_at(deadline, self.shared_quota.persist()).await;
+                    } else {
+                        let _ = self.shared_quota.persist().await;
+                    }
                 }
                 let last = err.last_error.to_string();
                 if err.attempts > 1 {
@@ -3177,8 +4021,38 @@ impl DeepSeekClient {
                 } else {
                     crate::retry_status::clear();
                 }
-                self.mark_request_failure(&last).await;
-                self.maybe_probe_recovery().await;
+                logging::warn(format!(
+                    "model_recovery_stopped provider={} attempts={} elapsed_ms={} resumable={}",
+                    self.api_provider.as_str(),
+                    err.attempts,
+                    err.total_time.as_millis(),
+                    matches!(
+                        err.last_error,
+                        LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }
+                    )
+                ));
+                self.mark_request_failure(retry_reason_label_and_human(&err.last_error).0)
+                    .await;
+                // Definitive HTTP stream errors must reach the caller without
+                // a /models probe that could turn them into a header timeout.
+                let transport_failure = matches!(
+                    err.last_error,
+                    LlmError::NetworkError(_) | LlmError::Timeout(_)
+                );
+                let ordinary_wire = self.wire_format != WireFormat::AnthropicMessages;
+                let probe = if attempt_total.is_some() {
+                    ordinary_wire || transport_failure
+                } else {
+                    ordinary_wire && transport_failure
+                };
+                if probe
+                    && !matches!(
+                        err.last_error,
+                        LlmError::RateLimited { .. } | LlmError::QuotaWindow { .. }
+                    )
+                {
+                    self.maybe_probe_recovery().await;
+                }
                 // Keep the structured `LlmError` downcastable so failure
                 // surfaces can classify auth/rate-limit/invalid-request
                 // instead of reporting an opaque string (#3884).
@@ -3190,37 +4064,50 @@ impl DeepSeekClient {
     /// The same bounded transport retry policy without process-global retry
     /// banners, provider-wide pause cells, or shared connection-health writes.
     /// Used only by the Auto classifier during read-only request inspection.
-    async fn send_with_isolated_retry<F>(&self, mut build: F) -> Result<reqwest::Response>
+    async fn send_with_isolated_retry<F>(
+        &self,
+        mut build: F,
+        attempt_total: Option<Duration>,
+        retry_cfg: &LlmRetryConfig,
+    ) -> Result<reqwest::Response>
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
-        let retry_cfg: LlmRetryConfig = self.retry.clone().into();
-        let request_result = with_retry(
-            &retry_cfg,
+        let retry_future = with_retry(
+            retry_cfg,
             || {
                 let request = self.with_operation_header(build());
+                let request = match attempt_total {
+                    Some(total) => request.timeout(total),
+                    None => request,
+                };
                 async move {
                     self.wait_for_rate_limit().await;
+                    crate::llm_client::rate_limit::set_response_headers_received(false);
                     let response = request
                         .send()
                         .await
                         .map_err(|err| LlmError::from_reqwest(&err))?;
+                    crate::llm_client::rate_limit::set_response_headers_received(true);
+                    let response =
+                        crate::llm_client::rate_limit::inspect_json_envelope_with_disclosure(
+                            self.api_provider.as_str(),
+                            response,
+                            Some((
+                                stream_entry::stream_open_timeout(),
+                                self.stream_idle_timeout,
+                            )),
+                            |status, raw| self.disclose_http_error(status, raw),
+                        )
+                        .await?;
                     let status = response.status();
                     if status.is_success() {
                         return Ok(response);
                     }
                     let retry_after = extract_retry_after(response.headers());
-                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
-                    let body = sanitize_http_error_body(
-                        Some(self.api_provider.display_name()),
-                        status.as_u16(),
-                        &body,
-                    );
-                    Err(LlmError::from_http_response_with_retry_after(
-                        status.as_u16(),
-                        &body,
-                        retry_after,
-                    ))
+                    let raw_body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                    let body = self.disclose_http_error(status.as_u16(), &raw_body);
+                    Err(self.classify_http_error(status.as_u16(), &raw_body, &body, retry_after))
                 }
             },
             Some(Box::new(|err, attempt, delay| {
@@ -3232,10 +4119,70 @@ impl DeepSeekClient {
                     delay.as_secs_f64(),
                 ));
             })),
-        )
-        .await;
-
+        );
+        let request_result = if let Some(total) = attempt_total {
+            let envelope = total.max(non_streaming_request_envelope());
+            crate::llm_client::rate_limit::active_timeout_total(envelope, retry_future)
+                .await
+                .map_err(|_| LlmError::Timeout(envelope))?
+        } else {
+            retry_future.await
+        };
         request_result.map_err(|err| anyhow::Error::new(err.last_error))
+    }
+
+    /// Reuse the frozen route only when endpoint and credential match. A
+    /// dedicated vision endpoint must not inherit the main route's headers.
+    pub(crate) fn auxiliary_json_route(
+        parent: Option<&Self>,
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+    ) -> Result<Self> {
+        if let Some(parent) = parent.filter(|p| p.matches_auxiliary_chat_route(base_url, api_key)) {
+            return Ok(parent.clone());
+        }
+        let config = Config {
+            provider: Some("custom".into()),
+            api_key: Some(api_key.into()),
+            base_url: Some(base_url.into()),
+            default_text_model: Some(model.into()),
+            rate_limit_recovery_dir: parent.and_then(|p| p.shared_quota.storage.clone()),
+            ..Default::default()
+        };
+        let mut client = Self::from_parts_with_exact_key(
+            base_url.to_owned(),
+            model.to_owned(),
+            WireFormat::ChatCompletions,
+            None,
+            &config,
+            Some(api_key),
+        )?;
+        if let Some(parent) = parent {
+            client.retry = parent.retry.clone();
+        }
+        Ok(client)
+    }
+
+    pub(crate) async fn request_auxiliary_json(
+        &self,
+        url: &str,
+        body: &Value,
+        operation_id: uuid::Uuid,
+    ) -> Result<Value> {
+        crate::llm_client::rate_limit::with_operation(
+            self.recovery_for_operation(operation_id)?,
+            async {
+                let call = self.for_operation(operation_id);
+                let _permit = call.acquire_provider_request_permit().await;
+                let response = call.send_json_with_retry(url, body).await?;
+                response
+                    .json()
+                    .await
+                    .context("Failed to parse auxiliary model response")
+            },
+        )
+        .await
     }
 
     pub(super) async fn send_json_with_retry(
@@ -3259,17 +4206,29 @@ impl DeepSeekClient {
     /// [`Self::send_stream_open_with_retry`]).
     pub(super) async fn open_stream_json_with_retry(
         &self,
+        client: &reqwest::Client,
         url: &str,
         body: &serde_json::Value,
+        policy: stream_entry::StreamHttpPolicy,
     ) -> Result<reqwest::Response> {
         let request_body =
             serde_json::to_vec(body).context("Failed to serialize JSON request body")?;
-        self.send_stream_open_with_retry(|| {
-            self.http_client
-                .post(url)
-                .header(CONTENT_TYPE, "application/json")
-                .body(request_body.clone())
-        })
+        let mut retry: LlmRetryConfig = self.retry.clone().into();
+        if policy == stream_entry::StreamHttpPolicy::Http1Only {
+            // Retain the single H1 send for ordinary failures. Provider quota
+            // recovery uses its own policy and still applies to this client.
+            retry.max_retries = 0;
+        }
+        self.send_with_retry_policy(
+            || {
+                client
+                    .post(url)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(request_body.clone())
+            },
+            None,
+            retry,
+        )
         .await
     }
 }
@@ -3309,7 +4268,7 @@ fn retry_reason_label_and_human(err: &LlmError) -> (&'static str, String) {
             .bump_error(codewhale_telemetry::ErrorCounter::NetworkError);
     }
     match err {
-        LlmError::RateLimited { retry_after, .. } => {
+        LlmError::RateLimited { retry_after, .. } | LlmError::QuotaWindow { retry_after, .. } => {
             let human = if let Some(after) = retry_after {
                 format!("rate limited (Retry-After {}s)", after.as_secs())
             } else {
@@ -3343,6 +4302,9 @@ impl DeepSeekClient {
         // auxiliary classifier call, however: it must neither consume nor
         // inherit that mutable foreground state.
         isolated.rate_limiter = Arc::new(AsyncMutex::new(TokenBucket::from_env()));
+        isolated.request_concurrency = None;
+        isolated.operation_recovery = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        isolated.operation_permit = Arc::default();
         let _inference = isolated.acquire_remote_control_inference_permit().await;
         let _permit = isolated.acquire_provider_request_permit().await;
         let prepared = isolated.prepare_outbound_request(request, false)?;
@@ -3357,9 +4319,44 @@ impl DeepSeekClient {
 impl DeepSeekClient {
     // A request-local clone owns exactly one outbound logical call. Do not
     // reuse it for an auxiliary request with a different body.
+    fn recovery_for_operation(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Arc<std::sync::Mutex<crate::llm_client::rate_limit::OperationRecovery>>> {
+        let mut operations = self
+            .operation_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        operations.retain(|_, recovery| {
+            Arc::strong_count(recovery) > 1
+                || recovery
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .created
+                    .elapsed()
+                    < Duration::from_secs(86400)
+        });
+        anyhow::ensure!(
+            operations.len() < 65536 || operations.contains_key(&id),
+            "Too many retained model recovery operations"
+        );
+        Ok(operations
+            .entry(id)
+            .or_insert_with(|| {
+                Arc::new(std::sync::Mutex::new(
+                    crate::llm_client::rate_limit::OperationRecovery {
+                        operation_id: Some(id.to_string()),
+                        ..Default::default()
+                    },
+                ))
+            })
+            .clone())
+    }
+
     fn for_operation(&self, operation_id: uuid::Uuid) -> Self {
         let mut client = self.clone();
         client.operation_id = Some(operation_id);
+        client.operation_permit = Arc::default();
         client
     }
 
@@ -3393,9 +4390,8 @@ impl DeepSeekClient {
             None => builder,
         }
     }
-    pub(crate) fn idempotency_matches_route(&self, base_url: &str, api_key: &str) -> bool {
-        self.request_idempotency_header.is_some()
-            && self.wire_format == WireFormat::ChatCompletions
+    pub(crate) fn matches_auxiliary_chat_route(&self, base_url: &str, api_key: &str) -> bool {
+        self.wire_format == WireFormat::ChatCompletions
             && !self.auth_disabled
             && !(self.api_provider == ApiProvider::XiaomiMimo
                 && (xiaomi_mimo_base_url_uses_token_plan(&self.base_url)
@@ -3440,7 +4436,7 @@ impl DeepSeekClient {
         &self,
         prepared: PreparedOutboundRequest,
         inference: Option<RemoteControlInferencePermit>,
-        permit: Option<ProviderRequestPermit>,
+        permit: Option<Arc<ProviderRequestPermit>>,
     ) -> Result<crate::llm_client::StreamEventBox> {
         let projection_warning = (!prepared.omitted_tool_names.is_empty()).then(|| {
             let omitted_tool_count = prepared.omitted_tool_names.len();
@@ -3559,18 +4555,23 @@ impl LlmClient for DeepSeekClient {
         request: MessageRequest,
         operation_id: uuid::Uuid,
     ) -> Result<MessageResponse> {
-        self.for_operation(operation_id)
-            .perform_message(request)
-            .await
+        crate::llm_client::rate_limit::with_operation(
+            self.recovery_for_operation(operation_id)?,
+            self.for_operation(operation_id).perform_message(request),
+        )
+        .await
     }
     async fn create_message_stream_for_operation(
         &self,
         request: MessageRequest,
         operation_id: uuid::Uuid,
     ) -> Result<crate::llm_client::StreamEventBox> {
-        self.for_operation(operation_id)
-            .perform_message_stream(request)
-            .await
+        crate::llm_client::rate_limit::with_operation(
+            self.recovery_for_operation(operation_id)?,
+            self.for_operation(operation_id)
+                .perform_message_stream(request),
+        )
+        .await
     }
     fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
         if self.request_idempotency_header.is_none() {
@@ -3639,9 +4640,11 @@ impl LlmClient for DeepSeekClient {
                 .prepare_outbound_request(call.request, true)
                 .map_err(crate::llm_client::DeferredStreamPreparationError)?,
         };
-        client
-            .finish_prepared_stream(prepared, inference, permit)
-            .await
+        crate::llm_client::rate_limit::with_operation(
+            client.recovery_for_operation(operation_id)?,
+            client.finish_prepared_stream(prepared, inference, permit),
+        )
+        .await
     }
 }
 
@@ -4406,7 +5409,6 @@ impl DeepSeekClient {
         max_tokens: u32,
     ) -> anyhow::Result<String> {
         let _inference = self.acquire_remote_control_inference_permit().await;
-        let _permit = self.acquire_provider_request_permit().await;
         if self.api_provider == ApiProvider::OpencodeZen
             || self.wire_format != WireFormat::ChatCompletions
         {
@@ -4426,6 +5428,7 @@ impl DeepSeekClient {
             "max_tokens": max_tokens,
         });
         let call = self.for_operation(uuid::Uuid::new_v4());
+        let _permit = call.acquire_provider_request_permit().await;
         let response = call.send_json_with_retry(&url, &body).await?;
         let status = response.status();
         if !status.is_success() {
@@ -4520,7 +5523,8 @@ mod tests {
     use super::*;
     use crate::client::chat::{
         ReasoningDetailsBuffer, build_chat_messages, build_chat_messages_for_request,
-        build_chat_messages_for_request_and_provider, count_reasoning_replay_chars,
+        build_chat_messages_for_request_and_provider,
+        build_chat_messages_for_request_and_provider_and_route, count_reasoning_replay_chars,
         parse_chat_message, parse_sse_chunk, sanitize_thinking_mode_messages, tool_to_chat,
         tool_to_chat_for_base_url,
     };
@@ -4736,6 +5740,65 @@ mod tests {
             .and_then(|tools| tools.iter().find(|tool| tool["function"]["name"] == name))
             .map(|tool| &tool["function"])
             .unwrap_or_else(|| panic!("captured tool catalog is missing {name}: {body}"))
+    }
+
+    /// The client-construction fallback must fail closed on a known-bad
+    /// Kimi model/endpoint pairing: `.ok()` on the route resolution used to
+    /// swallow the pairing rejection, and the per-turn auto-router
+    /// classifier sends real requests through a client built this way.
+    #[test]
+    fn client_fallback_fails_closed_on_cross_paired_kimi_routes() {
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            // The K3-generation gate keeps the same coverage here.
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K3_MODEL,
+            ),
+        ] {
+            let error = DeepSeekClient::new(&Config {
+                provider: Some("moonshot".to_string()),
+                providers: Some(ProvidersConfig {
+                    moonshot: ProviderConfig {
+                        api_key: Some("fallback-pairing-key".to_string()),
+                        base_url: Some(base_url.to_string()),
+                        model: Some(model.to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                ..Config::default()
+            })
+            .map(|_| ())
+            .expect_err("cross-paired Kimi route must fail closed in the client fallback");
+            let error = error.to_string();
+            assert!(error.contains(model), "{error}");
+            assert!(error.contains("base_url"), "{error}");
+        }
+
+        // Canonical pairs still construct on the same arm.
+        let client = DeepSeekClient::new(&Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(ProvidersConfig {
+                moonshot: ProviderConfig {
+                    api_key: Some("fallback-pairing-key".to_string()),
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some("k3".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("canonical membership pair must construct");
+        assert_eq!(client.base_url, crate::config::DEFAULT_KIMI_CODE_BASE_URL);
     }
 
     fn moonshot_request_boundary_client(
@@ -8069,6 +9132,8 @@ mod tests {
                 .acquire_provider_request_permit()
                 .await
                 .expect("zai default should install provider request limiter");
+            assert_eq!(client.active_provider_requests(), 0);
+            permit.resume().await;
 
             assert_eq!(client.active_provider_requests(), 1);
             assert_eq!(clone.active_provider_requests(), 1);
@@ -8085,6 +9150,8 @@ mod tests {
                 .acquire_provider_request_permit()
                 .await
                 .expect("zai default should install provider request limiter");
+            assert_eq!(client.active_provider_requests(), 0);
+            permit.resume().await;
             let stream: crate::llm_client::StreamEventBox = Box::pin(futures_util::stream::iter(
                 vec![Ok(StreamEvent::MessageStop)],
             ));
@@ -9375,6 +10442,222 @@ mod tests {
             generic_assistant.get("reasoning_content").is_none(),
             "generic OpenAI-compatible providers reject DeepSeek-only reasoning_content (#1542)"
         );
+    }
+
+    /// K3.1 replay contract (2026-11-04 pinvou-agent#825 review): the K3.1
+    /// spellings inherit the K3 contract verbatim, and the Kimi Code error
+    /// reference makes a replayed tool-call assistant message WITHOUT its
+    /// `reasoning_content` an HTTP 400. The exact-K3 matchers only learn the
+    /// bare k3 ids, so the replay gate carries its own K3.1 arm — pin all
+    /// four spellings across both vendor routes (direct platform + Kimi Code
+    /// membership endpoint), the stale-effort-off always-replay case, the
+    /// case/padding normalization, and the custom-gateway / non-Moonshot
+    /// dialect boundary. The uniquely pinning legs are the effort-off ones
+    /// and the bare membership ids: the direct-platform default-effort legs
+    /// would also replay through the generic `kimi-` prefix heuristic with
+    /// this arm deleted (same honesty note as the stream gate's arm).
+    #[test]
+    fn kimi_k31_tool_rounds_replay_reasoning_content_on_the_vendor_routes() {
+        let tool_round = || {
+            vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Need the date".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking {
+                            signature: None,
+                            state: None,
+                            thinking: "Need to call a tool".to_string(),
+                            redacted_data: None,
+                            reasoning_details: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "get_date".to_string(),
+                            input: json!({}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "tool-1".to_string(),
+                        content: "2026-04-23".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ]
+        };
+        let tool_assistant_reasoning = |label: &str,
+                                        provider: ApiProvider,
+                                        base_url: &str,
+                                        model: &str,
+                                        effort: Option<&str>|
+         -> Option<String> {
+            let request = MessageRequest {
+                model: model.to_string(),
+                messages: tool_round(),
+                max_tokens: 16,
+                system: None,
+                tools: None,
+                tool_choice: None,
+                metadata: None,
+                thinking: None,
+                reasoning_effort: effort.map(str::to_string),
+                stream: None,
+                temperature: None,
+                top_p: None,
+            };
+            let out = build_chat_messages_for_request_and_provider_and_route(
+                &request, provider, base_url,
+            );
+            let tool_assistant = out
+                .iter()
+                .find(|value| {
+                    value.get("role").and_then(Value::as_str) == Some("assistant")
+                        && value.get("tool_calls").is_some()
+                })
+                .unwrap_or_else(|| panic!("{label}: tool-call assistant message missing"));
+            tool_assistant
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        for (label, base_url, model, effort) in [
+            (
+                "direct platform",
+                "https://api.moonshot.cn/v1",
+                "kimi-k3.1-pro",
+                None,
+            ),
+            (
+                "direct platform highspeed",
+                "https://api.moonshot.ai/v1",
+                "kimi-k3.1-pro-highspeed",
+                None,
+            ),
+            // The arm must precede the effort check like bare K3: a stored
+            // effort off would otherwise strip the field via the generic
+            // path on the direct platform, where no catalog entry or
+            // `kimi-`-prefix-independent pin exists.
+            (
+                "direct platform ignores a stale effort off",
+                "https://api.moonshot.cn/v1",
+                "kimi-k3.1-pro",
+                Some("off"),
+            ),
+            (
+                "kimi code",
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro-highspeed",
+                None,
+            ),
+            (
+                "kimi code ignores a stale effort off",
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro",
+                Some("off"),
+            ),
+            // The official overseas Kimi Code alias the app's model catalog
+            // registers and prefs preserve verbatim (review P2,
+            // pinvou-agent#825): the replay contract must hold there too.
+            (
+                "kimi code overseas",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro",
+                None,
+            ),
+            (
+                "kimi code overseas highspeed",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro-highspeed",
+                None,
+            ),
+            // The spelling matcher normalizes case and padding; pin it on
+            // the bare Kimi Code ids, where no generic heuristic would
+            // replay in the matcher's place.
+            (
+                "kimi code is case-insensitive",
+                "https://api.kimi.com/coding/v1",
+                "K3.1-PRO",
+                None,
+            ),
+            (
+                "kimi code trims padding",
+                "https://api.kimi.com/coding/v1",
+                "  k3.1-pro  ",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, ApiProvider::Moonshot, base_url, model, effort),
+                Some("Need to call a tool".to_string()),
+                "{label}: the K3.1 replay contract must keep reasoning_content on the tool-round assistant message"
+            );
+        }
+
+        // The arm is pinned to the vendor's own routes: a custom
+        // Moonshot-compatible gateway keeps its own dialect, and so does a
+        // different provider that happens to point at either vendor host.
+        for (label, provider, base_url, model) in [
+            (
+                "custom gateway keeps its own dialect",
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                "k3.1-pro",
+            ),
+            (
+                "non-moonshot provider keeps its own dialect",
+                ApiProvider::Openai,
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro",
+            ),
+            (
+                "non-moonshot provider keeps its own dialect on the direct platform",
+                ApiProvider::Openai,
+                "https://api.moonshot.ai/v1",
+                "kimi-k3.1-pro",
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, provider, base_url, model, None),
+                None,
+                "{label}: reasoning_content must stay stripped outside the vendor routes"
+            );
+        }
+
+        // The spelling matcher is route-family-wide (documented: "all four
+        // spellings on both vendor routes"), so the cross-family pairings —
+        // the direct spelling on the membership endpoint and vice versa —
+        // replay too, even though config validation rejects those pairings
+        // before a request can be built.
+        for (label, base_url, model) in [
+            (
+                "direct spelling on the membership route",
+                "https://api.kimi.com/coding/v1",
+                "kimi-k3.1-pro",
+            ),
+            (
+                "membership spelling on the direct route",
+                "https://api.moonshot.ai/v1",
+                "k3.1-pro-highspeed",
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, ApiProvider::Moonshot, base_url, model, None),
+                Some("Need to call a tool".to_string()),
+                "{label}: the replay contract is spelling-family-wide on vendor routes"
+            );
+        }
     }
 
     #[test]
@@ -11964,6 +13247,7 @@ mod tests {
             capacity: 1.0,
             tokens: 1.0,
             refill_per_sec: 2.0,
+            normal_refill_per_sec: 2.0,
             last_refill: now,
         };
 
@@ -11991,6 +13275,7 @@ mod tests {
             capacity: 1.0,
             tokens: 1.0,
             refill_per_sec: 1.0,
+            normal_refill_per_sec: 1.0,
             last_refill: now,
         };
 
@@ -12993,3 +14278,7 @@ mod tests {
         assert_eq!(body["model"], "custom-claude", "model id verbatim: {body}");
     }
 }
+
+#[cfg(test)]
+#[path = "client/rate_limit_tests.rs"]
+mod rate_limit_tests;

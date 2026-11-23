@@ -17,8 +17,9 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, minimax_m3_route_uses_max_completion_tokens,
-    wire_model_for_provider_route,
+    is_exact_zai_tiered_effort_route, is_kimi_code_k31_route, is_kimi_code_membership_model,
+    is_kimi_k31_on_direct_platform_route, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -67,7 +68,8 @@ fn apply_provider_token_limit(
     let use_max_completion_tokens = provider == ApiProvider::XiaomiMimo
         || (provider == ApiProvider::Openai && model_is_openai_reasoning_family(model))
         || minimax_m3_route_uses_max_completion_tokens(provider, base_url, model)
-        || is_exact_direct_moonshot_k3_route(provider, base_url, model);
+        || is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        || is_kimi_k31_on_direct_platform_route(provider, base_url, model);
     if !use_max_completion_tokens {
         return;
     }
@@ -184,6 +186,17 @@ fn apply_inkling_reasoning_effort(
 /// generic Moonshot shaping. Other Moonshot and Kimi-compatible routes accept
 /// only the generic enabled/disabled form, so the exact endpoint and bare
 /// model identifier are both part of this guard.
+///
+/// The nested `thinking.effort` dialect predates the current Kimi Code docs,
+/// which now document top-level `reasoning_effort` for the coding endpoint;
+/// the nested form is what the shipped membership models demonstrably accept
+/// in production, so do not switch shapes without a live round-trip.
+///
+/// The K3.1 membership spellings share this dialect: the family is
+/// always-reasoning like K3, so a stale raw `off` maps to the lowest tier
+/// instead of the generic disabled payload the API rejects (the K3.1 docs
+/// confirm `off`/`none`/`disabled` are refused with HTTP 400 for this
+/// family, making the defensive mapping load-bearing rather than cosmetic).
 fn apply_kimi_code_k3_reasoning_effort(
     body: &mut Value,
     provider: ApiProvider,
@@ -191,7 +204,9 @@ fn apply_kimi_code_k3_reasoning_effort(
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_kimi_code_k3_route(provider, base_url, model) {
+    if !is_exact_kimi_code_k3_route(provider, base_url, model)
+        && !is_kimi_code_k31_route(provider, base_url, model)
+    {
         return;
     }
     let Some(effort) = effort else {
@@ -223,6 +238,9 @@ fn apply_kimi_code_k3_reasoning_effort(
 /// Moonshot `thinking: {type: disabled}` payload is not truthful for this
 /// route. Treat a legacy raw `off` as the lowest supported tier defensively;
 /// route-aware callers normalize it before it reaches this layer.
+///
+/// The K3.1 direct-platform spellings (`kimi-k3.1-pro[-highspeed]`) inherit
+/// the K3 parameter constraints verbatim and share this dialect.
 fn apply_direct_moonshot_k3_reasoning_effort(
     body: &mut Value,
     provider: ApiProvider,
@@ -230,7 +248,9 @@ fn apply_direct_moonshot_k3_reasoning_effort(
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_direct_moonshot_k3_route(provider, base_url, model) {
+    if !is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        && !is_kimi_k31_on_direct_platform_route(provider, base_url, model)
+    {
         return;
     }
 
@@ -924,13 +944,19 @@ fn apply_mistral_route_reasoning_controls(
 /// omits `temperature` and `top_p`. Strip legacy/generic values only from the
 /// exact first-party route so compatible gateways keep their own contract.
 /// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
+///
+/// The K3.1 direct-platform spellings share this contract: models-overview
+/// lists them in the same K3-series parameter column, so a stale sampling
+/// value would meet the same fixed-sampling schema the bare `kimi-k3` does.
 fn apply_direct_moonshot_k3_fixed_sampling(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
 ) {
-    if !is_exact_direct_moonshot_k3_route(provider, base_url, model) {
+    if !is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        && !is_kimi_k31_on_direct_platform_route(provider, base_url, model)
+    {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -939,62 +965,32 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
-/// Whether a configured route is exactly one of Kimi Code's official
-/// membership endpoints: China `https://api.kimi.com/coding/v1` or overseas
-/// `https://api.kimi.ai/coding/v1`.
+/// Kimi Code's documented membership models own their sampling behavior.
+/// Strip generic controls only on the exact first-party membership route;
+/// custom gateways and unknown model ids retain their own wire contract.
+/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+/// (verified 2026-08-26; re-checked 2026-11-15 — that page no longer
+/// documents the sampling restriction, so the standing evidence is the
+/// models-overview K3-series parameter column
+/// <https://platform.kimi.com/docs/api/models-overview> plus the route's
+/// observed behavior).
 ///
-/// The official Kimi Code documentation lists both hosts for the same
-/// product ("Kimi Code API address — China `https://api.kimi.com/coding/v1`,
-/// Overseas `https://api.kimi.ai/coding/v1`",
-/// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>, re-verified
-/// 2026-11-05), so the membership route contract spans both spellings.
-///
-/// Classification runs through the shared config-crate primitive
-/// `codewhale_config::provider::is_exact_https_route` (the matcher behind
-/// `is_exact_kimi_code_route`), so the scheme/authority/path and
-/// trailing-slash semantics here cannot drift from the route predicates.
-/// Widening `is_exact_kimi_code_route` itself belongs to in-flight PR #137,
-/// so the two-host membership policy stays at this caller.
-#[must_use]
-fn kimi_code_sampling_route(base_url: &str) -> bool {
-    const KIMI_CODE_ENDPOINTS: [(&str, &str); 2] =
-        [("api.kimi.com", "coding/v1"), ("api.kimi.ai", "coding/v1")];
-
-    KIMI_CODE_ENDPOINTS.iter().any(|(host, endpoint_path)| {
-        codewhale_config::provider::is_exact_https_route(base_url, host, endpoint_path)
-    })
-}
-
-/// Kimi Code's membership endpoints own the sampling behavior of every model
-/// they serve. Strip generic controls from the exact first-party routes
-/// regardless of model id; custom gateways and the direct platform route
-/// keep their own wire contract.
-///
-/// The strip is deliberately route-scoped, not roster-scoped. The document
-/// backing is the Kimi Code guide's own instruction to omit generic sampling
-/// on these endpoints ("omit them from requests",
-/// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>,
-/// verified 2026-08-26 and re-verified 2026-11-05). The 2026-11-04 live
-/// probe of the China endpoint (GET /models plus per-model requests) is an
-/// observation recorded alongside it, never the shipping basis: all six
-/// served ids — `k3`, `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`,
-/// `kimi-for-coding`, `kimi-for-coding-highspeed` — rejected anything but
-/// the fixed values with a 400 ("invalid temperature: only 1 is allowed for
-/// this model" / "invalid top_p: only 0.95 is allowed for this model"). The
-/// roster has already lagged behind this endpoint three times (`k3-256k`,
-/// `kimi-for-coding-highspeed`, then both `k3.1-pro` spellings), so any
-/// model id the endpoint serves next is covered without a code change.
-///
-/// The overseas host `api.kimi.ai` joins on the same document: the official
-/// documentation presents both regional endpoints as the same product with
-/// the same wire contract (the 6/6-model probe covered only the China
-/// spelling — an observation on one host, not a widening of another). The
-/// failure mode is benign — not sending `temperature`/`top_p` is exactly
-/// the documented configuration for this endpoint, so an `.ai` route that
-/// would have tolerated generic sampling merely ships the documented shape
-/// instead.
-fn apply_kimi_code_fixed_sampling(body: &mut Value, provider: ApiProvider, base_url: &str) {
-    if provider != ApiProvider::Moonshot || !kimi_code_sampling_route(base_url) {
+/// The K3.1 membership spellings (`k3.1-pro[-highspeed]`) inherit the K3
+/// parameter constraints verbatim (models-overview K3-series column), and
+/// the route demonstrably rejects sampling parameters for its membership
+/// models — so the family strip rides the same guard as the effort shaper
+/// rather than waiting on the rosters, which stay picker/label-scoped.
+fn apply_kimi_code_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    if provider != ApiProvider::Moonshot
+        || !moonshot_base_url_is_exact_kimi_code(base_url)
+        || !(is_kimi_code_membership_model(model)
+            || crate::config::is_kimi_k31_model_spelling(model))
+    {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -1421,8 +1417,11 @@ pub(crate) fn build_chat_wire_body(
             omitted_tool_names.extend(collision_dropped);
             moonshot_minted_names = minted_names;
         }
-        // xAI rejects a parameters root that is not a plain object schema
-        // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
+        // xAI rejects a parameters root that is neither an object schema nor
+        // a root-level union of object branches (e.g. apply_patch's root
+        // `oneOf` required-groups) with a 400 naming the tool; a documented
+        // union of object schemas passes through with its branch structure
+        // preserved (normalization still applies inside the branches).
         if matches!(provider, crate::config::ApiProvider::Xai) {
             for t in &mut chat_tools {
                 let Some(function) = t
@@ -1521,7 +1520,7 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
-    apply_kimi_code_fixed_sampling(&mut body, provider, base_url);
+    apply_kimi_code_fixed_sampling(&mut body, provider, base_url, &model);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -1638,30 +1637,13 @@ impl DeepSeekClient {
         );
         let idle_timeout = open_req.idle_timeout;
         let response = super::stream_entry::open_sse_response(&open_req, |policy| async move {
-            match policy {
-                // The prebuilt HTTP/1.1 twin carries the same default
-                // headers/auth; send once, without the JSON retry loop
-                // (matching the pre-seam H1-pin behavior).
-                super::stream_entry::StreamHttpPolicy::Http1Only => {
-                    let client = super::stream_entry::client_for_policy(
-                        &self.http_client,
-                        self.http1_fallback_client(),
-                        policy,
-                    );
-                    Ok(self
-                        .with_operation_header(client.post(url))
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .json(body)
-                        .send()
-                        .await?)
-                }
-                super::stream_entry::StreamHttpPolicy::DualWithH1Fallback => {
-                    // Stream open: no per-request total — the response body
-                    // outlives the open, and a total would ride on it and
-                    // truncate the stream.
-                    self.open_stream_json_with_retry(url, body).await
-                }
-            }
+            let client = super::stream_entry::client_for_policy(
+                &self.http_client,
+                self.http1_fallback_client(),
+                policy,
+            );
+            self.open_stream_json_with_retry(client, url, body, policy)
+                .await
         })
         .await?;
         Ok((response, idle_timeout))
@@ -3781,6 +3763,18 @@ fn should_replay_reasoning_content_for_provider(
 /// Moonshot and arbitrary OpenAI-compatible routes can also expose a `k3`
 /// model name, but only Kimi Code's exact membership-plan endpoint has this
 /// replay contract.
+///
+/// The K3.1 family spellings inherit the K3 replay contract verbatim through
+/// their own arm below — always-reasoning, so like bare K3 the arm precedes
+/// the effort check. All four spellings replay on both vendor routes (the
+/// membership and direct-platform endpoints); models-overview documents the
+/// K3-series constraints as shared with `kimi-k3`
+/// (<https://platform.kimi.com/docs/api/models-overview>, verified
+/// 2026-11-13), and the API answers HTTP 400 — "thinking is enabled but
+/// reasoning_content is missing in assistant tool call message" — when a
+/// later tool turn's assistant message lost the field
+/// (<https://www.kimi.com/code/docs/kimi-code/error-reference.html>,
+/// verified 2026-11-13).
 fn should_replay_reasoning_content_for_provider_on_route(
     provider: ApiProvider,
     base_url: &str,
@@ -3794,6 +3788,16 @@ fn should_replay_reasoning_content_for_provider_on_route(
         || is_exact_kimi_code_k3_route(provider, base_url, model)
         || (is_exact_mistral_chat_route(provider, base_url)
             && mistral_model_has_native_reasoning(model))
+    {
+        return true;
+    }
+
+    // The exact-K3 matchers above only learn the bare k3 ids, and the K3.1
+    // spellings carry their own arm. The gate is deliberately narrower than
+    // extending the shared matchers, whose other consumers (effort shaping,
+    // route validation, pickers) carry different K3-only contracts.
+    if is_kimi_code_k31_route(provider, base_url, model)
+        || is_kimi_k31_on_direct_platform_route(provider, base_url, model)
     {
         return true;
     }
@@ -3882,6 +3886,17 @@ fn is_reasoning_model_for_stream_on_route(
 ) -> bool {
     if is_exact_kimi_code_k3_route(provider, base_url, model)
         || is_exact_direct_moonshot_k3_route(provider, base_url, model)
+    {
+        return true;
+    }
+
+    // The K3.1 family is always-reasoning like bare K3, so its deltas are
+    // thinking, never inline answer text. Same vendor-route restriction as
+    // the replay gate: custom Moonshot-compatible gateways keep their own
+    // dialect. (The `kimi-`-prefixed spellings already classify through the
+    // generic heuristic below; this arm covers the bare membership ids.)
+    if is_kimi_code_k31_route(provider, base_url, model)
+        || is_kimi_k31_on_direct_platform_route(provider, base_url, model)
     {
         return true;
     }
@@ -5858,12 +5873,13 @@ mod alias_thinking_detection_tests {
     //! turn. See upstream API docs:
     //! <https://api-docs.deepseek.com/guides/thinking_mode>
     use super::{
-        ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
-        apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
-        apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
-        apply_provider_token_limit, apply_route_reasoning_controls, is_reasoning_model_for_stream,
-        is_reasoning_model_for_stream_on_route, provider_accepts_reasoning_content,
-        reasoning_stream_style_for_route, requires_reasoning_content,
+        REASONING_REPLAY_PLACEHOLDER, ReasoningStreamStyle,
+        apply_direct_moonshot_k3_fixed_sampling, apply_inkling_reasoning_effort,
+        apply_kimi_code_fixed_sampling, apply_kimi_code_k3_reasoning_effort,
+        apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
+        is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
+        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
+        requires_reasoning_content, sanitize_thinking_mode_messages_for_route,
         should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
@@ -6563,6 +6579,125 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_k31_reasoning_streams_as_thinking_on_the_vendor_routes() {
+        for (label, base_url, model) in [
+            (
+                "membership",
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                "membership overseas highspeed",
+                "https://api.kimi.ai/coding/v1",
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ),
+            (
+                "direct",
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+            (
+                "direct cn highspeed",
+                "https://api.moonshot.cn/v1",
+                crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+            ),
+        ] {
+            assert!(
+                is_reasoning_model_for_stream_on_route(ApiProvider::Moonshot, base_url, model),
+                "{label}: K3.1 is always-reasoning; deltas must classify as thinking"
+            );
+            assert_eq!(
+                reasoning_stream_style_for_route(ApiProvider::Moonshot, base_url, model, None),
+                ReasoningStreamStyle::SeparateField,
+                "{label}: reasoning_content deltas must not inline as answer text"
+            );
+        }
+
+        // Outside the vendor's own routes the dialect stays generic: a
+        // custom Moonshot-compatible gateway keeps its own stream shape, and
+        // so does a different provider that happens to point at the
+        // membership host.
+        for (label, provider, base_url, model) in [
+            (
+                "custom gateway",
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                "non-moonshot provider",
+                ApiProvider::Openai,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                "non-moonshot provider on the direct platform",
+                ApiProvider::Openai,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+        ] {
+            assert!(
+                !is_reasoning_model_for_stream_on_route(provider, base_url, model),
+                "{label}: must not gain the vendor stream dialect"
+            );
+        }
+    }
+
+    /// The K3.1 membership dialect must survive the full route-control
+    /// pipeline, not just the unit shaper: the generic Moonshot layer runs
+    /// first and would leave `thinking: {type: disabled}` — the payload the
+    /// API rejects for this always-reasoning family — if the route shaper
+    /// ever stopped overwriting it.
+    #[test]
+    fn kimi_k31_membership_effort_ladder_survives_route_controls() {
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            for (requested, expected) in [
+                ("off", "low"),
+                ("none", "low"),
+                ("low", "low"),
+                ("medium", "high"),
+                ("high", "high"),
+                ("max", "max"),
+            ] {
+                let mut body = json!({ "reasoning_effort": "stale" });
+                apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    crate::config::KIMI_CODE_K31_PRO_MODEL,
+                    Some(requested),
+                );
+
+                assert_eq!(
+                    body["thinking"],
+                    json!({ "type": "enabled", "effort": expected }),
+                    "{base_url} requested {requested}"
+                );
+                assert!(
+                    body.get("reasoning_effort").is_none(),
+                    "{requested}: {body}"
+                );
+            }
+
+            // An omitted effort keeps the body untouched: the endpoint owns
+            // its documented default (high for K3.1).
+            let mut body = json!({});
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Moonshot,
+                base_url,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                None,
+            );
+            assert_eq!(body, json!({}), "{base_url}: no effort injected");
+        }
+    }
+
+    #[test]
     fn xiaomi_mimo_uses_max_completion_tokens_payload_key() {
         let mut body = json!({
             "model": "mimo-v2.5-pro",
@@ -6782,6 +6917,55 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_k31_membership_uses_the_k3_nested_thinking_dialect() {
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            for model in [
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ] {
+                for (requested, expected) in [
+                    ("off", json!({ "type": "enabled", "effort": "low" })),
+                    ("none", json!({ "type": "enabled", "effort": "low" })),
+                    ("low", json!({ "type": "enabled", "effort": "low" })),
+                    ("medium", json!({ "type": "enabled", "effort": "high" })),
+                    ("high", json!({ "type": "enabled", "effort": "high" })),
+                    ("max", json!({ "type": "enabled", "effort": "max" })),
+                ] {
+                    let mut body = json!({ "reasoning_effort": "stale" });
+                    apply_kimi_code_k3_reasoning_effort(
+                        &mut body,
+                        ApiProvider::Moonshot,
+                        base_url,
+                        model,
+                        Some(requested),
+                    );
+
+                    assert_eq!(
+                        body["thinking"], expected,
+                        "{base_url} {model} requested {requested}"
+                    );
+                    assert!(body.get("reasoning_effort").is_none());
+                }
+            }
+        }
+
+        // A custom gateway keeps its own dialect: no nested effort is
+        // injected there, and a stale disabled payload is left alone.
+        let mut gateway = json!({ "thinking": { "type": "disabled" } });
+        apply_kimi_code_k3_reasoning_effort(
+            &mut gateway,
+            ApiProvider::Moonshot,
+            "https://gateway.example/v1",
+            crate::config::KIMI_CODE_K31_PRO_MODEL,
+            Some("off"),
+        );
+        assert_eq!(gateway["thinking"], json!({ "type": "disabled" }));
+    }
+
+    #[test]
     fn kimi_code_k3_256k_uses_k3_reasoning_and_membership_sampling_contracts() {
         let mut body = json!({
             "reasoning_effort": "stale",
@@ -6799,6 +6983,7 @@ mod alias_thinking_detection_tests {
             &mut body,
             ApiProvider::Moonshot,
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
         );
 
         assert_eq!(
@@ -6810,849 +6995,170 @@ mod alias_thinking_detection_tests {
         assert!(body.get("top_p").is_none());
     }
 
-    fn digit_led_name_probe_tool(name: &str) -> crate::models::Tool {
-        crate::models::Tool {
-            tool_type: None,
-            name: name.to_string(),
-            description: "probe".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"]
-            }),
-            allowed_callers: None,
-            defer_loading: None,
-            input_examples: None,
-            strict: None,
-            cache_control: None,
-        }
-    }
-
-    #[test]
-    fn moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern() {
-        // Kimi's function-call name pattern is
-        // `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$` (platform.kimi.ai tool-use
-        // documents, fetched 2026-11-05): a leading digit sits outside the
-        // supported set and `to_api_tool_name` only escapes characters the
-        // pattern cannot express anywhere. The Moonshot path gives such a
-        // name a `_` prefix; every other provider keeps the name unmodified.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            digit_led_name_probe_tool("mcp__server__tool"),
-        ]);
-        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
-
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-
-        let tools = body.body["tools"].as_array().expect("tools on the wire");
-        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
-        assert_eq!(
-            tools[1]["function"]["name"],
-            json!("mcp__server__tool"),
-            "names already inside the pattern stay untouched"
-        );
-        assert_eq!(
-            body.body["tool_choice"]["function"]["name"],
-            json!("_3d_render"),
-            "a forced call must name the same wire spelling the tools array carries"
-        );
-
-        // A non-Moonshot provider has no documented leading-character ban and
-        // keeps the raw name.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Openai,
-            "https://api.openai.com/v1",
-            false,
-        )
-        .expect("OpenAI wire body");
-        assert_eq!(
-            body.body["tools"][0]["function"]["name"],
-            json!("3d_render"),
-            "other providers are not touched"
-        );
-    }
-
-    #[test]
-    fn moonshot_wire_drops_the_digit_led_tool_when_its_wire_name_collides() {
-        // Registry keys `3d_render` and `_3d_render` are distinct and can
-        // coexist; minting both onto `_3d_render` would advertise two
-        // schemas under one wire name, and dispatch's exact-match precedence
-        // would then route every `_3d_render` call onto the underscore
-        // sibling regardless of which description the model read (review
-        // 5886233560). The digit-led tool is dropped from THIS request
-        // instead: the array carries only the genuine underscore tool, the
-        // drop is reported like the schema drops, and forcing either
-        // spelling bails instead of dispatching ambiguously.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
-        underscore_probe.description = "underscore probe".to_string();
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            underscore_probe,
-        ]);
-
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-
-        let tools = body.body["tools"].as_array().expect("tools on the wire");
-        assert_eq!(
-            tools.len(),
-            1,
-            "the colliding digit-led tool must be dropped: {tools:?}"
-        );
-        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
-        assert_eq!(
-            tools[0]["function"]["description"],
-            json!("underscore probe"),
-            "the surviving entry must be the genuine underscore tool: {tools:?}"
-        );
-        assert_eq!(
-            body.omitted_tool_names,
-            vec!["3d_render".to_string()],
-            "the drop must be reported under its registry spelling so forced \
-             choice can refuse the shadowed name"
-        );
-    }
-
-    #[test]
-    fn moonshot_wire_keeps_a_hyphenated_mint_whose_raw_twin_encodes_away() {
-        // Review 4604994816: the reserved-name wall must compare the
-        // registry's names in the SAME encoding as the mint. Raw
-        // `3d-render` encodes to `3d--render` and mints to `_3d--render`;
-        // raw `_3d--render` encodes to `_3d----render`. Comparing the
-        // minted spelling against the RAW registry name `_3d--render`
-        // falsely collided a pair that stays distinct on the wire and
-        // dropped the digit-led tool (and refused its forced choice) for a
-        // custom catalog.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut hyphen_probe = digit_led_name_probe_tool("3d-render");
-        hyphen_probe.description = "hyphen probe".to_string();
-        request.tools = Some(vec![hyphen_probe, digit_led_name_probe_tool("_3d--render")]);
-        request.tool_choice = Some(json!({"type": "tool", "name": "3d-render"}));
-
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-
-        let tools = body.body["tools"].as_array().expect("tools on the wire");
-        assert_eq!(
-            tools.len(),
-            2,
-            "the encoded forms are distinct, so nothing is dropped: {tools:?}"
-        );
-        assert_eq!(
-            tools[0]["function"]["name"],
-            json!("_3d--render"),
-            "the digit-led tool carries its minted wire spelling"
-        );
-        assert_eq!(
-            tools[1]["function"]["name"],
-            json!("_3d----render"),
-            "the raw underscore tool keeps its own encoded spelling"
-        );
-        assert!(
-            body.omitted_tool_names.is_empty(),
-            "no name pair collides after encoding: {:?}",
-            body.omitted_tool_names
-        );
-        assert_eq!(
-            body.body["tool_choice"]["function"]["name"],
-            json!("_3d--render"),
-            "the forced choice survives for the minted tool"
-        );
-    }
-
-    #[test]
-    fn moonshot_mint_owners_reflect_the_post_filtered_wire_exactly() {
-        // The ownership map dispatch resolves through must be the mapping
-        // the OUTGOING request actually advertised (review 5915692444): a
-        // live mint lists its owner; a collision- or projection-dropped
-        // digit-led tool lists nothing, so dispatch can never claim its
-        // spelling through the engine's active set.
-        // Live mint: `3d_render` survives and owns `_3d_render`.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-        assert_eq!(
-            body.moonshot_mint_owners
-                .get("3d_render")
-                .map(String::as_str),
-            Some("_3d_render"),
-            "a surviving digit-led tool owns its mint in the post-filter map"
-        );
-
-        // Collision drop: the raw `_3d_render` twin wins the spelling, so
-        // the digit-led tool went out on NO wire name and owns no mint —
-        // the map must be empty for it even though it stayed active.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            digit_led_name_probe_tool("_3d_render"),
-        ]);
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-        assert!(
-            !body.moonshot_mint_owners.contains_key("3d_render"),
-            "a collision-dropped tool owns no mint: {:?}",
-            body.moonshot_mint_owners
-        );
-
-        // Length drop: a 128-character digit-led name mints past the cap
-        // and is dropped whole — no mint, no owner.
-        let long_name = format!("3{}", "a".repeat(127));
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![digit_led_name_probe_tool(&long_name)]);
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-        assert!(
-            !body.moonshot_mint_owners.contains_key(&long_name),
-            "a length-dropped tool owns no mint"
-        );
-
-        // Non-Moonshot routes never mint: the map stays empty.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Openai,
-            "https://api.openai.com/v1",
-            false,
-        )
-        .expect("OpenAI wire body");
-        assert!(body.moonshot_mint_owners.is_empty());
-    }
-
-    #[test]
-    fn moonshot_mint_owners_survive_the_response_codec_for_hyphenated_names() {
-        // Review 5916467676: the wire mint rides on the ENCODED name —
-        // registry `3d-render` encodes to `3d--render` and mints to
-        // `_3d--render` — but dispatch receives response names AFTER
-        // from_api_tool_name turns `_3d--render` back into `_3d-render`.
-        // The ownership map must therefore store the DECODED minted
-        // identity, or its reverse lookup misses exactly the names the
-        // codec changed.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![digit_led_name_probe_tool("3d-render")]);
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-
-        // The wire body carries the encoded+minted spelling...
-        assert_eq!(
-            body.body["tools"][0]["function"]["name"],
-            json!("_3d--render"),
-            "a hyphenated digit-led name encodes before the mint"
-        );
-        // ...while the ownership map carries the DECODED identity the
-        // response decoder will hand dispatch.
-        assert_eq!(
-            body.moonshot_mint_owners
-                .get("3d-render")
-                .map(String::as_str),
-            Some("_3d-render"),
-            "the map must store the post-codec minted identity"
-        );
-        assert_eq!(
-            crate::client::from_api_tool_name("_3d--render"),
-            "_3d-render",
-            "codec premise: the wire spelling decodes past the raw map value"
-        );
-    }
-
-    #[test]
-    fn moonshot_wire_refuses_forcing_the_shadowed_name_but_allows_the_survivor() {
-        // With the digit-led twin dropped for the collision, the wire name
-        // `_3d_render` stays advertised by the surviving underscore tool, so
-        // forcing THAT spelling proceeds unambiguously. Forcing the dropped
-        // digit-led registry name bails: it would map onto a wire name this
-        // request's drop shadows (review 5886233560).
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
-        underscore_probe.description = "underscore probe".to_string();
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            underscore_probe,
-        ]);
-        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
-
-        let error = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .err()
-        .expect("forcing the shadowed registry spelling must bail");
-        let message = error.to_string();
-        assert!(
-            message.contains("_3d_render"),
-            "the bail must name the shadowed wire spelling: {message}"
-        );
-
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
-        underscore_probe.description = "underscore probe".to_string();
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            underscore_probe,
-        ]);
-        request.tool_choice = Some(json!({"type": "tool", "name": "_3d_render"}));
-
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("forcing the surviving underscore tool must proceed");
-        assert_eq!(
-            body.body["tool_choice"]["function"]["name"],
-            json!("_3d_render"),
-            "the surviving tool stays forceable under its own spelling"
-        );
-        assert!(
-            body.body["tools"]
-                .as_array()
-                .expect("tools on the wire")
-                .len()
-                == 1,
-            "only the underscore tool is advertised"
-        );
-    }
-
-    #[test]
-    fn moonshot_wire_refuses_the_ambiguity_when_a_schema_dropped_sibling_holds_the_minted_name() {
-        // Registry keys `3d_render` and `_3d_render` can coexist while the
-        // underscore sibling's schema drops it from THIS request. The mint
-        // once read only the surviving wire names (review 5896144003) and
-        // advertised the valid digit-led tool under the minted spelling —
-        // but dispatch exact-matches the FULL registry, where the
-        // schema-dropped sibling still holds `_3d_render`: an ordinary call
-        // to the advertised survivor selected the sibling's handler (review
-        // 5910671961). The ambiguity is therefore refused — the mint
-        // collision check now counts the whole registry catalog, so the
-        // survivor is dropped too and neither name is advertised.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
-        invalid_underscore.description = "invalid sibling".to_string();
-        // A non-object parameters root is rejected outright by the Kimi
-        // candidate validator, so this sibling cannot survive sanitization.
-        invalid_underscore.input_schema = json!({"type": "string"});
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            invalid_underscore,
-        ]);
-
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-
-        let tools = body
-            .body
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .map(|tools| tools.len())
-            .unwrap_or(0);
-        assert_eq!(
-            tools,
-            0,
-            "the ambiguity is refused: neither tool is advertised: {:?}",
-            body.body.get("tools")
-        );
-        assert_eq!(
-            body.omitted_tool_names,
-            vec!["_3d_render".to_string(), "3d_render".to_string()],
-            "the schema drop and the collision drop are both reported under registry spellings"
-        );
-
-        // Forcing either spelling fails: the dropped underscore registry
-        // spelling is not offered (review 5897491074), and the digit-led
-        // survivor has no minted alias to answer for it.
-        for forced in ["_3d_render", "3d_render"] {
-            let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-            let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
-            invalid_underscore.input_schema = json!({"type": "string"});
-            request.tools = Some(vec![
-                digit_led_name_probe_tool("3d_render"),
-                invalid_underscore,
-            ]);
-            request.tool_choice = Some(json!({"type": "tool", "name": forced}));
-            let error = crate::client::chat::build_chat_wire_body(
-                &request,
-                ApiProvider::Moonshot,
-                crate::config::DEFAULT_MOONSHOT_BASE_URL,
-                false,
-            )
-            .err()
-            .expect("forcing a refused tool must bail");
-            assert!(
-                error.to_string().contains("not offered"),
-                "the bail must name the offered predicate: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn moonshot_wire_drops_a_digit_led_tool_whose_minted_name_exceeds_the_maximum() {
-        // The documented pattern caps names at 128 characters and minting
-        // adds one, so a 127-character digit-led name survives at the exact
-        // boundary (minted = 128) and a 128-character name would mint to 129
-        // — that tool is dropped instead of baiting a whole-request 400
-        // (review thread on 5896144003).
-        let name_127 = format!("3{}", "a".repeat(126));
-        let name_128 = format!("3{}", "a".repeat(127));
-        assert_eq!(name_127.len(), 127);
-        assert_eq!(name_128.len(), 128);
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut overlong = digit_led_name_probe_tool(&name_128);
-        overlong.description = "overlong".to_string();
-        request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
-
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("Moonshot wire body");
-
-        let tools = body.body["tools"].as_array().expect("tools on the wire");
-        assert_eq!(
-            tools.len(),
-            1,
-            "only the boundary-surviving tool is advertised: {tools:?}"
-        );
-        let minted = format!("_{name_127}");
-        assert_eq!(minted.len(), 128, "the survivor mints to exactly the cap");
-        assert_eq!(tools[0]["function"]["name"], json!(minted));
-        assert_eq!(
-            body.omitted_tool_names,
-            vec![name_128.clone()],
-            "the overlong tool is dropped under its registry spelling"
-        );
-
-        // Forcing the dropped tool fails fast; forcing the survivor
-        // proceeds.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut overlong = digit_led_name_probe_tool(&name_128);
-        overlong.description = "overlong".to_string();
-        request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
-        request.tool_choice = Some(json!({"type": "tool", "name": name_128}));
-        let error = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .err()
-        .expect("forcing the overlong-dropped tool must bail");
-        assert!(
-            error.to_string().contains("not offered"),
-            "the bail must name the offered predicate: {error}"
-        );
-
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        request.tools = Some(vec![digit_led_name_probe_tool(&name_127)]);
-        request.tool_choice = Some(json!({"type": "tool", "name": name_127}));
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("forcing the boundary survivor must proceed");
-        assert_eq!(
-            body.body["tool_choice"]["function"]["name"],
-            json!(minted),
-            "the forced call names the minted wire spelling"
-        );
-    }
-
-    #[test]
-    fn kimi_code_fixed_sampling_covers_every_model_id_on_the_route() {
-        // Observation record (2026-11-04 live probe, GET /models + per-model
-        // requests; the shipping basis is the documented "omit them from
-        // requests" contract): all six ids served by
-        // https://api.kimi.com/coding/v1 answer
-        // "invalid temperature: only 1 is allowed for this model" /
-        // "invalid top_p: only 0.95 is allowed for this model" with a 400.
-        // The roster has lagged this endpoint three times already
-        // (`k3-256k`, `kimi-for-coding-highspeed`, both `k3.1-pro`
-        // spellings), so the strip must not consult it — an id the endpoint
-        // serves next is covered without a code change.
-        for model in [
-            "k3",
-            "k3-256k",
-            "k3.1-pro",
-            "k3.1-pro-highspeed",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
-            // An id the endpoint does not serve (yet) sits on the same route
-            // and inherits the same route contract.
-            "k3-next-unknown",
-        ] {
-            let request = sampling_probe_request(model);
-            let body = crate::client::chat::build_chat_wire_body(
-                &request,
-                ApiProvider::Moonshot,
-                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-                false,
-            )
-            .expect("Kimi Code wire body");
-            assert!(
-                body.body.get("temperature").is_none(),
-                "{model}: {}",
-                body.body
-            );
-            assert!(body.body.get("top_p").is_none(), "{model}: {}", body.body);
-            assert_eq!(body.body["model"], json!(model), "{model}");
-        }
-    }
-
-    fn sampling_probe_request(model: &str) -> crate::models::MessageRequest {
-        crate::models::MessageRequest {
-            model: model.to_string(),
-            messages: vec![crate::models::Message {
-                role: crate::models::Role::User,
-                content: vec![crate::models::ContentBlock::Text {
-                    text: "probe sampling".to_string(),
-                    cache_control: None,
-                }],
-            }],
-            max_tokens: 64,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: None,
-            temperature: Some(0.3),
-            top_p: Some(0.8),
-        }
-    }
-
     #[test]
     fn kimi_code_fixed_sampling_does_not_leak_to_neighbor_routes() {
         for (provider, base_url, model) in [
-            // The direct platform route keeps its own model-scoped strip
-            // (only `kimi-k3`), never the membership route's.
             (
                 ApiProvider::Moonshot,
                 crate::config::DEFAULT_MOONSHOT_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
-            // A compatible gateway on a non-first-party base_url keeps its
-            // own wire contract even when it claims a membership model id.
-            (
-                ApiProvider::Moonshot,
-                "https://gateway.example/v1",
-                crate::config::KIMI_CODE_K3_256K_MODEL,
-            ),
-            // A different provider identity never inherits Moonshot shaping,
-            // even on the exact membership host.
             (
                 ApiProvider::Openrouter,
                 crate::config::DEFAULT_KIMI_CODE_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
-            // Neighboring paths on the overseas membership host are not the
-            // coding endpoint; the path must match exactly.
             (
                 ApiProvider::Moonshot,
-                "https://api.kimi.ai/coding/v2",
-                crate::config::KIMI_CODE_K3_256K_MODEL,
-            ),
-            // Neighboring paths on the China membership host stay neighbors
-            // even when they share the `coding` prefix.
-            (
-                ApiProvider::Moonshot,
-                "https://api.kimi.com/coding/",
-                crate::config::KIMI_CODE_K3_256K_MODEL,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "k3-256k-preview",
             ),
         ] {
-            let request = sampling_probe_request(model);
-            let body =
-                crate::client::chat::build_chat_wire_body(&request, provider, base_url, false)
-                    .expect("neighbor wire body");
-            assert!(
-                body.body.get("temperature").is_some(),
-                "{base_url} {model}: generic sampling must survive: {}",
-                body.body
-            );
-            assert!(
-                body.body.get("top_p").is_some(),
-                "{base_url} {model}: generic sampling must survive: {}",
-                body.body
-            );
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
+            assert_eq!(body["temperature"], json!(0.3));
+            assert_eq!(body["top_p"], json!(0.8));
         }
     }
 
+    /// The K3.1 membership spellings inherit the membership sampling
+    /// contract (models-overview lists them in the K3-series parameter
+    /// column; the route rejects sampling parameters for its membership
+    /// models), so the strip must ride the family matcher and not wait on
+    /// the picker rosters.
     #[test]
-    fn moonshot_replay_prefixes_digit_led_assistant_tool_call_names() {
-        use crate::client::chat::build_chat_messages_for_request_and_provider;
-        use crate::models::{ContentBlock, Message, MessageRequest, Role};
-
-        // Assistant turns persist the registry spelling: dispatch resolves
-        // the digit-led wire prefix back before executing (see the engine's
-        // digit-led wire recovery). The replay must re-apply the prefix so
-        // the history matches the tools array
-        // (`moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern`)
-        // and stays inside Kimi's documented `name` pattern.
-        let request = MessageRequest {
-            model: crate::config::DEFAULT_MOONSHOT_MODEL.to_string(),
-            messages: vec![
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-probe-1".to_string(),
-                        name: "3d_render".to_string(),
-                        input: json!({"path": "scene.glb"}),
-                        caller: None,
-                        thought_signature: None,
-                    }],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: "call-probe-1".to_string(),
-                        content: "rendered".to_string(),
-                        is_error: None,
-                        content_blocks: None,
-                    }],
-                },
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-probe-2".to_string(),
-                        // A history entry that already carries the wire
-                        // prefix (pre-fixture sessions) is not digit-led
-                        // and must pass through untouched — idempotence.
-                        name: "_3d_render".to_string(),
-                        input: json!({"path": "scene.glb"}),
-                        caller: None,
-                        thought_signature: None,
-                    }],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: "call-probe-2".to_string(),
-                        content: "rendered".to_string(),
-                        is_error: None,
-                        content_blocks: None,
-                    }],
-                },
-            ],
-            max_tokens: 16,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-        };
-
-        let messages =
-            build_chat_messages_for_request_and_provider(&request, ApiProvider::Moonshot);
-        assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["name"],
-            json!("_3d_render"),
-            "the registry spelling is re-prefixed on the wire"
-        );
-        assert_eq!(
-            messages[2]["tool_calls"][0]["function"]["name"],
-            json!("_3d_render"),
-            "a stored wire spelling passes through unchanged"
-        );
-
-        // Other providers keep the registry spelling on the wire: the
-        // documented leading-character ban is Moonshot-only.
-        let messages = build_chat_messages_for_request_and_provider(&request, ApiProvider::Openai);
-        assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["name"],
-            json!("3d_render")
-        );
-    }
-
-    #[test]
-    fn kimi_code_sampling_route_stays_in_sync_with_the_config_matcher_on_the_shared_host() {
-        use super::kimi_code_sampling_route;
-
-        // The sampling strip deliberately covers both membership hosts while
-        // the config-crate matcher is still .com-only (widening it belongs to
-        // in-flight PR #137). Classification now runs through the shared
-        // config-crate matcher, so drift is structurally impossible; this
-        // loop still pins the caller-side agreement on the shared host —
-        // port, scheme, casing, and neighboring-path rejections included —
-        // so a host-set edit here cannot quietly change the route contract.
-        for url in [
-            "https://api.kimi.com/coding/v1",
-            "https://api.kimi.com/coding/v1/",
-            "HTTPS://API.KIMI.COM/coding/v1",
-            "https://api.kimi.com/CODING/V1",
-            "https://api.kimi.com/coding/v2",
-            "https://api.kimi.com/coding",
-            "http://api.kimi.com/coding/v1",
-            "https://api.kimi.com:8443/coding/v1",
-            "https://api.kimi.com/coding/v1//",
-            "https://api.kimi.io/coding/v1",
-            "https://example.com/coding/v1",
-        ] {
-            assert_eq!(
-                kimi_code_sampling_route(url),
-                crate::config::moonshot_base_url_is_exact_kimi_code(url),
-                "route-contract drift on {url}"
-            );
-        }
-        // The overseas host is the deliberate caller-side widening until the
-        // shared matcher catches up; this assertion is what flips when the
-        // widening lands.
-        assert!(kimi_code_sampling_route("https://api.kimi.ai/coding/v1"));
-        assert!(!crate::config::moonshot_base_url_is_exact_kimi_code(
-            "https://api.kimi.ai/coding/v1"
-        ));
-    }
-
-    #[test]
-    fn kimi_code_fixed_sampling_covers_the_overseas_api_kimi_ai_endpoint() {
-        // The official Kimi Code documentation lists two regional endpoints
-        // for the same membership product: China
-        // `https://api.kimi.com/coding/v1` and overseas
-        // `https://api.kimi.ai/coding/v1` (codex.html, "Kimi Code API
-        // address"). A configured base_url on the overseas host is the same
-        // route contract, so the strip must follow the route, not one
-        // spelling of its host.
+    fn kimi_code_k31_membership_owns_fixed_sampling() {
         for base_url in [
-            "https://api.kimi.ai/coding/v1",
-            // A trailing slash is insignificant and scheme/host are ASCII
-            // case-insensitive — the same semantics the config-crate
-            // exact-route matcher applies to the `.com` spelling.
-            "https://api.kimi.ai/coding/v1/",
-            "https://API.KIMI.AI/coding/v1",
-        ] {
-            let request = sampling_probe_request("k3.1-pro");
-            let body = crate::client::chat::build_chat_wire_body(
-                &request,
-                ApiProvider::Moonshot,
-                base_url,
-                false,
-            )
-            .expect("overseas Kimi Code wire body");
-            assert!(
-                body.body.get("temperature").is_none(),
-                "{base_url}: fixed sampling must strip temperature: {}",
-                body.body
-            );
-            assert!(
-                body.body.get("top_p").is_none(),
-                "{base_url}: fixed sampling must strip top_p: {}",
-                body.body
-            );
-            assert_eq!(body.body["model"], json!("k3.1-pro"), "{base_url}");
-        }
-    }
-
-    #[test]
-    fn overseas_kimi_ai_endpoint_keeps_the_document_parameter_whitelist() {
-        // Widening the sampling strip to the overseas host must NOT widen the
-        // tool-schema contract: both Kimi Code hosts serve the same MFJS
-        // specification, so a keyword the specification does not list
-        // (`pattern`) degrades the tool on both, while the sampling strip
-        // (document-backed: "omit them from requests") covers both hosts.
-        let patterned_tool = crate::models::Tool {
-            tool_type: None,
-            name: "patterned".to_string(),
-            description: "Find a label.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "label": {"type": "string", "pattern": "^[a-z]+$"}
-                },
-                "required": ["label"]
-            }),
-            allowed_callers: None,
-            defer_loading: None,
-            input_examples: None,
-            strict: None,
-            cache_control: None,
-        };
-        let mut request = sampling_probe_request("k3.1-pro");
-        request.tools = Some(vec![patterned_tool]);
-
-        for base_url in [
-            "https://api.kimi.ai/coding/v1",
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
         ] {
-            let body = crate::client::chat::build_chat_wire_body(
-                &request,
+            for model in [
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ] {
+                let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+                apply_kimi_code_fixed_sampling(&mut body, ApiProvider::Moonshot, base_url, model);
+                assert!(body.get("temperature").is_none(), "{base_url} {model}");
+                assert!(body.get("top_p").is_none(), "{base_url} {model}");
+            }
+        }
+
+        // Neighboring routes keep their own wire contract: a custom gateway,
+        // a non-Moonshot provider pointed at the membership host, and an
+        // unknown near-miss spelling must retain the caller's sampling.
+        for (provider, base_url, model) in [
+            (
                 ApiProvider::Moonshot,
-                base_url,
-                false,
-            )
-            .expect("Kimi Code wire body");
+                "https://gateway.example/v1",
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                ApiProvider::Openai,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "k3.1-pro-preview",
+            ),
+        ] {
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
             assert_eq!(
-                body.omitted_tool_names,
-                vec!["patterned".to_string()],
-                "the document-absent keyword drops the tool on {base_url}"
+                body["temperature"],
+                json!(0.3),
+                "{provider:?} {base_url} {model}"
             );
-            assert!(
-                body.body.get("tools").is_none(),
-                "the dropped tool must not ship on {base_url}: {}",
-                body.body
-            );
-            // The sampling strip covers the route regardless.
-            assert!(
-                body.body.get("temperature").is_none() && body.body.get("top_p").is_none(),
-                "fixed sampling must still strip on {base_url}: {}",
-                body.body
-            );
+            assert_eq!(body["top_p"], json!(0.8), "{provider:?} {base_url} {model}");
+        }
+    }
+
+    /// The direct-platform K3.1 spellings share the bare `kimi-k3` wire
+    /// contract: the modern `max_completion_tokens` field and the
+    /// fixed-sampling schema (no `temperature`/`top_p`), on the exact
+    /// first-party route only.
+    #[test]
+    fn direct_moonshot_k31_uses_modern_token_field_and_fixed_sampling_only_on_exact_route() {
+        for model in [
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            // Both direct-platform hosts ride the same exact-route gate.
+            for base_url in [
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                "https://api.moonshot.cn/v1",
+            ] {
+                let mut direct = json!({
+                    "max_tokens": 64,
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                });
+                apply_provider_token_limit(&mut direct, ApiProvider::Moonshot, base_url, model, 64);
+                apply_direct_moonshot_k3_fixed_sampling(
+                    &mut direct,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    model,
+                );
+                assert_eq!(
+                    direct["max_completion_tokens"],
+                    json!(64),
+                    "{model} {base_url}"
+                );
+                assert!(direct.get("max_tokens").is_none(), "{model} {base_url}");
+                assert!(direct.get("temperature").is_none(), "{model} {base_url}");
+                assert!(direct.get("top_p").is_none(), "{model} {base_url}");
+            }
+        }
+
+        let mut neighbor = json!({
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        });
+        apply_provider_token_limit(
+            &mut neighbor,
+            ApiProvider::Moonshot,
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            64,
+        );
+        apply_direct_moonshot_k3_fixed_sampling(
+            &mut neighbor,
+            ApiProvider::Moonshot,
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+        );
+        assert_eq!(neighbor["max_tokens"], json!(64));
+        assert!(neighbor.get("max_completion_tokens").is_none());
+        assert_eq!(neighbor["temperature"], json!(0.2));
+        assert_eq!(neighbor["top_p"], json!(0.9));
+    }
+
+    /// The membership endpoint keeps the legacy `max_tokens` field for the
+    /// K3.1 family: only the exact direct route switches to
+    /// `max_completion_tokens`, so a predicate swap between the two route
+    /// gates would silently rewrite membership requests to a wire field the
+    /// membership API does not document.
+    #[test]
+    fn kimi_k31_membership_keeps_the_legacy_max_tokens_field() {
+        for model in [
+            crate::config::KIMI_CODE_K31_PRO_MODEL,
+            crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            for base_url in [
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "https://api.kimi.ai/coding/v1",
+            ] {
+                let mut body = json!({ "max_tokens": 64 });
+                apply_provider_token_limit(&mut body, ApiProvider::Moonshot, base_url, model, 64);
+                assert_eq!(body["max_tokens"], json!(64), "{model} {base_url}");
+                assert!(
+                    body.get("max_completion_tokens").is_none(),
+                    "{model} {base_url}"
+                );
+            }
         }
     }
 
@@ -7693,6 +7199,122 @@ mod alias_thinking_detection_tests {
         );
         assert!(provider_default.get("thinking").is_none());
         assert!(provider_default.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn direct_moonshot_k31_uses_top_level_effort_and_never_disables_thinking() {
+        for model in [
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            for (requested, expected) in [
+                ("off", "low"),
+                ("none", "low"),
+                ("low", "low"),
+                ("medium", "high"),
+                ("high", "high"),
+                ("max", "max"),
+            ] {
+                let mut body = json!({
+                    "model": model,
+                    "thinking": { "type": "disabled" },
+                });
+                apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Moonshot,
+                    crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                    model,
+                    Some(requested),
+                );
+
+                assert_eq!(body["reasoning_effort"], json!(expected), "{requested}");
+                assert!(body.get("thinking").is_none(), "{requested}: {body}");
+            }
+        }
+
+        // Both direct-platform hosts at effort off specifically: the generic
+        // Moonshot disabled payload must be replaced, never kept alongside —
+        // the API rejects disabled-thinking requests for the K3.1 family.
+        for base_url in [
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            "https://api.moonshot.cn/v1",
+        ] {
+            let mut body = json!({ "thinking": { "type": "disabled" } });
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Moonshot,
+                base_url,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+                Some("off"),
+            );
+            assert_eq!(body["reasoning_effort"], json!("low"), "{base_url}");
+            assert!(body.get("thinking").is_none(), "{base_url}: {body}");
+        }
+
+        // An omitted effort leaves the provider default in control: a stale
+        // generic `thinking` payload is still stripped, but no tier is
+        // injected (the bare-K3 twin pins the same shape).
+        let mut stale = json!({ "thinking": { "type": "disabled" } });
+        apply_route_reasoning_controls(
+            &mut stale,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            None,
+        );
+        assert_eq!(stale, json!({}), "omitted effort: {stale}");
+    }
+
+    #[test]
+    fn kimi_k31_tool_round_gets_the_replay_placeholder_when_trace_was_dropped() {
+        let body = || {
+            json!({
+                "model": "k3.1-pro",
+                "messages": [
+                    { "role": "user", "content": "Need the date" },
+                    { "role": "assistant", "content": null, "tool_calls": [
+                        { "id": "tool-1", "type": "function",
+                          "function": { "name": "get_date", "arguments": "{}" } }
+                    ] },
+                    { "role": "user", "content": "2026-04-23" },
+                ],
+            })
+        };
+
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+        ] {
+            let mut wire = body();
+            let sanitized = sanitize_thinking_mode_messages_for_route(
+                &mut wire,
+                "k3.1-pro",
+                Some("off"),
+                ApiProvider::Moonshot,
+                base_url,
+            );
+            assert!(sanitized.is_some(), "{base_url}: K3.1 is a replay gate");
+            assert_eq!(
+                wire["messages"][1]["reasoning_content"],
+                json!(REASONING_REPLAY_PLACEHOLDER),
+                "{base_url}: a dropped trace must replay as the placeholder"
+            );
+        }
+
+        // A custom gateway is not a replay gate: the trace stays absent.
+        let mut gateway = body();
+        assert!(
+            sanitize_thinking_mode_messages_for_route(
+                &mut gateway,
+                "k3.1-pro",
+                Some("off"),
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+            )
+            .is_none()
+        );
+        assert!(gateway["messages"][1].get("reasoning_content").is_none());
     }
 
     #[test]
@@ -7742,6 +7364,27 @@ mod alias_thinking_detection_tests {
         assert!(neighbor.get("max_completion_tokens").is_none());
         assert_eq!(neighbor["temperature"], json!(0.2));
         assert_eq!(neighbor["top_p"], json!(0.9));
+    }
+
+    #[test]
+    fn kimi_k31_direct_prepared_request_carries_an_explicit_override_cap() {
+        // Review 5927442709: the resolved-route budget for K3.1 ids is the
+        // documented maximum, so an operator override above the 131,072
+        // default (here 262,144, under the 1M direct-route maximum) must
+        // reach the wire as `max_completion_tokens` rather than being
+        // silently clamped to the family default.
+        let mut direct = json!({
+            "temperature": 0.2,
+        });
+        apply_provider_token_limit(
+            &mut direct,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            "kimi-k3.1-pro",
+            262_144,
+        );
+        assert_eq!(direct["max_completion_tokens"], json!(262_144));
+        assert!(direct.get("max_tokens").is_none());
     }
 
     #[test]
@@ -9452,6 +9095,95 @@ mod image_block_wire_tests {
         );
     }
 
+    /// A root `oneOf` whose every branch declares `type: "object"` is a
+    /// documented-good xAI parameters root (2026-10-10 function-calling
+    /// doc): the xAI lane must keep the union — variants and all — instead
+    /// of folding it into one merged object.
+    #[test]
+    fn xai_chat_keeps_root_union_of_object_branches() {
+        let union_schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "email"},
+                        "address": {"type": "string"}
+                    },
+                    "required": ["kind", "address"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "sms"},
+                        "phone": {"type": "string"}
+                    },
+                    "required": ["kind", "phone"]
+                }
+            ]
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "notify".to_string(),
+            description: "Send a notification.".to_string(),
+            input_schema: union_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: "grok-4".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "notify someone".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            false,
+        )
+        .expect("xAI wire body");
+
+        let parameters = &body.body["tools"][0]["function"]["parameters"];
+        let branches = parameters["oneOf"]
+            .as_array()
+            .expect("root oneOf must survive");
+        assert_eq!(branches.len(), 2, "both object variants must survive");
+        assert_eq!(
+            branches[0]["required"],
+            serde_json::json!(["kind", "address"])
+        );
+        assert_eq!(
+            branches[1]["required"],
+            serde_json::json!(["kind", "phone"])
+        );
+        assert!(
+            parameters.get("type").is_none(),
+            "the root must not gain a forced object type: {parameters}"
+        );
+        assert!(
+            parameters.get("properties").is_none(),
+            "branch properties must not be merged into the root: {parameters}"
+        );
+    }
+
     /// The Moonshot Tool Use documentation requires "The root of `parameters`
     /// must be an `object`" (https://platform.kimi.ai/docs/api/tool-use,
     /// fetched 2026-11-05). The MFJS specification lists `anyOf` as an
@@ -9548,126 +9280,6 @@ mod image_block_wire_tests {
         assert!(
             parameters.get("required").is_none(),
             "no required set survives a union of disagreeing branches: {parameters}"
-        );
-    }
-
-    fn single_tool_request(name: &str, schema: serde_json::Value) -> MessageRequest {
-        MessageRequest {
-            model: crate::config::KIMI_CODE_K3_MODEL.to_string(),
-            messages: vec![Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "probe".to_string(),
-                    cache_control: None,
-                }],
-            }],
-            max_tokens: 128,
-            system: None,
-            tools: Some(vec![Tool {
-                tool_type: None,
-                name: name.to_string(),
-                description: "Probe the route's schema whitelist.".to_string(),
-                input_schema: schema,
-                allowed_callers: None,
-                defer_loading: None,
-                input_examples: None,
-                strict: None,
-                cache_control: None,
-            }]),
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
-        }
-    }
-
-    /// Keywords the 2026-11-04 live probe merely observed the endpoint
-    /// accepting (pattern, format, $schema, prefixItems, exclusiveMinimum,
-    /// exclusiveMaximum, nested allOf) sit outside the MFJS specification's
-    /// supported set. Probe facts are observations only and never a shipping
-    /// basis, so the tool carrying them degrades with a projection warning on
-    /// every Moonshot route — one pipeline, one wire contract.
-    #[test]
-    fn probe_observed_keywords_never_reach_the_wire() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "pattern": "^[a-z][a-z0-9-]*$",
-                    "format": "uri"
-                }
-            },
-            "required": ["label"]
-        });
-        let request = single_tool_request("probe_tool", schema);
-
-        for base_url in [
-            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-        ] {
-            let body = build_chat_wire_body(&request, ApiProvider::Moonshot, base_url, false)
-                .expect("Moonshot wire body");
-
-            assert_eq!(
-                body.omitted_tool_names,
-                vec!["probe_tool".to_string()],
-                "the probe-observed keyword drops the tool on {base_url}"
-            );
-            assert!(
-                body.body.get("tools").is_none(),
-                "a fully dropped catalog must omit the tools key on {base_url}: {}",
-                body.body
-            );
-        }
-    }
-
-    /// Advisory keywords the MFJS specification does not list (title,
-    /// minLength, ...) are stripped in place — a semantics-lossless or
-    /// soft-constraint-losing simplification — so the tool still ships and
-    /// the wire carries only the document's supported set.
-    #[test]
-    fn advisory_keywords_are_stripped_from_the_wire() {
-        let schema = serde_json::json!({
-            "title": "Annotated tool",
-            "type": "object",
-            "properties": {
-                "label": {"type": "string", "title": "Label", "minLength": 1, "maxLength": 40},
-                "price": {"type": "number", "minimum": 0, "maximum": 100}
-            },
-            "required": ["label"]
-        });
-        let request = single_tool_request("annotated_tool", schema);
-
-        let body = build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            false,
-        )
-        .expect("Kimi Code wire body");
-
-        assert!(
-            body.omitted_tool_names.is_empty(),
-            "advisory keywords must not drop the tool: {:?}",
-            body.omitted_tool_names
-        );
-        let parameters = &body.body["tools"][0]["function"]["parameters"];
-        for keyword in ["title", "minLength", "maxLength", "minimum", "maximum"] {
-            assert!(
-                !serde_json::to_string(parameters)
-                    .unwrap()
-                    .contains(&format!("\"{keyword}\"")),
-                "{keyword} must not reach the wire: {parameters}"
-            );
-        }
-        assert_eq!(parameters["type"], "object");
-        assert_eq!(
-            parameters["properties"]["label"]["type"], "string",
-            "the supported vocabulary survives the strip: {parameters}"
         );
     }
 }
