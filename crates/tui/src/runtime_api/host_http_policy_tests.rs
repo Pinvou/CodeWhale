@@ -1,6 +1,7 @@
 use super::*;
 use crate::client::DeepSeekClient;
 use crate::config::ModelHttpPolicy;
+use crate::tools::spec::ToolSpec;
 use crate::vision::tools::ImageAnalyzeTool;
 
 #[derive(Debug, Default)]
@@ -97,34 +98,51 @@ impl Fixture {
             .status())
     }
 
-    fn assert_policies_and_builders(&self, expected_primary_path: &str) -> Result<()> {
+    async fn assert_policies_and_builders(&self, expected_primary_path: &str) -> Result<()> {
         let primary: Arc<dyn ModelHttpPolicy> = self.primary.clone();
         let vision: Arc<dyn ModelHttpPolicy> = self.vision.clone();
         let config = self.state.config.read().clone();
-        let runtime = self.state.runtime_threads.read_config();
-        for snapshot in [&config, &*runtime] {
-            assert!(Arc::ptr_eq(
-                snapshot.model_http_policy.as_ref().unwrap(),
-                &primary
-            ));
-            assert!(Arc::ptr_eq(
-                snapshot.vision_model_http_policy.as_ref().unwrap(),
-                &vision
-            ));
+        {
+            let runtime = self.state.runtime_threads.read_config();
+            for snapshot in [&config, &*runtime] {
+                assert!(Arc::ptr_eq(
+                    snapshot.model_http_policy.as_ref().unwrap(),
+                    &primary
+                ));
+                assert!(Arc::ptr_eq(
+                    snapshot.vision_model_http_policy.as_ref().unwrap(),
+                    &vision
+                ));
+            }
         }
-        drop(runtime);
         self.primary.0.lock().unwrap().clear();
         self.vision.0.lock().unwrap().clear();
         let model = DeepSeekClient::new(&config)?;
         let vision_config = config.vision_model_config().unwrap();
         let vision_url = vision_config.base_url.clone().unwrap();
-        let _tool = ImageAnalyzeTool::new_with_route_client(vision_config, Some(model));
+        let tool = ImageAnalyzeTool::new_with_route_client(vision_config, Some(model));
         assert_eq!(
             *self.primary.0.lock().unwrap(),
             vec![format!("http://127.0.0.1:9{expected_primary_path}"); 2],
             "primary and HTTP1 must both apply policy to the newly selected route"
         );
-        assert_eq!(*self.vision.0.lock().unwrap(), vec![vision_url]);
+        // PR #151 on the post-refactor transport: construction builds no
+        // vision transport; the vision policy consults when execute births
+        // the auxiliary route client. The dial itself fails (discard port),
+        // which is irrelevant to the consult being recorded.
+        let workspace = tempfile::tempdir()?;
+        std::fs::write(workspace.path().join("sample.png"), b"owned image fixture")?;
+        let _ = tool
+            .execute(
+                serde_json::json!({"image_path": "sample.png"}),
+                &crate::tools::spec::ToolContext::new(workspace.path().to_path_buf()),
+            )
+            .await;
+        assert_eq!(
+            *self.vision.0.lock().unwrap(),
+            vec![vision_url.clone(), vision_url],
+            "the auxiliary vision client applies the policy to both transports"
+        );
         Ok(())
     }
 }
@@ -134,7 +152,7 @@ async fn forkguard_host_http_policy_survives_reload_switch_and_vision_reenable()
     let _env = crate::test_support::lock_test_env();
     let fixture = Fixture::new().await?;
     assert_eq!(fixture.reload().await?, StatusCode::OK);
-    fixture.assert_policies_and_builders("/primary/v1")?;
+    fixture.assert_policies_and_builders("/primary/v1").await?;
     let (status, body) = post_switch_provider(
         &crate::tls::reqwest_client(),
         &fixture.addr,
@@ -143,18 +161,18 @@ async fn forkguard_host_http_policy_survives_reload_switch_and_vision_reenable()
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    fixture.assert_policies_and_builders("/second/v1")?;
+    fixture.assert_policies_and_builders("/second/v1").await?;
     fs::write(&fixture.file, disk_config("openai", false))?;
     assert_eq!(fixture.reload().await?, StatusCode::OK);
     assert!(fixture.state.config.read().vision_model.is_none());
     fs::write(&fixture.file, disk_config("openai", true))?;
     assert_eq!(fixture.reload().await?, StatusCode::OK);
-    fixture.assert_policies_and_builders("/second/v1")?;
+    fixture.assert_policies_and_builders("/second/v1").await?;
     fs::write(&fixture.file, "[malformed")?;
     assert!(fixture.reload().await?.is_server_error());
-    fixture.assert_policies_and_builders("/second/v1")?;
+    fixture.assert_policies_and_builders("/second/v1").await?;
     fs::write(&fixture.file, disk_config("openai", true))?;
     assert_eq!(fixture.reload().await?, StatusCode::OK);
-    fixture.assert_policies_and_builders("/second/v1")?;
+    fixture.assert_policies_and_builders("/second/v1").await?;
     Ok(())
 }

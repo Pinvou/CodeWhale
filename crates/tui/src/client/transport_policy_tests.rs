@@ -46,13 +46,23 @@ impl ModelHttpPolicy for FixturePolicy {
 #[tokio::test]
 async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
     let server = MockServer::start().await;
+    // The primary route dials twice (h2 + http1 twins) under its own key;
+    // the independent vision route dials once under the vision key.
+    let vision_response = ResponseTemplate::new(200).set_body_json(serde_json::json!(
+        {"choices":[{"message":{"content":"owned fixture"}}]}
+    ));
     Mock::given(method("POST"))
         .and(header("x-host-policy", "applied"))
         .and(header("authorization", "Bearer owned-fixture-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            serde_json::json!({"choices":[{"message":{"content":"owned fixture"}}]}),
-        ))
-        .expect(3)
+        .respond_with(vision_response.clone())
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-host-policy", "applied"))
+        .and(header("authorization", "Bearer owned-vision-key"))
+        .respond_with(vision_response)
+        .expect(1)
         .mount(&server)
         .await;
     let address: SocketAddr = server.uri().trim_start_matches("http://").parse().unwrap();
@@ -67,9 +77,13 @@ async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
         base_url: Some(base.clone()),
         default_text_model: Some("deepseek-v4-pro".into()),
         model_http_policy: Some(policy.clone()),
+        vision_model_http_policy: Some(policy.clone()),
         vision_model: Some(VisionModelConfig {
             model: "owned-vision-model".into(),
-            api_key: None,
+            // A distinct key keeps the auxiliary route OFF the parent-reuse
+            // fast path: an independent vision credential is a fresh client
+            // birth, which is where the vision policy must consult.
+            api_key: Some("owned-vision-key".into()),
             base_url: Some(base.clone()),
         }),
         ..Config::default()
@@ -90,7 +104,6 @@ async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
         config.clone().vision_model_config().unwrap(),
         Some(client.clone()),
     );
-    assert_eq!(policy.calls.load(Ordering::SeqCst), 3);
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("sample.png"), b"owned image fixture").unwrap();
     vision
@@ -100,6 +113,9 @@ async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
         )
         .await
         .unwrap();
+    // The vision dial's auxiliary client birth consults the policy for both
+    // transports (h2 + http1 twins), like the primary build does: 2 + 2.
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 4);
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
@@ -122,22 +138,23 @@ async fn forkguard_host_http_policy_construction_denial_fails_closed() {
     };
     assert!(DeepSeekClient::new(&config).is_err());
     assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
-    let tool = ImageAnalyzeTool::new_with_http_policy(
-        VisionModelConfig {
-            model: "owned-fixture".into(),
-            api_key: None,
-            base_url: config.base_url,
-        },
-        None,
+    // PR #151 on the post-refactor transport: an independent vision route is
+    // a fresh auxiliary build, and that birth is where the vision policy is
+    // consulted — one more configure call, then the dial fails closed.
+    let parent_config = Config {
+        provider: Some("deepseek".into()),
+        api_key: Some("owned-fixture-key".into()),
+        base_url: Some("https://primary.invalid/v1".into()),
+        ..Config::default()
+    };
+    let parent = DeepSeekClient::new(&parent_config).unwrap();
+    let route = DeepSeekClient::auxiliary_json_route_with_policy(
+        Some(&parent),
+        "https://vision-endpoint.invalid/v1",
+        "owned-fixture-key",
+        "owned-fixture",
         Some(policy.clone()),
     );
-    assert!(
-        tool.execute(
-            serde_json::json!({"image_path":"never-read.png"}),
-            &ToolContext::new(std::env::temp_dir())
-        )
-        .await
-        .is_err()
-    );
+    assert!(route.is_err());
     assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
 }

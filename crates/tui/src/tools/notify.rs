@@ -8,7 +8,7 @@
 //!
 //! Honors the user's `[notifications]` config: `method = "off"` silences
 //! the tool entirely, and `quiet` / `events.model-notify = false` gate the
-//! category through the process-wide [`NotificationGate`]. Output messages
+//! category through the process-wide `NotificationGate`. Output messages
 //! are length-capped so a runaway model can't paint a paragraph into the
 //! terminal title bar.
 

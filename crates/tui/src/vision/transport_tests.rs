@@ -124,7 +124,11 @@ impl crate::config::ModelHttpPolicy for LocalTransport {
     }
 }
 
-fn vision_transport(url: &str, matched: bool, force_h2: bool) -> ImageAnalyzeTool {
+fn vision_transport(url: &str, matched: bool, force_h2: bool) -> DeepSeekClient {
+    // PR #151 on the post-refactor transport: the vision client is born at
+    // the auxiliary route. A matched parent is reused wholesale; an
+    // independent vision endpoint is a fresh fallback build that must carry
+    // the explicit host policy into the standard builder chain.
     let config = crate::config::Config {
         provider: Some("deepseek".into()),
         api_key: Some("owned-loopback-key".into()),
@@ -132,15 +136,15 @@ fn vision_transport(url: &str, matched: bool, force_h2: bool) -> ImageAnalyzeToo
         request_idempotency_header: Some("idempotency-key".into()),
         ..Default::default()
     };
-    ImageAnalyzeTool::new_with_http_policy(
-        VisionModelConfig {
-            model: "owned-vision".into(),
-            api_key: config.api_key.clone(),
-            base_url: config.base_url.clone(),
-        },
-        matched.then(|| DeepSeekClient::new(&config).unwrap()),
+    let parent = matched.then(|| DeepSeekClient::new(&config).unwrap());
+    DeepSeekClient::auxiliary_json_route_with_policy(
+        parent.as_ref(),
+        url,
+        "owned-loopback-key",
+        "owned-vision",
         Some(Arc::new(LocalTransport { force_h2 })),
     )
+    .unwrap()
 }
 
 fn transport_for_lane(url: &str, lane: &str) -> reqwest::Client {
@@ -161,8 +165,8 @@ fn transport_for_lane(url: &str, lane: &str) -> reqwest::Client {
             }
         }
         _ => vision_transport(url, lane == "matching-vision", false)
-            .client
-            .unwrap(),
+            .http_client
+            .clone(),
     }
 }
 
@@ -239,11 +243,9 @@ async fn forkguard_host_http_policy_vision_honors_http1_alias_and_later_host_ove
             .map(|v| EnvVarGuard::set("DEEPSEEK_FORCE_HTTP1", v))
             .unwrap_or_else(|| EnvVarGuard::remove("DEEPSEEK_FORCE_HTTP1"));
         let mut endpoint = Endpoint::start(&cert);
-        let tool = vision_transport(&endpoint.url, false, override_h2);
-        let response = tool
-            .client
-            .as_ref()
-            .unwrap()
+        let route = vision_transport(&endpoint.url, false, override_h2);
+        let response = route
+            .http_client
             .get(&endpoint.url)
             .timeout(Duration::from_secs(2))
             .send()
