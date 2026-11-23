@@ -58,6 +58,11 @@ pub const BLOCKED_PREFIXES: &[&str] = &[
     "/etc/sudoers",
     "/etc/ssh/",
     "/root/",
+    // macOS 的 root 用户家目录（`/root/` 在 macOS 上的对位物）；与
+    // `/root/` 同类的系统账户凭据存放区。回流必要支撑（community #876）：
+    // CLI 的生产别名钉 `/private/var/root/...` 经 `/private/{etc,var,tmp}`
+    // 别名展开后命中本表。
+    "/var/root/",
     "/var/log/auth",
     "/proc/",
     "/sys/",

@@ -697,7 +697,9 @@ where
     };
     write_topic_migration_journal_unlocked(journal_path, &journal)?;
     write(new_path, value)?;
-    let raw = fs::read_to_string(new_path)?;
+    // Round-14 复审:提交后复读同样走有界原语(刚写出的文件常态远小于
+    // 上限;并发追加越界按坏档处理)。
+    let raw = crate::platform::filesystem::read_private_data_file(new_path)?;
     let committed = serde_json::from_str::<T>(&raw).map_err(invalid_data)?;
     if !validate(&committed) {
         return Err(io::Error::new(
@@ -785,6 +787,23 @@ fn write_topic_migration_journal_unlocked(
 pub(super) fn reconcile_topic_migration_journals_unlocked<T: serde::de::DeserializeOwned>(
     dir: &Path,
 ) -> io::Result<TopicReconciliation> {
+    reconcile_topic_migration_journals_unlocked_with::<T, _>(dir, |path: &Path| {
+        fs::remove_file(path)
+    })
+}
+
+/// 回流必要支撑（community #876）：移除动作注入缝（同 commit 车道的
+/// `commit_topic_migration_unlocked_with`），让 journal 移除失败这个脱敏点
+/// 能被跨平台确定性测试直接驱动，而不必依赖平台特定语义。函数体保持
+/// 函数体保持 Official 现状的语义不变。
+pub(super) fn reconcile_topic_migration_journals_unlocked_with<T, F>(
+    dir: &Path,
+    remove_file: F,
+) -> io::Result<TopicReconciliation>
+where
+    T: serde::de::DeserializeOwned,
+    F: Fn(&Path) -> io::Result<()>,
+{
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -802,9 +821,13 @@ pub(super) fn reconcile_topic_migration_journals_unlocked<T: serde::de::Deserial
         if !name.starts_with(".topic-migration-") || !name.ends_with(".journal") {
             continue;
         }
-        let journal = match fs::read_to_string(&journal_path).and_then(|raw| {
-            serde_json::from_str::<TopicMigrationJournal>(&raw).map_err(invalid_data)
-        }) {
+        // Round-14 复审:journal 是存储目录内可被外部种植的文件,整读走
+        // 共享有界原语(常规文件门 + 16 MiB 上限);超界/非常规文件按
+        // 坏档同路隔离,不再无界读入。
+        let journal = match crate::platform::filesystem::read_private_data_file(&journal_path)
+            .and_then(|raw| {
+                serde_json::from_str::<TopicMigrationJournal>(&raw).map_err(invalid_data)
+            }) {
             Ok(journal) => journal,
             Err(_) => {
                 // An unparsable journal (truncated write or disk corruption)
@@ -825,12 +848,13 @@ pub(super) fn reconcile_topic_migration_journals_unlocked<T: serde::de::Deserial
             continue;
         }
         let authority = dir.join(&journal.authority_file);
-        let authority_valid = fs::read_to_string(&authority).is_ok_and(|raw| {
-            serde_json::from_str::<T>(&raw).is_ok()
-                && stable_id_with_prefix("authority", &raw) == journal.authority_hash
-        });
+        let authority_valid = crate::platform::filesystem::read_private_data_file(&authority)
+            .is_ok_and(|raw| {
+                serde_json::from_str::<T>(&raw).is_ok()
+                    && stable_id_with_prefix("authority", &raw) == journal.authority_hash
+            });
         if !authority_valid {
-            fs::remove_file(&journal_path)?;
+            remove_file(&journal_path)?;
             continue;
         }
         let mut journal_cleanup_pending = false;
@@ -839,14 +863,14 @@ pub(super) fn reconcile_topic_migration_journals_unlocked<T: serde::de::Deserial
             if stale == authority || !stale.exists() {
                 continue;
             }
-            if let Err(error) = fs::remove_file(&stale) {
+            if let Err(error) = remove_file(&stale) {
                 journal_cleanup_pending = true;
                 hidden_files.insert(stale.clone());
                 cleanup_failures.push(format!("{}: {error}", display_redacted(&stale)));
             }
         }
         if !journal_cleanup_pending {
-            if let Err(error) = fs::remove_file(&journal_path) {
+            if let Err(error) = remove_file(&journal_path) {
                 cleanup_failures.push(format!("{}: {error}", display_redacted(&journal_path)));
             }
         }
@@ -906,7 +930,7 @@ where
         if path == new_path || path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let same_topic = fs::read_to_string(&path)
+        let same_topic = crate::platform::filesystem::read_private_data_file(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<T>(&raw).ok())
             .map(|item| {
@@ -989,12 +1013,18 @@ pub(super) fn update_work_context_unlocked(
     normalize_work_context(&mut updated);
     let dir = work_context_dir();
     fs::create_dir_all(&dir)?;
-    let old_path = dir.join(format!("{}.json", existing.id));
     let new_path = dir.join(format!("{new_id}.json"));
     let mut stale_paths =
         work_context_stale_paths_unlocked(&dir, &new_path, &existing.topic, &updated.topic)?;
-    if old_path != new_path && old_path.exists() && !stale_paths.contains(&old_path) {
-        stale_paths.push(old_path);
+    // Round-11 复审 minor:existing.id 来自磁盘上的记录文件(clean_scalar
+    // 不限字符集),拼进清理路径前必须是单分量普通文件名——种植的
+    // `"id": "../x"` 会让清理臂 remove 到存储目录之外。非普通文件名的旧
+    // 记录跳过清理(新记录照常落盘,孤儿文件等待手工清理)。
+    if is_plain_filename(&existing.id) {
+        let old_path = dir.join(format!("{}.json", existing.id));
+        if old_path != new_path && old_path.exists() && !stale_paths.contains(&old_path) {
+            stale_paths.push(old_path);
+        }
     }
     let mutation =
         commit_topic_migration_unlocked(&new_path, &updated, &stale_paths, |committed| {
@@ -1034,7 +1064,7 @@ pub(super) fn delete_work_context_unlocked(id: &str) -> io::Result<bool> {
             .map(clean_id)
             .map(|file_id| file_id == id)
             .unwrap_or(false);
-        let matched_by_body = fs::read_to_string(&path)
+        let matched_by_body = crate::platform::filesystem::read_private_data_file(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<WorkContextFile>(&raw).ok())
             .map(|item| clean_id(&item.id) == id || clean_id(&item.topic) == id)
@@ -1786,7 +1816,7 @@ pub(super) fn disabled_runtime_snapshot(session_id: &str) -> io::Result<RuntimeM
     write_text_atomic(&path, "")?;
     Ok(RuntimeMemorySnapshot {
         session_id: session_id.to_string(),
-        runtime_path: path.display().to_string(),
+        runtime_path: display_redacted(&path),
         block: String::new(),
         items: Vec::new(),
     })
@@ -1864,12 +1894,18 @@ pub(super) fn update_preference_unlocked(
     };
     let dir = paths::user_memory_preferences_dir();
     fs::create_dir_all(&dir)?;
-    let old_path = dir.join(format!("{}.json", existing.id));
     let new_path = dir.join(format!("{new_id}.json"));
     let mut stale_paths =
         preference_stale_paths_unlocked(&dir, &new_path, &existing.topic, &updated.topic)?;
-    if old_path != new_path && old_path.exists() && !stale_paths.contains(&old_path) {
-        stale_paths.push(old_path);
+    // Round-11 复审 minor:与 update_work_context 同判据——磁盘载入的
+    // existing.id(clean_scalar 不限字符集)拼进清理路径前必须是单分量
+    // 普通文件名,否则种植的 `"id": "../x"` 会让清理臂 remove 到偏好
+    // 目录之外。非普通文件名的旧记录跳过清理。
+    if is_plain_filename(&existing.id) {
+        let old_path = dir.join(format!("{}.json", existing.id));
+        if old_path != new_path && old_path.exists() && !stale_paths.contains(&old_path) {
+            stale_paths.push(old_path);
+        }
     }
     let mutation =
         commit_topic_migration_unlocked(&new_path, &updated, &stale_paths, |committed| {
@@ -1909,7 +1945,7 @@ pub(super) fn delete_preference_unlocked(id: &str) -> io::Result<bool> {
             .map(clean_id)
             .unwrap_or_default();
         let matched_by_file = file_id == id;
-        let matched_by_body = fs::read_to_string(&path)
+        let matched_by_body = crate::platform::filesystem::read_private_data_file(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<PreferenceFile>(&raw).ok())
             .map(|pref| clean_id(&pref.id) == id)
@@ -2017,7 +2053,7 @@ fn write_preference_unlocked(item: &PendingMemoryItem) -> io::Result<()> {
             if path == target || path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let same_topic = fs::read_to_string(&path)
+            let same_topic = crate::platform::filesystem::read_private_data_file(&path)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<PreferenceFile>(&raw).ok())
                 .map(|pref| normalize_preference_topic(&pref.topic) == topic)

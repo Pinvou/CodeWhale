@@ -7,7 +7,7 @@ mod relay_client;
 pub(crate) mod task_permissions;
 
 pub use manager::{RelaySettingsInfo, RemoteControlManager};
-pub use protocol::{WebAccessInfo, WebAccessStatus};
+pub use protocol::{WebAccessInfo, WebAccessStatus, WebAccessStopOutcome};
 
 pub(crate) const MAX_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 
