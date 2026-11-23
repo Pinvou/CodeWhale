@@ -329,13 +329,22 @@ impl ReasoningEffort {
         wire_model: &str,
     ) -> Self {
         let normalized = self.normalize_for_provider(provider);
-        if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model) {
+        // The K3.1 family spellings inherit the K3 parameter constraints on
+        // the same vendor routes, so they ride the same two arms: without
+        // them the generic Moonshot tail below silently inflates the
+        // auto-selected Low (every subagent, low-keyword turns) onto High at
+        // dispatch time, not just in display.
+        if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model)
+            || crate::config::is_kimi_code_k31_route(provider, base_url, wire_model)
+        {
             return match normalized {
                 Self::Off => Self::Low,
                 other => other,
             };
         }
-        if crate::config::is_exact_direct_moonshot_k3_route(provider, base_url, wire_model) {
+        if crate::config::is_exact_direct_moonshot_k3_route(provider, base_url, wire_model)
+            || crate::config::is_kimi_k31_on_direct_platform_route(provider, base_url, wire_model)
+        {
             return match normalized {
                 Self::Off => Self::Low,
                 Self::Medium => Self::High,
@@ -1311,4 +1320,82 @@ pub enum McpUiAction {
     },
     Validate,
     Reload,
+}
+
+#[cfg(test)]
+mod kimi_k31_effort_normalization_tests {
+    use super::ReasoningEffort;
+    use crate::config::{ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL};
+
+    /// The K3.1 family must ride the same normalization ladder as its K3
+    /// siblings: membership keeps the Low tier (the generic Moonshot tail
+    /// would silently inflate every subagent's auto-selected Low onto High
+    /// at dispatch time) and folds Off onto the lowest documented tier; the
+    /// direct platform additionally folds Medium onto High. The bundled
+    /// catalog is K3-era, so no catalog effort list intercepts these routes
+    /// and the arms below are the load-bearing behavior.
+    #[test]
+    fn kimi_k31_routes_normalize_like_their_k3_siblings() {
+        for (base_url, model) in [
+            (DEFAULT_KIMI_CODE_BASE_URL, "k3.1-pro"),
+            ("https://api.kimi.ai/coding/v1", "k3.1-pro-highspeed"),
+        ] {
+            assert_eq!(
+                ReasoningEffort::Low.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::Low,
+                "{base_url} {model}: Low must survive on the membership K3.1 route"
+            );
+            assert_eq!(
+                ReasoningEffort::Off.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::Low,
+                "{base_url} {model}: Off folds to the lowest tier"
+            );
+            assert_eq!(
+                ReasoningEffort::Medium.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::Medium,
+                "{base_url} {model}: membership keeps the Medium intent (the wire shaper folds it onto high like bare k3)"
+            );
+            assert_eq!(
+                ReasoningEffort::High.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::High,
+                "{base_url} {model}"
+            );
+            assert_eq!(
+                ReasoningEffort::Max.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::Max,
+                "{base_url} {model}"
+            );
+        }
+        for (base_url, model) in [
+            (DEFAULT_MOONSHOT_BASE_URL, "kimi-k3.1-pro"),
+            ("https://api.moonshot.cn/v1", "kimi-k3.1-pro-highspeed"),
+        ] {
+            assert_eq!(
+                ReasoningEffort::Low.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::Low,
+                "{base_url} {model}: Low must survive on the direct K3.1 route"
+            );
+            assert_eq!(
+                ReasoningEffort::Off.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::Low,
+                "{base_url} {model}: Off folds to the lowest tier"
+            );
+            assert_eq!(
+                ReasoningEffort::Medium.normalize_for_route(ApiProvider::Moonshot, base_url, model),
+                ReasoningEffort::High,
+                "{base_url} {model}: direct folds Medium onto High like bare kimi-k3"
+            );
+        }
+        // Outside the vendor routes the generic Moonshot collapse still
+        // applies: a custom gateway with a K3.1 spelling keeps its own
+        // dialect, and Low inflates onto High there by design.
+        assert_eq!(
+            ReasoningEffort::Low.normalize_for_route(
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                "k3.1-pro",
+            ),
+            ReasoningEffort::High,
+        );
+    }
 }

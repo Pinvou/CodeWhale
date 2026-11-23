@@ -167,7 +167,6 @@ jobs:
             -A clippy::uninlined_format_args \
             -A clippy::too_many_arguments \
             -A clippy::unnecessary_map_or \
-            -A clippy::collapsible_if \
             -A clippy::assertions_on_constants
       - name: Workspace tests
         run: cargo test --workspace --all-features --locked
