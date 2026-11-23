@@ -39,10 +39,11 @@ serde_json.workspace = true
 toml.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 rustls.workspace = true
-semver.workspace = true
 tokio.workspace = true
 mimalloc.workspace = true
 sha2.workspace = true
+# tempfile stays a normal dependency: replace_binary_with_validation (the
+# update install path) uses it in production code.
 tempfile.workspace = true
 tracing.workspace = true
 webbrowser = "1.0"
@@ -61,3 +62,6 @@ codewhale-build-support = { path = "../build-support", version = "0.9.12" }
 libc = "0.2"
 
 [dev-dependencies]
+# semver has no production call sites in this crate: version comparison goes
+# through codewhale-release, and the remaining uses are #[cfg(test)]-gated.
+semver.workspace = true
