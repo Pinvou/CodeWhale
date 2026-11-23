@@ -8,7 +8,7 @@
 //! four bounds R1 makes finite:
 //!
 //! 1. `max_steps` — model steps in one turn.
-//! 2. The cumulative per-turn wall clock.
+//! 2. The cumulative per-turn active-work clock (excluding eligible waits).
 //! 3. `exec --max-turns` — the same step ceiling for headless runs.
 //! 4. The per-step stream caps (content bytes, stream duration).
 //!
@@ -29,7 +29,11 @@
 //! the model still owes work, grants exactly one bounded final-report turn
 //! first). [`TurnWallClock`] follows the same contract in `run_turn`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use crate::llm_client::rate_limit::ProviderWaitClock;
 
 /// Default ceiling on model steps within a single turn.
 ///
@@ -56,7 +60,8 @@ pub const DEFAULT_EXEC_MAX_TURNS: u32 = DEFAULT_MAX_MODEL_STEPS;
 /// Measured across every model step of one turn, not per request. Time the
 /// turn spends blocked on a human approval decision is excluded (see
 /// [`TurnWallClock::begin_human_wait`]) so an unanswered prompt cannot
-/// consume the budget.
+/// consume the budget. Actual provider recovery sleeps owned by this turn
+/// are excluded independently of active request/generation/tool work.
 pub const DEFAULT_TURN_WALL_CLOCK_SECS: u64 = 3_600;
 /// Smallest accepted per-turn wall-clock budget. Below this a single slow
 /// reasoning request would trip the budget before it could finish.
@@ -136,7 +141,7 @@ pub fn resolve_stream_max_duration_secs(raw: Option<u64>) -> u64 {
     }
 }
 
-/// Cumulative wall-clock budget for one turn.
+/// Cumulative active-work budget for one turn.
 ///
 /// Started once at the top of `Engine::run_turn` and checked at the
 /// provider-request boundary, so a turn that trips the budget stops before
@@ -148,6 +153,9 @@ pub fn resolve_stream_max_duration_secs(raw: Option<u64>) -> u64 {
 /// Without that exclusion an approval prompt left open overnight would fail
 /// the turn — and discard the work the user just approved — the moment they
 /// came back.
+/// Actual provider-recovery waits are also excluded while all participating
+/// work is blocked. Ordinary request, generation and active tool time remains
+/// charged; an active parallel sibling prevents recovery-wait credit.
 #[derive(Debug)]
 pub(crate) struct TurnWallClock {
     budget: Duration,
@@ -156,6 +164,8 @@ pub(crate) struct TurnWallClock {
     excluded: Duration,
     /// Set while currently blocked on a human decision.
     blocked_since: Option<Instant>,
+    provider_waits: Option<ProviderWaitClock>,
+    provider_wait_baseline: Duration,
 }
 
 impl TurnWallClock {
@@ -163,11 +173,17 @@ impl TurnWallClock {
     /// it is how tests assert the stop path without sleeping. Configuration
     /// never produces one — [`resolve_turn_wall_clock`] rejects `0`.
     pub(crate) fn start(budget: Duration) -> Self {
+        let provider_waits = crate::llm_client::rate_limit::turn_provider_wait_clock();
+        let provider_wait_baseline = provider_waits
+            .as_ref()
+            .map_or(Duration::ZERO, ProviderWaitClock::elapsed);
         Self {
             budget,
             started_at: Instant::now(),
             excluded: Duration::ZERO,
             blocked_since: None,
+            provider_waits,
+            provider_wait_baseline,
         }
     }
 
@@ -177,15 +193,22 @@ impl TurnWallClock {
     }
 
     /// Wall-clock time this turn has spent on its own work, excluding time
-    /// blocked on a human decision.
+    /// blocked on a human decision or its own provider recovery sleep.
     pub(crate) fn spent(&self) -> Duration {
         let blocked_now = self
             .blocked_since
             .map_or(Duration::ZERO, |since| since.elapsed());
+        let provider_waited = self
+            .provider_waits
+            .as_ref()
+            .map_or(Duration::ZERO, |waits| {
+                waits.elapsed().saturating_sub(self.provider_wait_baseline)
+            });
         self.started_at
             .elapsed()
             .saturating_sub(self.excluded)
             .saturating_sub(blocked_now)
+            .saturating_sub(provider_waited)
     }
 
     /// Whether the cumulative budget is spent.
@@ -228,6 +251,80 @@ impl TurnWallClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_provider_clock_charges_other_request_waits() {
+        use crate::llm_client::rate_limit::{wait, with_turn_provider_waits, without_active_time};
+
+        with_turn_provider_waits(async {
+            let clock = TurnWallClock::start(Duration::from_secs(30));
+            tokio::time::advance(Duration::from_secs(2)).await;
+            wait(Duration::from_secs(40)).await;
+            assert_eq!(clock.spent(), Duration::from_secs(2));
+            assert!(!clock.exhausted());
+            // Body/slot waits also pause the request clock, but not this budget.
+            without_active_time(tokio::time::sleep(Duration::from_secs(29))).await;
+            assert_eq!(clock.spent(), Duration::from_secs(31));
+            assert!(clock.exhausted());
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_provider_clock_queued_work_and_cancel_do_not_leave_credit() {
+        use crate::llm_client::rate_limit::{
+            wait, with_provider_wait_work, with_turn_provider_waits,
+        };
+
+        with_turn_provider_waits(async {
+            let clock = TurnWallClock::start(Duration::from_secs(30));
+            let unpolled = with_provider_wait_work(std::future::pending::<()>());
+            wait(Duration::from_secs(10)).await;
+            assert_eq!(clock.spent(), Duration::from_secs(10));
+            drop(unpolled);
+            let mut recovering = Box::pin(wait(Duration::from_secs(40)));
+            assert!(futures_util::poll!(recovering.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert_eq!(clock.spent(), Duration::from_secs(10));
+            drop(recovering);
+            tokio::time::advance(Duration::from_secs(3)).await;
+            assert_eq!(clock.spent(), Duration::from_secs(13));
+        })
+        .await;
+        with_turn_provider_waits(async {
+            let clock = TurnWallClock::start(Duration::from_secs(30));
+            tokio::time::advance(Duration::from_secs(5)).await;
+            assert_eq!(clock.spent(), Duration::from_secs(5));
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_provider_clock_child_scope_and_unwind_leave_parent_active() {
+        use crate::llm_client::rate_limit::{wait, with_turn_provider_waits};
+        use futures_util::FutureExt;
+
+        with_turn_provider_waits(async {
+            let parent = TurnWallClock::start(Duration::from_secs(30));
+            let result = std::panic::AssertUnwindSafe(with_turn_provider_waits(async {
+                let child = TurnWallClock::start(Duration::from_secs(30));
+                let mut recovering = Box::pin(wait(Duration::from_secs(40)));
+                assert!(futures_util::poll!(recovering.as_mut()).is_pending());
+                tokio::time::advance(Duration::from_secs(10)).await;
+                assert_eq!(child.spent(), Duration::ZERO);
+                panic!("controlled child unwind");
+            }))
+            .catch_unwind()
+            .await;
+            assert!(result.is_err());
+            assert_eq!(parent.spent(), Duration::from_secs(10));
+            wait(Duration::from_secs(40)).await;
+            assert_eq!(parent.spent(), Duration::from_secs(10));
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert_eq!(parent.spent(), Duration::from_secs(12));
+        })
+        .await;
+    }
 
     #[test]
     fn model_step_defaults_are_finite_and_reject_the_zero_sentinel() {
