@@ -208,13 +208,17 @@ pub(crate) fn constrained_effective_reasoning_for_route(
         return Some(Unavailable);
     }
 
-    if crate::config::is_exact_kimi_code_k3_route(provider, endpoint_identity, model) {
+    if crate::config::is_exact_kimi_code_k3_route(provider, endpoint_identity, model)
+        || crate::config::is_kimi_code_k31_route(provider, endpoint_identity, model)
+    {
         return Some(match requested {
             Off => Low,
             other => other,
         });
     }
-    if crate::config::is_exact_direct_moonshot_k3_route(provider, endpoint_identity, model) {
+    if crate::config::is_exact_direct_moonshot_k3_route(provider, endpoint_identity, model)
+        || crate::config::is_kimi_k31_on_direct_platform_route(provider, endpoint_identity, model)
+    {
         return Some(match requested {
             Off => Low,
             Medium => High,
@@ -942,5 +946,70 @@ impl WorkGraphSnapshot {
 impl Default for WorkGraphSnapshot {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod kimi_k31_work_graph_effort_tests {
+    use super::constrained_effective_reasoning_for_route;
+    use crate::config::{ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL};
+    use ReasoningEffortTier::{High, Low, Medium, Off};
+
+    use super::ReasoningEffortTier;
+
+    /// The work-graph tier mirror must track `normalize_for_route`: K3.1
+    /// keeps Low on the membership route and folds Medium onto High on the
+    /// direct platform, exactly like its K3 siblings.
+    #[test]
+    fn kimi_k31_routes_mirror_the_k3_work_graph_tiers() {
+        for base_url in [DEFAULT_KIMI_CODE_BASE_URL, "https://api.kimi.ai/coding/v1"] {
+            assert_eq!(
+                constrained_effective_reasoning_for_route(
+                    Low,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "k3.1-pro",
+                ),
+                Some(Low)
+            );
+            assert_eq!(
+                constrained_effective_reasoning_for_route(
+                    Off,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "k3.1-pro-highspeed",
+                ),
+                Some(Low)
+            );
+            assert_eq!(
+                constrained_effective_reasoning_for_route(
+                    Medium,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "k3.1-pro",
+                ),
+                Some(Medium)
+            );
+        }
+        for base_url in [DEFAULT_MOONSHOT_BASE_URL, "https://api.moonshot.cn/v1"] {
+            assert_eq!(
+                constrained_effective_reasoning_for_route(
+                    Low,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "kimi-k3.1-pro",
+                ),
+                Some(Low)
+            );
+            assert_eq!(
+                constrained_effective_reasoning_for_route(
+                    Medium,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    "kimi-k3.1-pro",
+                ),
+                Some(High)
+            );
+        }
     }
 }
