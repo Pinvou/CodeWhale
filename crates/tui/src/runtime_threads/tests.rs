@@ -4064,6 +4064,13 @@ async fn late_report_after_failure_settlement_is_written_through_and_survives_re
 /// journal fallback fires, and the sink's retirement flush persists it once
 /// storage recovers — pinned end-to-end through the production delivery
 /// path, a blocked turn file, and the retirement hook.
+///
+/// Unix-only (review 6020684714): the fault injection is the turns
+/// directory's read-only permission mode — the portable way to fail the
+/// atomic write while keeping `load_turn` healthy — so the whole regression
+/// rides the same gate instead of a half-gated setup that would pass the
+/// write through ungated and fail the nonempty-stage assertion on Windows.
+#[cfg(unix)]
 #[tokio::test]
 async fn transient_settled_write_failure_is_retryable_at_sink_retirement() {
     let dir = test_runtime_dir();
@@ -4095,7 +4102,6 @@ async fn transient_settled_write_failure_is_retryable_at_sink_retirement() {
     // settled write-through save fails transiently (the atomic write cannot
     // create its temp file), but `load_turn` keeps serving the record.
     let turns_dir = manager.store.turns_dir.clone();
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let read_only = std::fs::metadata(&turns_dir)
@@ -4142,7 +4148,6 @@ async fn transient_settled_write_failure_is_retryable_at_sink_retirement() {
 
     // Storage recovers; the last lease drops and the sink's retirement is
     // the durable final-owner boundary: its flush must persist the record.
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&turns_dir, std::fs::Permissions::from_mode(0o755))
