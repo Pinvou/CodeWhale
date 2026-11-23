@@ -405,7 +405,7 @@ impl Engine {
             let context_override = context_override.clone();
             let cancel_token = self.cancel_token.clone();
             let turn_tool_security = self.active_turn_tool_security.clone();
-            tasks.push(async move {
+            let task = async move {
                 let _shell_permit = if matches!(tool_name.as_str(), "bash" | "Bash" | "exec_shell")
                 {
                     shell_permits.acquire_owned().await.ok()
@@ -428,13 +428,16 @@ impl Engine {
                 )
                 .await;
                 (index, tool_name, result)
-            });
+            };
+            tasks.push(crate::llm_client::rate_limit::with_provider_wait_work(task));
         }
 
         let mut results: Vec<Option<ParallelToolResultEntry>> = Vec::with_capacity(result_count);
         results.resize_with(result_count, || None);
         let mut content_blocks = Vec::new();
-        while let Some((index, tool_name, result)) = tasks.next().await {
+        while let Some((index, tool_name, result)) =
+            crate::llm_client::rate_limit::with_suspended_wait_owner(tasks.next()).await
+        {
             let entry = match result {
                 Ok(output) => {
                     let RichToolResult {
@@ -624,9 +627,30 @@ impl Engine {
                 .await
                 .map(RichToolResult::plain)
         } else if let Some(registry) = registry {
-            registry
-                .execute_rich_full_with_context(&tool_name, tool_input, context_override.as_ref())
-                .await
+            let context = context_override
+                .as_ref()
+                .unwrap_or_else(|| registry.context());
+            let agent_id = context.owner_agent_id.clone();
+            let turn_id = context.origin_turn_id.clone();
+            let event_tx = tx_event.clone();
+            let observer: crate::llm_client::rate_limit::RecoveryObserver =
+                Arc::new(move |mut receipt| {
+                    receipt.agent_id = agent_id.clone();
+                    receipt.turn_id = turn_id.clone();
+                    let event_tx = event_tx.clone();
+                    Box::pin(async move {
+                        let _ = event_tx.send(Event::ModelRecovery { receipt }).await;
+                    })
+                });
+            crate::llm_client::rate_limit::with_observer(
+                observer,
+                registry.execute_rich_full_with_context(
+                    &tool_name,
+                    tool_input,
+                    context_override.as_ref(),
+                ),
+            )
+            .await
         } else {
             Err(ToolError::not_available(format!(
                 "tool '{tool_name}' is not registered"
