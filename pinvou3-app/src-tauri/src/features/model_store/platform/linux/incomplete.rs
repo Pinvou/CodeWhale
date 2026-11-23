@@ -7,7 +7,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{config, db, lifecycle::ModelManager, script_runner};
+use super::{config, db, lifecycle::ModelManager, run_state::ActiveCardOps, script_runner};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +53,11 @@ struct Receipt {
     cancelled: bool,
     #[serde(default)]
     install_context: Option<Context>,
+    /// 用户已放弃这条记录：不再提醒，也不再提供重试。打标改写由 service.rs 完
+    /// 成（SavedRun 的所有者）；旧回执没有这个字段，读出来是 false——放弃是本
+    /// 版才有的动作，存量记录的行为保持不变。
+    #[serde(default)]
+    dismissed: bool,
 }
 
 fn safe_id(id: &str) -> Result<(), String> {
@@ -191,13 +196,46 @@ fn failed_install(receipt: &Receipt) -> bool {
         && !matches!(receipt.outcome, Some(Ok(_)))
 }
 
-pub(super) fn summaries() -> Result<Vec<Value>, String> {
+/// 放弃一条安装回执前的全部校验。真正的改写在 service.rs——它是 SavedRun（含
+/// lines 的完整落盘格式）的所有者，这里只负责把「不能放弃」的情况全数拦下。
+///
+/// 三道闸各对应一种真实误用：
+///   * 未终结的记录还在跑，放弃等于把活着的任务从界面上抹掉，结局从此没人写；
+///   * 未完成面板只列失败的 download / install_local，别的种类没有「放弃」语义；
+///   * 脚本进程必须确认已退出（复用重试前的同一道进程检查）——刚点完取消，
+///     进程还在收尾时就放弃，会留下一个再也没人看的活进程。
+pub(super) fn ensure_dismissable(run_id: &str) -> Result<(), String> {
+    let receipt = read(run_id)?;
+    if receipt.outcome.is_none() {
+        return Err("installation_not_terminal".into());
+    }
+    if !failed_install(&receipt) {
+        return Err("installation_not_dismissable".into());
+    }
+    super::orphans::ensure_run_quiet(run_id)?;
+    Ok(())
+}
+
+pub(super) fn summaries(active: &ActiveCardOps) -> Result<Vec<Value>, String> {
     let mut items = Vec::new();
     for (_, (id, receipt)) in latest()? {
-        if !failed_install(&receipt)
+        // 已放弃的记录整条沉默：这是「不再提示」的全部语义。同卡之后**新的**
+        // 失败会生成更新的回执，照常出现——放弃只针对这一次尝试，不是拉黑卡片。
+        if receipt.dismissed
+            || !failed_install(&receipt)
             || db::get_store_model(&receipt.card_id)
                 .map_err(|error| error.to_string())?
                 .is_some()
+        {
+            continue;
+        }
+        // outcome=None 既可能是中断遗留，也可能只是正常下载尚未完成。
+        // 回执读取后核对当前登记，避免把运行中/排队/取消收尾的任务报为失败。
+        // 只排除同一次运行；没有确切归属的记录仍须保留待核实。
+        if receipt.outcome.is_none()
+            && active
+                .run_for_card(&receipt.card_id)
+                .is_some_and(|run| run.run_id == id && run.kind == receipt.kind)
         {
             continue;
         }
@@ -261,6 +299,11 @@ fn candidate(run_id: &str, accepted_run: Option<&str>) -> Result<Receipt, String
     if !failed_install(&receipt) || receipt.outcome.is_none() {
         return Err("installation_not_terminal".into());
     }
+    // 放弃过的记录不能从预览/重试这条侧门复活：面板上它已经消失了，一个看不
+    // 见的条目更不该还能发起安装。
+    if receipt.dismissed {
+        return Err("installation_dismissed".into());
+    }
     if db::get_store_model(&receipt.card_id)
         .map_err(|error| error.to_string())?
         .is_some()
@@ -314,6 +357,9 @@ pub(super) fn request_identity(run_id: &str) -> Result<(String, String, Context)
     if !failed_install(&receipt) || receipt.outcome.is_none() {
         return Err("installation_not_terminal".into());
     }
+    if receipt.dismissed {
+        return Err("installation_dismissed".into());
+    }
     let context = context(&receipt)?;
     Ok((receipt.card_id, receipt.kind, context))
 }
@@ -360,6 +406,9 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    // 放弃的改写在 service.rs（SavedRun 的所有者），测试直接驱动那条真实路径。
+    use super::super::service::{ModelStoreService, dismiss_incomplete_local};
+
     fn receipt(id: &str, kind: &str, time: &str, outcome: Value) {
         let value = json!({"card_id":"local-fixture","kind":kind,"created_at":time,"outcome":outcome,"cancelled":false,"lines":[]});
         super::super::execution_fence::private_write(
@@ -391,6 +440,98 @@ mod tests {
     }
 
     #[test]
+    fn live_installations_do_not_surface_as_failures_but_lost_runs_still_do() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        for (kind, op) in [
+            ("download", super::super::run_state::OP_DOWNLOAD),
+            ("install_local", super::super::run_state::OP_INSTALL_LOCAL),
+        ] {
+            receipt(
+                "older",
+                kind,
+                "2026-10-18T00:00:00Z",
+                json!({"Err":"old failure"}),
+            );
+            receipt("current", kind, "2026-10-18T00:00:01Z", Value::Null);
+            let active = ActiveCardOps::default();
+            active
+                .try_begin("local-fixture", op, Some("current"))
+                .unwrap();
+            // Active registration also owns queued work and cancellation
+            // until cleanup; an absent result is not evidence of failure.
+            for cancelled in [false, true] {
+                let mut current = read("current").unwrap();
+                current.cancelled = cancelled;
+                super::super::execution_fence::private_write(
+                    &config::data_dir().join("runs/current.json"),
+                    &serde_json::to_vec(&current).unwrap(),
+                )
+                .unwrap();
+                assert!(summaries(&active).unwrap().is_empty());
+            }
+            receipt(
+                "current",
+                kind,
+                "2026-10-18T00:00:01Z",
+                json!({"Err":"new failure"}),
+            );
+            let failed = summaries(&active).unwrap();
+            assert_eq!(
+                failed.len(),
+                1,
+                "terminal failure must not be hidden by stale activity"
+            );
+            assert_eq!(failed[0]["runId"], "current");
+            assert_eq!(failed[0]["terminal"], true);
+
+            active.finish("local-fixture");
+            receipt("current", kind, "2026-10-18T00:00:01Z", Value::Null);
+            let lost = summaries(&active).unwrap();
+            assert_eq!(
+                lost.len(),
+                1,
+                "unowned unfinished receipt must remain visible"
+            );
+            assert_eq!(lost[0]["runId"], "current");
+            assert_eq!(lost[0]["terminal"], false);
+            assert_eq!(lost[0]["canPreview"], false);
+            assert!(preview("current").err().unwrap().contains("not_terminal"));
+
+            receipt("current", kind, "2026-10-18T00:00:01Z", json!({"Ok":{}}));
+            assert!(summaries(&active).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn only_the_exact_active_installation_owns_an_unfinished_receipt() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt("current", "download", "2026-10-18T00:00:00Z", Value::Null);
+        for (card, id, op) in [
+            (
+                "local-fixture",
+                "another-run",
+                super::super::run_state::OP_DOWNLOAD,
+            ),
+            (
+                "another-card",
+                "current",
+                super::super::run_state::OP_DOWNLOAD,
+            ),
+            (
+                "local-fixture",
+                "current",
+                super::super::run_state::OP_INSTALL_LOCAL,
+            ),
+        ] {
+            let active = ActiveCardOps::default();
+            active.try_begin(card, op, Some(id)).unwrap();
+            assert_eq!(summaries(&active).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
     fn terminal_failures_without_a_row_remain_visible_and_do_not_resurface_after_successful_uninstall()
      {
         let _home = config::TempHome::new();
@@ -401,7 +542,7 @@ mod tests {
             "2026-10-18T00:00:00Z",
             json!({"Err":"fixture failure"}),
         );
-        let items = summaries().unwrap();
+        let items = summaries(&ActiveCardOps::default()).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["modelWritesGranted"], false);
         receipt(
@@ -410,7 +551,7 @@ mod tests {
             "2026-10-18T00:00:01Z",
             json!({"Ok":{}}),
         );
-        assert!(summaries().unwrap().is_empty());
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
         assert!(preview("failure").err().unwrap().contains("superseded"));
     }
 
@@ -451,7 +592,11 @@ mod tests {
             "2026-10-18T00:00:00Z",
             json!({"Err":"fixture failure"}),
         );
-        assert!(!summaries().unwrap()[0]["canPreview"].as_bool().unwrap());
+        assert!(
+            !summaries(&ActiveCardOps::default()).unwrap()[0]["canPreview"]
+                .as_bool()
+                .unwrap()
+        );
         assert!(
             preview("download")
                 .err()
@@ -495,7 +640,10 @@ mod tests {
             "2026-10-21T00:00:00Z",
             json!({"Err":"unique recovery proof"}),
         );
-        assert_eq!(summaries().unwrap()[0]["runId"], "unique-failure");
+        assert_eq!(
+            summaries(&ActiveCardOps::default()).unwrap()[0]["runId"],
+            "unique-failure"
+        );
         assert!(preview("unique-failure").is_ok());
         assert!(read("old-0").is_ok(), "old IDs remain on disk");
         receipt(
@@ -504,7 +652,7 @@ mod tests {
             "2026-10-21T00:00:01Z",
             json!({"Ok":null}),
         );
-        assert!(summaries().unwrap().is_empty());
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
         assert!(
             preview("unique-failure")
                 .err()
@@ -536,5 +684,150 @@ mod tests {
         assert!(read("private").err().unwrap().contains("untrusted"));
         std::fs::remove_file(linked).unwrap();
         assert!(read("private").is_ok());
+    }
+
+    /// 放弃的完整契约：面板沉默、预览/重试的侧门堵死、回执只是被打标而不是
+    /// 删除——信任校验（属主/权限/链接数）在改写后必须照常通过。
+    #[test]
+    fn dismiss_rejects_a_terminal_receipt_whose_installer_is_still_alive() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"cancelled"}),
+        );
+        let before = std::fs::read(config::data_dir().join("runs/failure.json")).unwrap();
+        let service = ModelStoreService::new();
+        let installer = super::super::orphans::RunGuard::register_with_run_id(
+            std::process::id() as i32,
+            false,
+            "dismiss regression",
+            Some("failure"),
+        );
+        assert!(
+            dismiss_incomplete_local(&service, "failure")
+                .unwrap_err()
+                .contains("installation_process_still_alive")
+        );
+        assert_eq!(
+            std::fs::read(config::data_dir().join("runs/failure.json")).unwrap(),
+            before
+        );
+        drop(installer);
+        dismiss_incomplete_local(&service, "failure").unwrap();
+        assert!(read("failure").unwrap().dismissed);
+    }
+
+    #[test]
+    fn dismissed_receipts_leave_summaries_and_cannot_retry() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"fixture failure"}),
+        );
+        let service = ModelStoreService::new();
+        assert_eq!(summaries(&ActiveCardOps::default()).unwrap().len(), 1);
+        dismiss_incomplete_local(&service, "failure").unwrap();
+        assert!(
+            summaries(&ActiveCardOps::default()).unwrap().is_empty(),
+            "放弃后面板必须沉默"
+        );
+        assert!(
+            preview("failure").err().unwrap().contains("dismissed"),
+            "放弃过的记录不能从预览复活"
+        );
+        // 打标不删文件：记录还在，信任校验照常通过，dismissed 已落盘。
+        let receipt = read("failure").unwrap();
+        assert!(receipt.dismissed);
+        // 再放弃一次是幂等的空转，不是错误。
+        dismiss_incomplete_local(&service, "failure").unwrap();
+    }
+
+    #[test]
+    fn dismissing_the_latest_failure_cannot_revive_an_older_retry() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "older",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"old"}),
+        );
+        receipt(
+            "latest",
+            "download",
+            "2026-10-18T00:00:01Z",
+            json!({"Err":"new"}),
+        );
+        let older_path = config::data_dir().join("runs/older.json");
+        let before = std::fs::read(&older_path).unwrap();
+        let service = ModelStoreService::new();
+        dismiss_incomplete_local(&service, "latest").unwrap();
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
+        assert!(
+            preview("older")
+                .err()
+                .unwrap()
+                .contains("installation_superseded")
+        );
+        assert!(read("latest").unwrap().dismissed);
+        assert_eq!(std::fs::read(older_path).unwrap(), before);
+    }
+
+    #[test]
+    fn dismiss_rejects_running_and_non_install_records() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let service = ModelStoreService::new();
+        // 还没终结的任务不能放弃：它还活着，结局还没写。
+        receipt("running", "download", "2026-10-18T00:00:00Z", Value::Null);
+        assert!(
+            dismiss_incomplete_local(&service, "running")
+                .err()
+                .unwrap()
+                .contains("not_terminal")
+        );
+        // 未完成面板只列失败的下载/本地安装；stop 这类记录没有「放弃」语义。
+        receipt(
+            "stopped",
+            "stop",
+            "2026-10-18T00:00:01Z",
+            json!({"Ok":null}),
+        );
+        assert!(
+            dismiss_incomplete_local(&service, "stopped")
+                .err()
+                .unwrap()
+                .contains("not_dismissable")
+        );
+    }
+
+    /// 放弃只针对那一次尝试：同卡之后新的失败照常出现，不做一键拉黑。
+    #[test]
+    fn a_newer_failure_still_surfaces_after_dismiss() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "old",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"old failure"}),
+        );
+        let service = ModelStoreService::new();
+        dismiss_incomplete_local(&service, "old").unwrap();
+        receipt(
+            "new",
+            "download",
+            "2026-10-18T00:00:01Z",
+            json!({"Err":"new failure"}),
+        );
+        let items = summaries(&ActiveCardOps::default()).unwrap();
+        assert_eq!(items.len(), 1, "只有最新一条会出现在面板上");
+        assert_eq!(items[0]["runId"], "new");
     }
 }

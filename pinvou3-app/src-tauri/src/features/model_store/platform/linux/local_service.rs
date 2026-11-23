@@ -56,8 +56,8 @@ use super::service::{self, ModelStoreService, TaskSnapshot};
 /// 给 1MB 已经是几十倍的余量；头部对齐 cmsd 的 64KB。
 const MAX_HEAD_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
-/// 单连接的读写超时。请求都是立刻能答的（下发是 spawn 即回、查询是内存快照），
-/// 30 秒答不完只能说明对端死了，关掉就是——不能让它占着连接线程不放。
+/// 单连接请求读取/响应写出的 IO 超时，不限制 dispatch 的处理时间。
+/// 常规任务下发即返回；残留扫描和删除同步等磁盘完成，客户端另设长读超时。
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// 单任务详情带的日志行数上限（末尾 N 行）。
 const TASK_LOG_TAIL: usize = 500;

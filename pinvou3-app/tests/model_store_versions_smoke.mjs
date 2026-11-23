@@ -1151,6 +1151,141 @@ try {
     assert.equal(explicitChoice.context_window_edit_requested, true);
     assert.equal(explicitChoice.preserve_context_window_tokens, false);
   }
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const { IncompleteInstallPanel } = await import('/features/model-store/IncompleteInstallPanel.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const root = createRoot(document.getElementById('root'));
+    let items = ['a', 'b'].map(id => ({ cardId: `card-${id}`, runId: `run-${id}`, terminal: true, canPreview: false }));
+    window.maintenanceCalls = [];
+    window.pendingDismissals = [];
+    window.maintenanceRefreshes = 0;
+    window.retryingMaintenanceCard = null;
+    window.__TAURI__ = { core: { invoke: (command, args) => {
+      window.maintenanceCalls.push({ command, args });
+      if (command !== 'model_store_dismiss_incomplete') throw Error(`Unexpected command: ${command}`);
+      return new Promise((resolve, reject) => window.pendingDismissals.push({ resolve, reject, runId: args.runId }));
+    } } };
+    window.renderMaintenance = () => root.render(createElement(IncompleteInstallPanel, {
+      installations: items, copy: dictZh.uiModelStore,
+      isRetrying: cardId => cardId === window.retryingMaintenanceCard,
+      onRefresh() {
+        window.maintenanceRefreshes += 1;
+        const dismissed = window.maintenanceCalls.at(-1).args.runId;
+        items = items.filter(item => item.runId !== dismissed);
+        window.renderMaintenance();
+      },
+    }));
+    window.replaceMaintenanceItems = next => { items = next; window.renderMaintenance(); };
+    window.renderMaintenance();
+  });
+  await page.waitForSelector('[data-testid="incomplete-dismiss-button"][data-run-id="run-a"]');
+  await page.click('[data-testid="incomplete-dismiss-button"][data-run-id="run-a"]');
+  await page.waitForSelector('[data-testid="incomplete-dismiss-confirm"]');
+  const target = await page.$eval('[data-testid="incomplete-dismiss-confirm"]', el => el.textContent);
+  assert.ok(target.includes('card-a') && target.includes('run-a'), 'confirmation must identify both the card and exact attempt');
+  assert.equal(await page.$eval('[data-run-id="run-b"]', el => el.disabled), true);
+  await page.click('[data-run-id="run-b"]');
+  assert.equal(await page.$eval('[data-testid="incomplete-dismiss-confirm"]', el => el.textContent), target, 'another row cannot silently retarget an open confirmation');
+  await page.click('[data-testid="incomplete-dismiss-confirm-button"]');
+  await page.waitForFunction(() => window.pendingDismissals.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.maintenanceCalls), [{ command: 'model_store_dismiss_incomplete', args: { runId: 'run-a' } }]);
+  assert.equal(await page.evaluate(() => window.maintenanceRefreshes), 0, 'refresh must wait for backend success');
+  await page.evaluate(() => window.pendingDismissals.shift().resolve({ ok: true }));
+  await page.waitForFunction(() => window.maintenanceRefreshes === 1 && !document.querySelector('[data-testid="incomplete-dismiss-confirm"]'));
+  assert.equal(await page.$('[data-run-id="run-a"]'), null);
+  assert.ok(await page.$('[data-run-id="run-b"]'));
+
+  await page.click('[data-run-id="run-b"]');
+  await page.evaluate(() => { window.retryingMaintenanceCard = 'card-b'; window.renderMaintenance(); });
+  await page.waitForFunction(() => document.querySelector('[data-testid="incomplete-dismiss-confirm-button"]')?.disabled);
+  await page.click('[data-testid="incomplete-dismiss-confirm-button"]');
+  assert.equal(await page.evaluate(() => window.maintenanceCalls.length), 1, 'a concurrent retry cannot discard its original receipt');
+  await page.evaluate(() => window.replaceMaintenanceItems([{ cardId: 'card-c', runId: 'run-c', terminal: true, canPreview: false }]));
+  await page.waitForSelector('[data-run-id="run-c"]');
+  assert.equal(await page.$eval('[data-testid="incomplete-dismiss-confirm-button"]', el => el.disabled), true, 'a removed target cannot become a different receipt');
+  await page.click('[data-testid="incomplete-dismiss-confirm"] button');
+  await page.click('[data-run-id="run-c"]');
+  await page.click('[data-testid="incomplete-dismiss-confirm-button"]');
+  await page.waitForFunction(() => window.pendingDismissals.length === 1);
+  await page.evaluate(() => window.pendingDismissals.shift().reject(Error('installation_dismiss_persist_failed')));
+  await page.waitForFunction(() => document.querySelector('[data-testid="incomplete-installations"] [role="alert"]')?.textContent.includes('installation_dismiss_persist_failed'));
+  assert.equal(await page.evaluate(() => window.maintenanceRefreshes), 1, 'a rejected dismissal must not report a refresh or remove the receipt');
+  assert.ok(await page.$('[data-run-id="run-c"]'));
+
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const { DownloadCenterView } = await import('/features/model-store/DownloadCenterView.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    window.orphanCalls = [];
+    window.orphanEntries = [{ name: 'partial-fixture', path: '/fixture/models/partial-fixture', bytes: 16 }];
+    window.failOrphanRescan = false;
+    window.orphanScanFailure = false;
+    window.unresolvedLibraryCards = [];
+    window.__TAURI__ = { core: { invoke: async (command, args) => {
+      window.orphanCalls.push({ command, args });
+      if (command === 'model_store_scan_orphans') {
+        if (window.orphanScanFailure) throw Error('fixture rescan unavailable');
+        return { entries: window.orphanEntries, partial: false, unresolvedInFlight: 0, unresolvedLibraryCards: window.unresolvedLibraryCards };
+      }
+      if (command === 'model_store_remove_orphan') {
+        window.orphanEntries = [];
+        window.orphanScanFailure = window.failOrphanRescan;
+        return { freedBytes: 16 };
+      }
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    createRoot(document.getElementById('root')).render(createElement(DownloadCenterView, {
+      tasks: [], installations: [], copy: dictZh.uiModelStore,
+    }));
+  });
+  await page.waitForSelector('[data-testid="model-store-orphan-scan"]');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.deepEqual(await page.evaluate(() => window.orphanCalls), [], 'mounting the view must not automatically scan');
+  await page.click('[data-testid="model-store-orphan-scan"]');
+  await page.waitForSelector('[data-testid="model-store-orphan-delete"]');
+  await page.click('[data-testid="model-store-orphan-delete"]');
+  assert.deepEqual(await page.evaluate(() => window.orphanCalls.map(x => x.command)), ['model_store_scan_orphans'], 'opening a confirmation must not delete');
+  await page.click('[data-testid="model-store-orphan-confirm-button"]');
+  await page.waitForSelector('[data-testid="model-store-orphans-empty"]');
+  assert.deepEqual(await page.evaluate(() => window.orphanCalls.map(x => x.command)), ['model_store_scan_orphans', 'model_store_remove_orphan', 'model_store_scan_orphans']);
+  assert.equal(await page.$('[data-testid="model-store-orphan-delete"]'), null, 'post-delete results cannot keep a ghost entry');
+  await page.evaluate(() => {
+    window.orphanEntries = [{ name: 'partial-fixture', path: '/fixture/models/partial-fixture', bytes: 16 }];
+    window.failOrphanRescan = true;
+  });
+  await page.click('[data-testid="model-store-orphan-scan"]');
+  await page.waitForSelector('[data-testid="model-store-orphan-delete"]');
+  await page.click('[data-testid="model-store-orphan-delete"]');
+  await page.click('[data-testid="model-store-orphan-confirm-button"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="model-store-orphans"] [role="alert"]')?.textContent.includes('fixture rescan unavailable'));
+  assert.equal(await page.$('[data-testid="model-store-orphan-delete"]'), null);
+  assert.equal(await page.$('[data-testid="model-store-orphans-empty"]'), null, 'a failed rescan returns to unscanned, not a false empty result');
+  await page.evaluate(() => {
+    window.orphanScanFailure = false;
+    window.unresolvedLibraryCards = ['unproven-card'];
+    // Even a stale/mixed response must not offer an unproven directory.
+    window.orphanEntries = [{ name: 'Registered-Weights', path: '/fixture/models/Registered-Weights', bytes: 16 }];
+  });
+  await page.click('[data-testid="model-store-orphan-scan"]');
+  await page.waitForSelector('[data-testid="model-store-orphans-ownership"]');
+  assert.match(await page.$eval('[data-testid="model-store-orphans-ownership"]', el => el.textContent), /unproven-card/);
+  assert.equal(await page.$('[data-testid="model-store-orphan-delete"]'), null, 'unproven library ownership cannot offer any deletion candidate');
+  assert.equal(await page.$('[data-testid="model-store-orphans-empty"]'), null, 'paused cleanup must not claim an empty root');
+
+
   // Exercise the actual hook and lazy module in Chrome, including resource
   // loading boundaries that pure scheduler/controller tests cannot observe.
   async function waitForStartupProbe(predicate) {
@@ -1329,6 +1464,9 @@ try {
   await broken.page.close();
   console.log('PASS: startup hook lazy loading preserves unavailable-state acknowledgement, library reconciliation, cancellation, deadlines and private failure handling in real Chrome');
   assert.deepEqual(errors, []);
+  console.log('PASS: dismissal identifies and pins its target, calls the exact run only after confirmation, refreshes only on success, and handles retry/removal races');
+  console.log('PASS: orphan cleanup never scans automatically, rescans after removal, and clears stale results when that rescan fails');
+  console.log('PASS: unknown library ownership identifies blocking cards and hides deletion candidates without claiming an empty root');
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
   console.log('PASS: MTP deployment and version dialogs disclose network defaults and retained .env in all three languages without changing the 256K default');
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');

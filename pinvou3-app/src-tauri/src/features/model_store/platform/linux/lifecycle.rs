@@ -231,6 +231,17 @@ pub struct DiskSummary {
     pub stale_cache_bytes: u64,
 }
 
+/// 旧记录（runtime_card_id 存在而 models_root 为空等形态）的**权威实际权重
+/// 目录**：从卡片目录的 .deploy-env 读部署脚本写下的 MODEL_DIR。残留目录扫描
+/// 复用它，与 candidate_paths 的推导保持同一份真相——扫描各自再猜一遍，
+/// 迟早和卸载推出两个不同的目录。
+pub(super) fn legacy_resource_dir_for_scan(
+    rec: &db::StoreModelRecord,
+    configured_root: &Path,
+) -> Option<PathBuf> {
+    versions::legacy_resource_dir(rec, configured_root)
+}
+
 /// 商店 `model_name` 的归一化：小写 + 每段连续非法字符替换为一个 `-`，再去
 /// 首尾 `-`。必须跟 Python 版的 re.sub(r"[^a-z0-9_.-]+", "-", name) 行为完全
 /// 一致（即使旁边已经有合法的 "-"，也会出现 "--"）——这个名字是模型的身份
@@ -251,6 +262,11 @@ fn normalize_model_name(raw: &str) -> String {
         }
     }
     name.trim_matches('-').to_string()
+}
+
+/// 残留扫描与建议名称共用目标分支的归一化规则，保留安全兜底。
+pub(super) fn lower_model_name(raw: &str) -> String {
+    normalize_model_name(raw)
 }
 
 pub fn suggest_model_name(card: &StoreCardDetail) -> String {

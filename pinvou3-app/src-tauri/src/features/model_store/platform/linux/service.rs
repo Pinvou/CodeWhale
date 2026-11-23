@@ -132,6 +132,9 @@ struct RunLog {
     /// 用户主动取消。取消在底层也是一个 Err，但对用户是两回事——"你点了取消"
     /// 和"它炸了"不该长得一样，调用方要能分别给出提示。
     cancelled: Mutex<bool>,
+    /// 用户已放弃这条失败的安装：未完成面板不再列它，重试入口一并关死。
+    /// 只作用于这一条回执（见 [`RunLog::dismiss`]）。
+    dismissed: Mutex<bool>,
     /// 现在是不是有一条脚本提示在等人作答。
     ///
     /// 界面把「要不要弹输入框」从日志行里解析出来，而日志是可回放的——切走再
@@ -175,6 +178,7 @@ impl RunLog {
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            dismissed: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
             retained_native: Mutex::new(false),
             finished_at_epoch: Mutex::new(None),
@@ -274,6 +278,7 @@ impl RunLog {
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            dismissed: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
             retained_native: Mutex::new(false),
             finished_at_epoch: Mutex::new(None),
@@ -302,6 +307,7 @@ impl RunLog {
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            dismissed: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
             retained_native: Mutex::new(false),
             finished_at_epoch: Mutex::new(None),
@@ -314,6 +320,27 @@ impl RunLog {
     /// 那一瞬间再回来的话，回放会把同一条提示又弹一次。
     fn answered(&self) {
         *self.awaiting_prompt.lock() = false;
+    }
+
+    /// 用户放弃了这条失败的安装。只打标并落盘，不删任何文件。
+    ///
+    /// 调用方（dismiss_incomplete_local）已经按磁盘上的回执做过完整校验；这里
+    /// 再拦一次"没终结"，是因为内存里的 log 和磁盘文件由同一路 persist 保持
+    /// 一致，但校验和改写之间仍可能插入一次 finish——兜住这条窄竞态的代价是
+    /// 一个 if，漏过去的后果是活任务的记录被打上"已放弃"。
+    fn dismiss(&self) -> Result<(), String> {
+        if self.outcome.lock().is_none() {
+            return Err("installation_not_terminal".into());
+        }
+        *self.dismissed.lock() = true;
+        if let Err(error) = self.persist_result() {
+            // 落盘报错时回滚内存，避免内存领先于未提交的磁盘状态。
+            // rename 成功而父目录 fsync 失败时磁盘可能已经 dismissed；
+            // 磁盘回执仍是权威，后续重新读取时以它为准。
+            *self.dismissed.lock() = false;
+            return Err(format!("installation_dismiss_persist_failed: {error}"));
+        }
+        Ok(())
     }
 
     fn finish(&self, outcome: Result<Value, String>, cancelled: bool) {
@@ -608,6 +635,16 @@ impl ModelStoreService {
         }
     }
 
+    /// 还在进行的安装类操作（下载/本地安装/版本暂存），供残留目录扫描排除
+    /// 「正在写权重的目录」。只暴露这一类：部署/启停的目标目录已由库记录覆盖。
+    pub(super) fn active_installs(&self) -> Vec<super::run_state::ActiveRun> {
+        self.active
+            .active_runs()
+            .into_iter()
+            .filter(|run| super::orphan_dirs::is_in_flight_kind(run.kind))
+            .collect()
+    }
+
     /// Operator escape for a lost receiver record. The accept gate serializes
     /// this tombstone with late requests using the same id. No running operation
     /// or orphan writer may exist; corrupt receipts never count as absence.
@@ -715,6 +752,10 @@ struct SavedRun {
     install_context: Option<super::incomplete::Context>,
     #[serde(default)]
     retry_reference: Option<super::incomplete::RetryReference>,
+    /// 用户已放弃这条失败的安装：不再提醒，也不再提供重试。只打标，不删文件——
+    /// 回执是耐久任务事实，删除会把同卡更早的失败记录顶上来，弹窗换个 ID 复活。
+    #[serde(default)]
+    dismissed: bool,
 }
 
 /// Restore old terminal receipts without changing their completion age. Legacy
@@ -784,6 +825,7 @@ fn load_saved_run(path: &std::path::Path) -> Result<Option<RunLog>, String> {
     *log.line_bytes.lock() = bytes;
     *log.lines.lock() = lines;
     *log.cancelled.lock() = saved.cancelled;
+    *log.dismissed.lock() = saved.dismissed;
     if let Some(outcome) = saved.outcome {
         *log.outcome.lock() = Some(outcome);
         *log.finished_at_epoch.lock() = saved.finished_at_epoch.or_else(|| {
@@ -865,6 +907,7 @@ impl RunLog {
             progress,
             outcome: self.outcome.lock().clone(),
             cancelled: *self.cancelled.lock(),
+            dismissed: *self.dismissed.lock(),
             finished_at_epoch: *self.finished_at_epoch.lock(),
             install_context: self.install_context.lock().clone(),
             retry_reference: self.retry_reference.lock().clone(),
@@ -1354,7 +1397,7 @@ pub async fn library(service: Arc<ModelStoreService>) -> Result<Value, String> {
             Ok(records) => (records, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        let (incomplete, incomplete_error) = match super::incomplete::summaries() {
+        let (incomplete, incomplete_error) = match super::incomplete::summaries(&service.active) {
             Ok(items) => (items, None),
             Err(error) => (Vec::new(), Some(error)),
         };
@@ -1764,6 +1807,97 @@ pub async fn preview_incomplete(
     .map_err(|error| error.to_string())?
 }
 
+/// 放弃一条失败的安装：未完成面板不再提示，重试入口一并关死。已下载的文件
+/// 原样保留——断点续传是刻意设计，放弃撤的是提醒和重试凭据，不是数据。
+pub async fn dismiss_incomplete(
+    service: &Arc<ModelStoreService>,
+    run_id: String,
+) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        if service.remote {
+            return super::background::call("incomplete_dismiss", json!({"run_id":run_id}));
+        }
+        dismiss_incomplete_local(&service, &run_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 放弃的本地执行路径。校验在 [`super::incomplete::ensure_dismissable`]（终结
+/// 与否、种类、脚本进程已退出），改写走 SavedRun 的所有者这条唯一的落盘路——
+/// 内存里还热着的 log 直接打标持久化；冷的（超出保留期、只剩磁盘文件）经
+/// load_saved_run 原样装回再打标，不进内存表。
+pub(super) fn dismiss_incomplete_local(
+    service: &ModelStoreService,
+    run_id: &str,
+) -> Result<Value, String> {
+    let _accept = service.accept_gate.lock();
+    super::incomplete::ensure_dismissable(run_id)?;
+    let log = match service.run(run_id) {
+        Some(log) => log,
+        None => {
+            // 校验已经确认回执存在、受信且已终结；load_saved_run 在这条路上
+            // 不会走到"补写中断结局"的分支。
+            let path = config::data_dir()
+                .join("runs")
+                .join(format!("{run_id}.json"));
+            Arc::new(load_saved_run(&path)?.ok_or("installation_record_unavailable")?)
+        }
+    };
+    if *log.dismissed.lock() {
+        return Ok(json!({ "ok": true }));
+    }
+    // An accepted cmsd parent can still be waiting for its local receiver.
+    // Unknown hand-offs retain their exclusion until their state is verified.
+    let (pending, pending_error) = super::delegated_run::pending(Some(&log.card_id));
+    if !pending.is_empty() || pending_error.is_some() {
+        return Err("installation_task_active".into());
+    }
+    // A retry owns the same card under a new run ID. Serialize with admission
+    // and the established cross-process card lock, not just the original PID.
+    let _operation =
+        card_operation_lock(&log.card_id).map_err(|_| "installation_task_active".to_string())?;
+    if service.active.run_for_card(&log.card_id).is_some() {
+        return Err("installation_task_active".into());
+    }
+    log.dismiss()?;
+    Ok(json!({ "ok": true }))
+}
+
+/// 列举 models_dir 下无库记录的残留目录（取消/失败下载的半截权重）。
+/// 只读；删除走 [`remove_orphan`]，两步分开——扫描可能慢（量体积），
+/// 删除不可逆，不能让一次顺手刷新碰到它。
+pub async fn scan_orphans(service: &Arc<ModelStoreService>) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        if service.remote {
+            return super::background::call("orphan_scan", json!({}));
+        }
+        super::orphan_dirs::scan(Some(&service))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 删除一个残留目录。同步等待删除完成（几十 GB 是分钟级）：调用方用 busy
+/// 态表达"正在删"，比再发明一套任务登记 + 轮询协议便宜得多，也让"删完
+/// 释放了多少"能随应答一次带回。
+pub async fn remove_orphan(
+    service: &Arc<ModelStoreService>,
+    path: String,
+) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        if service.remote {
+            return super::background::call("orphan_remove", json!({"path":path}));
+        }
+        super::orphan_dirs::remove(Some(&service), &path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub fn retry_incomplete(
     service: &Arc<ModelStoreService>,
     run_id: String,
@@ -1787,6 +1921,11 @@ pub fn retry_incomplete(
                 .get("device_id")
                 .and_then(Value::as_str)
                 .ok_or("installation_admission_unconfirmed")?;
+            // cmsd persists the parent before asynchronously invoking the
+            // receiver. Keep dismissal out until its lookup binding is saved;
+            // the receiver uses the same acceptance gate and waits for release.
+            let _accept = service.accept_gate.lock();
+            super::incomplete::retry_request(&run_id)?;
             let accepted = client.retry_install(&card, &run_id, &expected_sha256)?;
             if accepted.get("error").is_some_and(|error| !error.is_null())
                 || accepted
@@ -3515,7 +3654,12 @@ mod tests {
         while log.outcome.lock().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        let outcome = log.outcome.lock().clone();
+        assert!(
+            outcome.as_ref().is_some_and(Result::is_ok),
+            "enable outcome: {outcome:?}; log tail: {:?}",
+            log.lines.lock()
+        );
         let observations = observed.lock();
         assert!(
             observations
@@ -5105,6 +5249,7 @@ mod durable_history_tests {
             progress: None,
             outcome,
             cancelled: false,
+            dismissed: false,
             finished_at_epoch: epoch,
             install_context: None,
             retry_reference: None,
@@ -5177,7 +5322,7 @@ mod durable_history_tests {
                 assert!(Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let items = super::super::incomplete::summaries().unwrap();
+            let items = super::super::incomplete::summaries(&service.active).unwrap();
             assert!(items.iter().any(|item| item["runId"] == "unique-failure"));
             assert!(items.iter().any(|item| item["runId"] == run_id));
         }
@@ -5403,7 +5548,7 @@ mod durable_history_tests {
         restarted.restore_runs().unwrap();
         assert!(restarted.runs.lock().is_empty());
         assert_eq!(
-            super::super::incomplete::summaries().unwrap()[0]["runId"],
+            super::super::incomplete::summaries(&restarted.active).unwrap()[0]["runId"],
             "large-install-failure"
         );
         let preview = super::super::incomplete::preview("large-install-failure").unwrap();
@@ -5541,5 +5686,184 @@ mod bounded_log_observation_tests {
             );
             assert_eq!(std::fs::read(path).unwrap(), before);
         }
+    }
+}
+
+// 注意：这个 test-only impl 块刻意放在文件**末尾**、全部任务 kind 字面量之后。
+// 前端 tests/megacube_view_model.test.mjs 以首个 `#[cfg(test)]` 为界截取本文件
+// 的「生产段」来枚举商店产出的任务 kind——任何更靠前的 test-only 代码都会把
+// version_stage 等字面量截出扫描区，那条门禁就会假性失败。
+#[cfg(test)]
+impl ModelStoreService {
+    /// 测试专用：往活跃登记表里塞一条进行中的安装（orphan_dirs 的注册表
+    /// 排除路径需要它——回执落盘到 RunGuard 登记之间的窗口，注册表是唯一
+    /// 守卫，这条路径必须有测试能驱动到）。
+    pub(super) fn active_registry_for_tests(&self) -> &super::run_state::ActiveCardOps {
+        &self.active
+    }
+}
+
+#[cfg(test)]
+mod incomplete_dismiss_tests {
+    use super::*;
+
+    #[test]
+    fn dismissal_survives_service_restore_and_retirement_checkpoint_rewrite() {
+        for kind in ["download", "install_local"] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let retained = config::data_dir().join("retained-weights");
+            std::fs::write(&retained, b"keep downloaded bytes").unwrap();
+            {
+                let service = ModelStoreService::new();
+                let log = service.new_run("discarded", "retry-card", kind).unwrap();
+                log.finish(Err("original failure".into()), false);
+                dismiss_incomplete_local(&service, "discarded").unwrap();
+            }
+            let restarted = ModelStoreService::new();
+            restarted.restore_runs().unwrap();
+            assert!(
+                super::super::incomplete::summaries(&restarted.active)
+                    .unwrap()
+                    .is_empty()
+            );
+            // retire_host checkpoints these restored in-memory logs. Checking
+            // the panel only before this write misses a lost dismissed flag.
+            restarted
+                .run("discarded")
+                .unwrap()
+                .persist_result()
+                .unwrap();
+            let saved: Value = serde_json::from_slice(
+                &std::fs::read(config::data_dir().join("runs/discarded.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["dismissed"], true);
+            assert!(
+                super::super::incomplete::summaries(&restarted.active)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&retained).unwrap(), b"keep downloaded bytes");
+        }
+    }
+
+    #[test]
+    fn accepted_or_unconfirmed_parent_prevents_dismissal_before_receiver_start() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        for status in ["queued", "running"] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let service = ModelStoreService::new();
+            let original = service
+                .new_run("original", "retry-card", "download")
+                .unwrap();
+            original.finish(Err("original failure".into()), false);
+            let path = config::data_dir().join("runs/original.json");
+            let before = std::fs::read(&path).unwrap();
+            let socket = config::data_dir().join("dismiss-parent.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let client = crate::features::megacube::Client::at_socket(socket).unwrap();
+            super::super::delegated_run::save(
+                &client,
+                "pending-parent",
+                "retry-card",
+                "download",
+                "device-fixture",
+            )
+            .unwrap();
+            let worker = std::thread::spawn(move || {
+                for response in [
+                    json!({"device_id":"device-fixture"}),
+                    json!({"tasks":[{
+                        "id":"pending-parent", "card":"retry-card", "kind":"install",
+                        "store_run_id":"cmsd-pending-parent", "status":status
+                    }]}),
+                ] {
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(Instant::now() < deadline);
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(e) => panic!("{e}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        assert!(reader.read_line(&mut line).unwrap() > 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let body = response.to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            assert!(
+                dismiss_incomplete_local(&service, "original")
+                    .unwrap_err()
+                    .contains("installation_task_active")
+            );
+            worker.join().unwrap();
+            // Offline parent: lack of an observation is not proof of idleness.
+            assert!(
+                dismiss_incomplete_local(&service, "original")
+                    .unwrap_err()
+                    .contains("installation_task_active")
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            std::fs::remove_file(
+                config::data_dir().join("delegated-runs/cmsd-pending-parent.json"),
+            )
+            .unwrap();
+            dismiss_incomplete_local(&service, "original").unwrap();
+        }
+    }
+
+    #[test]
+    fn another_service_cannot_dismiss_the_receipt_while_its_card_is_running() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let service = Arc::new(ModelStoreService::new());
+        let original = service
+            .new_run("original", "retry-card", "download")
+            .unwrap();
+        original.finish(Err("original failure".into()), false);
+        let path = config::data_dir().join("runs/original.json");
+        let before = std::fs::read(&path).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let running = spawn_op(&service, "retry-card", OP_DOWNLOAD, move |_, _, _| {
+            wait.recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })
+        .unwrap();
+        let other_window = ModelStoreService::new();
+        let refused = dismiss_incomplete_local(&other_window, "original");
+        release.send(()).unwrap();
+        assert!(refused.unwrap_err().contains("installation_task_active"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let run_id = running["run_id"].as_str().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.run(run_id).unwrap().outcome.lock().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        dismiss_incomplete_local(&other_window, "original").unwrap();
     }
 }

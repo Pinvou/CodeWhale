@@ -136,6 +136,11 @@ function startDownload(cardId) {
 
 function previewIncomplete(runId) { return invokeTauri('model_store_preview_incomplete', { runId }); }
 function retryIncomplete(runId, expectedSha256) { return invokeTauri('model_store_retry_incomplete', { runId, expectedSha256 }); }
+// 放弃一条失败的安装：只撤提醒和重试凭据，后端不删任何已下载文件。
+function dismissIncomplete(runId) { return invokeTauri('model_store_dismiss_incomplete', { runId }); }
+// 残留目录：扫描只读；删除后端会复验归属/活跃/路径三道闸。
+function scanOrphans() { return invokeTauri('model_store_scan_orphans'); }
+function removeOrphan(path) { return invokeTauri('model_store_remove_orphan', { path }); }
 
 /**
  * 发起部署。
@@ -340,6 +345,9 @@ export {
   previewIncomplete,
   retryIncomplete,
   startCardScripts,
+  dismissIncomplete,
+  scanOrphans,
+  removeOrphan,
   startDeploy,
   startEnable,
   startStop,

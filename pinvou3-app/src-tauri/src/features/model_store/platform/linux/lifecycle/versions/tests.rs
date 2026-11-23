@@ -127,6 +127,63 @@ fn fixture() -> (
 }
 
 #[test]
+fn switched_legacy_rollback_weights_cannot_be_removed_as_orphans() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    config::save_settings(&mgr.settings).unwrap();
+    let models = mgr.settings.models_path();
+    let old_resource = models.join("legacy");
+    assert_ne!(
+        old_resource.file_name().unwrap(),
+        current.model_name.as_str()
+    );
+    assert_ne!(old_resource.file_name().unwrap(), "old");
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let active = db::get_store_model(&current.card_id).unwrap().unwrap();
+    assert!(
+        Path::new(active.models_root.as_deref().unwrap()).starts_with(models.join(".versions"))
+    );
+    let old_id = version_store::active_id(&current);
+    let history = version_store::get(&current.card_id, &old_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.state, "history");
+    assert_eq!(history.resource_dir.as_deref(), old_resource.to_str());
+    assert_eq!(history.models_root.as_deref(), models.to_str());
+    let orphan_dirs = super::super::super::orphan_dirs::scan(None).unwrap();
+    assert!(orphan_dirs["entries"].as_array().unwrap().is_empty());
+    assert_eq!(
+        orphan_dirs["unresolvedLibraryCards"],
+        serde_json::json!([current.card_id])
+    );
+    assert!(
+        super::super::super::orphan_dirs::remove(None, old_resource.to_str().unwrap())
+            .unwrap_err()
+            .starts_with("orphan_library_ownership_unresolved:")
+    );
+    assert_eq!(
+        fs::read(old_resource.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+    mgr.switch_version(&current.card_id, &old_id, &mut |_| {}, Default::default())
+        .unwrap();
+    assert_eq!(
+        db::get_store_model(&current.card_id)
+            .unwrap()
+            .unwrap()
+            .active_version_id
+            .as_deref(),
+        Some(old_id.as_str())
+    );
+    assert_eq!(
+        fs::read(old_resource.join("old.tachyon")).unwrap(),
+        b"old-weights"
+    );
+}
+
+#[test]
 fn stage_target_inside_active_weights_is_rejected_before_writes_and_sibling_is_cleanable() {
     let (_temp, mut mgr, current, card, pkg, id) = fixture();
     let original_root = mgr.settings.models_path();

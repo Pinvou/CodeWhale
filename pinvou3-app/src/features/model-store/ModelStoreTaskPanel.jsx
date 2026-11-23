@@ -206,9 +206,13 @@ function taskSubtitle(task, copy) {
 
 /**
  * 单个任务卡。
+ *
+ * `inline` 给「下载」筛选的集中视图用：去掉右下角浮层的固定宽度和投影，
+ * 撑满所在网格。行为（取消/应答/展开）与浮层里完全一致——同一张卡两个摆法，
+ * 不该有两套能力。
  * @returns {React.ReactElement} 任务卡。
  */
-function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove, onStopRetained }) {
+function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswer, onForceRemove, onStopRetained, inline = false }) {
   const logRef = useRef(null);
   // 要不要跟着新行滚到底。**初值是 false**:用户的原话是「不要滚动的闪日志,这样很乱」。
   // 原来每来一行就无条件 `scrollTop = scrollHeight`,而装引擎时日志是一秒几十行——
@@ -345,8 +349,12 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
       data-testid="model-store-task"
       data-task-kind={task.kind}
       data-task-status={task.status}
-      className="w-[360px] max-w-full overflow-hidden rounded-[16px] border border-[#E1E5EA] bg-white dark:border-[#2E3134] dark:bg-[#202124]"
-      style={{ boxShadow: '0 6px 20px rgba(60,64,67,.18)' }}
+      className={
+        inline
+          ? 'w-full overflow-hidden rounded-[16px] border border-[#E1E5EA] bg-white dark:border-[#2E3134] dark:bg-[#202124]'
+          : 'w-[360px] max-w-full overflow-hidden rounded-[16px] border border-[#E1E5EA] bg-white dark:border-[#2E3134] dark:bg-[#202124]'
+      }
+      style={inline ? undefined : { boxShadow: '0 6px 20px rgba(60,64,67,.18)' }}
     >
       <div className="flex items-start gap-2 px-4 pt-3">
         {task.status === 'running' ? <Spinner size={14} tone="brand" className="mt-1" /> : null}
@@ -602,4 +610,4 @@ function ModelStoreTaskPanel({ tasks, copy, onCancel, onDismiss, onToggle, onAns
   );
 }
 
-export { ModelStoreTaskPanel, renderEta, taskSubtitle };
+export { ModelStoreTaskPanel, ModelStoreTaskCard, renderEta, taskSubtitle };

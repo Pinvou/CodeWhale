@@ -73,6 +73,27 @@ pub fn retry_incomplete(
     nope()
 }
 
+/// 非 Linux 上没有未完成安装可放弃：桩与 linux/service.rs 同名同签名。
+pub async fn dismiss_incomplete(
+    _service: &Arc<ModelStoreService>,
+    _run_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+/// 非 Linux 上没有权重目录可扫描：桩与 linux/service.rs 同名同签名。
+pub async fn scan_orphans(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
+    nope()
+}
+
+/// 非 Linux 上没有残留目录可删除：桩与 linux/service.rs 同名同签名。
+pub async fn remove_orphan(
+    _service: &Arc<ModelStoreService>,
+    _path: String,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub async fn model_detail(_card_id: String) -> Result<Value, String> {
     nope()
 }
