@@ -7276,7 +7276,18 @@ impl RuntimeThreadManager {
                         None
                     } else {
                         match self.store.save_turn(&turn) {
-                            Ok(()) => Some(turn),
+                            Ok(()) => {
+                                // Settlement boundary: the on-disk turn is
+                                // now authoritative, so drop the stage copy
+                                // and write through any late detached child's
+                                // report instead of staging it — the same
+                                // process-exit window the happy terminal
+                                // path closes (#154 review: a detached
+                                // child's lease can still be held after the
+                                // monitor's failure settlement).
+                                self.store.mark_turn_settled(turn_id);
+                                Some(turn)
+                            }
                             Err(err) => {
                                 tracing::error!(
                                     "Failed to persist terminal monitor failure: {err}"

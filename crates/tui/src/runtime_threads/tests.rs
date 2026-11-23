@@ -3965,6 +3965,98 @@ async fn monitor_failure_settlement_carries_records_staged_while_the_settles_awa
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// (#154 review: the failure-settlement path must mark the turn settled too)
+/// `settle_claimed_turn_failure` persists the terminal turn exactly like the
+/// happy monitor path, so a detached child's late report after that save must
+/// also be written THROUGH instead of joining the in-memory stage batch —
+/// with the lease still held, a normal exit would drop a staged record. This
+/// drives the production failure settlement (not a store fixture) and then
+/// delivers through the real sink path, pinning write-through, no journal
+/// fallback, and durability across a fresh store open.
+#[tokio::test]
+async fn late_report_after_failure_settlement_is_written_through_and_survives_reopen() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn("thr_mf_late", "turn_mf_late", RuntimeTurnStatus::InProgress);
+    let item = sample_item(
+        "turn_mf_late",
+        "item_mf_late",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    // The detached child keeps its lease across the failure settlement, so
+    // the sink stays registered and a later report is delivered directly.
+    let _lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path, driven to completion.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+    let settled = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("reload terminal turn");
+    assert_eq!(settled.status, RuntimeTurnStatus::Failed);
+    assert_eq!(settled.error.as_deref(), Some("monitor died"));
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the failure settlement must leave no stage copy behind"
+    );
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late detached child's report after the failure settlement — through
+    // the production delivery path, as it would arrive in the real process.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:late-after-failure",
+        &route,
+        &Usage {
+            input_tokens: 17,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "a failure-settled turn's late report must write through, not stage \
+         (a normal exit with the lease held would drop a staged record)"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the late record, so no journal fallback may exist"
+    );
+    // "Normal exit and restart": a fresh store over the same root must see
+    // the late record — it is on disk, not in process memory.
+    drop(_lease);
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 17);
+    assert_eq!(
+        from_disk.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:late-after-failure"
+        )],
+        "the late record's (fingerprinted) source id must survive the reopen"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
