@@ -3552,6 +3552,52 @@ impl ModelManager {
         Ok(())
     }
 
+    /// 任务 G 下半（启用前冲突预检的归属臂）：端点上有服务时，判断它是不是
+    /// **本卡自己的**活实例。判据与 reconcile 收编（G 上半）同源，两条任一：
+    ///
+    /// - 原生引擎：`cards/<id>/.runtime/serve.identity.json` 记录的进程活着
+    ///   （含 start_ticks/uid 防_PID_复用比对，见 [`native_engine_identity_alive`]）；
+    /// - docker 形态：compose 项目名或容器名 == card_id 的容器处于 running
+    ///   （[`docker_owned_container_state`]——同事用同款镜像跑别的模型不会撞
+    ///   上这两个名字，镜像不构成身份）。
+    ///
+    /// 两条都不满足（含 docker 查不动的 Unknown）→ false：外来服务或归属
+    /// 查不实，宁拒不收——把别人的服务认成自己的实例，停用就会去停别人的
+    /// 服务。
+    fn leftover_instance_is_own(&self, rec: &db::StoreModelRecord) -> bool {
+        // r23 P2-1：与 reconcile 收编同款判据——safe_path_component 失败时直接
+        // 跳过本机探测。旧写法 unwrap_or_default + 非空判是死守卫：join("")
+        // 得到的仍是 cards/ 本身（永非空），校验失败会去探测整个 cards/ 目录
+        // 下的身份文件。
+        if let Ok(safe_id) = config::safe_path_component(&rec.card_id) {
+            let card_dir = config::data_dir().join("cards").join(safe_id);
+            if native_engine_identity_alive(&card_dir) {
+                return true;
+            }
+        }
+        docker_owned_container_state(&rec.card_id) == DockerOwnedContainerState::Running
+    }
+
+    /// 接管承诺「用户从此有了停用入口」——本地脚本必须真有 stop，否则接管会把
+    /// 用户锁进无自愈路径（stop() 的脚本步 `?` 先行返回 → running 恒 true →
+    /// 再启用被拒、更新脚本被「确已停止」拒、卸载被拒）。r23 P2-2：fail-closed，
+    /// 缺失或读不到脚本源时都视为没有 stop，维持拒绝口径。
+    ///
+    /// `LocalDir`（install_local 就地执行的本地卡）与 `Local` 同按 blobs 判，与
+    /// [`ScriptsSource::script_hash`] / [`ScriptsSource::optional_script_blob`]
+    /// 的分组一致；load_local_card 要求六个入口脚本齐全才放行，blobs 里必有 stop。
+    /// 刻意不写通配臂：脚本源再添形态时让编译期报 E0004，而不是静默判成「没有
+    /// stop」把接管全拒掉（#2340 合并队列集成失败即此类）。
+    fn local_stop_script_present(&self, rec: &db::StoreModelRecord) -> bool {
+        match self.local_scripts_source(rec) {
+            Ok(ScriptsSource::Local { blobs, .. } | ScriptsSource::LocalDir { blobs, .. }) => {
+                blobs.contains_key("stop")
+            }
+            Ok(ScriptsSource::Remote { scripts, .. }) => scripts.contains_key("stop"),
+            Err(_) => false,
+        }
+    }
+
     pub fn enable(
         &self,
         card_id: &str,
@@ -3623,9 +3669,17 @@ impl ModelManager {
         // 重启/接管意图（main 的 context-repair 二次启用与修订通知流都依赖它）——
         // 自己的实例端点有响应是常态，不构成拒绝理由。
         // 保留第 2) 臂（条件收窄为 !rec.running）：**running=false 而端点有响应**
-        // = 遗留/外来实例（reconcile 无身份可认领），仍拒绝并指引自助恢复——r19
-        // 的双实例防护在这条臂上不变。
-        // 修复意图（repair_due）对 2) 臂短路：修复语义恰恰要在端点存活时再启用。
+        // = 遗留/外来实例（reconcile 无身份可认领）。任务 G 下半在这条臂上细分
+        // **归属**：验证是本卡自己的活实例（原生引擎 `.runtime/serve.identity.json`
+        // 身份核验 / docker 名下容器 running）→ **接管**：不跑脚本、不重启，直接
+        // 登记运行中——热实例（GB10 上启用一次约 5 分钟）不必白白重启，且用户
+        // 从此有了停用入口（此前库里没登记时界面上连停都停不了）。接管路径选择
+        // 「直接成功」而不是报错：与 reconcile 静默收编的语义一致（那次也没有
+        // 重启实例），且此时并没有真正启动任何新东西。
+        // 外来服务或归属查不实 → 仍拒绝并指引自助恢复——r19 的双实例防护在这条
+        // 臂上不变（绝不把别人的服务认作自己的实例）。
+        // 修复意图（repair_due）对 2) 臂短路：修复语义恰恰要在端点存活时再启用，
+        // 接管臂同理（修复流程要的是重跑脚本，不是登记旧实例）。
         let repair_intent = super::linked_models::repair_due(card_id);
         if !rec.running && rec.engine_name != "ollama" && !repair_intent {
             if let Some(endpoint) = rec.endpoint_url.as_deref() {
@@ -3634,6 +3688,23 @@ impl ModelManager {
                 if endpoint_path_is_openai_style(endpoint)
                     && openai_compatible_endpoint_alive(endpoint)
                 {
+                    if self.leftover_instance_is_own(&rec) {
+                        if !self.local_stop_script_present(&rec) {
+                            return Err(ModelManagerError::new(
+                                "该模型的服务仍在后台运行且归属核验通过，但本地缺少停用脚本，\
+                                 接管后您将无法从界面停用它。请先「更新卡片脚本」补齐脚本包后重试；\
+                                 如仍失败请反馈日志。",
+                            ));
+                        }
+                        on_progress(
+                            "检测到本卡服务已在后台运行且身份核验通过（非商店操作启动的遗留实例），\
+                             已接管为运行中，未重启实例；如需重启请先停用。",
+                        );
+                        db::set_running(card_id, true).map_err(|e| {
+                            ModelManagerError::new(format!("记录运行状态失败：{e}"))
+                        })?;
+                        return Ok(());
+                    }
                     return Err(ModelManagerError::new(
                         "该模型的服务端口仍有响应（可能是旧版脚本或手工操作启动的遗留\
                          实例），已取消本次启用以避免出现双实例。请先停用该模型，\
@@ -3641,6 +3712,29 @@ impl ModelManager {
                     ));
                 }
             }
+        }
+        // 任务 G 下半（ollama 臂）：服务级探针分不清哪张卡在跑，改查 /api/ps
+        // 该模型是否已被加载（r21 P2-5 的同款判据）：已加载而库里没登记 →
+        // 同样接管（不重新加载）；缺本地停用脚本时 fail-closed 维持拒绝。
+        // 未加载（Some(false)）或查不动（None）→ 正常走脚本路径。
+        if !rec.running
+            && rec.engine_name == "ollama"
+            && !repair_intent
+            && ollama_model_loaded(&self.settings.ollama_host, &rec.model_name) == Some(true)
+        {
+            if !self.local_stop_script_present(&rec) {
+                return Err(ModelManagerError::new(
+                    "检测到该模型仍由 Ollama 加载着，但本地缺少停用脚本，接管后您将无法\
+                     从界面停用它。请先「更新卡片脚本」补齐脚本包后重试。",
+                ));
+            }
+            on_progress(
+                "检测到该模型仍由 Ollama 加载着（可能来自商店外的操作或上次异常中断），\
+                 已接管为运行中，未重新加载；如需重启请先停用。",
+            );
+            db::set_running(card_id, true)
+                .map_err(|e| ModelManagerError::new(format!("记录运行状态失败：{e}")))?;
+            return Ok(());
         }
         let env = self.env_for_record(&rec);
         let source = self.local_scripts_source(&rec)?;
@@ -6186,6 +6280,8 @@ const DOCKER_PS_A_FORMAT: &str =
     "{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}";
 
 /// `require_actually_stopped` 对「无 container_name 的 docker 卡」的结论。
+/// 任务 G 下半：leftover_instance_is_own 也用它判归属，需要 PartialEq/Eq。
+#[derive(PartialEq, Eq)]
 enum DockerOwnedContainerState {
     /// 找到本卡容器且有运行中的。
     Running,
@@ -8534,6 +8630,9 @@ echo '权重就绪'
 
     const FAKE_UNINSTALL: &str = "#!/bin/sh\necho '已卸载'\n";
 
+    /// r23 P2-2：接管守卫要求本地真有 stop 脚本（接管=承诺停用入口），夹具随之补齐。
+    const FAKE_STOP: &str = "#!/bin/sh\necho '已停用'\n";
+
     /// 脚印文件里有几行 = 那个脚本真正跑了几次。文件不在就是 0 次。
     fn ran_times(marker: &std::path::Path) -> usize {
         std::fs::read_to_string(marker)
@@ -8559,6 +8658,7 @@ echo '权重就绪'
         for (script_type, body) in [
             ("install_engine", FAKE_INSTALL_ENGINE),
             ("download_model", FAKE_DOWNLOAD_MODEL),
+            ("stop", FAKE_STOP),
             ("uninstall", FAKE_UNINSTALL),
         ] {
             let path = dir.join(format!("{script_type}.sh"));
@@ -8867,6 +8967,208 @@ echo '权重就绪'
         assert!(
             error.to_string().contains("enable 脚本"),
             "放行后失败应来自脚本层：{error}"
+        );
+    }
+
+    /// 任务 G 下半：端点活着的遗留实例若**身份核验通过**（本卡自己的
+    /// `.runtime/serve.identity.json` 进程活着），点「启用」必须**接管**——
+    /// 不跑脚本、不重启（GB10 上启用一次约 5 分钟）、直接登记运行中给停用
+    /// 入口。夹具刻意不带 enable 脚本：返回 Ok 本身就是「没走脚本路径」的
+    /// 证明（走了会在「找不到 enable 脚本」上失败）。
+    #[test]
+    fn enable_takes_over_a_native_leftover_instance_with_verified_identity() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        db::update_store_model_status("card-dl", "deployed", None).unwrap();
+
+        // 假一个活着的 OpenAI 端点（与现有预检测试同一手法）
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.flush();
+            }
+        });
+        db::set_endpoint_info(
+            "card-dl",
+            Some(&format!("http://127.0.0.1:{port}/v1")),
+            Some("model-id"),
+        )
+        .unwrap();
+
+        // 用本测试进程的真实身份写 identity 回执——identity_process_alive 的
+        // 真比对（pid+start_ticks+uid）必须通过。
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let ticks = super::super::native_process::start_ticks(&stat)
+            .expect("本进程 stat 应可解析出 starttime");
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+        let runtime_dir = config::data_dir()
+            .join("cards")
+            .join("card-dl")
+            .join(".runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            runtime_dir.join("serve.identity.json"),
+            format!(
+                r#"{{"version":1,"process":{{"pid":{},"start_ticks":{},"uid":{}}}}}"#,
+                std::process::id(),
+                ticks,
+                uid
+            ),
+        )
+        .unwrap();
+
+        let mut progress = Vec::new();
+        mgr.enable(
+            "card-dl",
+            &mut |line| progress.push(line.to_string()),
+            Default::default(),
+        )
+        .expect("身份核验通过的遗留实例必须接管成功");
+        assert!(
+            db::get_store_model("card-dl").unwrap().unwrap().running,
+            "接管后必须登记为运行中（这样界面上才有停用入口）"
+        );
+        assert!(
+            progress.iter().any(|l| l.contains("接管")),
+            "接管要说给人听——用户得知道这次没有重启实例：{progress:?}"
+        );
+    }
+
+    /// 接管的负例：identity 文件存在但 PID 已死（上次异常中断留下的陈回执）
+    /// → 归属不成立 → 维持「双实例」拒绝。钉的是「PID 活着」而不是「文件
+    /// 存在」——文件在进程死后就是一张废纸。
+    #[test]
+    fn enable_still_refuses_when_the_identity_receipt_is_stale() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = manager_with_card(
+            download_settings(&models_dir),
+            local_script_card(&tmp.path().join("scripts"), None),
+        );
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        db::update_store_model_status("card-dl", "deployed", None).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            while let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = socket.flush();
+            }
+        });
+        db::set_endpoint_info(
+            "card-dl",
+            Some(&format!("http://127.0.0.1:{port}/v1")),
+            Some("model-id"),
+        )
+        .unwrap();
+
+        let runtime_dir = config::data_dir()
+            .join("cards")
+            .join("card-dl")
+            .join(".runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            runtime_dir.join("serve.identity.json"),
+            r#"{"version":1,"process":{"pid":999999999,"start_ticks":1,"uid":1000}}"#,
+        )
+        .unwrap();
+
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("双实例"),
+            "陈回执不得触发接管：{error}"
+        );
+        assert!(!db::get_store_model("card-dl").unwrap().unwrap().running);
+    }
+
+    /// ollama 卡的接管臂：/api/ps 说该模型仍被加载而库里没登记 → 接管；
+    /// 未加载（Some(false)）→ 正常走脚本路径（夹具无脚本，报「enable 脚本」
+    /// 而不是接管成功）。
+    #[test]
+    fn enable_takes_over_an_ollama_model_already_loaded_and_proceeds_when_not() {
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mut card = local_script_card(&tmp.path().join("scripts"), None);
+        card.summary.engine_name = "ollama".into();
+        let mut settings = download_settings(&models_dir);
+
+        // 应答队列：主线程先下载拿到 model_name，再往队列里塞「已加载」的
+        // 应答；队列空时兜底答「未加载」。一个假服务顺序服务两个回合。
+        let bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queue = std::sync::Arc::clone(&bodies);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            while let Ok((mut socket, _)) = listener.accept() {
+                let body = queue
+                    .lock()
+                    .unwrap()
+                    .pop()
+                    .unwrap_or_else(|| r#"{"models":[]}"#.to_string());
+                let mut buf = [0_u8; 1024];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes());
+                let _ = socket.flush();
+            }
+        });
+        settings.ollama_host = format!("http://127.0.0.1:{port}");
+
+        let mgr = manager_with_card(settings, card);
+        mgr.download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        db::update_store_model_status("card-dl", "deployed", None).unwrap();
+        let model_name = mgr.get_record("card-dl").unwrap().model_name;
+        bodies
+            .lock()
+            .unwrap()
+            .push(format!(r#"{{"models":[{{"name":"{model_name}"}}]}}"#));
+
+        // 回合一：已加载 → 接管成功、登记运行中、不跑脚本
+        let mut progress = Vec::new();
+        mgr.enable(
+            "card-dl",
+            &mut |line| progress.push(line.to_string()),
+            Default::default(),
+        )
+        .expect("模型仍在显存里时必须接管");
+        assert!(db::get_store_model("card-dl").unwrap().unwrap().running);
+        assert!(progress.iter().any(|l| l.contains("接管")));
+
+        // 回合二：停掉登记后再问，/api/ps 队列已空 → 答「未加载」→ 正常启用
+        // 路径（夹具无 enable 脚本，失败必须是脚本层而不是接管/预检层）
+        db::set_running("card-dl", false).unwrap();
+        let error = mgr
+            .enable("card-dl", &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("enable 脚本"),
+            "未加载时走正常启用路径：{error}"
         );
     }
 
