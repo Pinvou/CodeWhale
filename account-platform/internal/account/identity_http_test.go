@@ -5,12 +5,59 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 )
+
+func TestSMSOnlyDispatchDistinguishesProvenAbsenceFromUnknownResult(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+		proof  bool
+	}{
+		{"old route absent", http.StatusNotFound, "", true},
+		{"workload expired before dispatch", http.StatusUnauthorized, `{"code":"SERVICE_AUTH_REQUIRED"}`, true},
+		{"workload not admitted", http.StatusForbidden, `{"code":"SERVICE_AUTH_FORBIDDEN"}`, true},
+		{"unrecognized rejection", http.StatusUnauthorized, `{"code":"UNKNOWN"}`, false},
+		{"unknown upstream effect", http.StatusServiceUnavailable, "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var hits atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != identity.MobileSignupCreatePath {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				hits.Add(1)
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client, err := NewHTTPIdentityProvisioner(server.URL, "file:"+filepath.Join(t.TempDir(), "missing-token"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := func() error {
+				_, err := client.CreateMobileUserFirstAttempt(ctx, uuid.New(), "fixture", "+8613800138000", "", identity.MobileSignupCredentialMode)
+				return err
+			}
+			if err := request(); !errors.Is(err, ErrIdentityCreateNotDispatched) || hits.Load() != 0 {
+				t.Fatal("local unreadable workload identity was not recognized as zero dispatch", err)
+			}
+			client.serviceToken = "controlled-token"
+			if err := request(); err == nil || errors.Is(err, ErrIdentityCreateNotDispatched) != test.proof || hits.Load() != 1 {
+				t.Fatal("wrong dispatch classification or endpoint", err, hits.Load())
+			}
+		})
+	}
+}
 
 func TestProfileRevocationV2IsRejectedByLegacyDecoderBeforeDispatch(t *testing.T) {
 	var dispatched atomic.Bool

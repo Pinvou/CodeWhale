@@ -114,7 +114,9 @@ func enforceSMSRateLimits(ctx context.Context, tx pgx.Tx, challenge SMSChallenge
 	}
 	var last, oldest *time.Time
 	var hourly int
-	if err := tx.QueryRow(ctx, `SELECT max(created_at) FILTER (WHERE status<>'FAILED'),min(created_at) FILTER (WHERE created_at>$2 AND status<>'FAILED'),count(*) FILTER (WHERE created_at>$2 AND status<>'FAILED') FROM sms_challenges WHERE mobile_e164=$1`, challenge.Mobile, now.Add(-time.Hour)).Scan(&last, &oldest, &hourly); err != nil {
+	// A login transport failure must not make the known number take a different
+	// next-request quota path from an unknown number with no delivery attempt.
+	if err := tx.QueryRow(ctx, `SELECT max(created_at),min(created_at) FILTER (WHERE created_at>$2),count(*) FILTER (WHERE created_at>$2) FROM sms_challenges WHERE mobile_e164=$1 AND (status<>'FAILED' OR purpose IN ('LOGIN','PASSWORD_RESET'))`, challenge.Mobile, now.Add(-time.Hour)).Scan(&last, &oldest, &hourly); err != nil {
 		return err
 	}
 	mobileHash, sourceHash, deviceHash := sha256Bytes(challenge.Mobile), sha256Bytes(challenge.Source), sha256Bytes(challenge.Device)
@@ -424,6 +426,24 @@ AND NOT (status='REPAIR_REQUIRED' AND identity_create_attempted_at IS NOT NULL
 }
 
 func (r *PostgresRepository) CompensatePreIdentityRegistration(ctx context.Context, operationID uuid.UUID, code string, attemptVersion int64) error {
+	if code == signupCreateNotDispatched {
+		// This proof concerns the immutable first grant. A later query-only
+		// recovery lease may change the operation version but cannot create
+		// another identity. Still refuse if any identity or Account exists.
+		command, err := r.pool.Exec(ctx, `
+UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,
+last_error_code=$3,compensation_evidence=jsonb_build_object('authority','IDENTITY_ADAPTER','creation_never_dispatched',true,'attempt_version',$4::bigint),version=version+1,updated_at=$2
+WHERE id=$1 AND identity_subject IS NULL AND committed_user_id IS NULL
+  AND signup_first_dispatch_version=$4 AND $4>0 AND signup_consent_version IS NOT NULL
+  AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now(), code, attemptVersion)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrRegistrationConflict
+		}
+		return nil
+	}
 	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
 		command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,

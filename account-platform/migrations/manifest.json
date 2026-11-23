@@ -1212,6 +1212,16 @@
         "file": "900026_approval_delivery_terminal_recovery.up.sql",
         "version": 900026,
         "sha256": "aa4dd01995ecc0fe9bcc8ede004404e83ebca986d527131d914663eb189d3860"
+      },
+      {
+        "file": "900027_sms_signup_consent.down.sql",
+        "version": 900027,
+        "sha256": "649a78fe63540b1a757e1e4efa2e98874f5d81820af98d18a85acf4bccb97abd"
+      },
+      {
+        "file": "900027_sms_signup_consent.up.sql",
+        "version": 900027,
+        "sha256": "e9ee756a4c7f0e45898d86620abcc077801c5cf072626e839a3f09768bb71624"
       }
     ],
     "billing": [

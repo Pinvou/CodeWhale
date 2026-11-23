@@ -110,6 +110,26 @@ func TestAliyunSMSProviderTreatsUnknownAsInvalidCode(t *testing.T) {
 	}
 }
 
+func TestAliyunSMSVerificationTransportErrorOmitsRequestInputs(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	provider, err := NewAliyunSMSProvider(AliyunSMSConfig{
+		AccessKeyID: "fixture-id", AccessKeySecret: strings.Repeat("s", 32), SignName: "fixture",
+		RegisterTemplate: "100001", LoginTemplate: "100001", Endpoint: server.URL,
+	})
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	provider.client = server.Client()
+	server.Close()
+	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", uuid.New(),
+		SMSVerificationData{Provider: provider.Descriptor()}, "903489")
+	if verified || err == nil || strings.Contains(err.Error(), "13800138000") ||
+		strings.Contains(err.Error(), "903489") || strings.Contains(err.Error(), server.URL) {
+		t.Fatal("unsafe transport error returned")
+	}
+}
+
 func TestAliyunSMSProviderRequiresHTTPS(t *testing.T) {
 	_, err := NewAliyunSMSProvider(AliyunSMSConfig{
 		AccessKeyID: "test-id", AccessKeySecret: strings.Repeat("s", 32), SignName: "gifted-sign",

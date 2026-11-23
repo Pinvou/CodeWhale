@@ -241,7 +241,7 @@ final class PinvouAuthClientTransportTest {
     }
     @Test void smsNeedsTheActual204SubjectHeader() throws Exception {
         HttpServer s = server(204, "");
-        try { assertEquals("controlled-subject", client(s).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
+        try { assertEquals(new PinvouAuthClient.SMSLogin("controlled-subject", false), client(s).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
         s = server(200, "{}");
         try { HttpServer current = s; assertThrows(PinvouAuthClient.AuthClientException.class, () -> client(current).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
     }

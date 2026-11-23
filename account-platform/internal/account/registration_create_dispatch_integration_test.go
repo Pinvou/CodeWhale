@@ -63,6 +63,9 @@ func registrationDispatchReady(t *testing.T, r *PostgresRepository) uuid.UUID {
 
 func TestRegistrationCreateDispatchRuntimePostgres(t *testing.T) {
 	f := retainedWalletFenceActors(t)
+	t.Run("consented-sms-creates-account-before-wallet", func(t *testing.T) {
+		testConsentedMobileSignup(t, f)
+	})
 	t.Run("only-explicit-proof-at-exact-first-version-compensates", func(t *testing.T) {
 		r := f.repository(t)
 		ctx := context.Background()

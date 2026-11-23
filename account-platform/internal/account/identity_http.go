@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
@@ -90,7 +91,11 @@ func (p *HTTPIdentityProvisioner) createMobileUser(ctx context.Context, operatio
 	var response struct {
 		Subject string `json:"subject"`
 	}
-	err := p.request(ctx, http.MethodPost, "/internal/v1/users/mobile", map[string]any{
+	path := "/internal/v1/users/mobile"
+	if policyVersion == identity.MobileSignupCredentialMode {
+		path = identity.MobileSignupCreatePath
+	}
+	err := p.request(ctx, http.MethodPost, path, map[string]any{
 		"registration_operation_id": operationID.String(), "username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion, "first_attempt": firstAttempt,
 	}, &response)
 	if err != nil {
@@ -133,27 +138,52 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 	}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
 	if err != nil {
+		if path == identity.MobileSignupCreatePath {
+			return ErrIdentityCreateNotDispatched
+		}
 		return err
 	}
 	if err := serviceauth.SetAuthorization(request, p.serviceToken); err != nil {
+		if path == identity.MobileSignupCreatePath {
+			return ErrIdentityCreateNotDispatched
+		}
 		return err
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response, err := p.client.Do(request)
+	client := p.client
+	if path == identity.MobileSignupCreatePath {
+		// A 404 proves route absence only from the configured adapter, never
+		// from a redirect target.
+		direct := *client
+		direct.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &direct
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return errors.New("identity adapter request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if response.StatusCode == http.StatusNotFound {
+			// The protected SMS-only route never returns not found and is
+			// called directly on the adapter. An older router stops here.
+			if path == identity.MobileSignupCreatePath {
+				return ErrIdentityCreateNotDispatched
+			}
 			return ErrIdentityRegistrationNotFound
 		}
 		var problem struct {
 			Code string `json:"code"`
 		}
 		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&problem)
+		if path == identity.MobileSignupCreatePath &&
+			((response.StatusCode == http.StatusUnauthorized && problem.Code == "SERVICE_AUTH_REQUIRED") ||
+				(response.StatusCode == http.StatusForbidden && problem.Code == "SERVICE_AUTH_FORBIDDEN")) {
+			// These middleware responses are emitted before the create handler.
+			return ErrIdentityCreateNotDispatched
+		}
 		switch problem.Code {
 		case "PASSWORD_INVALID":
 			return ErrPasswordInvalid

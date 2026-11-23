@@ -56,6 +56,7 @@ type AuthorizationDecision struct {
 }
 
 type PermissionCheck struct {
+	SMSChallengeID *uuid.UUID `json:"sms_challenge_id,omitempty"`
 	Issuer         string     `json:"issuer"`
 	Subject        string     `json:"subject"`
 	Permission     string     `json:"permission"`
@@ -422,6 +423,10 @@ func (s *Service) checkPermission(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid permission check", httpserver.RequestID(r.Context()))
 		return
 	}
+	if request.SMSChallengeID != nil && (*request.SMSChallengeID == uuid.Nil || request.Permission != PermissionPersonalSessionLogin || composite || request.OrganizationID != nil || request.UnitID != nil) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid SMS login authorization", httpserver.RequestID(r.Context()))
+		return
+	}
 	repository, ok := s.repository.(authorizationRepository)
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
@@ -429,7 +434,16 @@ func (s *Service) checkPermission(w http.ResponseWriter, r *http.Request) {
 	}
 	var decision AuthorizationDecision
 	var err error
-	if composite {
+	if request.SMSChallengeID != nil {
+		bound, available := s.repository.(interface {
+			AuthorizeBoundSMSLogin(context.Context, identity.Principal, uuid.UUID) (AuthorizationDecision, error)
+		})
+		if !available {
+			api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		decision, err = bound.AuthorizeBoundSMSLogin(r.Context(), identity.Principal{Issuer: request.Issuer, Subject: request.Subject}, *request.SMSChallengeID)
+	} else if composite {
 		compositeRepository, available := s.repository.(compositeAuthorizationRepository)
 		if !available {
 			api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))

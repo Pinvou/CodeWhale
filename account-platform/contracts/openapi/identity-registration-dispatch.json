@@ -34,6 +34,39 @@
           "503": {"description": "IDENTITY_CREATE_UNCONFIRMED or existing bounded password precheck capacity failure; no automatic redispatch."}
         }
       }
+    },
+    "/internal/v1/users/mobile/sms-only": {
+      "post": {
+        "operationId": "createSMSOnlyMobileIdentity",
+        "description": "Requires internal.identity.user.create and the Account durable first grant. The password handle is empty, and the adapter never configures a password. A missing route on the configured adapter proves no dispatch. An unknown remote result does not.",
+        "security": [{"workloadBearer": []}],
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["registration_operation_id", "username", "mobile", "password_policy_version", "first_attempt"],
+            "properties": {
+              "registration_operation_id": {"type": "string", "format": "uuid"},
+              "username": {"type": "string", "pattern": "^user-[a-f0-9]{24}$"},
+              "mobile": {"type": "string", "pattern": "^\\+861[3-9][0-9]{9}$"},
+              "password_handle": {"type": "string", "const": ""},
+              "password_policy_version": {"type": "string", "const": "sms-only-v1"},
+              "first_attempt": {"type": "boolean"}
+            }
+          }}}
+        },
+        "responses": {
+          "201": {"description": "Confirmed correlated subject."},
+          "400": {"description": "Malformed request or wrong credential mode."},
+          "401": {"description": "Missing or invalid workload authentication."},
+          "403": {"description": "Workload lacks the exact identity create permission."},
+          "409": {"description": "Identity conflict requires manual inspection."},
+          "410": {"description": "Explicit never-dispatched proof. Account compares the immutable first grant before releasing the reservation."},
+          "500": {"description": "Unknown upstream effect. Account retains the reservation and correlates the original operation."},
+          "503": {"description": "Identity creation is unconfirmed. Account does not replay dispatch."}
+        }
+      }
     }
   },
   "components": {"securitySchemes": {"workloadBearer": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}}}

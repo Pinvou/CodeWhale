@@ -8,6 +8,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
@@ -47,6 +48,7 @@ func (s *Service) Handler() http.Handler {
 	internal.POST("/registration/password-references/preparation", serviceauth.Require("internal.identity.password-reference.validate"), httpserver.AdaptFunc(s.passwordReferencePreparation))
 	internal.POST("/registration/password-references/validate", serviceauth.Require("internal.identity.password-reference.validate"), httpserver.AdaptFunc(s.validateReference))
 	internal.POST("/users/mobile", serviceauth.Require("internal.identity.user.create"), httpserver.AdaptFunc(s.createMobileUser))
+	internal.POST("/users/mobile/sms-only", serviceauth.Require("internal.identity.user.create"), httpserver.AdaptFunc(s.createSMSOnlyUser))
 	internal.GET("/registration-operations/:operation_id/user", serviceauth.Require("internal.identity.registration.read"), httpserver.AdaptFunc(s.findRegistrationUser))
 	internal.POST("/users/:subject/disable-and-confirm", serviceauth.Require("internal.identity.user.disable"), httpserver.AdaptFunc(s.disableUserAndConfirm))
 	internal.PUT("/users/:subject/username", serviceauth.Require("internal.identity.username.update"), httpserver.AdaptFunc(s.updateUsername))
@@ -145,6 +147,14 @@ func (s *Service) validateReference(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) createMobileUser(w http.ResponseWriter, r *http.Request) {
+	s.handleMobileUserCreate(w, r, false)
+}
+
+func (s *Service) createSMSOnlyUser(w http.ResponseWriter, r *http.Request) {
+	s.handleMobileUserCreate(w, r, true)
+}
+
+func (s *Service) handleMobileUserCreate(w http.ResponseWriter, r *http.Request, smsOnly bool) {
 	var body registrationReferenceRequest
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a complete JSON request is required", httpserver.RequestID(r.Context()))
@@ -152,6 +162,10 @@ func (s *Service) createMobileUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.FirstAttempt == nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "explicit registration dispatch attestation is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	if smsOnly != (body.PasswordPolicyVersion == identity.MobileSignupCredentialMode) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "credential mode does not match the creation route", httpserver.RequestID(r.Context()))
 		return
 	}
 	subject, err := s.vault.CreateMobileUserFirstAttempt(r.Context(), body.RegistrationOperationID, body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile, *body.FirstAttempt)

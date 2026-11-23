@@ -38,6 +38,7 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 		PasswordHandle           string     `json:"password_handle"`
 		PasswordPolicyVersion    string     `json:"password_policy_version"`
 		PasswordPreparationToken string     `json:"password_preparation_token"`
+		SignupConsentVersion     string     `json:"signup_consent_version"`
 		Purpose                  SMSPurpose `json:"purpose"`
 		CaptchaID                uuid.UUID  `json:"captcha_id"`
 		CaptchaOffset            int        `json:"captcha_offset"`
@@ -50,7 +51,7 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	challenge, err := s.mobileAuth.Send(withPasswordPreparation(r.Context(), body.PasswordPreparationToken), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset, requestSource(r), r.Header.Get("X-Device-ID"))
+	challenge, err := s.mobileAuth.send(withPasswordPreparation(r.Context(), body.PasswordPreparationToken), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset, requestSource(r), r.Header.Get("X-Device-ID"), body.SignupConsentVersion)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -130,12 +131,21 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
-	subject, err := s.mobileAuth.VerifyLogin(ctx, body.Mobile, body.ChallengeID, body.Code)
+	subject, bound, err := s.mobileAuth.verifyLogin(ctx, body.Mobile, body.ChallengeID, body.Code, r.Header.Get("X-Pinvou-SMS-Binding") == "v1")
 	if err != nil {
+		if errors.Is(err, ErrRegistrationRecovering) {
+			w.Header().Set("X-Pinvou-SMS-Outcome", "REGISTRATION_RECOVERING")
+		}
+		if errors.Is(err, errMobileSignupReview) {
+			w.Header().Set("X-Pinvou-SMS-Outcome", "REGISTRATION_MANUAL_REVIEW_REQUIRED")
+		}
 		s.writeMobileAuthError(w, r, err)
 		return
 	}
 	w.Header().Set("X-Pinvou-Identity-Subject", subject)
+	if bound {
+		w.Header().Set("X-Pinvou-SMS-Binding", "v1")
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -143,6 +153,12 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "AUTH_INTERNAL_ERROR", "the authentication request could not be completed"
 	switch {
+	case errors.Is(err, errMobileSignupConsent):
+		status, code, message = http.StatusBadRequest, "SIGNUP_CONSENT_INVALID", "invalid mobile signup consent"
+	case errors.Is(err, ErrRegistrationRecovering):
+		status, code, message = http.StatusConflict, "REGISTRATION_RECOVERING", "registration could not finish; continue the original registration or retry later"
+	case errors.Is(err, errMobileSignupReview):
+		status, code, message = http.StatusConflict, "REGISTRATION_MANUAL_REVIEW_REQUIRED", "registration requires manual review; contact support"
 	case errors.Is(err, ErrMobileInvalid):
 		status, code, message = http.StatusBadRequest, "MOBILE_INVALID", "a valid mainland China mobile number is required"
 	case errors.Is(err, ErrMobileAlreadyRegistered):
@@ -179,7 +195,7 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 		status, code, message = http.StatusNotFound, "REGISTRATION_OPERATION_NOT_FOUND", "the registration operation was not found"
 	}
 	if status >= http.StatusInternalServerError {
-		slog.ErrorContext(r.Context(), "mobile authentication request failed", "error", err, "request_id", httpserver.RequestID(r.Context()))
+		slog.ErrorContext(r.Context(), "mobile authentication request failed", "code", code, "request_id", httpserver.RequestID(r.Context()))
 	} else if errors.Is(err, ErrRegistrationConflict) {
 		slog.WarnContext(r.Context(), "mobile authentication request rejected by registration conflict", "request_id", httpserver.RequestID(r.Context()))
 	}

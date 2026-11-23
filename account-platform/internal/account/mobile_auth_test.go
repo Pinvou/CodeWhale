@@ -367,6 +367,7 @@ func newMobileAuthForTest(t *testing.T, repository MobileAuthRepository, sms SMS
 	}
 	service.now = func() time.Time { return time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC) }
 	service.loginResponseFloor = 0
+	service.ordinaryLoginVerifyBudget = 0
 	return service
 }
 
@@ -451,6 +452,71 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	}
 	if sms.verifyCalls != 0 {
 		t.Fatal("local challenge state must be checked before calling Aliyun")
+	}
+}
+
+func TestOrdinarySMSVerificationHidesPreProofProviderFailure(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{identitySubject: "existing-subject"}
+	sms := &smsProviderFake{verifyErr: errors.New("controlled provider failure")}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	id := uuid.New()
+	if subject, err := service.VerifyLogin(context.Background(), "13800138000", id, "123456"); subject != "" || !errors.Is(err, ErrSMSInvalid) || sms.verifyCalls != 1 {
+		t.Fatal("pre-proof provider failure exposed a different login outcome", err)
+	}
+}
+
+func TestOrdinarySMSVerificationBoundsSlowProviderBeforePublicRejection(t *testing.T) {
+	const providerBudget = 100 * time.Millisecond
+	responses := make(map[string]time.Duration)
+	for _, mode := range []string{"unknown", "slow-provider"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := &mobileAuthRepositoryFake{}
+			provider := &resetFloorProvider{delay: 3 * time.Second}
+			if mode == "slow-provider" {
+				repository.identitySubject = "existing-subject"
+			}
+			service := newMobileAuthForTest(t, repository, provider, &identityProvisionerFake{})
+			service.ordinaryLoginVerifyBudget = providerBudget
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			startedAt := time.Now()
+			subject, err := service.VerifyLogin(ctx, "13800138000", uuid.New(), "123456")
+			elapsed := time.Since(startedAt)
+			if subject != "" || !errors.Is(err, ErrSMSInvalid) || ctx.Err() != nil {
+				t.Fatalf("expected an ordinary rejection before the client deadline, subject=%q err=%v elapsed=%v", subject, err, elapsed)
+			}
+			if elapsed < providerBudget+240*time.Millisecond || repository.consumeVerified {
+				t.Fatalf("rejected before the common response window or consumed an unverified code: %v", elapsed)
+			}
+			responses[mode] = elapsed
+		})
+	}
+	if delta := responses["slow-provider"] - responses["unknown"]; delta > 200*time.Millisecond {
+		t.Fatalf("provider delayed ordinary login beyond the common response window: %v", delta)
+	}
+}
+
+type transientSignupCompensationRepository struct {
+	*mobileAuthRepositoryFake
+	attempts int
+}
+
+func (r *transientSignupCompensationRepository) CompensatePreIdentityRegistration(ctx context.Context, id uuid.UUID, code string, version int64) error {
+	r.attempts++
+	if r.attempts <= 4 {
+		return errors.New("controlled persistence outage")
+	}
+	return r.mobileAuthRepositoryFake.CompensatePreIdentityRegistration(ctx, id, code, version)
+}
+
+func TestMobileSignupRetriesPersistingKnownNoDispatchProof(t *testing.T) {
+	repository := &transientSignupCompensationRepository{mobileAuthRepositoryFake: &mobileAuthRepositoryFake{}}
+	service := newMobileAuthForTest(t, repository, &smsProviderFake{}, &identityProvisionerFake{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := service.compensateKnownRegistrationDispatch(ctx, uuid.New(), signupCreateNotDispatched, 7); err != nil || repository.attempts != 5 {
+		t.Fatalf("expected the proof to persist after the transient outage, attempts=%d err=%v", repository.attempts, err)
 	}
 }
 

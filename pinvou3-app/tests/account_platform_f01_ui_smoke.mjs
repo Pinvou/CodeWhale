@@ -159,9 +159,14 @@ try {
     assert((await page.evaluate(() => new Set(globalThis.f01.smsCalls.map(call => JSON.stringify(call.command))).size)) === 1, 'all attempts retain the original command');
   });
   await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
-  const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=username]'); };
-  await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
+  const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=tel-national]'); };
+  const desktopPassword = async () => {
     await desktopGuest();
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.password));
+    await page.waitForSelector('.ap-login input[autocomplete=username]');
+  };
+  await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
+    await desktopPassword();
     await page.evaluate(() => { globalThis.f01.loginError = 'oidc_credentials_invalid: SYNTHETIC_PROVIDER_DETAIL'; });
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
     await page.click('form button:not([type=button])');
@@ -178,6 +183,32 @@ try {
     await waitText(await page.evaluate(() => globalThis.f01.copy().account.smsRateLimited));
     assert(await page.evaluate(() => [...document.querySelectorAll('.ap-login button')].some(button => button.disabled && /1\d\d/.test(button.textContent))), 'SMS rate limit did not disable its resend button');
   });
+  await caseRun('changing the SMS signup choice retires the original challenge and sends consent on the new one', async () => {
+    await desktopGuest();
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    const send = async () => {
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode));
+      await page.waitForSelector('[role=dialog]');
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    };
+    await send();
+    await page.type('input[autocomplete=one-time-code]', '000000');
+    await page.click('.ap-auth-signup-consent input');
+    assert(await page.$eval('.ap-auth-submit', node => node.disabled), 'changed consent reused the old SMS challenge');
+    const sendLabel = await page.evaluate(() => globalThis.f01.copy().account.sendCode);
+    await page.waitForFunction(label => [...document.querySelectorAll('.ap-auth-code button')].some(node => node.textContent === label && !node.disabled), {}, sendLabel);
+    await send();
+    assert(await page.evaluate(() => {
+      const sent = globalThis.f01.nativeCalls.filter(([method]) => method === 'sms');
+      return sent.length === 2 && !('signup_consent_version' in sent[0][1])
+        && sent[1][1].purpose === 'LOGIN' && sent[1][1].signup_consent_version === 'mobile-signup-v1';
+    }), 'consent was not scoped to the new SMS challenge');
+    await page.type('input[autocomplete=one-time-code]', '000000');
+    await page.click('.ap-auth-submit');
+    await waitText('account-a');
+    assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(([method]) => method === 'sms-login')), 'SMS login was not used');
+  });
   const fillRegistration = async () => {
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[autocomplete=tel-national]', '13800000000');
@@ -190,7 +221,7 @@ try {
     await fresh();
     await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
     await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); });
-    await page.waitForSelector('.ap-login input[autocomplete=username]');
+    await page.waitForSelector('.ap-login input[autocomplete=tel-national]');
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[autocomplete=tel-national]', '13800000000');
     const inputs = await page.$$('input[type=password]'); await inputs[0].type('ControlPassword9'); await inputs[1].type('ControlPassword9');
@@ -245,7 +276,7 @@ try {
   for (const language of ['zh','en','ja']) await caseRun(`${language}: reset prepares only after challenge and submits only original reference`, async () => {
     await fresh();await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
     await page.evaluate(() => {globalThis.f01.authenticated=false;globalThis.f01.render('desktop');});
-    await page.waitForSelector('.ap-login input[autocomplete=username]');
+    await page.waitForSelector('.ap-login input[autocomplete=tel-national]');
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.forgot));
     await page.type('input[autocomplete=tel-national]','13800000000');
     const inputs=await page.$$('input[type=password]');await inputs[0].type('ControlPassword9');await inputs[1].type('ControlPassword9');
@@ -268,7 +299,7 @@ try {
     assert(await page.evaluate(() => !document.body.textContent.includes(globalThis.f01.copy().account.requestFailed) && !document.querySelector('.ap-login [role=alert]') && globalThis.f01.nativeCalls.filter(call => call[0] === 'sms').length === 1), 'retired response contaminated current account');
   });
   await caseRun('typed passwords require an explicit reveal and blur hides without shifting submit', async () => {
-    await desktopGuest(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
+    await desktopPassword(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
     assert(await page.evaluate(() => document.querySelector('[data-password-reveal-output]').hidden), 'typed password automatically revealed');
     await page.click('[data-password-input] > button');
     await page.waitForFunction(() => !document.querySelector('[data-password-reveal-output]').hidden);
@@ -276,9 +307,9 @@ try {
     await page.click('form button:not([type=button])'); await waitText('account-a');
     assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'login')), 'reveal/blur prevented submission');
   });
-  await caseRun('desktop normal password login uses the explicit Native transport', async () => { await desktopGuest(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9'); await page.click('form button:not([type=button])'); await waitText('account-a'); assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'login')), 'login not sent'); });
+  await caseRun('desktop normal password login uses the explicit Native transport', async () => { await desktopPassword(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9'); await page.click('form button:not([type=button])'); await waitText('account-a'); assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'login')), 'login not sent'); });
   await caseRun('retired login completion cannot notify the host about the previous identity', async () => {
-    await desktopGuest(); await page.evaluate(() => { globalThis.f01.delayNextBalance = true; });
+    await desktopPassword(); await page.evaluate(() => { globalThis.f01.delayNextBalance = true; });
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9'); await page.click('form button:not([type=button])');
     await page.waitForFunction(() => typeof globalThis.f01.releaseBalance === 'function');
     await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b');

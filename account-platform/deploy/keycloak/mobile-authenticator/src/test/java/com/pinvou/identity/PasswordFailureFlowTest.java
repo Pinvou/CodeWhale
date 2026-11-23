@@ -318,12 +318,42 @@ final class PasswordFailureFlowTest {
         UserModel smsUser = mock(UserModel.class);
         when(smsUser.getId()).thenReturn("fixture-sms-user"); when(smsUser.isEnabled()).thenReturn(true);
         when(f.session.users().getUserById(f.realm, "fixture-sms-user")).thenReturn(smsUser);
-        when(f.client.verifySMS(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn("fixture-sms-user");
+        when(f.client.verifySMS(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(new PinvouAuthClient.SMSLogin("fixture-sms-user", false));
         f.notes.put("pinvou.browser.mobile", "+8613800000000");
         f.notes.put("pinvou.browser.sms_challenge", "fixture-challenge");
         f.form.putSingle("intent", "submit"); f.form.putSingle("mode", "sms"); f.form.putSingle("sms_code", "000000");
         f.attempt(true, true);
         assertSame(smsUser, f.authenticated.get()); f.assertFailures(1);
+    }
+
+    @Test void portalPromptLoginOffersSignupButRecentAuthenticationDoesNot() throws Exception {
+        Fixture f = new Fixture();
+        when(f.auth.getClientNote("prompt")).thenReturn("login");
+        f.form.putSingle("intent", "request_sms");
+        f.form.putSingle("mode", "sms");
+        f.form.putSingle("mobile", "13800000000");
+        f.form.putSingle("signup_consent", "on");
+        when(f.client.createCaptcha(anyString(), eq("LOGIN"), anyString(), anyString())).thenReturn(Map.of("captcha_id", "fixture"));
+        f.attempt(true);
+        assertEquals("mobile-signup-v1", f.notes.get("pinvou.browser.signup_consent"));
+        when(f.auth.getClientNote("max_age")).thenReturn("900");
+        f.attempt(true);
+        assertEquals("", f.notes.getOrDefault("pinvou.browser.signup_consent", ""));
+    }
+
+    @Test void changingSignupConsentRequiresANewChallenge() throws Exception {
+        Fixture f = new Fixture();
+        f.form.putSingle("mode", "sms");
+        f.form.putSingle("sms_code", "000000");
+        f.form.putSingle("signup_consent", "on");
+        f.notes.put("pinvou.browser.mobile", "+8613800000000");
+        f.notes.put("pinvou.browser.sms_challenge", "old-login-challenge");
+        f.notes.put("pinvou.browser.sms_sent", "true");
+        f.attempt(true);
+        assertEquals("pinvouMobileSignupConsentChanged", f.lastMessage);
+        assertFalse(f.notes.containsKey("pinvou.browser.sms_challenge"));
+        assertFalse(f.notes.containsKey("pinvou.browser.sms_sent"));
+        verifyNoInteractions(f.client);
     }
 
     @Test void newRegistrationAndResetSubmissionsClearOnlyFailedPasswordAttribution() throws Exception {

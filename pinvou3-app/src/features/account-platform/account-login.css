@@ -15,6 +15,8 @@
 .ap-login .ap-auth-form { display: grid; gap: 18px; }
 .ap-login .ap-auth-form label { display: grid; gap: 7px; min-width: 0; }
 .ap-login .ap-auth-form input { display: block; width: 100%; min-width: 0; }
+.ap-login .ap-auth-form .ap-auth-signup-consent { display: flex; align-items: flex-start; gap: 8px; }
+.ap-login .ap-auth-form .ap-auth-signup-consent input { width: auto; flex: none; }
 .ap-login .ap-password-input > button { min-height: 32px; height: 32px; width: 32px; top: 4px; right: 4px; transform: none; }
 .ap-login .ap-auth-form small, .ap-login .ap-auth-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--auth-muted); }
 .ap-login .ap-auth-code { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; }

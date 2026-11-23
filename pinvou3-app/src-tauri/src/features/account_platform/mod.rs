@@ -477,6 +477,8 @@ pub struct PortalOpenRequest {
 #[derive(Debug, Deserialize)]
 pub struct SMSRequest {
     #[serde(default)]
+    pub signup_consent_version: String,
+    #[serde(default)]
     pub password_preparation_token: String,
     pub username: String,
     pub mobile: String,
@@ -699,17 +701,18 @@ impl AccountPlatformState {
         if purpose != "REGISTER" && purpose != "LOGIN" && purpose != "PASSWORD_RESET" {
             return Err("mobile_auth_request_invalid: invalid SMS purpose".to_string());
         }
-        let mut result = self.public_account_request(
-            &config,
-            "v1/auth/sms/challenges",
-            serde_json::json!({
-                "username": input.username.trim(), "mobile": input.mobile.trim(),
-                "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
-                "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
-                "password_preparation_token": input.password_preparation_token,
-            }),
-        )
-        .await?;
+        let mut body = serde_json::json!({
+            "username": input.username.trim(), "mobile": input.mobile.trim(),
+            "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
+            "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
+            "password_preparation_token": input.password_preparation_token,
+        });
+        if !input.signup_consent_version.is_empty() {
+            body["signup_consent_version"] = input.signup_consent_version.into();
+        }
+        let mut result = self
+            .public_account_request(&config, "v1/auth/sms/challenges", body)
+            .await?;
         if purpose == "REGISTER" {
             let operation_id = result
                 .get("registration_operation_id")
@@ -1676,6 +1679,21 @@ fn classify_token_error(
         }
         (TokenFlow::Sms, Some("invalid_grant")) => {
             "mobile_auth_code_invalid: SMS code is invalid or expired".to_string()
+        }
+        (TokenFlow::Sms, Some("temporarily_unavailable"))
+            if oauth_description == Some("REGISTRATION_RECOVERING") =>
+        {
+            "mobile_auth_failed: REGISTRATION_RECOVERING".to_string()
+        }
+        (TokenFlow::Sms, Some("temporarily_unavailable"))
+            if oauth_description == Some("REGISTRATION_MANUAL_REVIEW_REQUIRED") =>
+        {
+            "mobile_auth_failed: REGISTRATION_MANUAL_REVIEW_REQUIRED".to_string()
+        }
+        (TokenFlow::Sms, Some("temporarily_unavailable"))
+            if status == StatusCode::SERVICE_UNAVAILABLE =>
+        {
+            "mobile_auth_failed: SMS_UNAVAILABLE".to_string()
         }
         (TokenFlow::Sms, Some("unauthorized_client")) => {
             "oidc_direct_grant_disabled: client configuration is invalid or in-app SMS sign-in is disabled"
@@ -3704,6 +3722,7 @@ mod tests {
         first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         state
             .send_sms(SMSRequest {
+                signup_consent_version: String::new(),
                 password_preparation_token: String::new(),
                 username: "public-b".into(),
                 mobile: "+8613800000000".into(),

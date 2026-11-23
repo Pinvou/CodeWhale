@@ -206,7 +206,8 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return false, fmt.Errorf("verify Aliyun SMS: %w", err)
+		// The transport error can embed the complete signed request URL.
+		return false, errors.New("Aliyun SMS verification transport failed")
 	}
 	defer response.Body.Close()
 	var body struct {

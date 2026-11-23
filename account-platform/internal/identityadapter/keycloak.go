@@ -150,21 +150,30 @@ func (p *KeycloakDirectory) Ping(ctx context.Context) error {
 func (p *KeycloakDirectory) CreateMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, password string) (string, error) {
 	access, err := p.accessToken(ctx)
 	if err != nil {
+		if password == "" {
+			return "", ErrCreateNotDispatched
+		}
 		return "", err
 	}
-	body, _ := json.Marshal(map[string]any{
+	user := map[string]any{
 		"username": username, "enabled": true,
 		"attributes": map[string][]string{
 			"phone_number": {mobile}, "phone_number_verified": {"true"},
 			"pinvou_registration_operation_id": {operationID.String()},
 		},
-		"credentials": []map[string]any{{"type": "password", "value": password, "temporary": false}},
-	})
+	}
+	if password != "" {
+		user["credentials"] = []map[string]any{{"type": "password", "value": password, "temporary": false}}
+	}
+	body, _ := json.Marshal(user)
 	endpoint := *p.adminURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/admin/realms/" + url.PathEscape(p.realm) + "/users"
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+access)
 	request.Header.Set("Content-Type", "application/json")
+	if password == "" && ctx.Err() != nil {
+		return "", ErrCreateNotDispatched
+	}
 	response, err := p.client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("create Keycloak user: %w", err)

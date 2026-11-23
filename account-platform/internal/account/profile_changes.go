@@ -656,7 +656,12 @@ func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal 
 		}
 	} else {
 		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE mobile_e164=$1 AND status<>'DELETED')`, value).Scan(&exists); err != nil {
+		if err := lockRegistrationMobile(ctx, tx, value); err != nil {
+			return ProfileChange{}, err
+		}
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE mobile_e164=$1 AND status<>'DELETED')
+OR EXISTS(SELECT 1 FROM registration_operations WHERE mobile_e164=$1 AND signup_consent_version IS NOT NULL AND committed_user_id IS NULL
+ AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','REPAIR_REQUIRED','COMPENSATION_PENDING'))`, value).Scan(&exists); err != nil {
 			return ProfileChange{}, err
 		}
 		if exists {
