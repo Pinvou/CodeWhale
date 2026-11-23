@@ -278,6 +278,7 @@ impl RunLog {
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            dismissed: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
             retained_native: Mutex::new(false),
             finished_at_epoch: Mutex::new(None),
@@ -306,6 +307,7 @@ impl RunLog {
             docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
+            dismissed: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
             retained_native: Mutex::new(false),
             finished_at_epoch: Mutex::new(None),
@@ -3652,7 +3654,12 @@ mod tests {
         while log.outcome.lock().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        let outcome = log.outcome.lock().clone();
+        assert!(
+            outcome.as_ref().is_some_and(Result::is_ok),
+            "enable outcome: {outcome:?}; log tail: {:?}",
+            log.lines.lock()
+        );
         let observations = observed.lock();
         assert!(
             observations

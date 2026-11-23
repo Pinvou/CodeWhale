@@ -83,12 +83,12 @@ pub mod weight_identity;
 pub use lan_store::{lan_status, revoke_api_key, set_lan_sharing};
 pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, check_card_update,
-    create_api_key, delete_engine, dismiss_incomplete, export_run_log, follow_deployment_context, force_remove,
-    installed_engines, library, list_cards, local_resources, memory_admission, model_detail,
-    preview_incomplete, remove_orphan, retry_incomplete, reveal_run_logs_dir, run_log, run_startup_cleanup,
-    run_startup_linked_sync, scan_orphans, set_storage_settings, start_card_scripts, start_card_update,
-    start_deploy, start_download, start_lifecycle, start_version_action, startup_update_check,
-    storage_settings, take_startup_cleanup, versions,
+    create_api_key, delete_engine, dismiss_incomplete, export_run_log, follow_deployment_context,
+    force_remove, installed_engines, library, list_cards, local_resources, memory_admission,
+    model_detail, preview_incomplete, remove_orphan, retry_incomplete, reveal_run_logs_dir,
+    run_log, run_startup_cleanup, run_startup_linked_sync, scan_orphans, set_storage_settings,
+    start_card_scripts, start_card_update, start_deploy, start_download, start_lifecycle,
+    start_version_action, startup_update_check, storage_settings, take_startup_cleanup, versions,
 };
 
 // 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`
