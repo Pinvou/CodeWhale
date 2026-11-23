@@ -4057,6 +4057,145 @@ async fn late_report_after_failure_settlement_is_written_through_and_survives_re
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// (review 6020048780: a failed settled write-through dropped the record to
+/// the journal fallback, which the retirement flush never drains) A settled
+/// write that fails transiently must keep the appended record in the same
+/// retryable stage the batched writer uses: the sink acknowledges it, no
+/// journal fallback fires, and the sink's retirement flush persists it once
+/// storage recovers — pinned end-to-end through the production delivery
+/// path, a blocked turn file, and the retirement hook.
+#[tokio::test]
+async fn transient_settled_write_failure_is_retryable_at_sink_retirement() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn(
+        "thr_mf_retry",
+        "turn_mf_retry",
+        RuntimeTurnStatus::InProgress,
+    );
+    let item = sample_item(
+        "thr_mf_retry",
+        "item_mf_retry",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block writes to the turns directory while reads stay healthy: the
+    // settled write-through save fails transiently (the atomic write cannot
+    // create its temp file), but `load_turn` keeps serving the record.
+    let turns_dir = manager.store.turns_dir.clone();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let read_only = std::fs::metadata(&turns_dir)
+            .expect("stat the turns dir")
+            .permissions();
+        std::fs::set_permissions(
+            &turns_dir,
+            std::fs::Permissions::from_mode(read_only.mode() & 0o555),
+        )
+        .expect("read-only the turns dir");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late detached child's report lands while the write fails: the sink
+    // must still acknowledge it (retryably held by the store), not send it
+    // to the in-memory journal fallback.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:retry-after-failed-write",
+        &route,
+        &Usage {
+            input_tokens: 23,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.routed_usage_staged.lock().is_empty(),
+        "a record whose settled write failed must stay in the retryable stage"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the record, so no journal fallback may exist"
+    );
+
+    // Storage recovers; the last lease drops and the sink's retirement is
+    // the durable final-owner boundary: its flush must persist the record.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turns_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the turns dir permissions");
+    }
+    drop(lease);
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the retirement flush must drain the retryable stage"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the retirement flush must not fall back to the journal"
+    );
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 23);
+    assert_eq!(
+        from_disk.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:retry-after-failed-write"
+        )],
+        "the retryable record must be durable across a fresh store open"
+    );
+    // Exactly-once: a re-delivery of the same source id is a no-op.
+    let duplicate = crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek-primary",
+            "deepseek-v4-flash",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            Utc::now(),
+        ),
+        usage: Usage {
+            input_tokens: 23,
+            ..Usage::default()
+        },
+    };
+    let re_acked = reopened
+        .append_routed_usage_staged(&turn.id, "sink:retry-after-failed-write", duplicate)
+        .expect("duplicate delivery after recovery");
+    assert!(
+        !re_acked,
+        "the source fingerprint dedupe must survive the retryable path"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites

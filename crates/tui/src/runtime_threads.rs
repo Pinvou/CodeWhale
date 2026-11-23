@@ -1567,7 +1567,34 @@ impl RuntimeThreadStore {
             if !append_routed_usage_record(&mut turn, source_id, usage) {
                 return Ok(false);
             }
-            return self.save_turn(&turn).map(|_| true);
+            if self.save_turn(&turn).is_ok() {
+                return Ok(true);
+            }
+            // Transient settled write failure: hold the appended record in
+            // the same retryable stage the batched writer uses instead of
+            // dropping it — the caller would only fall back to the
+            // in-memory journal, which the retirement flush never drains
+            // (review 6020048780), so the record was lost unless storage
+            // recovered before some unrelated save rewrote the turn.
+            // `load_turn` serves the staged form, so the next write-through,
+            // batch append, or settlement save persists it; the retirement
+            // flush retries it a bounded number of times. A second failure
+            // keeps the entry resident (save_turn clears the stage only on
+            // success), and the staged form deduplicates by source
+            // fingerprint like every other stage entry.
+            {
+                let mut staged = self.routed_usage_staged.lock();
+                match staged.get_mut(turn_id) {
+                    Some(entry) => {
+                        entry.turn = turn;
+                        entry.pending += 1;
+                    }
+                    None => {
+                        staged.insert(turn_id.to_string(), StagedRoutedUsage { turn, pending: 1 });
+                    }
+                }
+            }
+            return Ok(true);
         }
         // Fast path: extend the staged turn in place, keeping the staged form
         // visible to `load_turn` readers for the whole critical section.
