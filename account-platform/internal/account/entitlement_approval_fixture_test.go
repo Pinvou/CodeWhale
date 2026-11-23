@@ -32,7 +32,12 @@ func newEntitlementApprovalFixtureWithRelayConstructor(t *testing.T, ctx context
 	t.Helper()
 	t.Setenv("PINVOU_TEST_ACCOUNT_DATABASE_URL", raw)
 	f := retainedWalletFenceActors(t)
-	repository := f.repository(t)
+	return f.entitlementApprovalRepository(t, ctx, raw, 0, constructRelay)
+}
+
+func (f *retainedWalletFenceFixture) entitlementApprovalRepository(t *testing.T, ctx context.Context, raw string, migrationVersion int64, constructRelay func(context.Context, string) (*ApprovalRelayStore, error)) (*PostgresRepository, *pgx.Conn, *ApprovalRelayStore, string) {
+	t.Helper()
+	repository := f.repositoryThroughVersion(t, migrationVersion, nil)
 	repository.approvalPresenterReady = approvalPolicyPresenterReady
 	config := repository.pool.Config().ConnConfig.Copy()
 	config.User = "account_migrator"
