@@ -485,7 +485,7 @@ export const dictZh = {
           orphansDeleteConfirmTitle:'永久删除这个目录？',
           orphansDeleteConfirmHint:'将不可恢复地删除整个目录。请确认其中没有自定义模型、其他账号或程序仍使用的文件；列表只核查当前账号的已登记范围，不能证明任意脚本或其他配置没有引用。',
           orphansDeleted:(size)=>`已删除，释放 ${size}。`,
-          orphanErrors:{orphan_library_ownership_unresolved:'库记录的权重范围无法确认，此根的残留清理已暂停。请保留文件；下载和重试仍可使用。',orphan_directory_other_user:'目录属于其他系统账号，已拒绝删除。请为各账号使用独立的权重目录。',orphan_resources_busy:'模型文件正在使用或暂时不可用，请待其他操作结束后重试。',orphan_scan_unavailable:'无法读取权重目录，请检查存储设置。',orphan_directory_owned:'这个目录属于模型库或进行中的任务，已拒绝删除。',orphan_activity_unresolved:'安装活动或任务记录无法核实，删除已暂停。请核对下载任务的卡片和运行 ID；委托失联时恢复原设备和连接，不要手删交接记录。',orphan_path_unsafe:'路径不安全或不是权重目录下的直接子目录，已拒绝。',orphan_remove_failed:'删除失败，请检查文件权限后重试。'},
+          orphanErrors:{orphan_directory_mounted:'目录包含挂载点，已拒绝清理。请先核对挂载用途，安全卸载后重新扫描。',orphan_mount_state_unavailable:'无法核实当前挂载状态，残留清理已暂停。请保留文件并检查挂载配置。',orphan_library_ownership_unresolved:'库记录的权重范围无法确认，此根的残留清理已暂停。请保留文件；下载和重试仍可使用。',orphan_directory_other_user:'目录属于其他系统账号，已拒绝删除。请为各账号使用独立的权重目录。',orphan_resources_busy:'模型文件正在清理或使用中，或暂时不可用。请待当前操作结束后重试。',orphan_scan_unavailable:'无法读取权重目录，请检查存储设置。',orphan_directory_owned:'这个目录属于模型库或进行中的任务，已拒绝删除。',orphan_activity_unresolved:'安装活动或任务记录无法核实，删除已暂停。请核对下载任务的卡片和运行 ID；委托失联时恢复原设备和连接，不要手删交接记录。',orphan_path_unsafe:'路径不安全或不是权重目录下的直接子目录，已拒绝。',orphan_remove_failed:'删除失败，请检查文件权限后重试。'},
           statusAvailable:'可下载',
           linkRowRemoved:(name,n)=>`已同时从品悟的模型列表移除「${name}」的 ${n} 条配置`,
           linkRowStale:(name,e)=>`「${name}」已卸载，但品悟模型列表里那一条没能移除（${e}）。它现在已经不可用，请到设置里手动删除或改用其它模型。`,

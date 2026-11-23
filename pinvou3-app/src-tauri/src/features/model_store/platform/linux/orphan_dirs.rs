@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 
 use super::{config, db};
 
+mod mounts;
+
 /// 单次列举的目录数上限。扫描由「扫描」按钮显式触发，不该变成一次无限时的
 /// 全盘枚举；真攒到这个量级说明有别的问题，先截断并如实报告 partial。
 const MAX_ENTRIES: usize = 512;
@@ -369,6 +371,14 @@ fn scan_for_user(
     service: Option<&super::service::ModelStoreService>,
     owner_uid: u32,
 ) -> Result<Value, String> {
+    scan_with_mounts(service, owner_uid, mounts::Mounts::read)
+}
+
+fn scan_with_mounts(
+    service: Option<&super::service::ModelStoreService>,
+    owner_uid: u32,
+    read_mounts: impl FnOnce() -> Result<mounts::Mounts, String>,
+) -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
     let blocked = blocked_dirs(service, &models_dir)?;
@@ -384,6 +394,9 @@ fn scan_for_user(
     let mut entries = Vec::new();
     let mut partial = false;
     let read = std::fs::read_dir(&models_dir).map_err(|_| "orphan_scan_unavailable".to_string())?;
+    let canonical_root =
+        std::fs::canonicalize(&models_dir).map_err(|_| "orphan_scan_unavailable".to_string())?;
+    let mounts = read_mounts()?;
     for entry in read {
         let Ok(entry) = entry else {
             partial = true;
@@ -422,6 +435,12 @@ fn scan_for_user(
             continue;
         }
         if blocked.contains(&path) {
+            continue;
+        }
+        // Includes same-filesystem bind mounts and mounts deeper in the tree.
+        // Do not traverse them for sizing or offer their parent for deletion.
+        if mounts.intersects(&canonical_root.join(name)) {
+            partial = true;
             continue;
         }
         if entries.len() >= MAX_ENTRIES {
@@ -467,6 +486,26 @@ fn remove_for_user_with_recheck(
     path_text: &str,
     owner_uid: u32,
     before_recheck: impl FnOnce(),
+) -> Result<Value, String> {
+    remove_with_io(
+        service,
+        path_text,
+        owner_uid,
+        before_recheck,
+        mounts::Mounts::read,
+        |path| std::fs::remove_dir_all(path),
+    )
+}
+
+// Keep fault injection at the I/O boundaries; tests run the same ownership,
+// exclusion and final identity checks as the public removal command.
+fn remove_with_io(
+    service: Option<&super::service::ModelStoreService>,
+    path_text: &str,
+    owner_uid: u32,
+    before_recheck: impl FnOnce(),
+    mut read_mounts: impl FnMut() -> Result<mounts::Mounts, String>,
+    remove_dir: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<Value, String> {
     let settings = config::load_settings();
     let models_dir = settings.models_path();
@@ -522,6 +561,12 @@ fn remove_for_user_with_recheck(
     //    回执已损坏/丢失，也不能跳过仍在写权重的脚本进程。
     super::orphans::ensure_host_quiet()?;
 
+    let canonical_target =
+        std::fs::canonicalize(&target).map_err(|_| "orphan_path_unsafe".to_string())?;
+    if read_mounts()?.intersects(&canonical_target) {
+        return Err("orphan_directory_mounted".into());
+    }
+
     // Keep measurement inside the exclusion window: supported resource writers
     // cannot change the tree between ownership validation and unlink. A cold
     // tree with many small files can hold this lock for minutes or hours; other
@@ -542,7 +587,12 @@ fn remove_for_user_with_recheck(
     {
         return Err("orphan_path_unsafe".into());
     }
-    std::fs::remove_dir_all(&target).map_err(|error| format!("orphan_remove_failed: {error}"))?;
+    // Measuring can take hours. Re-read this thread's mount namespace at the
+    // last check, rather than trusting the scan or the pre-measurement snapshot.
+    if read_mounts()?.intersects(&canonical_target) {
+        return Err("orphan_directory_mounted".into());
+    }
+    remove_dir(&target).map_err(|error| format!("orphan_remove_failed: {error}"))?;
     Ok(json!({ "freedBytes": bytes }))
 }
 
@@ -609,6 +659,119 @@ mod tests {
         } else {
             db::add_store_model(params).unwrap();
         }
+    }
+
+    fn mounts_at(paths: &[&Path]) -> mounts::Mounts {
+        use std::os::unix::ffi::OsStrExt;
+        let mut table = b"1 1 8:1 / / rw - ext4 none rw\n".to_vec();
+        for (index, path) in paths.iter().enumerate() {
+            table.extend_from_slice(format!("{} 1 8:1 /source ", index + 2).as_bytes());
+            for byte in path.as_os_str().as_bytes() {
+                match byte {
+                    b' ' => table.extend_from_slice(b"\\040"),
+                    b'\t' => table.extend_from_slice(b"\\011"),
+                    b'\n' => table.extend_from_slice(b"\\012"),
+                    b'\\' => table.extend_from_slice(b"\\134"),
+                    byte => table.push(*byte),
+                }
+            }
+            table.extend_from_slice(b" rw - ext4 none rw\n");
+        }
+        mounts::Mounts::parse(&table).unwrap()
+    }
+
+    #[test]
+    fn scan_excludes_mounted_candidates_and_parents_of_nested_mounts() {
+        let _home = config::TempHome::new();
+        let (ordinary, _) = seed_models_dir();
+        seed_record("owned-model");
+        let root = std::fs::canonicalize(config::load_settings().models_path()).unwrap();
+        let mounted = root.join("bound weights");
+        let nested = root.join("nested weights");
+        std::fs::create_dir_all(&mounted).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let report = scan_with_mounts(None, unsafe { libc::geteuid() }, || {
+            Ok(mounts_at(&[&mounted, &nested.join("weights.bin")]))
+        })
+        .unwrap();
+        assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(report["entries"][0]["path"], ordinary.to_str().unwrap());
+        assert_eq!(report["partial"], true);
+    }
+
+    #[test]
+    fn mount_guard_checks_before_measurement_and_again_before_unlink() {
+        for already_mounted in [true, false] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let (candidate, _) = seed_models_dir();
+            let canonical = std::fs::canonicalize(&candidate).unwrap();
+            let mut reads = 0;
+            let error = remove_with_io(
+                None,
+                candidate.to_str().unwrap(),
+                unsafe { libc::geteuid() },
+                || {},
+                || {
+                    reads += 1;
+                    Ok(if already_mounted || reads == 2 {
+                        // A nested file bind keeps the candidate's dev+ino unchanged.
+                        mounts_at(&[&canonical.join("config.json")])
+                    } else {
+                        mounts_at(&[])
+                    })
+                },
+                |_| panic!("a mounted tree must never reach recursive removal"),
+            )
+            .unwrap_err();
+            assert_eq!(error, "orphan_directory_mounted");
+            assert_eq!(reads, if already_mounted { 1 } else { 2 });
+            assert_eq!(std::fs::read(candidate.join("config.json")).unwrap(), b"{}");
+        }
+    }
+
+    #[test]
+    fn unconfirmed_mount_state_refuses_scan_and_removal_without_touching_files() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (candidate, _) = seed_models_dir();
+        let unavailable = || Err("orphan_mount_state_unavailable".into());
+        assert_eq!(
+            scan_with_mounts(None, unsafe { libc::geteuid() }, unavailable).unwrap_err(),
+            "orphan_mount_state_unavailable"
+        );
+        assert_eq!(
+            remove_with_io(
+                None,
+                candidate.to_str().unwrap(),
+                unsafe { libc::geteuid() },
+                || {},
+                unavailable,
+                |_| panic!("unconfirmed mount state must not authorize removal"),
+            )
+            .unwrap_err(),
+            "orphan_mount_state_unavailable"
+        );
+        assert!(candidate.join("config.json").exists());
+    }
+
+    #[test]
+    fn recursive_removal_failure_is_reported_without_claiming_freed_bytes() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let (candidate, _) = seed_models_dir();
+        let error = remove_with_io(
+            None,
+            candidate.to_str().unwrap(),
+            unsafe { libc::geteuid() },
+            || {},
+            mounts::Mounts::read,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("orphan_remove_failed: "), "{error}");
+        assert!(error.contains("permission denied"), "{error}");
+        assert!(candidate.join("config.json").exists());
     }
 
     fn seed_version(

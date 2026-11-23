@@ -97,7 +97,7 @@ test('orphan copy exists in all three languages and promises irreversibility', (
       assert.ok(text.includes(key), `${key} 缺失`);
     }
     // 后端拒绝码必须都有人话对应，缺一个界面上就裸奔错误码。
-    for (const code of ['orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_directory_other_user', 'orphan_activity_unresolved', 'orphan_library_ownership_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
+    for (const code of ['orphan_directory_mounted', 'orphan_mount_state_unavailable', 'orphan_scan_unavailable', 'orphan_directory_owned', 'orphan_directory_other_user', 'orphan_activity_unresolved', 'orphan_library_ownership_unresolved', 'orphan_path_unsafe', 'orphan_remove_failed', 'orphan_resources_busy']) {
       assert.ok(text.includes(`${code}:`), `orphanErrors.${code} 缺失`);
     }
   }

@@ -5708,6 +5708,47 @@ mod incomplete_dismiss_tests {
     use super::*;
 
     #[test]
+    fn dismissal_survives_service_restore_and_retirement_checkpoint_rewrite() {
+        for kind in ["download", "install_local"] {
+            let _home = config::TempHome::new();
+            db::init_db().unwrap();
+            let retained = config::data_dir().join("retained-weights");
+            std::fs::write(&retained, b"keep downloaded bytes").unwrap();
+            {
+                let service = ModelStoreService::new();
+                let log = service.new_run("discarded", "retry-card", kind).unwrap();
+                log.finish(Err("original failure".into()), false);
+                dismiss_incomplete_local(&service, "discarded").unwrap();
+            }
+            let restarted = ModelStoreService::new();
+            restarted.restore_runs().unwrap();
+            assert!(
+                super::super::incomplete::summaries(&restarted.active)
+                    .unwrap()
+                    .is_empty()
+            );
+            // retire_host checkpoints these restored in-memory logs. Checking
+            // the panel only before this write misses a lost dismissed flag.
+            restarted
+                .run("discarded")
+                .unwrap()
+                .persist_result()
+                .unwrap();
+            let saved: Value = serde_json::from_slice(
+                &std::fs::read(config::data_dir().join("runs/discarded.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["dismissed"], true);
+            assert!(
+                super::super::incomplete::summaries(&restarted.active)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&retained).unwrap(), b"keep downloaded bytes");
+        }
+    }
+
+    #[test]
     fn accepted_or_unconfirmed_parent_prevents_dismissal_before_receiver_start() {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
