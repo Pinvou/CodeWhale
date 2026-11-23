@@ -1041,6 +1041,14 @@ struct StagedRoutedUsage {
     pending: usize,
 }
 
+/// One routed-usage record accepted while its settled turn could not be
+/// read; parked for retry by [`RuntimeThreadStore::settled_pending`].
+#[derive(Debug)]
+struct PendingRoutedUsage {
+    source_id: String,
+    usage: EffectiveRouteUsage,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeThreadStore {
     threads_dir: PathBuf,
@@ -1086,6 +1094,18 @@ pub struct RuntimeThreadStore {
     /// marker exists to keep LATE records durable within a live process;
     /// after a restart nothing is staged and a fresh settlement re-marks.
     settled_turns: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    /// Routed-usage records accepted while a settled turn could not even be
+    /// read (transient storage failure at read time). They carry the same
+    /// retry ownership as failed writes (review 6024797269): the sink is
+    /// acknowledged, so no journal fallback fires, and the next successful
+    /// read — a later append or the retirement flush — merges them into the
+    /// turn and persists them. In-memory only, safe for the same reason as
+    /// [`Self::settled_turns`]: within a live process the queue keeps the
+    /// records durable across storage recovery, and after a restart the
+    /// records were never persisted anywhere, so there is no acked record a
+    /// fresh process could still owe. Shared across store clones like
+    /// [`Self::routed_usage_staged`].
+    settled_pending: Arc<parking_lot::Mutex<HashMap<String, Vec<PendingRoutedUsage>>>>,
     /// Serializes envelope claim/state transitions. The durable envelope is
     /// the queue; this guard prevents concurrent replay/wake requests from
     /// starting more than one turn for the same message.
@@ -1150,6 +1170,7 @@ impl RuntimeThreadStore {
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
             routed_usage_staged: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             settled_turns: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
+            settled_pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
             #[cfg(test)]
             turn_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1517,14 +1538,64 @@ impl RuntimeThreadStore {
     /// source fingerprints (review 5926566445).
     pub fn flush_routed_usage_staged(&self, turn_id: &str) -> Result<()> {
         let _turn_mutation = self.turn_mutation.lock();
-        let turn = {
+        // Records accepted while the settled turn could not be read carry
+        // the same retry ownership as failed writes (review 6024797269):
+        // drain them here so the retirement boundary persists them even
+        // when no later append runs.
+        let pending = self.settled_pending.lock().remove(turn_id);
+        let mut turn = {
             let staged = self.routed_usage_staged.lock();
             staged.get(turn_id).map(|entry| entry.turn.clone())
         };
+        let mut merged_pending = false;
+        if turn.is_none() {
+            if let Some(records) = pending {
+                match self.load_turn(turn_id) {
+                    Ok(mut loaded) => {
+                        for record in records {
+                            append_routed_usage_record(
+                                &mut loaded,
+                                &record.source_id,
+                                record.usage,
+                            );
+                        }
+                        turn = Some(loaded);
+                        merged_pending = true;
+                    }
+                    Err(err) => {
+                        // Still unreadable: restore retry ownership before
+                        // surfacing the failure (the retirement hook
+                        // retries a bounded number of times).
+                        self.settled_pending
+                            .lock()
+                            .insert(turn_id.to_string(), records);
+                        return Err(err);
+                    }
+                }
+            }
+        } else if let Some(records) = pending {
+            if let Some(turn) = turn.as_mut() {
+                for record in records {
+                    append_routed_usage_record(turn, &record.source_id, record.usage);
+                }
+                merged_pending = true;
+            }
+        }
         let Some(turn) = turn else {
             return Ok(());
         };
-        write_json_atomic(&self.turn_path(&turn.id)?, &turn)?;
+        if let Err(err) = write_json_atomic(&self.turn_path(&turn.id)?, &turn) {
+            // A failed write must not strand merged pending records when no
+            // resident stage entry holds them; the staged form keeps them
+            // retryable (the next flush or append retries it).
+            if merged_pending {
+                let mut staged = self.routed_usage_staged.lock();
+                staged
+                    .entry(turn_id.to_string())
+                    .or_insert(StagedRoutedUsage { turn, pending: 1 });
+            }
+            return Err(err);
+        }
         self.routed_usage_staged.lock().remove(turn_id);
         Ok(())
     }
@@ -1536,6 +1607,21 @@ impl RuntimeThreadStore {
     pub(crate) fn mark_turn_settled(&self, turn_id: &str) {
         self.routed_usage_staged.lock().remove(turn_id);
         self.settled_turns.lock().insert(turn_id.to_string());
+    }
+
+    /// Merge any records parked by a failed settled read
+    /// ([`Self::settled_pending`]) into `turn`, returning whether anything
+    /// new was appended. Called once the turn reads successfully again; the
+    /// persisted source fingerprints keep the merge exactly-once.
+    fn drain_settled_pending_into(&self, turn_id: &str, turn: &mut TurnRecord) -> bool {
+        let pending = self.settled_pending.lock().remove(turn_id);
+        let mut appended = false;
+        if let Some(pending) = pending {
+            for record in pending {
+                appended |= append_routed_usage_record(turn, &record.source_id, record.usage);
+            }
+        }
+        appended
     }
 
     /// Deliver one routed-usage record for `turn_id`. Appends stage in memory
@@ -1563,8 +1649,34 @@ impl RuntimeThreadStore {
         // can still be held across exit, and neither the stage map nor any
         // static runs Drops at process end).
         if self.settled_turns.lock().contains(turn_id) {
-            let mut turn = self.load_turn(turn_id)?;
-            if !append_routed_usage_record(&mut turn, source_id, usage) {
+            let mut turn = match self.load_turn(turn_id) {
+                Ok(turn) => turn,
+                Err(_err) => {
+                    // Transient read failure (review 6024797269): the sink
+                    // would only fall back to the in-memory journal, which
+                    // terminal settlement already drained and the retirement
+                    // flush never reads — hold the accepted record in the
+                    // pending queue instead. The next successful read (a
+                    // later append or the retirement flush) merges it into
+                    // the turn and persists it. A duplicate source id is a
+                    // no-op, exactly like the persisted-path dedupe.
+                    let mut pending = self.settled_pending.lock();
+                    let queue = pending.entry(turn_id.to_string()).or_default();
+                    if queue.iter().any(|record| record.source_id == source_id) {
+                        return Ok(false);
+                    }
+                    queue.push(PendingRoutedUsage {
+                        source_id: source_id.to_string(),
+                        usage,
+                    });
+                    return Ok(true);
+                }
+            };
+            let mut newly = self.drain_settled_pending_into(turn_id, &mut turn);
+            if append_routed_usage_record(&mut turn, source_id, usage) {
+                newly = true;
+            }
+            if !newly {
                 return Ok(false);
             }
             if self.save_turn(&turn).is_ok() {
@@ -1636,6 +1748,7 @@ impl RuntimeThreadStore {
         // and `load_turn` would serve that phantom record until process end.
         let _turn_mutation = self.turn_mutation.lock();
         self.routed_usage_staged.lock().remove(turn_id);
+        self.settled_pending.lock().remove(turn_id);
         remove_file_if_exists(&self.turn_path(turn_id)?)
     }
 

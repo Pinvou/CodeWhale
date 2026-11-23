@@ -4201,6 +4201,164 @@ async fn transient_settled_write_failure_is_retryable_at_sink_retirement() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// (review 6024797269: the settled branch's initial read could also lose the
+/// record — a failed load returned before any stage entry existed, the sink
+/// fell back to the in-memory journal, and the retirement flush only reads
+/// the stage) A settled append whose LOAD fails transiently must park the
+/// accepted record in the retryable pending queue: the sink acknowledges it,
+/// no journal fallback fires, and once storage recovers the sink's
+/// retirement flush merges it into the turn and persists it. End-to-end
+/// through production paths: failure settlement, a late report through the
+/// real sink while the turn file is unreadable, recovery, then the last
+/// lease drop.
+#[cfg(unix)]
+#[tokio::test]
+async fn transient_settled_read_failure_is_retryable_at_sink_retirement() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn(
+        "thr_mf_readfail",
+        "turn_mf_readfail",
+        RuntimeTurnStatus::InProgress,
+    );
+    let item = sample_item(
+        "thr_mf_readfail",
+        "item_mf_readfail",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block reads of the turn file only: the settled append's initial load
+    // fails transiently, while atomic writes to the directory stay healthy
+    // (the recovery below is a plain permission restore, so the retirement
+    // flush's own write cannot fail).
+    let turn_path = manager.store.turns_dir.join(format!("{}.json", turn.id));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable the turn file");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late detached child's report lands while the read fails: the sink
+    // must acknowledge it into the retryable pending queue, not the journal.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:retry-after-failed-read",
+        &route,
+        &Usage {
+            input_tokens: 31,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "a record whose settled read failed must park in the pending queue"
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the write-side stage must stay clear on a read failure"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the record, so no journal fallback may exist"
+    );
+    // A duplicate source id while still parked is a no-op.
+    let before = manager.store.settled_pending.lock().len();
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:retry-after-failed-read",
+        &route,
+        &Usage {
+            input_tokens: 31,
+            ..Usage::default()
+        },
+    );
+    assert_eq!(
+        manager.store.settled_pending.lock().len(),
+        before,
+        "a duplicate delivery while parked must not queue a second record"
+    );
+
+    // Storage recovers; the last lease drops and the sink's retirement is
+    // the durable final-owner boundary: its flush must merge the parked
+    // record into the turn and persist it.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the turn file permissions");
+    }
+    drop(lease);
+    assert!(
+        manager.store.settled_pending.lock().is_empty(),
+        "the retirement flush must drain the pending queue"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the retirement flush must not fall back to the journal"
+    );
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 31);
+    assert_eq!(
+        from_disk.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:retry-after-failed-read"
+        )],
+        "the parked record must be durable across a fresh store open"
+    );
+    // Exactly-once after recovery: a re-delivery of the same source id is a
+    // no-op.
+    let duplicate = crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek-primary",
+            "deepseek-v4-flash",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            Utc::now(),
+        ),
+        usage: Usage {
+            input_tokens: 31,
+            ..Usage::default()
+        },
+    };
+    let re_acked = reopened
+        .append_routed_usage_staged(&turn.id, "sink:retry-after-failed-read", duplicate)
+        .expect("duplicate delivery after recovery");
+    assert!(
+        !re_acked,
+        "the source fingerprint dedupe must cover the parked path"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
