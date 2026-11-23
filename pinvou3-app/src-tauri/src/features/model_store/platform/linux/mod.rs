@@ -26,7 +26,9 @@
 //!
 //! 相对 LMM **刻意没有搬**的：`admin.rs`（上游 919 行，本地 HTTP 管理接口——那是 sidecar
 //! 形态的产物，原生实现后前端直接走 Tauri 命令）、`updater.rs`（LMM 自己的 OTA，
-//! 品悟有自己的更新机制）、`worker.rs` / `system_probe.rs`（双机从机控制、硬件探测）。
+//! 品悟有自己的更新机制）、`system_probe.rs`（硬件探测）。
+//! `worker.rs`（双机从机控制）**已搬入**——下方 `pub mod worker;`，round-3 P3
+//! 勘误：本行此前仍把它列在「没有搬」清单里，与本文件自己的模块声明矛盾。
 //! LAN 共享由本模块自己的窄代理实现，不复用 sidecar 管理接口。
 
 pub mod background;
@@ -77,6 +79,7 @@ pub mod startup_updates;
 pub mod store_client;
 pub mod version_store;
 pub mod weight_identity;
+pub mod worker;
 
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。

@@ -27,6 +27,25 @@ pub(crate) use linux as backend;
 #[cfg(not(target_os = "linux"))]
 pub(crate) use unsupported as backend;
 
+/// `pinvou3-tauri model-store-worker <子命令>...` 的分发入口。
+///
+/// 双机卡片脚本经 `$LMM_WORKER` 调用（见 `linux::worker` 的 USAGE）。必须在
+/// 任何 GUI/TLS/异步运行时初始化**之前**分流——它跑在卡片脚本的 pty 里，
+/// 秒进秒出；lib.rs 的 `run()` 一进来就调这里。cfg 收在本文件（架构守卫
+/// 只放行 /platform/ 下的平台条件编译）。
+pub fn worker_cli(args: &[String]) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        linux::worker::cli(args)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = args;
+        eprintln!("ERROR: 双机从机控制仅在 Linux 上可用");
+        2
+    }
+}
+
 /// This entry runs before creating any WebView or single-instance GUI lock.
 pub fn run_background() -> Result<(), String> {
     #[cfg(target_os = "linux")]

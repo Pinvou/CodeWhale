@@ -1405,17 +1405,17 @@ impl ModelManager {
             "LMM_SOURCE_FILENAME".into(),
             rec.source_filename.clone().unwrap_or_default(),
         );
-        // 双机卡片（主机 + 从机）要靠 `$LMM_WORKER` 这个命令行工具去操作从机。
-        //
-        // **一期没有搬从机控制**（LMM 的 `core/worker.rs`，941 行，排在三期）。这里
-        // 刻意不注入 `LMM_WORKER`：注入一个指向不存在的程序的路径，脚本只会拿到一句
-        // "No such file or directory"，那句话不会告诉任何人发生了什么。不注入的话，
-        // 脚本会在真正要动从机那一步以它自己的话失败。
+        // 双机卡片（主机 + 从机）要靠 `$LMM_WORKER` 这个命令行工具去操作从机
+        // （连从机、投公钥、推文件、测直连网口——见 platform/linux/worker.rs，
+        // 2026-10-27 自 LMM 移植）。注入的是 wrapper 脚本路径（补上
+        // `model-store-worker` 子命令层，见 worker::script_env）：lib.rs 的 run()
+        // 会把该子命令在任何 GUI 初始化之前分流给它。worker 的全局单槽
+        // worker.json 防跨卡覆盖也依赖上面注入的 LMM_CARD_ID（worker.rs 的
+        // card_binding_error），重构 env 时别把它落掉。
         if rec.deploy_topology == DeployTopology::Dual {
-            env.insert(
-                "LMM_DUAL_UNSUPPORTED".into(),
-                "双机部署尚未在这个版本里实现".into(),
-            );
+            for (key, value) in super::worker::script_env() {
+                env.insert(key, value);
+            }
         }
         env
     }
