@@ -126,6 +126,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forkguard_completion_wait_does_not_retain_engine_handle() {
+        let mut mock = mock_engine_handle();
+        let (finished, receipt) = watch::channel(None);
+        mock.handle.run_completion = Some(receipt);
+        let waiting = mock.handle.wait_run_completion();
+        drop(mock.handle);
+        assert!(
+            matches!(
+                mock.rx_op.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ),
+            "observing completion must not keep the engine alive through an op sender"
+        );
+        finished
+            .send(Some(EngineRunCompletion::NormalReturn))
+            .unwrap();
+        assert_eq!(waiting.await, EngineRunCompletion::NormalReturn);
+    }
+
+    #[tokio::test]
     async fn run_completion_drops_future_before_notifying_all_waiters() {
         let (run, handle, release, dropped) = fixture(false);
         let task = tokio::spawn(run);

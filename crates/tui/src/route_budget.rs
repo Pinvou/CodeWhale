@@ -286,6 +286,26 @@ pub(crate) fn output_ceiling_source(provider: ApiProvider, model: &str) -> Outpu
     )
 }
 
+/// Effective request output cap for a `(provider, base_url, requested model)`
+/// route: normalize the requested id exactly as the transport does
+/// (`wire_model_for_provider_route`), then apply
+/// [`effective_max_output_tokens_for_route`]. The transport clamp
+/// (`client.rs`) and the host-facing
+/// `core::engine::route_effective_max_output_tokens` both delegate here, so
+/// the normalize-then-intersect composition has a single shared copy and the
+/// two callers cannot silently drift.
+#[must_use]
+pub(crate) fn route_effective_max_output_tokens(
+    provider: ApiProvider,
+    base_url: &str,
+    requested_model: &str,
+    route_limits: Option<RouteLimits>,
+) -> u32 {
+    let wire_model =
+        crate::config::wire_model_for_provider_route(provider, base_url, requested_model);
+    effective_max_output_tokens_for_route(provider, &wire_model, route_limits)
+}
+
 /// Effective request output cap for a fully resolved provider/model route.
 #[must_use]
 pub(crate) fn effective_max_output_tokens_for_route(
