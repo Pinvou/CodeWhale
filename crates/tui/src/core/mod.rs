@@ -15,6 +15,7 @@
 #![deny(clippy::print_stderr)]
 
 pub mod authority;
+pub(crate) mod capacity;
 // `crates/core` now owns the engine (issue #5261). The TUI's `engine`
 // consumes the core boundary directly so headless and TUI share one
 // `Op`-in / `EventMsg`-out API, one `ThreadId`/`SessionId` type, and one
