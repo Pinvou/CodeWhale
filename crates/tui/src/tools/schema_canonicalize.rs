@@ -80,19 +80,17 @@ pub fn canonicalize_schema(value: &mut Value) {
                         | "$defs"
                         | "definitions"
                         | "dependentSchemas"
-                ) {
-                    if let Some(name_map) = v.as_object_mut() {
-                        let old = std::mem::take(name_map);
-                        let mut entries: Vec<(String, Value)> = old.into_iter().collect();
-                        entries.sort_by(|a, b| a.0.cmp(&b.0));
-                        for (_name, prop_schema) in entries.iter_mut() {
-                            canonicalize_schema(prop_schema);
-                        }
-                        for (name, prop_schema) in entries {
-                            name_map.insert(name, prop_schema);
-                        }
-                        continue;
+                ) && let Some(name_map) = v.as_object_mut() {
+                    let old = std::mem::take(name_map);
+                    let mut entries: Vec<(String, Value)> = old.into_iter().collect();
+                    entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (_name, prop_schema) in entries.iter_mut() {
+                        canonicalize_schema(prop_schema);
                     }
+                    for (name, prop_schema) in entries {
+                        name_map.insert(name, prop_schema);
+                    }
+                    continue;
                 }
                 canonicalize_schema(v);
             }
