@@ -1,6 +1,8 @@
 //! Codewhale TUI library — single-binary entry point.
 
 #![allow(clippy::uninlined_format_args)]
+// Scoped request/stream recovery futures exceed the default compiler query depth.
+#![recursion_limit = "256"]
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Read, Write};
@@ -1104,6 +1106,13 @@ struct SetupArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 struct DoctorArgs {
+    /// Privately locate this route's recovery receipt as JSON (no network or repairs)
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json", "probe_api", "probe_local", "check_updates", "probe_mcp", "probe_search", "fix", "yes"]
+    )]
+    recovery_json: bool,
     /// Emit machine-readable structural JSON output (always offline)
     #[arg(long, default_value_t = false)]
     json: bool,
@@ -2216,6 +2225,13 @@ async fn run_async_main_dispatch(
     if let Some(command) = command {
         return match command {
             Commands::Doctor(args) => {
+                if args.recovery_json {
+                    // Keep private scope metadata out of ordinary doctor,
+                    // logging, model history, and generic error propagation.
+                    let report = doctor_recovery_report(&cli);
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                    return Ok(());
+                }
                 let config = match load_doctor_config_from_cli(&cli, &args) {
                     Ok(config) => config,
                     Err(error) if args.json => return run_doctor_json_config_error(&error),
@@ -2707,7 +2723,7 @@ fn prepare_cli_startup(
     initialize_plugins();
     let command = cli.command.clone();
     let should_load_dotenv = match command.as_ref() {
-        Some(Commands::Doctor(args)) => args.probe_api || args.probe_local,
+        Some(Commands::Doctor(args)) => args.probe_api || args.probe_local || args.recovery_json,
         _ => true,
     };
     if should_load_dotenv {
@@ -8125,6 +8141,46 @@ fn resolve_workspace(cli: &Cli) -> Result<PathBuf> {
 
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
     load_config_from_cli_with_effective_profile(cli).map(|(config, _)| config)
+}
+
+/// Explicit private diagnostic; ordinary doctor never enters this boundary.
+fn doctor_recovery_report(cli: &Cli) -> serde_json::Value {
+    let receipt = tracing::subscriber::with_default(
+        tracing::subscriber::NoSubscriber::default(),
+        || -> Result<String> {
+            let mut config = load_config_from_cli(cli)?;
+            let workspace = resolve_workspace(cli)?;
+            // Interactive project overlays can select a different model/wire
+            // from exec. Do not guess which launch an operator is repairing.
+            if !cli.no_project_config {
+                for directory in [
+                    codewhale_config::CODEWHALE_APP_DIR,
+                    codewhale_config::LEGACY_APP_DIR,
+                ] {
+                    anyhow::ensure!(
+                        !workspace.join(directory).join("config.toml").try_exists()?,
+                        "Project-overlay route is unavailable to this diagnostic"
+                    );
+                }
+            }
+            let explicit_route = crate::config::explicit_launch_provider_override().is_some()
+                || crate::config::explicit_launch_model_override().is_some();
+            apply_selected_fleet_operator_for_launch(
+                &mut config,
+                &workspace,
+                explicit_route,
+                false,
+            )?;
+            crate::client::recovery_receipt_location(&config)?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| anyhow!("Recovery path cannot be represented losslessly in JSON"))
+        },
+    );
+    receipt.map_or_else(
+        |_| serde_json::json!({"status": "unavailable"}),
+        |receipt| serde_json::json!({"status": "located", "receipt": receipt}),
+    )
 }
 
 /// Doctor is a structural report unless the user explicitly asks it to probe

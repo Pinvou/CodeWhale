@@ -1079,7 +1079,7 @@ pub fn report_compaction_failure(
             "provider plan quota exhausted — switch provider/model or renew the provider plan"
                 .to_string()
         }
-        Some(crate::llm_client::LlmError::RateLimited { .. }) => {
+        Some(crate::llm_client::LlmError::RateLimited { .. } | crate::llm_client::LlmError::QuotaWindow { .. }) => {
             "provider rate limit blocked compaction — retry after the limit resets or switch provider/model"
                 .to_string()
         }
@@ -1217,9 +1217,20 @@ pub async fn compact_messages_safe(
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
-            // Exponential backoff: 1s, 2s, 4s
+            // Exponential backoff: 1s, 2s. Only typed provider refusal is
+            // recovery time; ordinary transient failures still spend budget.
             let delay = Duration::from_millis(BASE_DELAY_MS * (1 << (attempt - 1)));
-            tokio::time::sleep(delay).await;
+            if last_error
+                .as_ref()
+                .and_then(llm_error_in_chain)
+                .is_some_and(|error| {
+                    matches!(error, crate::llm_client::LlmError::RateLimited { .. })
+                })
+            {
+                crate::llm_client::rate_limit::wait(delay).await;
+            } else {
+                tokio::time::sleep(delay).await;
+            }
         }
 
         match compact_messages_with_metadata(
@@ -2582,6 +2593,63 @@ mod tests {
             operations[0], operations[2],
             "rebuilding the original prompt after a changed call must not resurrect its ID"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_provider_clock_compaction_uses_the_latest_typed_failure() {
+        use crate::core::engine::turn_budget::TurnWallClock;
+        use crate::llm_client::rate_limit::{turn_provider_wait_clock, with_turn_provider_waits};
+
+        for typed in [true, false] {
+            let first = if typed {
+                anyhow::Error::new(crate::llm_client::LlmError::RateLimited {
+                    message: "fixture provider refusal".into(),
+                    retry_after: None,
+                })
+                .context("summary request failed")
+            } else {
+                anyhow::anyhow!("429 Too Many Requests")
+            };
+            let client = ScriptedSummaryClient::with_outcomes(vec![
+                Err(first),
+                Err(crate::llm_client::LlmError::NetworkError("fixture reset".into()).into()),
+                Ok(vec![ContentBlock::Text {
+                    text: FIXED_SUMMARY.to_string(),
+                    cache_control: None,
+                }]),
+            ]);
+            let config = CompactionConfig {
+                model: "test-model".to_string(),
+                cache_summary: false,
+                ..Default::default()
+            };
+            with_turn_provider_waits(async {
+                let started = tokio::time::Instant::now();
+                let clock = TurnWallClock::start(Duration::from_secs(30));
+                let waits = turn_provider_wait_clock().unwrap();
+                let result = compact_messages_safe(
+                    &client,
+                    &[msg("user", "Preserve the current migration state.")],
+                    None,
+                    &prepared(&config),
+                )
+                .await
+                .expect("the third summary call succeeds");
+                assert_eq!(started.elapsed(), Duration::from_secs(3));
+                assert_eq!(waits.elapsed(), Duration::from_secs(u64::from(typed)));
+                assert_eq!(
+                    clock.spent(),
+                    Duration::from_secs(if typed { 2 } else { 3 })
+                );
+                assert_eq!(result.retries_used, 2);
+                assert!(result.messages.iter().any(is_compaction_checkpoint_message));
+                let operations = client.operations.lock().unwrap();
+                assert_eq!(operations.len(), 3);
+                assert!(operations.iter().all(|id| *id == operations[0]));
+                assert_eq!(client.requests.lock().unwrap().len(), 3);
+            })
+            .await;
+        }
     }
 
     #[tokio::test]
