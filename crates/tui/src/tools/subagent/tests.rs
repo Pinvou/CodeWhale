@@ -12,6 +12,7 @@ use tempfile::{Builder as TempDirBuilder, tempdir};
 mod identity_selection;
 mod launch_receipt;
 mod operation_identity;
+mod terminal_parent_mail;
 
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
     WHALE_NICKNAMES
@@ -2526,6 +2527,7 @@ async fn always_rate_limited_chat_client() -> (DeepSeekClient, Arc<AtomicUsize>)
         api_key: Some("test-key".to_string()),
         base_url: Some(format!("http://{addr}/v1")),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),
@@ -2576,6 +2578,7 @@ async fn always_invalid_request_chat_client() -> (DeepSeekClient, Arc<AtomicUsiz
         api_key: Some("test-key".to_string()),
         base_url: Some(format!("http://{addr}/v1")),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),
@@ -6523,6 +6526,16 @@ async fn agent_tool_cancel_stops_running_child() {
 
 #[tokio::test]
 async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
+    assert_model_wait_cancel_delivery(false, false).await;
+}
+
+#[tokio::test]
+async fn forkguard_rate_limit_detached_cancel_survives_a_sealed_parent_mailbox() {
+    assert_model_wait_cancel_delivery(true, false).await;
+    assert_model_wait_cancel_delivery(true, true).await;
+}
+
+async fn assert_model_wait_cancel_delivery(sealed_parent: bool, event_queue_full: bool) {
     use tokio_util::sync::CancellationToken;
 
     let tmp = tempdir().expect("tempdir");
@@ -6553,7 +6566,17 @@ async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
     let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
     let (event_tx, mut event_rx) = mpsc::channel(8);
+    if event_queue_full {
+        for _ in 0..8 {
+            event_tx
+                .try_send(Event::status("fixture queue occupancy"))
+                .unwrap();
+        }
+    }
     let mut runtime = runtime_with_depth(1, Some(completion_tx));
+    if sealed_parent {
+        mailbox.seal();
+    }
     runtime.mailbox = Some(mailbox);
     runtime.event_tx = Some(event_tx);
     agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
@@ -6598,16 +6621,33 @@ async fn model_wait_cancel_fans_in_once_and_preserves_checkpoint() {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(terminal_mail.len(), 1);
-    assert!(matches!(
-        terminal_mail[0].message,
-        MailboxMessage::Cancelled { ref agent_id } if agent_id == "agent_model_wait_cancel"
-    ));
+    assert_eq!(terminal_mail.len(), usize::from(!sealed_parent));
+    if !sealed_parent {
+        assert!(matches!(
+            terminal_mail[0].message,
+            MailboxMessage::Cancelled { ref agent_id } if agent_id == "agent_model_wait_cancel"
+        ));
+    }
 
-    let complete_events = std::iter::from_fn(|| event_rx.try_recv().ok())
-        .filter(|event| matches!(event, Event::AgentComplete { .. }))
-        .count();
-    assert_eq!(complete_events, 1);
+    let mut events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+    if event_queue_full {
+        events.push(
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("queued metadata terminal must be delivered")
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::AgentComplete { .. }))
+            .count(),
+        usize::from(!event_queue_full)
+    );
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        Event::AgentProgress { id, activity, .. } if id == &agent_id && activity.worker_status == AgentWorkerStatus::Cancelled)).count(), 1,
+        "a typed terminal event survives parent mailbox sealing and worker abortion");
     let worker = manager.get_worker_record(&agent_id).expect("worker record");
     assert_eq!(worker.status, AgentWorkerStatus::Cancelled);
     assert_eq!(
@@ -9755,90 +9795,105 @@ async fn subagent_retries_transient_provider_header_timeout_before_succeeding() 
     assert_eq!(snapshot.result.as_deref(), Some("recovered answer"));
 }
 
-#[tokio::test]
-async fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
-    let tmp = tempdir().expect("tempdir");
-    let manager = Arc::new(RwLock::new(SubAgentManager::new(
-        tmp.path().to_path_buf(),
-        2,
-    )));
-    let agent_id = "agent_rate_limited_checkpoint".to_string();
-    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
-    let agent = SubAgent::new(
-        agent_id.clone(),
-        FleetRole::Worker,
-        "Inspect rate-limit recovery".to_string(),
-        make_assignment(),
-        "deepseek-v4-flash".to_string(),
-        Some("Blue".to_string()),
-        Some(vec![]),
-        task_input_tx,
-        tmp.path().to_path_buf(),
-        "boot_test".to_string(),
-    );
-    {
-        let mut manager = manager.write().await;
-        manager.agents.insert(agent_id.clone(), agent);
-        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
-    }
+#[test]
+fn subagent_rate_limit_exhaustion_interrupts_with_checkpoint() {
+    // Exercise the full worker fixture with the product Engine thread's 16 MiB stack.
+    std::thread::Builder::new()
+        .stack_size(crate::CODEWHALE_MAIN_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let tmp = tempdir().expect("tempdir");
+                    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+                        tmp.path().to_path_buf(),
+                        2,
+                    )));
+                    let agent_id = "agent_rate_limited_checkpoint".to_string();
+                    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+                    let agent = SubAgent::new(
+                        agent_id.clone(),
+                        FleetRole::Worker,
+                        "Inspect rate-limit recovery".to_string(),
+                        make_assignment(),
+                        "deepseek-v4-flash".to_string(),
+                        Some("Blue".to_string()),
+                        Some(vec![]),
+                        task_input_tx,
+                        tmp.path().to_path_buf(),
+                        "boot_test".to_string(),
+                    );
+                    {
+                        let mut manager = manager.write().await;
+                        manager.agents.insert(agent_id.clone(), agent);
+                        manager
+                            .register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+                    }
 
-    let (client, calls) = always_rate_limited_chat_client().await;
-    let mut runtime = stub_runtime().with_step_api_timeout(Duration::from_secs(5));
-    runtime.client = client;
-    runtime.manager = Arc::clone(&manager);
-    runtime.context = ToolContext::new(tmp.path());
+                    let (client, calls) = always_rate_limited_chat_client().await;
+                    let mut runtime = stub_runtime().with_step_api_timeout(Duration::from_secs(5));
+                    runtime.client = client;
+                    runtime.manager = Arc::clone(&manager);
+                    runtime.context = ToolContext::new(tmp.path());
 
-    let task = SubAgentTask {
-        manager_handle: Arc::clone(&manager),
-        runtime,
-        agent_id: agent_id.clone(),
-        agent_type: FleetRole::Worker,
-        prompt: "Inspect rate-limit recovery".to_string(),
-        assignment: make_assignment(),
-        allowed_tools: Some(vec![]),
-        fork_context: false,
-        started_at: Instant::now(),
-        max_steps: 3,
-        token_budget: None,
-        wall_time: DEFAULT_CHILD_WALL_TIME,
-        input_rx: task_input_rx,
-        launch_gate: None,
-        _foreground_child_registration: None,
-    };
+                    let task = SubAgentTask {
+                        manager_handle: Arc::clone(&manager),
+                        runtime,
+                        agent_id: agent_id.clone(),
+                        agent_type: FleetRole::Worker,
+                        prompt: "Inspect rate-limit recovery".to_string(),
+                        assignment: make_assignment(),
+                        allowed_tools: Some(vec![]),
+                        fork_context: false,
+                        started_at: Instant::now(),
+                        max_steps: 3,
+                        token_budget: None,
+                        wall_time: DEFAULT_CHILD_WALL_TIME,
+                        input_rx: task_input_rx,
+                        launch_gate: None,
+                        _foreground_child_registration: None,
+                    };
 
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::spawn(run_subagent_task(task)),
-    )
-    .await
-    .expect("sub-agent task should finish")
-    .expect("sub-agent join should succeed");
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        tokio::spawn(run_subagent_task(task)),
+                    )
+                    .await
+                    .expect("sub-agent task should finish")
+                    .expect("sub-agent join should succeed");
 
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        SUBAGENT_TRANSIENT_PROVIDER_MAX_RETRIES.saturating_add(1) as usize,
-        "rate-limit retries should be owned by the sub-agent retry loop"
-    );
-    let snapshot = {
-        let manager = manager.read().await;
-        manager
-            .get_result(&agent_id)
-            .expect("agent should stay registered")
-    };
-    let SubAgentStatus::Interrupted(reason) = &snapshot.status else {
-        panic!("expected interrupted sub-agent, got {:?}", snapshot.status);
-    };
-    assert!(
-        reason.contains("rate-limited provider response"),
-        "reason should name the provider rate limit: {reason}"
-    );
-    let checkpoint = snapshot
-        .checkpoint
-        .as_ref()
-        .expect("rate-limit interruption should preserve checkpoint");
-    assert_eq!(checkpoint.reason, "api_rate_limited");
-    assert!(checkpoint.continuable);
-    assert!(snapshot.needs_input.is_some());
+                    assert_eq!(
+                        calls.load(Ordering::SeqCst),
+                        1,
+                        "disabled transport retries must not be restarted by the child wrapper"
+                    );
+                    let snapshot = {
+                        let manager = manager.read().await;
+                        manager
+                            .get_result(&agent_id)
+                            .expect("agent should stay registered")
+                    };
+                    let SubAgentStatus::Interrupted(reason) = &snapshot.status else {
+                        panic!("expected interrupted sub-agent, got {:?}", snapshot.status);
+                    };
+                    assert!(
+                        reason.contains("Rate-limit recovery stopped"),
+                        "reason should name the provider rate limit: {reason}"
+                    );
+                    let checkpoint = snapshot
+                        .checkpoint
+                        .as_ref()
+                        .expect("rate-limit interruption should preserve checkpoint");
+                    assert_eq!(checkpoint.reason, "api_rate_limited");
+                    assert!(checkpoint.continuable);
+                    assert!(snapshot.needs_input.is_some());
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -12497,19 +12552,32 @@ fn clamp_child_max_spawn_depth_enforces_absolute_ceiling() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn rate_limit_pause_blocks_subagent_spawn() {
-    let _guard = crate::retry_status::test_guard();
-    // Drop-clear the window even if an assertion below panics: this state is
-    // process-global, and a leaked 30s pause strands every concurrently
-    // running test whose worker issues a model request.
-    let _clear = ClearRateLimitOnDrop;
-    crate::retry_status::clear();
-    crate::retry_status::clear_rate_limit();
-    crate::retry_status::note_rate_limit(Duration::from_secs(30));
-
     let tmp = tempdir().expect("tempdir");
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(429).insert_header("Retry-After", "7200"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        rate_limit_recovery_dir: Some(tmp.path().join("quota")),
+        ..Default::default()
+    };
     let mut runtime = stub_runtime();
+    runtime.client = DeepSeekClient::new(&config).expect("fixture client");
+    runtime.api_config = Some(Arc::new(config));
+    let error = runtime
+        .client
+        .send_json_with_retry(&server.uri(), &json!({}))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::llm_client::LlmError>(),
+        Some(crate::llm_client::LlmError::QuotaWindow { .. })
+    ));
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
 
@@ -13871,6 +13939,625 @@ async fn interrupted_child_stops_gating_later_writers() {
             .any(|record| record.claim.owner == first.agent_id),
         "the interrupted child's claim stays on the ledger as history; it is inactive, not erased"
     );
+}
+
+/// Mail accepted while a child was parked must follow the resume: the
+/// queue-only receipt promised the owner session the mail survives a resume,
+/// but the resume re-dispatches under a NEW id and `followup` on the old id
+/// can only park further mail on the retained record — it can never deliver.
+/// The resume delivers parked mail in its initial input, before the latest
+/// instruction; no additional followup is required to wake the mailbox.
+#[tokio::test]
+async fn resumed_child_inherits_the_parked_mail_of_its_interrupted_predecessor() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    let mut guard = manager.write().await;
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-mail".into()),
+                ..Default::default()
+            },
+        )
+        .expect("writer admitted");
+    // Give the child a continuable checkpoint with content, as a real
+    // interrupted loop leaves behind, so the resume has something to seed.
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+    guard
+        .followup_child(&first.agent_id, "accepted while parked".to_string())
+        .expect("queue-only follow-up receipt");
+    guard
+        .followup_child(&first.agent_id, "second parked mail".into())
+        .unwrap();
+    assert_eq!(
+        guard.queued_mail_depth(&first.agent_id),
+        Some(2),
+        "the parked mail sits on the interrupted predecessor"
+    );
+
+    let resumed = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            Arc::clone(&manager),
+            runtime,
+            &first.agent_id,
+            "continue",
+        )
+        .expect("resume re-dispatches the checkpoint");
+    assert_ne!(
+        resumed.agent_id, first.agent_id,
+        "resume runs under a new id"
+    );
+    assert_eq!(
+        guard.queued_mail_depth(&resumed.agent_id),
+        None,
+        "the accepted FIFO is already included in the successor's initial input"
+    );
+    assert_eq!(
+        guard.queued_mail_depth(&first.agent_id),
+        None,
+        "the predecessor's mailbox is emptied by the migration"
+    );
+    let prompt = &guard.agents[&resumed.agent_id].prompt;
+    assert!(
+        prompt.find("accepted while parked").unwrap() < prompt.find("second parked mail").unwrap()
+    );
+    assert!(
+        prompt.find("second parked mail").unwrap()
+            < prompt.rfind("Parent follow-up: continue").unwrap()
+    );
+    assert_eq!(resumed.queue_depth, 0);
+    assert!(resumed.woke && resumed.continued_from_checkpoint);
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_interrupt_preserves_uncheckpointed_fifo() {
+    for stage in ["unread", "taken", "appended", "checkpointed"] {
+        let tmp = tempdir().unwrap();
+        let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+        let mut runtime = stub_runtime();
+        runtime.manager = manager.clone();
+        runtime.context = ToolContext::new(tmp.path());
+        let mut guard = manager.write().await;
+        let (child, mut rx) = guard.insert_test_running_agent_with_input(stage, tmp.path());
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "earlier state".into(),
+                cache_control: None,
+            }],
+        }];
+        assert!(guard.update_checkpoint(
+            &child,
+            build_subagent_checkpoint(&child, "before_api_request", &messages, 1, true)
+        ));
+        for text in ["FIFO-M1", "FIFO-M2"] {
+            let receipt = guard.followup_child(&child, text.into()).unwrap();
+            assert!(receipt.woke);
+            assert_eq!(receipt.queue_depth, 0);
+        }
+        assert_eq!(guard.queued_follow_up_counts()[&child], 2);
+        let mut taken = VecDeque::new();
+        if stage != "unread" {
+            let input = rx.try_recv().unwrap();
+            input.mark_taken();
+            taken.push_back(input);
+            assert_eq!(guard.queued_follow_up_counts()[&child], 1);
+        }
+        if matches!(stage, "appended" | "checkpointed") {
+            append_subagent_inputs_as_user_messages(&mut messages, &mut taken);
+        }
+        if stage == "checkpointed" {
+            assert!(guard.update_checkpoint(
+                &child,
+                build_subagent_checkpoint(&child, "before_api_request", &messages, 2, true)
+            ));
+        }
+        guard
+            .queue_running_parent_message(&child, "FIFO-M3".into())
+            .unwrap();
+        guard
+            .interrupt_child(&child, None, "controlled interrupt".into())
+            .unwrap();
+        drop(rx);
+        drop(taken);
+        let expected = if stage == "checkpointed" {
+            vec!["FIFO-M2", "FIFO-M3"]
+        } else {
+            vec!["FIFO-M1", "FIFO-M2", "FIFO-M3"]
+        };
+        assert_eq!(
+            guard.queued_mail[&child]
+                .iter()
+                .map(|mail| mail.text.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{stage}"
+        );
+        assert!(guard.queued_follow_up_counts().is_empty());
+        let checkpoint = guard.agents[&child].checkpoint.clone().unwrap();
+        assert!(!guard.update_checkpoint(
+            &child,
+            build_subagent_checkpoint(&child, "late worker", &[], 99, true)
+        ));
+        assert_eq!(
+            guard.agents[&child]
+                .checkpoint
+                .as_ref()
+                .unwrap()
+                .checkpoint_id,
+            checkpoint.checkpoint_id
+        );
+        let resumed = guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime,
+                &child,
+                "FIFO-LATEST",
+            )
+            .unwrap();
+        let prompt = &guard.agents[&resumed.agent_id].prompt;
+        assert_eq!(
+            prompt.matches("FIFO-M1").count(),
+            1,
+            "no loss or replay: {stage}"
+        );
+        assert!(prompt.find("FIFO-M1").unwrap() < prompt.find("FIFO-M2").unwrap());
+        assert!(prompt.find("FIFO-M2").unwrap() < prompt.find("FIFO-M3").unwrap());
+        assert!(prompt.find("FIFO-M3").unwrap() < prompt.find("FIFO-LATEST").unwrap());
+        assert_eq!(resumed.queue_depth, 0);
+        assert_eq!(guard.queued_mail_depth(&child), None);
+        assert_eq!(guard.queued_mail_depth(&resumed.agent_id), None);
+    }
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_resume_reaches_real_request_without_another_followup() {
+    let tmp = tempdir().unwrap();
+    let (sent, mut received) = mpsc::unbounded_channel();
+    let app = Router::new().route("/{*path}", post(move |Json(body): Json<Value>| {
+        let sent = sent.clone();
+        async move {
+            sent.send(body).unwrap();
+            Json(json!({"id":"chatcmpl-mail","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let stop_guard = shutdown.clone().drop_guard();
+    let stopping = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopping.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let config = crate::config::Config {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("http://{addr}/v1")),
+        ..Default::default()
+    };
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.api_config = Some(Arc::new(config));
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let task = {
+        let mut guard = manager.write().await;
+        let (child, _) = guard.insert_test_interrupted_continuable_agent(
+            "real-request",
+            tmp.path(),
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "earlier checkpoint".into(),
+                    cache_control: None,
+                }],
+            }],
+        );
+        for text in ["REAL-MAIL-ONE", "REAL-MAIL-TWO"] {
+            guard.followup_child(&child, text.into()).unwrap();
+        }
+        let resumed = guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime,
+                &child,
+                "REAL-LATEST",
+            )
+            .unwrap();
+        assert_eq!(resumed.queue_depth, 0);
+        guard
+            .agents
+            .get_mut(&resumed.agent_id)
+            .unwrap()
+            .task_handle
+            .take()
+            .unwrap()
+    };
+    let body = tokio::time::timeout(Duration::from_secs(10), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let messages = body["messages"].to_string();
+    assert_eq!(messages.matches("REAL-MAIL-ONE").count(), 1);
+    assert_eq!(messages.matches("REAL-MAIL-TWO").count(), 1);
+    assert!(messages.find("REAL-MAIL-ONE").unwrap() < messages.find("REAL-MAIL-TWO").unwrap());
+    assert!(messages.find("REAL-MAIL-TWO").unwrap() < messages.find("REAL-LATEST").unwrap());
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(stop_guard);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_checkpoint_keeps_fresh_batch_before_history_trimming() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let mut messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "earlier work".into(),
+            cache_control: None,
+        }],
+    }];
+    let child = {
+        let mut guard = manager.write().await;
+        let (child, mut rx) = guard.insert_test_running_agent_with_input("large-mail", tmp.path());
+        guard.update_checkpoint(
+            &child,
+            build_subagent_checkpoint(&child, "prior", &messages, 1, true),
+        );
+        for text in [
+            "BATCH-FIRST".to_owned(),
+            format!(
+                "BATCH-SECOND{}",
+                "x".repeat(SUBAGENT_CHECKPOINT_MESSAGE_BUDGET_BYTES + 1)
+            ),
+        ] {
+            guard.followup_child(&child, text).unwrap();
+        }
+        let mut inputs = VecDeque::new();
+        while let Ok(input) = rx.try_recv() {
+            input.mark_taken();
+            inputs.push_back(input);
+        }
+        append_subagent_inputs_as_user_messages(&mut messages, &mut inputs);
+        child
+    };
+    let cp =
+        checkpoint_subagent_progress(&runtime, &child, "before_api_request", &messages, 2, true)
+            .await;
+    assert_eq!(cp.omitted_messages, 1);
+    assert_eq!(
+        cp.messages.len(),
+        2,
+        "the first input must not disappear behind the oversized last input"
+    );
+    assert_eq!(message_text(&cp.messages[0]), "BATCH-FIRST");
+    assert!(message_text(&cp.messages[1]).starts_with("BATCH-SECOND"));
+    {
+        let mut guard = manager.write().await;
+        assert!(
+            guard.pending_follow_ups[&child].lock().unwrap().is_empty(),
+            "both inputs are actually recoverable in this checkpoint"
+        );
+        guard
+            .interrupt_child(&child, None, "before API".into())
+            .unwrap();
+        let resumed = guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime.clone(),
+                &child,
+                "BATCH-LATEST",
+            )
+            .unwrap();
+        let prompt = &guard.agents[&resumed.agent_id].prompt;
+        assert_eq!(prompt.matches("BATCH-FIRST").count(), 1);
+        assert_eq!(prompt.matches("BATCH-SECOND").count(), 1);
+    }
+    // No pending batch: preserve #3882's ordinary bounded history behavior.
+    messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "processed".into(),
+            cache_control: None,
+        }],
+    });
+    let other = manager
+        .write()
+        .await
+        .insert_test_running_agent("ordinary-history", tmp.path());
+    let ordinary =
+        checkpoint_subagent_progress(&runtime, &other, "after_model_response", &messages, 3, true)
+            .await;
+    assert_eq!(ordinary.messages.len(), 1);
+    assert_eq!(message_text(&ordinary.messages[0]), "processed");
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_resume_can_be_interrupted_before_its_first_poll() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let mut guard = manager.write().await;
+    let (child, _) = guard.insert_test_interrupted_continuable_agent(
+        "first-poll",
+        tmp.path(),
+        vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "original context".into(),
+                cache_control: None,
+            }],
+        }],
+    );
+    for text in ["EARLY-ONE", "EARLY-TWO"] {
+        guard.followup_child(&child, text.into()).unwrap();
+    }
+    let first = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime.clone(),
+            &child,
+            "EARLY-LATEST-1",
+        )
+        .unwrap();
+    // The manager write lock keeps the worker from constructing its first
+    // checkpoint. Interrupt through the real production entry in this gap.
+    assert_eq!(
+        guard.agents[&first.agent_id]
+            .checkpoint
+            .as_ref()
+            .unwrap()
+            .reason,
+        "resume_admitted"
+    );
+    guard
+        .interrupt_child(&first.agent_id, None, "before first poll".into())
+        .unwrap();
+    let second = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime,
+            &first.agent_id,
+            "EARLY-LATEST-2",
+        )
+        .unwrap();
+    let prompt = &guard.agents[&second.agent_id].prompt;
+    assert_eq!(prompt.matches("EARLY-ONE").count(), 1);
+    assert_eq!(prompt.matches("EARLY-TWO").count(), 1);
+    assert!(prompt.find("EARLY-ONE").unwrap() < prompt.find("EARLY-TWO").unwrap());
+    assert!(prompt.find("EARLY-LATEST-1").unwrap() < prompt.find("EARLY-LATEST-2").unwrap());
+    assert_eq!(second.queue_depth, 0);
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_failed_resume_keeps_fifo_for_the_next_attempt() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let mut guard = manager.write().await;
+    let (child, _) = guard.insert_test_interrupted_continuable_agent(
+        "retry-mail",
+        tmp.path(),
+        vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "original context".into(),
+                cache_control: None,
+            }],
+        }],
+    );
+    for text in ["RETRY-ONE", "RETRY-TWO"] {
+        guard.followup_child(&child, text.into()).unwrap();
+    }
+    runtime.max_spawn_depth = 0;
+    assert!(
+        guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime.clone(),
+                &child,
+                "failed instruction"
+            )
+            .is_err()
+    );
+    assert_eq!(guard.queued_mail_depth(&child), Some(2));
+    assert!(!guard.resume_targets.contains_key(&child));
+    runtime.max_spawn_depth = DEFAULT_MAX_SPAWN_DEPTH;
+    let receipt = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime,
+            &child,
+            "RETRY-LATEST",
+        )
+        .unwrap();
+    let prompt = &guard.agents[&receipt.agent_id].prompt;
+    assert!(prompt.find("RETRY-ONE").unwrap() < prompt.find("RETRY-TWO").unwrap());
+    assert!(prompt.find("RETRY-TWO").unwrap() < prompt.find("RETRY-LATEST").unwrap());
+    assert_eq!(guard.queued_mail_depth(&child), None);
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_first_spawn_can_be_interrupted_before_its_first_poll() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    // Keep the actual worker behind the manager lock through the handoff.
+    let mut guard = manager.write().await;
+    let child = guard
+        .spawn_background_with_assignment_options(
+            manager.clone(),
+            runtime.clone(),
+            FleetRole::Scout,
+            "INITIAL-ASSIGNMENT".into(),
+            make_assignment(),
+            Some(vec!["read_file".into()]),
+            SubAgentSpawnOptions::default(),
+        )
+        .unwrap();
+    for text in ["FIRST-ONE", "FIRST-TWO"] {
+        guard.followup_child(&child.agent_id, text.into()).unwrap();
+    }
+    assert_eq!(guard.queued_follow_up_counts()[&child.agent_id], 2);
+    guard
+        .interrupt_child(&child.agent_id, None, "before first poll".into())
+        .unwrap();
+    assert_eq!(
+        guard.queued_mail.get(&child.agent_id).map(|mail| mail
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()),
+        Some(vec!["FIRST-ONE", "FIRST-TWO"]),
+        "accepted first-generation mail must retain its recovery route"
+    );
+    assert!(guard.has_live_work_for_session("workspace"));
+    let resumed = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime.clone(),
+            &child.agent_id,
+            "FIRST-LATEST",
+        )
+        .unwrap();
+    assert!(!guard.queued_mail.contains_key(&child.agent_id));
+    let first_prompt = &guard.agents[&resumed.agent_id].prompt;
+    for text in [
+        "INITIAL-ASSIGNMENT",
+        "FIRST-ONE",
+        "FIRST-TWO",
+        "FIRST-LATEST",
+    ] {
+        assert_eq!(first_prompt.matches(text).count(), 1, "{text}");
+    }
+    assert!(first_prompt.find("FIRST-ONE").unwrap() < first_prompt.find("FIRST-TWO").unwrap());
+    assert!(first_prompt.find("FIRST-TWO").unwrap() < first_prompt.find("FIRST-LATEST").unwrap());
+    guard
+        .interrupt_child(&resumed.agent_id, None, "before resumed first poll".into())
+        .unwrap();
+    let next = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime,
+            &resumed.agent_id,
+            "FIRST-NEXT",
+        )
+        .unwrap();
+    let next_prompt = &guard.agents[&next.agent_id].prompt;
+    for text in [
+        "INITIAL-ASSIGNMENT",
+        "FIRST-ONE",
+        "FIRST-TWO",
+        "FIRST-LATEST",
+        "FIRST-NEXT",
+    ] {
+        assert_eq!(next_prompt.matches(text).count(), 1, "{text}");
+    }
+    assert!(next_prompt.find("FIRST-LATEST").unwrap() < next_prompt.find("FIRST-NEXT").unwrap());
+    guard
+        .interrupt_child(&next.agent_id, None, "fixture complete".into())
+        .unwrap();
+    assert!(guard.queued_follow_up_counts().is_empty());
+    assert!(!guard.has_live_work_for_session("workspace"));
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_inbox_contention_retries_after_release() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut guard = manager.write().await;
+    let (child, _) =
+        guard.insert_test_interrupted_continuable_agent("inbox-lock", tmp.path(), vec![]);
+    assert!(guard.agent_id_is_owned_by_session(&child, "workspace"));
+    let inbox = guard.pending_follow_ups.entry(child).or_default().clone();
+    let held = inbox.lock().unwrap();
+    let refused = guard.has_live_work_for_session("workspace");
+    drop(held);
+    assert!(refused, "an unreadable owned inbox must refuse retirement");
+    assert!(!guard.has_live_work_for_session("workspace"));
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_unfinished_terminal_task_retries_after_reap() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut guard = manager.write().await;
+    let (child, _) =
+        guard.insert_test_interrupted_continuable_agent("unfinished", tmp.path(), vec![]);
+    assert!(guard.agent_id_is_owned_by_session(&child, "workspace"));
+    assert!(!guard.has_live_work_for_session("workspace"));
+    guard.agents.get_mut(&child).unwrap().task_handle =
+        Some(tokio::spawn(std::future::pending::<()>()));
+    let refused = guard.has_live_work_for_session("workspace");
+    let task = guard
+        .agents
+        .get_mut(&child)
+        .unwrap()
+        .task_handle
+        .take()
+        .unwrap();
+    task.abort();
+    let completion = task.await;
+    assert!(refused, "a terminal label does not prove its task stopped");
+    assert!(completion.unwrap_err().is_cancelled());
+    assert!(!guard.has_live_work_for_session("workspace"));
 }
 
 /// The resume path is the same scenario from the other side: `followup` on
@@ -15470,10 +16157,8 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
     let SubAgentStatus::Interrupted(reason) = &result.status else {
         panic!("turn-end parking must interrupt resumably: {result:?}");
     };
-    assert!(
-        reason.contains(&format!("resume_from=\"{agent_id}\"")),
-        "{reason}"
-    );
+    let recovery_call = format!("agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"");
+    assert!(reason.contains(&recovery_call), "{reason}");
     assert_eq!(result.steps_taken, 0);
     let checkpoint = result
         .checkpoint
@@ -15491,9 +16176,7 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
         .as_ref()
         .expect("parked work must carry an actionable recovery instruction");
     assert!(
-        recovery
-            .question
-            .contains(&format!("resume_from=\"{agent_id}\"")),
+        recovery.question.contains(&recovery_call),
         "{}",
         recovery.question
     );
@@ -15503,7 +16186,7 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
             agent_id: ref delivered_agent_id,
             reason: ref delivered_reason,
         } if delivered_agent_id == agent_id
-            && delivered_reason.contains(&format!("resume_from=\"{agent_id}\""))
+            && delivered_reason.contains(&recovery_call)
     ));
 
     let (explicit_status, _, _, explicit_needs_input, explicit_worker_status, _) =
@@ -16309,6 +16992,43 @@ fn terminal_synthesis_is_scoped_to_owner_and_keeps_delivery_history() {
             .terminal_results_excluding_for_session("session-a", &delivered)
             .is_empty(),
         "returning A -> B -> A must not re-synthesize an already delivered terminal result"
+    );
+}
+
+#[test]
+fn control_resolution_rejects_a_caller_owned_outside_the_active_session() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);
+    let (agent_a, _input_a) =
+        manager.insert_test_running_agent_with_input("session_a", workspace.path());
+    let (agent_b, _input_b) =
+        manager.insert_test_running_agent_with_input("session_b", workspace.path());
+    assign_test_session_owner(&mut manager, &agent_a, "session-a");
+    assign_test_session_owner(&mut manager, &agent_b, "session-b");
+
+    // The target resolves in the active session, so the resolution leg
+    // cannot be the failure source; the caller id is owned by another
+    // session, which is exactly the folded caller-ownership guard in
+    // ensure_caller_controls_descendant_for_session. This pin keeps the
+    // early-Err leg distinct from the "Refusing" descendant check.
+    manager
+        .get_result_by_ref_for_session("session-a", &agent_a)
+        .expect("target resolves in the active session");
+    let error = manager
+        .ensure_caller_controls_descendant_for_session(
+            "session-a",
+            &agent_a,
+            Some(&agent_b),
+            "agent/cancel",
+        )
+        .expect_err("a caller owned outside the active session must fail closed");
+    assert_eq!(error.to_string(), "Agent not found in the active session");
+    assert_eq!(
+        manager
+            .get_result(&agent_a)
+            .expect("A still running")
+            .status,
+        SubAgentStatus::Running
     );
 }
 
@@ -17244,6 +17964,7 @@ async fn tool_call_then_invalid_request_chat_client() -> (DeepSeekClient, Arc<At
         api_key: Some("test-key".to_string()),
         base_url: Some(format!("http://{addr}/v1")),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),
@@ -18494,7 +19215,7 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
             message,
             MailboxMessage::Interrupted { agent_id, reason }
                 if agent_id == "agent_queued_turn_end_park"
-                    && reason.contains("resume_from=\"agent_queued_turn_end_park\"")
+                    && reason.contains("agent(action=\"followup\", agent_id=\"agent_queued_turn_end_park\", message=\"")
         )),
         "parking must publish an actionable interrupted receipt: {messages:?}"
     );
@@ -19331,57 +20052,6 @@ async fn shared_scope_budget_stops_admitted_children_mid_run() {
         manager.read().await.budget_spent_for_scope(scope_id),
         200,
         "collective spend is accounted once per child"
-    );
-}
-
-/// Clears the process-wide rate-limit window on drop so a panicking test
-/// body cannot leak a live pause into concurrently running tests.
-struct ClearRateLimitOnDrop;
-
-impl Drop for ClearRateLimitOnDrop {
-    fn drop(&mut self) {
-        crate::retry_status::clear_rate_limit();
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn worker_is_not_stranded_by_transient_global_rate_limit_window() {
-    // Regression for a parallel-suite flake: `rate_limit_pause_blocks_subagent_spawn`
-    // opens a 30s process-wide rate-limit window and closes it milliseconds
-    // later. A worker whose request reached `send_with_retry` inside that
-    // window used to commit to sleeping the FULL remaining window without
-    // re-checking, blowing the 5s timeouts in the budget tests above. The
-    // pause must be re-polled so an already-cleared window releases
-    // in-flight requests promptly.
-    let _guard = crate::retry_status::test_guard();
-    let _clear = ClearRateLimitOnDrop;
-    crate::retry_status::note_rate_limit(Duration::from_secs(30));
-
-    let tmp = tempdir().expect("tempdir");
-    let (manager, agent_id, _calls, task_handle) =
-        spawn_budget_capped_worker(tmp.path(), 60, 40, Some(50), 4, DEFAULT_CHILD_WALL_TIME).await;
-
-    // Simulate the concurrent test finishing: the window closes shortly
-    // after the worker's first request has already observed it.
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        crate::retry_status::clear_rate_limit();
-    });
-
-    tokio::time::timeout(Duration::from_secs(5), task_handle)
-        .await
-        .expect("worker must not be stranded by an already-cleared rate-limit window")
-        .expect("task should finish");
-
-    let result = {
-        let manager = manager.read().await;
-        manager.get_result(&agent_id).expect("agent registered")
-    };
-    assert!(
-        matches!(result.status, SubAgentStatus::BudgetExhausted),
-        "expected BudgetExhausted, got {:?}",
-        result.status
     );
 }
 

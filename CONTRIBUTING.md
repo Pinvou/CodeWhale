@@ -2,6 +2,13 @@
 
 Thank you for your interest in contributing to codewhale! This document provides guidelines and instructions for contributing.
 
+> **Fork note (Pinvou/CodeWhale):** this repository is the Pinvou fork.
+> Its `main` branch mirrors upstream and receives no fork work; internal
+> maintenance pull requests target the protected public maintenance branch
+> **`pinvou3-clean`** (fork lifecycle: `docs/fork-policy.md` in the parent
+> workspace). The process below is the inherited upstream contribution
+> process and applies to upstream contributions.
+
 ## Getting Started
 
 ### Prerequisites
@@ -58,31 +65,20 @@ requests, so passing locally means the PR lanes should pass too:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-features --locked -- \
-  -D warnings \
-  -A clippy::uninlined_format_args \
-  -A clippy::too_many_arguments \
-  -A clippy::unnecessary_map_or \
-  -A clippy::collapsible_if \
-  -A clippy::assertions_on_constants
-cargo test --workspace --all-features --locked
-```
-
-The release lane runs a stricter clippy that also lints test, bench, and
-example targets. The PR template checklist asks for this form, and it is
-the right command before requesting review or doing release-bound work,
-because `--all-features` alone skips lints that will fail the release
-lane later:
-
-```bash
 cargo clippy --workspace --all-targets --all-features --locked -- \
   -D warnings \
   -A clippy::uninlined_format_args \
   -A clippy::too_many_arguments \
   -A clippy::unnecessary_map_or \
-  -A clippy::collapsible_if \
   -A clippy::assertions_on_constants
+cargo test --workspace --all-features --locked
 ```
+
+The gate above now also lints test, bench, and example targets
+(`--all-targets`), matching the release lane's strength, so there is no
+weaker PR-lane clippy variant to keep in your head. The PR template
+checklist asks for this same form, and it stays the right command before
+requesting review or doing release-bound work.
 
 #### Fast local loop
 

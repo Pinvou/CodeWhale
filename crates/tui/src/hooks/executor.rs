@@ -5466,26 +5466,88 @@ command = "echo project"
     #[cfg(unix)]
     #[test]
     fn helper_wait_and_uncontained_reap_paths_are_bounded() {
-        let mut helper = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        struct FixtureCleanup<'a>(&'a mut Child);
+
+        impl FixtureCleanup<'_> {
+            fn child(&mut self) -> &mut Child {
+                self.0
+            }
+        }
+
+        impl Drop for FixtureCleanup<'_> {
+            fn drop(&mut self) {
+                // Independent of the helpers under test. This fallback runs
+                // after their assertions, including during an unwind; it must
+                // neither replace their result nor panic a second time.
+                let reaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = self.0.kill();
+                    matches!(self.0.wait_timeout(super::HOOK_REAP_TIMEOUT), Ok(Some(_)))
+                }))
+                .unwrap_or(false);
+                if !reaped {
+                    let _ = std::io::Write::write_all(
+                        &mut std::io::stderr(),
+                        b"hook test fixture cleanup was not confirmed\n",
+                    );
+                }
+            }
+        }
+
+        // These paths own only the immediate child, so replace the shell.
+        let mut helper_process = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
             .spawn()
             .expect("spawn helper");
+        let mut helper = FixtureCleanup(&mut helper_process);
         let started = Instant::now();
-        let error = super::wait_for_helper_status(&mut helper, Duration::from_millis(20))
+        let error = super::wait_for_helper_status(helper.child(), Duration::from_millis(20))
             .expect_err("slow helper must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < super::HOOK_REAP_TIMEOUT + Duration::from_secs(1));
-        assert!(matches!(helper.try_wait(), Ok(Some(_))));
+        assert!(matches!(helper.child().try_wait(), Ok(Some(_))));
 
-        let mut uncontained = Command::new("sh")
-            .args(["-c", "sleep 30"])
+        let mut uncontained_process = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
             .spawn()
             .expect("spawn uncontained child");
+        let mut uncontained = FixtureCleanup(&mut uncontained_process);
         assert!(super::kill_and_reap_immediate_child(
-            &mut uncontained,
+            uncontained.child(),
             Duration::from_secs(1)
         ));
-        assert!(matches!(uncontained.try_wait(), Ok(Some(_))));
+        assert!(matches!(uncontained.child().try_wait(), Ok(Some(_))));
+
+        // A caught assertion failure must retain its payload and release the
+        // child. The outer owner also makes the no-inner-guard control safe.
+        for install_inner_guard in [true, false] {
+            let mut process = Command::new("sh")
+                .args(["-c", "exec sleep 30"])
+                .spawn()
+                .expect("spawn unwind probe");
+            {
+                let mut backstop = FixtureCleanup(&mut process);
+                let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    assert!(matches!(backstop.child().try_wait(), Ok(None)));
+                    let _inner = install_inner_guard.then(|| FixtureCleanup(backstop.child()));
+                    panic!("fixture unwind probe");
+                }))
+                .expect_err("probe must preserve the original panic");
+                assert_eq!(
+                    failure.downcast_ref::<&str>(),
+                    Some(&"fixture unwind probe")
+                );
+                assert_eq!(
+                    backstop
+                        .child()
+                        .try_wait()
+                        .expect("observe owned probe")
+                        .is_some(),
+                    install_inner_guard,
+                    "only the inner guard may reap before the outer owner drops"
+                );
+            }
+            assert!(matches!(process.try_wait(), Ok(Some(_))));
+        }
     }
 
     #[test]

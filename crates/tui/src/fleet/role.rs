@@ -300,6 +300,10 @@ pub(crate) const NETWORK_TOOL_DENYLIST: &[&str] = &[
     // Every MCP surface, including remote servers registered at runtime.
     "mcp*",
     "start_mcp_server",
+    // The three bare read helpers predate the `mcp_` naming scheme and
+    // bypass the `mcp*` glob, so they are listed explicitly; if
+    // `MCP_READ_HELPER_TOOLS` (`crate::mcp`) ever grows another bare name,
+    // decide here whether the network posture must deny it too.
     "list_mcp_resources",
     "list_mcp_resource_templates",
     "read_mcp_resource",
