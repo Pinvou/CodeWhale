@@ -1573,13 +1573,11 @@ impl RuntimeThreadStore {
                     }
                 }
             }
-        } else if let Some(records) = pending {
-            if let Some(turn) = turn.as_mut() {
-                for record in records {
-                    append_routed_usage_record(turn, &record.source_id, record.usage);
-                }
-                merged_pending = true;
+        } else if let (Some(records), Some(turn)) = (pending, turn.as_mut()) {
+            for record in records {
+                append_routed_usage_record(turn, &record.source_id, record.usage);
             }
+            merged_pending = true;
         }
         let Some(turn) = turn else {
             return Ok(());
@@ -1819,17 +1817,20 @@ impl RuntimeThreadStore {
     /// again. Must be called without `turn_mutation` held — it takes the
     /// guard via `try_lock`, so mutation holders (the append and flush
     /// paths, which drain explicitly) make this a no-op instead of a
-    /// deadlock. Every failure restores retry ownership before returning.
+    /// deadlock. The guard is taken BEFORE the queue is removed
+    /// (review 6032888025): a settled append parks a new record into the
+    /// map only while it holds the guard, so a contended lock leaves the
+    /// queue untouched for the active owner instead of a remove→restore
+    /// window that could overwrite it. Every failure restores retry
+    /// ownership under the same guard.
     fn drain_settled_pending_for_read(&self, turn_id: &str) {
-        let Some(queue) = self.settled_pending.lock().remove(turn_id) else {
-            return;
-        };
         let Some(_turn_mutation) = self.turn_mutation.try_lock() else {
             // A mutation holder (append/flush) owns this turn and drains
-            // the queue itself; restore and defer to it.
-            self.settled_pending
-                .lock()
-                .insert(turn_id.to_string(), queue);
+            // the queue itself; leave the queue — and any record a
+            // concurrent append parked — untouched.
+            return;
+        };
+        let Some(queue) = self.settled_pending.lock().remove(turn_id) else {
             return;
         };
         let mut record = match self.read_turn_record(turn_id) {

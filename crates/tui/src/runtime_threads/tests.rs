@@ -14837,3 +14837,195 @@ async fn update_thread_rejects_a_relative_workspace() -> Result<()> {
     assert_eq!(reloaded.workspace, workspace);
     Ok(())
 }
+
+/// (reviews 6032888025 + 6033393232: the read-side drain used to remove the
+/// pending queue before trying `turn_mutation`, so a concurrent settled
+/// append could park a new record into the emptied map and the reader's
+/// restore would overwrite it — acknowledged usage lost) The drain must take
+/// the mutation guard BEFORE touching the queue: with the guard contended the
+/// queue — and the record a concurrent append parked — survives untouched,
+/// and the later uncontended read drains both records to disk.
+#[cfg(unix)]
+#[tokio::test]
+async fn contended_read_drain_leaves_concurrently_parked_records_intact() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn("thr_mf_race", "turn_mf_race", RuntimeTurnStatus::InProgress);
+    let item = sample_item(
+        "thr_mf_race",
+        "item_mf_race",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let _lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block reads of the turn file: reports park instead of writing through.
+    let turn_path = manager.store.turns_dir.join(format!("{}.json", turn.id));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable the turn file");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // Record A parks via the production sink path.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:race-a",
+        &route,
+        &Usage {
+            input_tokens: 41,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "record A must park while reads fail"
+    );
+
+    // The race's writer half, deterministically: an in-flight settled append
+    // holds `turn_mutation` and parks record B into the map exactly as the
+    // append path does while its own load fails.
+    let guard = manager.store.turn_mutation.lock();
+    let parked_b = vec![super::PendingRoutedUsage {
+        source_id: "sink:race-b".to_string(),
+        usage: crate::cost_status::EffectiveRouteUsage {
+            route: route.clone(),
+            usage: Usage {
+                input_tokens: 43,
+                ..Usage::default()
+            },
+        },
+    }];
+    manager
+        .store
+        .settled_pending
+        .lock()
+        .entry(turn.id.clone())
+        .or_default()
+        .push(super::PendingRoutedUsage {
+            source_id: "sink:race-b".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: route.clone(),
+                usage: Usage {
+                    input_tokens: 43,
+                    ..Usage::default()
+                },
+            },
+        });
+    drop(parked_b);
+
+    // The reader half: an ordinary read must see the contended guard and
+    // leave the queue — BOTH records — untouched.
+    // The invariant the reviews pin, checked as a property: while the
+    // mutation guard is held, the pending queue must NEVER momentarily
+    // vanish — the drain takes the guard before touching the map, so a
+    // concurrent reader cannot open the remove→restore window a parked
+    // record could fall into. A buggy remove-before-lock order churns the
+    // map under the held guard and this poll observes the absence.
+    let (absence_tx, absence_rx) = std::sync::mpsc::channel();
+    let watcher_store = manager.store.clone();
+    let watch_turn = turn.id.clone();
+    let watcher = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if watcher_store
+                .settled_pending
+                .lock()
+                .get(&watch_turn)
+                .is_none()
+            {
+                absence_tx.send(()).ok();
+                return;
+            }
+            std::thread::yield_now();
+        }
+    });
+
+    // Concurrent reader: repeated contended ordinary reads while the guard
+    // is held. Under the fix each attempt fails the try_lock without
+    // touching the map; under the reported order it churns the map.
+    let reader_store = manager.store.clone();
+    let reader_turn = turn.id.clone();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..2000 {
+            let _ = reader_store.load_turn(&reader_turn);
+        }
+    });
+
+    let read = manager.store.load_turn(&turn.id);
+    assert!(
+        read.is_err(),
+        "storage is still unreadable, so the read must surface that"
+    );
+    reader.join().expect("reader joins");
+    let saw_absence = absence_rx.try_recv().is_ok();
+    watcher.join().expect("watcher joins");
+    assert!(
+        !saw_absence,
+        "a contended read must not remove the queue while the mutation guard \
+         is held (reviews 6032888025/6033393232)"
+    );
+    {
+        let pending = manager.store.settled_pending.lock();
+        let queue = pending.get(&turn.id).expect("the queue must survive");
+        let sources: Vec<&str> = queue.iter().map(|r| r.source_id.as_str()).collect();
+        assert!(
+            sources.contains(&"sink:race-a") && sources.contains(&"sink:race-b"),
+            "the contended read must not clobber the concurrently parked record: {sources:?}"
+        );
+    }
+    drop(guard);
+
+    // Storage recovers; an ordinary read drains both records in one save.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the turn file permissions");
+    }
+    let recovered = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("ordinary read after recovery");
+    assert_eq!(recovered.routed_usage.len(), 2);
+    assert!(
+        manager.store.settled_pending.lock().is_empty(),
+        "the uncontended read must drain the whole queue"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "neither record may reach the journal fallback"
+    );
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 2);
+    let mut tokens: Vec<u32> = from_disk
+        .routed_usage
+        .iter()
+        .map(|r| r.usage.input_tokens)
+        .collect();
+    tokens.sort_unstable();
+    assert_eq!(tokens, vec![41, 43], "both parked records must persist");
+    let _ = std::fs::remove_dir_all(dir);
+}
