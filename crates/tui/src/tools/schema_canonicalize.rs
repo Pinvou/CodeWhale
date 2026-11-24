@@ -80,7 +80,8 @@ pub fn canonicalize_schema(value: &mut Value) {
                         | "$defs"
                         | "definitions"
                         | "dependentSchemas"
-                ) && let Some(name_map) = v.as_object_mut() {
+                ) && let Some(name_map) = v.as_object_mut()
+                {
                     let old = std::mem::take(name_map);
                     let mut entries: Vec<(String, Value)> = old.into_iter().collect();
                     entries.sort_by(|a, b| a.0.cmp(&b.0));
