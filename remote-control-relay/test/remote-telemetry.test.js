@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRemoteOverview, projectRemoteTasks } from "../remote-telemetry.js";
+import { buildRemoteOverview, projectRemoteTasks, remoteOverviewForAnalyst } from "../remote-telemetry.js";
 import { buildBehaviorOverview, buildStatsOverview, buildDeviceList, buildBehaviorModelRanking, buildBehaviorToolRanking, TelemetryStore } from "../telemetry-service.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -145,6 +145,13 @@ test("remote event groups use earliest observed order and keep their counts", ()
   assert.deepEqual(report.remote_control.rows.map(({ stage, sequence, count }) => [sequence, stage, count]), [
     [1, "connection", 1], [2, "attachment", 2], [3, "claim", 1],
   ]);
+  const reversed = rows.map(row => ({ ...row, occurred_at: 2 * (now - 5000) - row.occurred_at }));
+  const other = buildBehaviorOverview(devices, [], reversed, "today", now);
+  assert.notDeepEqual(other.remote_control.rows, report.remote_control.rows);
+  assert.deepEqual(remoteOverviewForAnalyst(report.remote_control).rows,
+    remoteOverviewForAnalyst(other.remote_control).rows);
+  assert.deepEqual(remoteOverviewForAnalyst(report.remote_control).rows.map(row => row.stage),
+    ["attachment", "claim", "connection"]);
 });
 
 test("B-only admission rejection reports its reason without an invocation or origin activity", () => {

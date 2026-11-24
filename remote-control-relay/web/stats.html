@@ -167,7 +167,7 @@
           <article class="metric"><div class="metric-head">主控 / 被控安装实例</div><div class="number" id="remoteDevices">—</div><p class="metric-copy">按角色分别去重，同一实例可能承担两种角色。</p></article>
         </section>
         <section class="card table-card"><div class="table-head"><div class="table-title"><h2>任务效果与连接质量</h2><p>总调用已包含远控调用；此处为细分视图，不再累加。样本不足 30 时隐藏百分比。</p></div></div><div class="table-wrap"><table><thead><tr><th>指标</th><th>观测值</th></tr></thead><tbody id="remoteSummaryRows"></tbody></table></div></section>
-        <section class="card table-card"><div class="table-head"><div class="table-title"><h2>连接、权限与传输事件</h2><p>按所选周期内各组首次发生的时间编号。次数为该组的观测总数。</p></div></div><div class="table-wrap"><table><thead><tr><th scope="col">序号</th><th scope="col">阶段</th><th scope="col">结果</th><th scope="col">原因</th><th scope="col">次数</th></tr></thead><tbody id="remoteEventRows"></tbody></table></div></section>
+        <section class="card table-card"><div class="table-head"><div class="table-title"><h2>连接、权限与传输事件</h2><p id="remoteEventDescription">次数为该组的观测总数。</p></div></div><div class="table-wrap"><table><thead><tr><th scope="col">序号</th><th scope="col">阶段</th><th scope="col">结果</th><th scope="col">原因</th><th scope="col">次数</th></tr></thead><tbody id="remoteEventRows"></tbody></table></div></section>
       </section>
       <section class="page-view hidden" id="commercialView">
         <section class="metrics">
@@ -348,6 +348,7 @@
   function storeBehaviorReport(section,value){if(section==='summary')state.behavior=value;else if(behaviorOverviewSections.includes(section))state.behaviorSectionReports[section]=value;else state[section]=value;delete state.behaviorErrors[section]}
   function renderRemote(){
     const report=state.behaviorSectionReports.remote,r=report?.remote_control;
+    $('remoteEventDescription').textContent=state.role==='behavior_analyst'?'按事件类别编号。次数为该组的观测总数。':'按所选周期内各组首次发生的时间编号。次数为该组的观测总数。';
     if(!r||!Number.isFinite(r.task_count)){$('remoteMeta').textContent=report?'当前服务端尚未提供完整远控统计，请升级 Relay。':'等待远控统计';for(const id of ['remoteTasks','remoteSuccess','remoteAwaiting','remoteDevices'])$(id).textContent='—';renderSimpleRows('remoteSummaryRows',[],[()=>'',()=>'']);renderSimpleRows('remoteEventRows',r?.rows||[],[row=>row.sequence??'—',row=>escapeHtml(row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>nf.format(row.count||0)]);return}
     const n=v=>nf.format(v||0),pct=v=>v===null||v===undefined?'样本不足':ratio(v),ms=duration;
     $('remoteMeta').textContent=`双端匿名任务去重 · 北京时间 · ${report.range==='today'?'今日':`${report.range} 天`} · 未归属调用 ${n(r.unattributed_count)} · 未关联任务事件 ${n(r.legacy_event_count)}`;

@@ -32,7 +32,7 @@ import {
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
 import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
-import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview } from "./remote-telemetry.js";
+import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview, remoteOverviewForAnalyst } from "./remote-telemetry.js";
 import { prepareBehaviorEventView, isBehaviorEventView, namedBehaviorEvents, windowedBehaviorEvents } from "./behavior-event-view.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3208,7 +3208,11 @@ export function createTelemetryService(options = {}) {
         return true;
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/overview`) {
-        json(res, 200, store.behaviorOverview(new URL(req.url, "http://localhost").searchParams.get("range")));
+        const report = store.behaviorOverview(new URL(req.url, "http://localhost").searchParams.get("range"));
+        const remoteControl = adminAuthorized(req).role === "behavior_analyst"
+          ? remoteOverviewForAnalyst(report.remote_control)
+          : report.remote_control;
+        json(res, 200, { ...report, remote_control: remoteControl });
         return true;
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/tools`) {

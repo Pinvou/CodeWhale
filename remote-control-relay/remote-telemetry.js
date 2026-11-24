@@ -113,6 +113,16 @@ export function collectRemoteRetentionEvidence(evidence, event) {
   if (selected.length) evidence.set(task.key, selected);
 }
 
+const compareGroupLabel = (a, b) => a.stage.localeCompare(b.stage)
+  || a.outcome.localeCompare(b.outcome) || a.reason.localeCompare(b.reason);
+
+export function remoteOverviewForAnalyst(report) {
+  // Use the pre-existing category order for aggregate-only sessions.
+  const rows = [...report.rows].sort(compareGroupLabel)
+    .map((row, index) => ({ ...row, sequence: index + 1 }));
+  return { ...report, rows };
+}
+
 export function buildRemoteOverview(events, start, end, {
   minimumSample = 30, countedTaskKeys = null, countedEvents = null, taskGroups = null,
 } = {}) {
@@ -207,8 +217,7 @@ export function buildRemoteOverview(events, start, end, {
     result_wait_p50_ms: percentile(resultWait, 0.5), result_wait_p90_ms: percentile(resultWait, 0.9),
     permission_funnel: { request: 0, allowed: 0, denied: 0, expired: 0, ...group("remote_permission_step") }, size_buckets: group("remote_size_bucket"),
     latency_buckets: group("remote_latency_bucket"), model_sources: group("remote_model_source"),
-    rows: [...rows.values()].sort((a, b) => a.firstAt - b.firstAt || a.stage.localeCompare(b.stage)
-      || a.outcome.localeCompare(b.outcome) || a.reason.localeCompare(b.reason))
+    rows: [...rows.values()].sort((a, b) => a.firstAt - b.firstAt || compareGroupLabel(a, b))
       .map(({ stage, outcome, reason, count }, index) => ({ stage, outcome, reason, count, sequence: index + 1 })),
     event_count: raw.length,
     legacy_event_count: legacyCount,
