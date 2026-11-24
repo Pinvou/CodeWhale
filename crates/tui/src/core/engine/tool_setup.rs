@@ -73,13 +73,15 @@ impl Engine {
     ) -> ToolRegistryBuilder {
         let shell_policy = shell_policy_for_mode(mode, allow_shell);
         if mode != AppMode::Plan {
-            let mut builder = ToolRegistryBuilder::new().with_agent_runtime_surface(
-                client.clone(),
-                model.to_string(),
-                self.agent_tool_surface_options(shell_policy),
-                todo_list,
-                plan_state,
-            );
+            let mut builder = ToolRegistryBuilder::new()
+                .with_vision_http_policy(self.api_config.vision_http_policy())
+                .with_agent_runtime_surface(
+                    client.clone(),
+                    model.to_string(),
+                    self.agent_tool_surface_options(shell_policy),
+                    todo_list,
+                    plan_state,
+                );
             if self.config.features.enabled(Feature::Mcp) {
                 builder = builder.with_registry_mcp_sync_tool();
             }
@@ -97,6 +99,7 @@ impl Engine {
         }
 
         let mut builder = ToolRegistryBuilder::new()
+            .with_vision_http_policy(self.api_config.vision_http_policy())
             // Modes change authority, not the primitive tool identity.
             // Plan advertises the same file names as Work; the turn-loop
             // mode gate below the schema boundary blocks write/edit, and

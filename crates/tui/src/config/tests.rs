@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "host_http_policy_tests.rs"]
+mod host_http_policy_tests;
+
 #[test]
 fn forkguard_model_operation_builtin_and_unspecified_identity_scope() {
     for (source, target, retained) in [
