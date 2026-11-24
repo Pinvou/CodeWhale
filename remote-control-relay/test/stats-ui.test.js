@@ -956,3 +956,64 @@ test('retention labels follow known API semantics and behavior timestamps explic
     }
   } finally { dom.window.close(); }
 });
+
+test("role changes discard previously authorized remote rows and delayed responses", async () => {
+  let role = "operations_admin";
+  let releaseOldOverview;
+  let failOverview = false;
+  const oldResponse = new Promise(resolve => { releaseOldOverview = resolve; });
+  const adminRows = [
+    { sequence: 1, stage: "connection", outcome: "ok", reason: "none", count: 1 },
+    { sequence: 2, stage: "attachment", outcome: "ok", reason: "none", count: 1 },
+  ];
+  const ok = value => ({ ok: true, status: 200, json: async () => value });
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => {
+        const path = new URL(String(url), "https://www.pinvou.com");
+        const range = path.searchParams.get("range") || "30";
+        if (path.pathname.endsWith("/session")) return ok({ role });
+        if (path.pathname.endsWith("/login")) { role = "behavior_analyst"; return ok({ role }); }
+        if (path.pathname.endsWith("/behavior/overview")) {
+          if (role === "operations_admin" && range === "7") await oldResponse;
+          if (role === "behavior_analyst" && failOverview) return { ok: false, status: 503, json: async () => ({}) };
+          const rows = role === "operations_admin" || range === "7" ? adminRows
+            : adminRows.toReversed().map((row, index) => ({ ...row, sequence: index + 1 }));
+          return ok({ range, remote_control: { task_count: 0, rows } });
+        }
+        return ok({ range, devices: [], rows: [], funnel_rows: [] });
+      };
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  try {
+    const { document, Event } = dom.window;
+    const tick = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    const stages = () => Array.from(document.querySelectorAll("#remoteEventRows tr td:nth-child(2)"), cell => cell.textContent);
+    await tick();
+    document.querySelector('[data-view="remote"]').click();
+    assert.deepEqual(stages(), ["连接", "附件传输"]);
+    document.querySelector('[data-behavior-section="remote"] [data-range="7"]').click();
+    await tick();
+    document.querySelector("#logout").click();
+    await tick();
+    assert.deepEqual(stages(), []);
+    failOverview = true;
+    document.querySelector("#loginForm").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await tick();
+    assert.equal(document.querySelector("#loginLayer").classList.contains("hidden"), true);
+    assert.deepEqual(stages(), []);
+    failOverview = false;
+    releaseOldOverview();
+    await tick();
+    assert.deepEqual(stages(), []);
+    document.querySelector("#refreshButton").click();
+    await tick();
+    assert.deepEqual(stages(), ["附件传输", "连接"]);
+  } finally {
+    dom.window.close();
+  }
+});

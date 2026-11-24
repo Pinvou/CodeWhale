@@ -201,7 +201,7 @@
   const statsDay=value=>Math.floor((Number(value)+STATS_TIMEZONE_OFFSET_MS)/DAY_MS);
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
+  function showLogin(message=''){state.dataRefreshVersion++;clearRemoteReport();failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
   function linePath(values,max,left=35,right=770,top=22,bottom=184){
     let connected=false;
     return values.map((value,index)=>{
@@ -345,11 +345,21 @@
     const targets={remote:'remoteEventRows',activation:'activationFunnelRows',voice:'voiceFunnelRows',errors:'errorRows',versions:'versionQualityRows',toolCalls:'toolCallRows',toolInstalls:'toolInstallRows',scenes:'sceneRows',models:'modelRows'};
     for(const [section,id] of Object.entries(targets)){if(state.behaviorErrors[section]&&!behaviorReport(section)){const body=$(id),count=body.closest('table').querySelectorAll('thead th').length;body.innerHTML=`<tr><td class="table-empty" colspan="${count}">加载失败，请点击刷新重试</td></tr>`}}
   }
-  function storeBehaviorReport(section,value){if(section==='summary')state.behavior=value;else if(behaviorOverviewSections.includes(section))state.behaviorSectionReports[section]=value;else state[section]=value;delete state.behaviorErrors[section]}
+  function storeBehaviorReport(section,value){
+    if(behaviorOverviewSections.includes(section)&&section!=='remote'&&value?.remote_control){const {remote_control,...report}=value;value=report}
+    if(section==='summary')state.behavior=value;else if(behaviorOverviewSections.includes(section))state.behaviorSectionReports[section]=value;else state[section]=value;delete state.behaviorErrors[section]}
+  function clearRemoteReport(){
+    beginBehaviorRequest('remote');
+    delete state.behaviorRangeRequests.remote;
+    setBehaviorRangeBusy('remote',false);
+    storeBehaviorReport('remote',null);
+    renderRemote();
+    renderBehaviorErrors();
+  }
   function renderRemote(){
     const report=state.behaviorSectionReports.remote,r=report?.remote_control;
     $('remoteEventDescription').textContent=state.role==='behavior_analyst'?'按事件类别编号。次数为该组的观测总数。':'按所选周期内各组首次发生的时间编号。次数为该组的观测总数。';
-    if(!r||!Number.isFinite(r.task_count)){$('remoteMeta').textContent=report?'当前服务端尚未提供完整远控统计，请升级 Relay。':'等待远控统计';for(const id of ['remoteTasks','remoteSuccess','remoteAwaiting','remoteDevices'])$(id).textContent='—';renderSimpleRows('remoteSummaryRows',[],[()=>'',()=>'']);renderSimpleRows('remoteEventRows',r?.rows||[],[row=>row.sequence??'—',row=>escapeHtml(row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>nf.format(row.count||0)]);return}
+    if(!r||!Number.isFinite(r.task_count)){$('remoteMeta').textContent=report?'当前服务端尚未提供完整远控统计，请升级 Relay。':'等待远控统计';for(const id of ['remoteTasks','remoteSuccess','remoteAwaiting','remoteDevices','remoteSubmitted','remoteOutcomes'])$(id).textContent='—';renderSimpleRows('remoteSummaryRows',[],[()=>'',()=>'']);renderSimpleRows('remoteEventRows',r?.rows||[],[row=>row.sequence??'—',row=>escapeHtml(row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>nf.format(row.count||0)]);return}
     const n=v=>nf.format(v||0),pct=v=>v===null||v===undefined?'样本不足':ratio(v),ms=duration;
     $('remoteMeta').textContent=`双端匿名任务去重 · 北京时间 · ${report.range==='today'?'今日':`${report.range} 天`} · 未归属调用 ${n(r.unattributed_count)} · 未关联任务事件 ${n(r.legacy_event_count)}`;
     $('remoteTasks').textContent=n(r.task_count);$('remoteSubmitted').textContent=`提交 ${n(r.submitted_count)} · 接纳 ${n(r.admitted_count)} · 拒绝 ${n(r.rejected_count)}`;
@@ -424,6 +434,7 @@
       const session=await api('session');
       if(!isCurrent())return;
       if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
+      if(state.role!==session.role)clearRemoteReport();
       state.role=session.role;
       const diagnosticsRefresh=manual&&state.view==='diagnostics';
       let diagnosticsOk=true;
@@ -490,7 +501,7 @@
   $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
-  $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
+  $('logout').addEventListener('click',async()=>{clearRemoteReport();try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
   Object.keys(state.behaviorRanges).forEach(syncBehaviorRangeControls);
   refreshData().then(()=>{if($('loginLayer').classList.contains('hidden')&&!state.timer)state.timer=setInterval(refreshData,30000)});
 </script>

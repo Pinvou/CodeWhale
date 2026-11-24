@@ -3143,15 +3143,16 @@ export function createTelemetryService(options = {}) {
         json(res, session ? 200 : 401, session ? { role: session.role } : { error: "unauthorized" });
         return true;
       }
+      let statsSession;
       if (routePath.startsWith(`${STATS_PREFIX}/api/`)) {
-        const session = adminAuthorized(req);
-        if (!session) {
+        statsSession = adminAuthorized(req);
+        if (!statsSession) {
           json(res, 401, { error: "unauthorized" });
           return true;
         }
         const behaviorRoute = routePath.startsWith(`${STATS_PREFIX}/api/behavior/`)
           || routePath === `${STATS_PREFIX}/api/commercial/overview`;
-        if (session.role === "behavior_analyst" && !behaviorRoute) {
+        if (statsSession.role === "behavior_analyst" && !behaviorRoute) {
           json(res, 403, { error: "forbidden" });
           return true;
         }
@@ -3209,7 +3210,7 @@ export function createTelemetryService(options = {}) {
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/overview`) {
         const report = store.behaviorOverview(new URL(req.url, "http://localhost").searchParams.get("range"));
-        const remoteControl = adminAuthorized(req).role === "behavior_analyst"
+        const remoteControl = statsSession.role === "behavior_analyst"
           ? remoteOverviewForAnalyst(report.remote_control)
           : report.remote_control;
         json(res, 200, { ...report, remote_control: remoteControl });
