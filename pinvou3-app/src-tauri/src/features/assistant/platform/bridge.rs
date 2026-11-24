@@ -3793,7 +3793,9 @@ impl Pinvou3Bridge {
                 .replace('\'', "'\\''");
             hooks.push(Hook {
                 event: HookEvent::ShellEnv,
-                command: format!("bash '{script}'"),
+                command: self
+                    .managed_shell_env_command()
+                    .map_or_else(|| format!("bash '{script}'"), |(command, _)| command),
                 condition: None,
                 // 20s: this script spawns the user's login shell to harvest
                 // the login env. Profiles sourcing nvm/conda/pyenv init
@@ -3824,6 +3826,99 @@ impl Pinvou3Bridge {
             working_dir: None,
             problems: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    fn managed_shell_env_command(
+        &self,
+    ) -> Option<(
+        String,
+        crate::platform::connector_lock::ManagedConnectorPaths,
+    )> {
+        use crate::platform::connector_lock::managed_connector_shell_paths;
+        use std::path::Path;
+
+        const SHELL_ENV: &str = include_str!("../../../../resources/common/bundle/shell_env.sh");
+        let script = &self.bundle.shell_env_sh;
+        if std::fs::read_to_string(script).ok()?.replace("\r\n", "\n")
+            != SHELL_ENV.replace("\r\n", "\n")
+        {
+            return None;
+        }
+        // The ordinary non-login shells keep the supplied exec PATH. A
+        // custom shell or startup file can resolve the same bare name again.
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        match shell.as_str() {
+            "" | "/bin/sh" | "/usr/bin/sh" | "/bin/bash" | "/usr/bin/bash" | "/bin/dash"
+            | "/usr/bin/dash" => {
+                if ["BASH_ENV", "ENV"]
+                    .into_iter()
+                    .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+                {
+                    return None;
+                }
+            }
+            "/bin/zsh" | "/usr/bin/zsh" => {
+                let home = std::env::var_os("ZDOTDIR").or_else(|| std::env::var_os("HOME"))?;
+                if PathBuf::from(home).join(".zshenv").exists()
+                    || ["/etc/zshenv", "/etc/zsh/zshenv"]
+                        .into_iter()
+                        .any(|file| Path::new(file).exists())
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+
+        let paths = managed_connector_shell_paths();
+        let encoded = serde_json::to_string(&paths).ok()?;
+        let script_path = script.to_str()?;
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        // Bind the function to the embedded script used for provenance.
+        // Ordinary or customized unpacked hooks keep their existing command.
+        Some((
+            format!(
+                "bash -c {} {} {}",
+                quote(SHELL_ENV),
+                quote(script_path),
+                quote(&encoded)
+            ),
+            paths,
+        ))
+    }
+
+    pub(crate) fn connector_shell_path(
+        &self,
+        config: &EngineConfig,
+    ) -> crate::platform::connector_lock::ConnectorShellPath {
+        use crate::platform::connector_lock::ConnectorShellPath;
+        let executors = [
+            config.runtime_services.hook_executor.as_deref(),
+            config.hook_executor.as_deref(),
+        ];
+        let mut shell_env = executors
+            .into_iter()
+            .flatten()
+            .filter(|executor| executor.config().enabled)
+            .flat_map(|executor| executor.config().hooks.iter())
+            .filter(|hook| hook.event == HookEvent::ShellEnv)
+            .peekable();
+        if shell_env.peek().is_none() {
+            return ConnectorShellPath::Inherited;
+        }
+        #[cfg(unix)]
+        if let Some((command, paths)) = self.managed_shell_env_command()
+            && shell_env.all(|hook| {
+                hook.name.as_deref() == Some("pinvou3-cli-shell-env")
+                    && hook.condition.is_none()
+                    && !hook.background
+                    && hook.command == command
+            })
+        {
+            return ConnectorShellPath::Managed(paths);
+        }
+        ConnectorShellPath::ExplicitOnly
     }
 
     fn build_hook_executor(&self) -> Arc<HookExecutor> {

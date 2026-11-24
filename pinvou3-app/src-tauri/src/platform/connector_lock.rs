@@ -118,14 +118,28 @@ pub fn locked_cli_path(name: &str) -> Option<std::path::PathBuf> {
     Some(super::paths::assets_cli_dir(name, &pin.version).join(executable_name(name)))
 }
 
-/// Resolve the app-managed source for a registered connector. The executable
-/// name alone says nothing about a launcher in the workspace or an earlier PATH
-/// directory. Derive the location from the same layout used by the installer.
+/// Search paths we can establish for a native shell execution. With the stock
+/// ShellEnv hook, the installed launcher must win both when login PATH was
+/// imported and when the hook failed and the child inherited the app PATH.
+#[derive(Default)]
+pub(crate) enum ConnectorShellPath {
+    Inherited,
+    #[cfg(unix)]
+    Managed(ManagedConnectorPaths),
+    #[default]
+    ExplicitOnly,
+}
+
+#[cfg(unix)]
+pub(crate) type ManagedConnectorPaths =
+    std::collections::BTreeMap<&'static str, Vec<std::path::PathBuf>>;
+
 pub(crate) fn registered_telemetry_cli(
     key: &str,
     program: &str,
     cwd: &std::path::Path,
-    shell_path_inherited: bool,
+    shell_path: &ConnectorShellPath,
+    _command: &str,
 ) -> bool {
     use std::path::Path;
 
@@ -160,12 +174,86 @@ pub(crate) fn registered_telemetry_cli(
         }
         _ => None,
     };
-    let path = shell_path_inherited
-        .then(|| std::env::var_os("PATH"))
-        .flatten();
-    installed.is_some_and(|installed| {
-        matches_installed_connector_launcher(program, cwd, &installed, path.as_deref())
-    })
+    let Some(installed) = installed else {
+        return false;
+    };
+    if matches_installed_connector_launcher(program, cwd, &installed, None) {
+        return true;
+    }
+    if matches!(shell_path, ConnectorShellPath::ExplicitOnly) {
+        return false;
+    }
+    let inherited = std::env::var_os("PATH");
+    if !matches_installed_connector_launcher(program, cwd, &installed, inherited.as_deref()) {
+        return false;
+    }
+    match shell_path {
+        ConnectorShellPath::Inherited => true,
+        #[cfg(unix)]
+        ConnectorShellPath::Managed(paths) => {
+            // Keep the scope identical to the stock ShellEnv branch.
+            if _command.contains(['\n', '\r', '|', '&', ';', '<', '>', '`'])
+                || _command.contains("$(")
+            {
+                return false;
+            }
+            let Some(dirs) = paths.get(program) else {
+                return false;
+            };
+            let Ok(path) = std::env::join_paths(dirs) else {
+                return false;
+            };
+            matches_installed_connector_launcher(program, cwd, &installed, Some(&path))
+        }
+        ConnectorShellPath::ExplicitOnly => false,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn managed_connector_shell_paths() -> ManagedConnectorPaths {
+    use std::path::{Path, PathBuf};
+
+    let mut paths = ManagedConnectorPaths::new();
+    for binary in ["lark-cli", "wecom-cli", "dws"] {
+        let versioned =
+            locked_cli_path(binary).and_then(|file| file.parent().map(Path::to_path_buf));
+        let legacy = super::paths::managed_connector_bin_dir();
+        paths.insert(binary, versioned.into_iter().chain(legacy).collect());
+    }
+    for (key, aliases) in [
+        ("eip", ["eip", "eip-cli", "eip-cli-aarch64"]),
+        ("zhidao", ["zhidao", "zhidao-cli", "zhidao-cli-aarch64"]),
+    ] {
+        let dir = super::paths::bundle_skills_dir().join(key).join("bin");
+        for binary in aliases {
+            paths.insert(binary, vec![dir.clone()]);
+        }
+    }
+    let tmeet = tmeet_launcher_path(&super::os::connector_cli_command("tmeet", "tmeet"));
+    let tmeet_dir = tmeet
+        .is_absolute()
+        .then(|| tmeet.parent().map(Path::to_path_buf))
+        .flatten()
+        .or_else(|| {
+            std::env::var_os("NPM_CONFIG_PREFIX")
+                .or_else(|| std::env::var_os("npm_config_prefix"))
+                .map(|prefix| PathBuf::from(prefix).join("bin"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".npm-global/bin"))
+        });
+    paths.insert("tmeet", tmeet_dir.into_iter().collect());
+    // A delimiter or a newline would not round-trip through the PATH line.
+    paths.retain(|_, dirs| {
+        !dirs.is_empty()
+            && dirs.iter().all(|dir| {
+                dir.is_absolute()
+                    && dir
+                        .to_str()
+                        .is_some_and(|dir| !dir.contains([':', '\n', '\r', '\0']))
+            })
+    });
+    paths
 }
 
 pub(crate) fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {

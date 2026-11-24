@@ -2083,15 +2083,7 @@ impl AppEngine {
         );
 
         let workspace = engine_config.workspace.clone();
-        // A shell-env hook can replace PATH for an individual child. Its
-        // effective value is not available in the shell job snapshot.
-        let shell_path_inherited = [
-            engine_config.runtime_services.hook_executor.as_deref(),
-            engine_config.hook_executor.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|executor| !executor.has_hooks_for_event(deepseek_tui::hooks::HookEvent::ShellEnv));
+        let connector_shell_path = bridge.connector_shell_path(&engine_config);
         let handle = spawn_engine(engine_config, &dt_config);
         // Record the provider route this spawn resolved onto the session
         // record. These two fields are not wire-inert diagnostics: the
@@ -2140,7 +2132,7 @@ impl AppEngine {
             scheduled_unattended.clone(),
             turn_lifecycle.clone(),
             shell_manager,
-            shell_path_inherited,
+            connector_shell_path,
             turn_shell_tasks.clone(),
             steer_id_generation,
             transcript_writer_active.clone(),

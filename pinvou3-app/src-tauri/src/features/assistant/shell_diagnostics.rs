@@ -84,7 +84,7 @@ pub(crate) fn foreground_connector_key(
     call: &str,
     success: bool,
     metadata: Option<&Value>,
-    shell_path_inherited: bool,
+    shell_path: &crate::platform::connector_lock::ConnectorShellPath,
 ) -> Option<&'static str> {
     if metadata.is_some_and(|value| {
         ["sandbox_denied", "blocked", "backgrounded", "canceled"]
@@ -94,14 +94,18 @@ pub(crate) fn foreground_connector_key(
         return None;
     }
     let jobs = manager.lock().ok()?.list_jobs_for_session(session);
-    terminal_connector_key(&jobs, session, turn, call, success, |key, program, cwd| {
-        crate::platform::connector_lock::registered_telemetry_cli(
-            key,
-            program,
-            cwd,
-            shell_path_inherited,
-        )
-    })
+    terminal_connector_key(
+        &jobs,
+        session,
+        turn,
+        call,
+        success,
+        |key, program, cwd, command| {
+            crate::platform::connector_lock::registered_telemetry_cli(
+                key, program, cwd, shell_path, command,
+            )
+        },
+    )
 }
 
 fn terminal_connector_key(
@@ -110,7 +114,7 @@ fn terminal_connector_key(
     turn: &str,
     call: &str,
     success: bool,
-    is_installed: impl FnOnce(&str, &str, &Path) -> bool,
+    is_installed: impl FnOnce(&str, &str, &Path, &str) -> bool,
 ) -> Option<&'static str> {
     let job = unique_shell_job(jobs, session, turn, call)?;
     match (success, &job.status, job.exit_code) {
@@ -118,8 +122,16 @@ fn terminal_connector_key(
         (false, ShellStatus::Failed, Some(code)) if !matches!(code, 0 | 126 | 127) => {}
         _ => return None,
     }
+    // An unsupported call operator can exit before the verified launcher runs.
+    if !success && job.command.trim_start().starts_with('&') {
+        return None;
+    }
     // The job stores the command actually executed after any input rewrite.
-    crate::features::behavior_telemetry::connector_cli_key(&job.command, &job.cwd, is_installed)
+    crate::features::behavior_telemetry::connector_cli_key(
+        &job.command,
+        &job.cwd,
+        |key, program, cwd| is_installed(key, program, cwd, &job.command),
+    )
 }
 
 #[cfg(test)]
@@ -193,25 +205,39 @@ mod tests {
 
     #[test]
     fn connector_attribution_requires_the_exact_job_and_uses_the_executed_command() {
+        let mut rejected = job();
+        rejected.command = "& \"./managed/lark-cli.exe\"".into();
+        rejected.exit_code = Some(2);
+        assert_eq!(
+            terminal_connector_key(
+                &[rejected],
+                "session",
+                "turn",
+                "call",
+                false,
+                |_, _, _, _| { true }
+            ),
+            None
+        );
         let mut terminal = job();
         terminal.command = "wecom-cli list".into();
         terminal.status = ShellStatus::Completed;
         terminal.exit_code = Some(0);
         let jobs = [terminal];
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "call", true, |_, _, _| true),
+            terminal_connector_key(&jobs, "session", "turn", "call", true, |_, _, _, _| true),
             Some("wecom")
         );
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "denied", false, |_, _, _| true),
+            terminal_connector_key(&jobs, "session", "turn", "denied", false, |_, _, _, _| true),
             None
         );
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "call", false, |_, _, _| true),
+            terminal_connector_key(&jobs, "session", "turn", "call", false, |_, _, _, _| true),
             None
         );
         assert_eq!(
-            terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _| true),
+            terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _, _| true),
             None
         );
     }

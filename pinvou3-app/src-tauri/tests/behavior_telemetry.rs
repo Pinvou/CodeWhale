@@ -8,11 +8,16 @@ mod platform {
     pub mod connector_lock {
         use std::path::Path;
 
+        pub enum ConnectorShellPath {
+            ExplicitOnly,
+        }
+
         pub fn registered_telemetry_cli(
             key: &str,
             program: &str,
             cwd: &Path,
-            _shell_path_inherited: bool,
+            _shell_path: &ConnectorShellPath,
+            _command: &str,
         ) -> bool {
             let installed = cwd.join("managed-fixture").join(super::fixture_cli_name());
             key == "feishu"
