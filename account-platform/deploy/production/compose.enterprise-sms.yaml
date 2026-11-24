@@ -1,0 +1,48 @@
+# Apply alongside the Account business Compose configuration on a private network.
+services:
+  enterprise-sms-gateway:
+    image: ${ENTERPRISE_SMS_GATEWAY_IMAGE:?set the reviewed gateway image}
+    pull_policy: never
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    ulimits:
+      core: {soft: 0, hard: 0}
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+    healthcheck:
+      test: [CMD, /healthcheck]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 6
+    expose: ["8443"]
+    environment:
+      SMS_GATEWAY_TLS_CERT_FILE: /run/sms-gateway/tls.crt
+      SMS_GATEWAY_TLS_KEY_FILE: /run/sms-gateway/tls.key
+      SMS_GATEWAY_ACCESS_KEY_ID_FILE: /run/sms-gateway/access-key-id
+      SMS_GATEWAY_ACCESS_KEY_SECRET_FILE: /run/sms-gateway/access-key-secret
+      SMS_GATEWAY_BEARER_TOKEN_FILE: /run/sms-gateway/bearer-token
+      SMS_GATEWAY_STATE_DIR: /var/lib/sms-gateway
+      SMS_GATEWAY_SIGN_NAME: ${ENTERPRISE_SMS_SIGN_NAME:?set the approved sign name}
+      SMS_GATEWAY_REGISTER_TEMPLATE: ${ENTERPRISE_SMS_REGISTER_TEMPLATE:?set the approved register code}
+      SMS_GATEWAY_LOGIN_TEMPLATE: ${ENTERPRISE_SMS_LOGIN_TEMPLATE:?set the approved login code}
+      SMS_GATEWAY_PROFILE_MOBILE_TEMPLATE: ${ENTERPRISE_SMS_PROFILE_MOBILE_TEMPLATE:?set the approved change mobile code}
+      SMS_GATEWAY_PASSWORD_RESET_TEMPLATE: ${ENTERPRISE_SMS_PASSWORD_RESET_TEMPLATE:?set the approved password reset code}
+      HEALTHCHECK_URL: https://enterprise-sms-gateway:8443/health/ready
+      SSL_CERT_FILE: /run/sms-gateway/ca-bundle.pem
+    volumes:
+      - {type: bind, source: "${ENTERPRISE_SMS_SECRET_DIRECTORY:?set the private secret directory}", target: /run/sms-gateway, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${ENTERPRISE_SMS_STATE_DIRECTORY:?set the durable private state directory}", target: /var/lib/sms-gateway, bind: {create_host_path: false}}
+    networks:
+      - backend
+networks:
+  backend:
+    external: true
+    name: ${PERSONAL_BACKEND_NETWORK:?set the existing private Account network}
