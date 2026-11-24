@@ -931,7 +931,7 @@ pub fn track_tool_call_completed(
         error_category,
         diagnostic_error,
         None,
-        None,
+        || None,
     );
 }
 
@@ -945,7 +945,7 @@ pub fn track_tool_call_completed_with_metadata(
     error_category: Option<&str>,
     diagnostic_error: Option<&str>,
     diagnostic_metadata: Option<&Value>,
-    connector_key: Option<&'static str>,
+    resolve_connector_key: impl FnOnce() -> Option<&'static str>,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
@@ -980,7 +980,9 @@ pub fn track_tool_call_completed_with_metadata(
         }
         event = event.diagnostic_tool_metadata(diagnostic_metadata);
     }
-    if let Some(key) = connector_key.filter(|_| operation.turn_id == turn_id) {
+    if operation.turn_id == turn_id
+        && let Some(key) = resolve_connector_key()
+    {
         // Interpret the native shell result before applying its funnel identity.
         event = event.tool(key, key, "cli");
     }

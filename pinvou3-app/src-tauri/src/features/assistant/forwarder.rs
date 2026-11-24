@@ -315,7 +315,6 @@ pub(crate) fn spawn_event_forwarder(
     scheduled_unattended: Arc<AtomicBool>,
     turn_lifecycle: Arc<TurnLifecycle>,
     shell_manager: SharedShellManager,
-    connector_shell_path: crate::platform::connector_lock::ConnectorShellPath,
     turn_shell_tasks: TurnShellTaskRegistry,
     steer_id_generation: u64,
     transcript_writer_active: Arc<AtomicBool>,
@@ -678,21 +677,6 @@ pub(crate) fn spawn_event_forwarder(
                                 .and_then(serde_json::Value::as_str)
                                 == Some("Running");
                     if let Some(turn_id) = current_turn_id.as_deref() {
-                        let connector_key = if !shell_still_running
-                            && matches!(name.as_str(), "Bash" | "bash" | "exec_shell")
-                        {
-                            crate::features::assistant::shell_diagnostics::foreground_connector_key(
-                                &shell_manager,
-                                &session_id,
-                                turn_id,
-                                &id,
-                                success,
-                                metadata.as_ref(),
-                                &connector_shell_path,
-                            )
-                        } else {
-                            None
-                        };
                         // The default lowercase bash error has no ToolResult
                         // metadata. Observe only its exact Engine-owned job;
                         // do not parse command output or guess legacy origins.
@@ -718,7 +702,16 @@ pub(crate) fn spawn_event_forwarder(
                             }),
                             (!success).then_some(output.as_str()),
                             diagnostic_metadata.as_ref(),
-                            connector_key,
+                            || {
+                                if shell_still_running
+                                    || !matches!(name.as_str(), "Bash" | "bash" | "exec_shell")
+                                {
+                                    return None;
+                                }
+                                crate::features::assistant::shell_diagnostics::foreground_connector_key(
+                                    &shell_manager, &session_id, turn_id, &id, success, metadata.as_ref(),
+                                )
+                            },
                         );
                     }
                     #[cfg(feature = "benchmark-hooks")]

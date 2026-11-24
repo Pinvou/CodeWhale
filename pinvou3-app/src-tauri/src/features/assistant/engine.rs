@@ -2083,7 +2083,6 @@ impl AppEngine {
         );
 
         let workspace = engine_config.workspace.clone();
-        let connector_shell_path = bridge.connector_shell_path(&engine_config);
         let handle = spawn_engine(engine_config, &dt_config);
         // Record the provider route this spawn resolved onto the session
         // record. These two fields are not wire-inert diagnostics: the
@@ -2132,7 +2131,6 @@ impl AppEngine {
             scheduled_unattended.clone(),
             turn_lifecycle.clone(),
             shell_manager,
-            connector_shell_path,
             turn_shell_tasks.clone(),
             steer_id_generation,
             transcript_writer_active.clone(),

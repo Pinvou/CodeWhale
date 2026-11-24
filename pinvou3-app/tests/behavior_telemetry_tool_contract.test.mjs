@@ -1,9 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
@@ -19,8 +15,8 @@ test('assistant and ACP tool calls emit correlated start and terminal events', (
   assert(forwarder.includes('track_tool_call_completed_with_metadata('));
   const completion = forwarder.slice(forwarder.indexOf('Event::ToolCallComplete {'), forwarder.indexOf('let background_task_id ='));
   assert.match(completion, /tool_completion_metadata\(\s*&shell_manager,\s*&session_id,\s*turn_id,\s*&id,\s*&name,\s*success,\s*metadata\.as_ref\(\),\s*\)/);
-  assert.match(completion, /foreground_connector_key\([\s\S]*?metadata\.as_ref\(\),\s*&connector_shell_path,\s*\)/);
-  assert.match(completion, /track_tool_call_completed_with_metadata\([\s\S]*?diagnostic_metadata\.as_ref\(\),\s*connector_key,\s*\);/);
+  assert.match(completion, /foreground_connector_key\([\s\S]*?metadata\.as_ref\(\),\s*\)/);
+  assert.match(completion, /track_tool_call_completed_with_metadata\([\s\S]*?diagnostic_metadata\.as_ref\(\),\s*\|\|\s*\{/);
   assert(acp.includes('track_tool_call_started('));
   assert(acp.includes('track_tool_call_completed('));
   assert(telemetry.includes('calls.remove(&tool_operation_key(session_id, call_id))'));
@@ -73,49 +69,4 @@ test('marketplace sync and join errors reach the installation guard before retur
   const start = marketplace.indexOf('pub async fn install_marketplace_tool(');
   const body = marketplace.slice(start, marketplace.indexOf('\n}', start) + 2);
   assert.match(body, /let post_install =[\s\S]*?mark_mcp_config_updated\(\);[\s\S]*?hot_refresh\(&pool, true\)\.await;\s*telemetry_install\.finish\(post_install\)/);
-});
-
-test('the default Unix hook supplies the managed path only for the selected connector', {
-  skip: process.platform === 'win32',
-}, () => {
-  const directory = mkdtempSync(join(tmpdir(), 'pinvou-connector-shell-env-'));
-  try {
-    const managed = join(directory, 'managed');
-    const loginPath = join(directory, 'login-path');
-    mkdirSync(managed);
-    mkdirSync(loginPath);
-    const login = join(directory, 'login-shell');
-    writeFileSync(login, '#!/bin/sh\nprintf "\\0PINVOU3_SHELL_ENV_START\\0PATH=%s\\0" "$FIXTURE_LOGIN_PATH"\n', { mode: 0o700 });
-    for (const [bin, output] of [[managed, 'managed'], [loginPath, 'login']]) {
-      for (const name of ['lark-cli', 'tmeet', 'other-cli']) {
-        writeFileSync(join(bin, name), '#!/bin/sh\nprintf "%s" "' + output + '"\n', { mode: 0o700 });
-      }
-    }
-    const script = fileURLToPath(new URL('../src-tauri/resources/common/bundle/shell_env.sh', import.meta.url));
-    const prefix = JSON.stringify({ 'lark-cli': [managed], tmeet: [managed] });
-    const env = { ...process.env, SHELL: login, FIXTURE_LOGIN_PATH: loginPath };
-    const run = (args) => spawnSync('bash', ['-c', readFileSync(script, 'utf8'), script, prefix], {
-      env: { ...env, DEEPSEEK_TOOL_ARGS: args }, encoding: 'utf8',
-    });
-    for (const [command, expected] of [
-      ['lark-cli list', 'managed'],
-      ['tmeet meeting list', 'managed'],
-      ['other-cli list', 'login'],
-      ['lark-cli list && other-cli list', 'loginlogin'],
-      ['\x27' + join(loginPath, 'lark-cli').replaceAll("\x27", "'\\''") + '\x27 list', 'login'],
-    ]) {
-      const applied = run(JSON.stringify({ command }));
-      assert.equal(applied.status, 0, applied.stderr);
-      const effectivePath = applied.stdout.match(/^PATH=(.+)$/m)?.[1];
-      assert(effectivePath);
-      const child = spawnSync('/bin/sh', ['-c', command], {
-        env: { ...env, PATH: effectivePath }, encoding: 'utf8',
-      });
-      assert.equal(child.status, 0, child.stderr);
-      assert.equal(child.stdout, expected);
-    }
-    assert.notEqual(run('{"command":"lark-cli').status, 0);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
 });

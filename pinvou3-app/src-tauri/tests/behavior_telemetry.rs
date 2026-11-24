@@ -8,21 +8,13 @@ mod platform {
     pub mod connector_lock {
         use std::path::Path;
 
-        pub enum ConnectorShellPath {
-            ExplicitOnly,
-        }
+        pub use pinvou3_lib::platform::behavior_telemetry_test_support::connector_failure_exit_is_ambiguous;
 
-        pub fn registered_telemetry_cli(
-            key: &str,
-            program: &str,
-            cwd: &Path,
-            _shell_path: &ConnectorShellPath,
-            _command: &str,
-        ) -> bool {
+        pub fn registered_telemetry_cli(key: &str, program: &str, cwd: &Path) -> bool {
             let installed = cwd.join("managed-fixture").join(super::fixture_cli_name());
             key == "feishu"
                 && pinvou3_lib::platform::behavior_telemetry_test_support::matches_installed_connector_launcher(
-                    program, cwd, &installed, None,
+                    program, cwd, &installed,
                 )
         }
     }
@@ -164,55 +156,60 @@ fn synthetic_lark_command(folder: &std::path::Path, exit: i64, managed: bool) ->
 }
 
 #[test]
-fn installed_launcher_excludes_workspace_shadow_and_missing_program() {
+fn launcher_attribution_requires_an_explicit_installed_path() {
     use pinvou3_lib::platform::behavior_telemetry_test_support::matches_installed_connector_launcher;
 
     let root = tempfile::tempdir().unwrap();
-    let work = root.path().join("workspace");
-    let managed = root.path().join("managed");
-    let wrong = root.path().join("earlier");
-    for directory in [&work, &managed, &wrong] {
-        std::fs::create_dir(directory).unwrap();
-    }
-    let executable = platform::fixture_cli_name();
-    let installed = managed.join(executable);
-    let path = std::env::join_paths([&wrong, &managed]).unwrap();
+    let work = root.path();
+    let managed = work.join("managed-fixture");
+    std::fs::create_dir(&managed).unwrap();
+    let name = platform::fixture_cli_name();
+    let installed = managed.join(name);
+    let explicit = format!("./managed-fixture/{name}");
     assert!(!matches_installed_connector_launcher(
-        "lark-cli",
-        &work,
-        &installed,
-        Some(&path)
+        &explicit, work, &installed
     ));
+
     std::fs::write(&installed, b"fixture").unwrap();
-    assert!(!matches_installed_connector_launcher(
-        "lark-cli", &work, &installed, None
-    ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!matches_installed_connector_launcher(
+            &explicit, work, &installed
+        ));
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     assert!(matches_installed_connector_launcher(
-        "lark-cli",
-        &work,
-        &installed,
-        Some(&path)
-    ));
-    std::fs::write(wrong.join(executable), b"unrelated fixture").unwrap();
-    assert!(!matches_installed_connector_launcher(
-        "lark-cli",
-        &work,
-        &installed,
-        Some(&path)
-    ));
-    std::fs::write(work.join(executable), b"unrelated fixture").unwrap();
-    assert!(!matches_installed_connector_launcher(
-        &format!("./{executable}"),
-        &work,
-        &installed,
-        Some(&path),
+        &explicit, work, &installed
     ));
     assert!(matches_installed_connector_launcher(
         installed.to_str().unwrap(),
-        &work,
-        &installed,
-        Some(&path),
+        work,
+        &installed
     ));
+    assert!(!matches_installed_connector_launcher(
+        "lark-cli", &managed, &installed
+    ));
+    assert!(!matches_installed_connector_launcher(
+        name, &managed, &installed
+    ));
+    std::fs::copy(&installed, work.join(name)).unwrap();
+    assert!(!matches_installed_connector_launcher(
+        &format!("./{name}"),
+        work,
+        &installed
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_shell_launch_errors_are_ambiguous() {
+    use platform::connector_lock::connector_failure_exit_is_ambiguous;
+
+    assert!(connector_failure_exit_is_ambiguous(1));
+    assert!(connector_failure_exit_is_ambiguous(9009));
+    assert!(!connector_failure_exit_is_ambiguous(7));
 }
 
 #[test]

@@ -79,6 +79,10 @@ pub mod behavior_telemetry_test_support {
     pub const TELEMETRY_DEFAULT_BASE_URL: &str = super::telemetry::TELEMETRY_DEFAULT_BASE_URL;
     pub const TELEMETRY_ENROLLMENT_TOKEN: &str = super::telemetry::TELEMETRY_ENROLLMENT_TOKEN;
 
+    pub fn connector_failure_exit_is_ambiguous(code: i64) -> bool {
+        super::connector_lock::connector_failure_exit_is_ambiguous(code)
+    }
+
     pub fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {
         super::connector_lock::tmeet_launcher_path(command)
     }
@@ -87,9 +91,8 @@ pub mod behavior_telemetry_test_support {
         program: &str,
         cwd: &Path,
         installed: &Path,
-        path: Option<&std::ffi::OsStr>,
     ) -> bool {
-        super::connector_lock::matches_installed_connector_launcher(program, cwd, installed, path)
+        super::connector_lock::matches_installed_connector_launcher(program, cwd, installed)
     }
 
     pub fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()> {

@@ -31,30 +31,10 @@ collect_login_env() {
 
 login_env_rc=0
 collect_login_env | python3 -c '
-import json
 import os
-import posixpath
 import re
 import sys
 
-def connector_path_prefix():
-    if len(sys.argv) != 2:
-        return []
-    try:
-        directories = json.loads(sys.argv[1])
-        command = json.loads(os.environ.get("DEEPSEEK_TOOL_ARGS", "{}")).get("command", "")
-        # Leave pipelines and compound invocations on their login PATH.
-        if any(mark in command for mark in ("\n", "\r", "|", "&", ";", "<", ">", chr(96), "$(")):
-            return []
-        binary = re.match(r"[ \t\r\n\v\f]*([^ \t\r\n\v\f]+)", command)
-        paths = directories.get(binary.group(1), []) if binary else []
-        return [path for path in paths if posixpath.isabs(path)]
-    except (AttributeError, TypeError, ValueError):
-        # The engine may truncate very large hook inputs. Contribute no
-        # environment in that case, so the child uses the inherited PATH.
-        raise SystemExit(1)
-
-managed_prefix = connector_path_prefix()
 marker = b"\0PINVOU3_SHELL_ENV_START\0"
 raw = sys.stdin.buffer.read()
 _, found, payload = raw.partition(marker)
@@ -110,13 +90,8 @@ for entry in payload.split(b"\0"):
     # URL userinfo 往往是代理/私有源密码；变量名不敏感也不能透传。
     if re.search(r"://[^/\s]*@", value):
         continue
-    if key == "PATH" and managed_prefix:
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and ord(value[0]) in (34, 39):
-            value = value[1:-1]
-        value = ":".join([*managed_prefix, value])
     print(f"{key}={value}")
-' "$@" || login_env_rc=$?
+' || login_env_rc=$?
 
 if (( login_env_rc == 124 )); then
     # rc=124 沿 pipefail 上抛后，引擎侧 collect_shell_env 对非零退出的 hook

@@ -118,31 +118,18 @@ pub fn locked_cli_path(name: &str) -> Option<std::path::PathBuf> {
     Some(super::paths::assets_cli_dir(name, &pin.version).join(executable_name(name)))
 }
 
-/// Search paths we can establish for a native shell execution. With the stock
-/// ShellEnv hook, the installed launcher must win both when login PATH was
-/// imported and when the hook failed and the child inherited the app PATH.
-#[derive(Default)]
-pub(crate) enum ConnectorShellPath {
-    Inherited,
-    #[cfg(unix)]
-    Managed(ManagedConnectorPaths),
-    #[default]
-    ExplicitOnly,
+pub(crate) fn connector_failure_exit_is_ambiguous(code: i64) -> bool {
+    // A shell can use an ordinary child exit code to report a launch error.
+    // Windows PowerShell notably returns 1 for a nonexistent executable.
+    matches!(code, 0 | 126 | 127 | 9009) || cfg!(windows) && code == 1
 }
 
-#[cfg(unix)]
-pub(crate) type ManagedConnectorPaths =
-    std::collections::BTreeMap<&'static str, Vec<std::path::PathBuf>>;
-
-pub(crate) fn registered_telemetry_cli(
-    key: &str,
-    program: &str,
-    cwd: &std::path::Path,
-    shell_path: &ConnectorShellPath,
-    _command: &str,
-) -> bool {
+pub(crate) fn registered_telemetry_cli(key: &str, program: &str, cwd: &std::path::Path) -> bool {
     use std::path::Path;
 
+    if !Path::new(program).is_absolute() && !program.contains(['/', '\\']) {
+        return false;
+    }
     let installed = match key {
         "eip" | "zhidao" => {
             let Some(name) = Path::new(program).file_name() else {
@@ -166,7 +153,7 @@ pub(crate) fn registered_telemetry_cli(
                 _ => "dws",
             };
             locked_cli_path(bin)
-                .filter(|path| path.is_file())
+                .filter(|path| launcher_is_executable(path))
                 .or_else(|| {
                     super::paths::managed_connector_bin_dir()
                         .map(|dir| dir.join(executable_name(bin)))
@@ -174,86 +161,7 @@ pub(crate) fn registered_telemetry_cli(
         }
         _ => None,
     };
-    let Some(installed) = installed else {
-        return false;
-    };
-    if matches_installed_connector_launcher(program, cwd, &installed, None) {
-        return true;
-    }
-    if matches!(shell_path, ConnectorShellPath::ExplicitOnly) {
-        return false;
-    }
-    let inherited = std::env::var_os("PATH");
-    if !matches_installed_connector_launcher(program, cwd, &installed, inherited.as_deref()) {
-        return false;
-    }
-    match shell_path {
-        ConnectorShellPath::Inherited => true,
-        #[cfg(unix)]
-        ConnectorShellPath::Managed(paths) => {
-            // Keep the scope identical to the stock ShellEnv branch.
-            if _command.contains(['\n', '\r', '|', '&', ';', '<', '>', '`'])
-                || _command.contains("$(")
-            {
-                return false;
-            }
-            let Some(dirs) = paths.get(program) else {
-                return false;
-            };
-            let Ok(path) = std::env::join_paths(dirs) else {
-                return false;
-            };
-            matches_installed_connector_launcher(program, cwd, &installed, Some(&path))
-        }
-        ConnectorShellPath::ExplicitOnly => false,
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn managed_connector_shell_paths() -> ManagedConnectorPaths {
-    use std::path::{Path, PathBuf};
-
-    let mut paths = ManagedConnectorPaths::new();
-    for binary in ["lark-cli", "wecom-cli", "dws"] {
-        let versioned =
-            locked_cli_path(binary).and_then(|file| file.parent().map(Path::to_path_buf));
-        let legacy = super::paths::managed_connector_bin_dir();
-        paths.insert(binary, versioned.into_iter().chain(legacy).collect());
-    }
-    for (key, aliases) in [
-        ("eip", ["eip", "eip-cli", "eip-cli-aarch64"]),
-        ("zhidao", ["zhidao", "zhidao-cli", "zhidao-cli-aarch64"]),
-    ] {
-        let dir = super::paths::bundle_skills_dir().join(key).join("bin");
-        for binary in aliases {
-            paths.insert(binary, vec![dir.clone()]);
-        }
-    }
-    let tmeet = tmeet_launcher_path(&super::os::connector_cli_command("tmeet", "tmeet"));
-    let tmeet_dir = tmeet
-        .is_absolute()
-        .then(|| tmeet.parent().map(Path::to_path_buf))
-        .flatten()
-        .or_else(|| {
-            std::env::var_os("NPM_CONFIG_PREFIX")
-                .or_else(|| std::env::var_os("npm_config_prefix"))
-                .map(|prefix| PathBuf::from(prefix).join("bin"))
-        })
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".npm-global/bin"))
-        });
-    paths.insert("tmeet", tmeet_dir.into_iter().collect());
-    // A delimiter or a newline would not round-trip through the PATH line.
-    paths.retain(|_, dirs| {
-        !dirs.is_empty()
-            && dirs.iter().all(|dir| {
-                dir.is_absolute()
-                    && dir
-                        .to_str()
-                        .is_some_and(|dir| !dir.contains([':', '\n', '\r', '\0']))
-            })
-    });
-    paths
+    installed.is_some_and(|path| matches_installed_connector_launcher(program, cwd, &path))
 }
 
 pub(crate) fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {
@@ -266,15 +174,35 @@ pub(crate) fn tmeet_launcher_path(command: &std::process::Command) -> std::path:
         .into()
 }
 
+fn launcher_is_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: the CString owns a valid NUL-terminated path for the call.
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    true
+}
+
 pub(crate) fn matches_installed_connector_launcher(
     program: &str,
     cwd: &std::path::Path,
     installed: &std::path::Path,
-    path: Option<&std::ffi::OsStr>,
 ) -> bool {
     use std::path::Path;
 
-    if !installed.is_absolute() || !installed.is_file() {
+    let requested = Path::new(program);
+    if !requested.is_absolute() && !program.contains(['/', '\\']) {
+        return false;
+    }
+    if !installed.is_absolute() || !launcher_is_executable(installed) {
         return false;
     }
     let normalize = |value: &Path| super::os::platform_compat_path(&value.to_string_lossy());
@@ -292,34 +220,8 @@ pub(crate) fn matches_installed_connector_launcher(
             value == installed
         }
     };
-    let requested = Path::new(program);
-    if requested.is_absolute() || program.contains(['/', '\\']) {
-        // Explicit paths point at a single executable. Merely having the
-        // official CLI basename somewhere outside the installed path is insufficient.
-        return matches(&cwd.join(requested));
-    }
-
-    let suffixes: &[&str] = if cfg!(windows) && requested.extension().is_none() {
-        &["", ".com", ".exe", ".bat", ".cmd", ".ps1"]
-    } else {
-        &[""]
-    };
-    let directory_match = |directory: &Path| {
-        let mut found = suffixes
-            .iter()
-            .map(|suffix| directory.join(format!("{program}{suffix}")))
-            .filter(|filename| filename.is_file());
-        let first = found.next()?;
-        // Multiple plausible launchers in one directory are ambiguous.
-        Some(matches(&first) && found.all(|filename| matches(&filename)))
-    };
-    if directory_match(cwd) == Some(false) {
-        return false;
-    }
-    path.into_iter()
-        .flat_map(std::env::split_paths)
-        .find_map(|directory| directory_match(&cwd.join(directory)))
-        .unwrap_or(false)
+    // An identical name reached through PATH provides no launch evidence.
+    matches(&cwd.join(requested))
 }
 
 #[cfg(test)]

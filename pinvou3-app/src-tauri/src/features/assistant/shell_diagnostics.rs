@@ -84,7 +84,6 @@ pub(crate) fn foreground_connector_key(
     call: &str,
     success: bool,
     metadata: Option<&Value>,
-    shell_path: &crate::platform::connector_lock::ConnectorShellPath,
 ) -> Option<&'static str> {
     if metadata.is_some_and(|value| {
         ["sandbox_denied", "blocked", "backgrounded", "canceled"]
@@ -100,11 +99,7 @@ pub(crate) fn foreground_connector_key(
         turn,
         call,
         success,
-        |key, program, cwd, command| {
-            crate::platform::connector_lock::registered_telemetry_cli(
-                key, program, cwd, shell_path, command,
-            )
-        },
+        crate::platform::connector_lock::registered_telemetry_cli,
     )
 }
 
@@ -114,12 +109,13 @@ fn terminal_connector_key(
     turn: &str,
     call: &str,
     success: bool,
-    is_installed: impl FnOnce(&str, &str, &Path, &str) -> bool,
+    is_installed: impl FnOnce(&str, &str, &Path) -> bool,
 ) -> Option<&'static str> {
     let job = unique_shell_job(jobs, session, turn, call)?;
     match (success, &job.status, job.exit_code) {
         (true, ShellStatus::Completed, Some(0)) => {}
-        (false, ShellStatus::Failed, Some(code)) if !matches!(code, 0 | 126 | 127) => {}
+        (false, ShellStatus::Failed, Some(code))
+            if !crate::platform::connector_lock::connector_failure_exit_is_ambiguous(code) => {}
         _ => return None,
     }
     // An unsupported call operator can exit before the verified launcher runs.
@@ -127,11 +123,7 @@ fn terminal_connector_key(
         return None;
     }
     // The job stores the command actually executed after any input rewrite.
-    crate::features::behavior_telemetry::connector_cli_key(
-        &job.command,
-        &job.cwd,
-        |key, program, cwd| is_installed(key, program, cwd, &job.command),
-    )
+    crate::features::behavior_telemetry::connector_cli_key(&job.command, &job.cwd, is_installed)
 }
 
 #[cfg(test)]
@@ -209,14 +201,9 @@ mod tests {
         rejected.command = "& \"./managed/lark-cli.exe\"".into();
         rejected.exit_code = Some(2);
         assert_eq!(
-            terminal_connector_key(
-                &[rejected],
-                "session",
-                "turn",
-                "call",
-                false,
-                |_, _, _, _| { true }
-            ),
+            terminal_connector_key(&[rejected], "session", "turn", "call", false, |_, _, _| {
+                true
+            }),
             None
         );
         let mut terminal = job();
@@ -225,19 +212,19 @@ mod tests {
         terminal.exit_code = Some(0);
         let jobs = [terminal];
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "call", true, |_, _, _, _| true),
+            terminal_connector_key(&jobs, "session", "turn", "call", true, |_, _, _| true),
             Some("wecom")
         );
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "denied", false, |_, _, _, _| true),
+            terminal_connector_key(&jobs, "session", "turn", "denied", false, |_, _, _| true),
             None
         );
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "call", false, |_, _, _, _| true),
+            terminal_connector_key(&jobs, "session", "turn", "call", false, |_, _, _| true),
             None
         );
         assert_eq!(
-            terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _, _| true),
+            terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _| true),
             None
         );
     }
