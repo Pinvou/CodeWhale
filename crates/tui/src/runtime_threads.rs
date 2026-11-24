@@ -1777,12 +1777,27 @@ impl RuntimeThreadStore {
     }
 
     pub fn load_turn(&self, turn_id: &str) -> Result<TurnRecord> {
+        // Recovery owner for parked settled-read records (review 6025421726):
+        // after the retirement hook's bounded retries are exhausted and the
+        // sink is gone, ordinary reads are the only remaining owner — drain
+        // the queue here once storage reads again. Skipped while a mutation
+        // holder is active (those paths drain explicitly).
+        if !self.settled_pending.lock().is_empty() {
+            self.drain_settled_pending_for_read(turn_id);
+        }
         // Staged routed-usage appends are part of the logical record: readers
         // must observe them even though the disk file lags by up to
         // [`ROUTED_USAGE_FLUSH_BATCH`] records.
         if let Some(staged) = self.routed_usage_staged.lock().get(turn_id) {
             return Ok(staged.turn.clone());
         }
+        self.read_turn_record(turn_id)
+    }
+
+    /// Read and validate the persisted turn file, ignoring any in-memory
+    /// stage overlays. Shared by [`Self::load_turn`] and the pending-queue
+    /// recovery drain.
+    fn read_turn_record(&self, turn_id: &str) -> Result<TurnRecord> {
         let path = self.turn_path(turn_id)?;
         let raw = read_store_file(&path)
             .with_context(|| format!("Failed to read turn {}", path.display()))?;
@@ -1796,6 +1811,52 @@ impl RuntimeThreadStore {
             );
         }
         Ok(record)
+    }
+
+    /// Recovery owner for [`Self::settled_pending`] once the retirement
+    /// hook's bounded retries are exhausted (review 6025421726): ordinary
+    /// reads drain the queue into the persisted turn when storage reads
+    /// again. Must be called without `turn_mutation` held — it takes the
+    /// guard via `try_lock`, so mutation holders (the append and flush
+    /// paths, which drain explicitly) make this a no-op instead of a
+    /// deadlock. Every failure restores retry ownership before returning.
+    fn drain_settled_pending_for_read(&self, turn_id: &str) {
+        let Some(queue) = self.settled_pending.lock().remove(turn_id) else {
+            return;
+        };
+        let Some(_turn_mutation) = self.turn_mutation.try_lock() else {
+            // A mutation holder (append/flush) owns this turn and drains
+            // the queue itself; restore and defer to it.
+            self.settled_pending
+                .lock()
+                .insert(turn_id.to_string(), queue);
+            return;
+        };
+        let mut record = match self.read_turn_record(turn_id) {
+            Ok(record) => record,
+            Err(_) => {
+                // Still unreadable: restore retry ownership.
+                self.settled_pending
+                    .lock()
+                    .insert(turn_id.to_string(), queue);
+                return;
+            }
+        };
+        for pending in &queue {
+            append_routed_usage_record(&mut record, &pending.source_id, pending.usage.clone());
+        }
+        let Ok(path) = self.turn_path(turn_id) else {
+            self.settled_pending
+                .lock()
+                .insert(turn_id.to_string(), queue);
+            return;
+        };
+        if write_json_atomic(&path, &record).is_err() {
+            // Persist failed: restore retry ownership for the next read.
+            self.settled_pending
+                .lock()
+                .insert(turn_id.to_string(), queue);
+        }
     }
 
     pub fn load_item(&self, item_id: &str) -> Result<TurnItemRecord> {

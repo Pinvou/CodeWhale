@@ -4359,6 +4359,133 @@ async fn transient_settled_read_failure_is_retryable_at_sink_retirement() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// (review 6025421726: after the retirement hook's retries are exhausted the
+/// sink is gone and nothing consumed the parked queue) When storage is still
+/// unreadable at the last lease drop, the retirement flush fails all its
+/// attempts and the sink retires — the parked records must stay queued, and
+/// once storage recovers an ordinary read must take over as the recovery
+/// owner: drain the queue into the turn and persist it, so the accepted
+/// usage becomes visible in persisted history even though no append or
+/// retirement ever follows.
+#[cfg(unix)]
+#[tokio::test]
+async fn settled_read_recovery_survives_retirement_exhaustion_via_ordinary_read() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn(
+        "thr_mf_exhaust",
+        "turn_mf_exhaust",
+        RuntimeTurnStatus::InProgress,
+    );
+    let item = sample_item(
+        "thr_mf_exhaust",
+        "item_mf_exhaust",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block reads of the turn file only.
+    let turn_path = manager.store.turns_dir.join(format!("{}.json", turn.id));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable the turn file");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late report parks in the pending queue while reads fail.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:exhausted-recovery",
+        &route,
+        &Usage {
+            input_tokens: 37,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "the report must park in the pending queue while reads fail"
+    );
+
+    // The last lease retires while storage is STILL unreadable: the
+    // retirement hook's three attempts each fail (its load cannot read the
+    // turn), the sink is removed, and the queue must survive with its
+    // records — no journal fallback may have absorbed them.
+    drop(lease);
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "exhausted retirement attempts must leave the records parked"
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the write-side stage must stay clear through exhausted retirement"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the accepted report must never reach the journal fallback"
+    );
+
+    // Storage recovers; an ordinary read is now the only remaining owner.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the turn file permissions");
+    }
+    let recovered = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("ordinary read after recovery");
+    assert_eq!(recovered.routed_usage.len(), 1);
+    assert_eq!(recovered.routed_usage[0].usage.input_tokens, 37);
+    assert_eq!(
+        recovered.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:exhausted-recovery"
+        )],
+        "the ordinary read must surface the parked record"
+    );
+    assert!(
+        manager.store.settled_pending.lock().is_empty(),
+        "the recovery read must drain the parked queue"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the recovery drain must not fall back to the journal"
+    );
+    // Persisted history: the drained form is on disk, visible to a fresh
+    // store open.
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 37);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
