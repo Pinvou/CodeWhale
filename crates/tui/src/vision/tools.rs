@@ -18,6 +18,11 @@ use crate::tools::spec::{
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
     route_client: Option<DeepSeekClient>,
+    /// Explicit vision host transport policy (PR #151). Covers injected
+    /// vision surfaces whose dial has no parent client to resolve one from;
+    /// when absent, the auxiliary route falls back to the parent's resolved
+    /// vision policy.
+    host_policy: Option<std::sync::Arc<dyn crate::config::ModelHttpPolicy>>,
 }
 
 /// Active-work envelope for image upload, generation and response consumption.
@@ -45,9 +50,20 @@ impl ImageAnalyzeTool {
         config: VisionModelConfig,
         route_client: Option<DeepSeekClient>,
     ) -> Self {
+        Self::new_with_host_policy(config, route_client, None)
+    }
+
+    /// Build the tool with an explicit vision host transport policy (PR #151).
+    #[must_use]
+    pub fn new_with_host_policy(
+        config: VisionModelConfig,
+        route_client: Option<DeepSeekClient>,
+        host_policy: Option<std::sync::Arc<dyn crate::config::ModelHttpPolicy>>,
+    ) -> Self {
         Self {
             config,
             route_client,
+            host_policy,
         }
     }
 
@@ -287,12 +303,21 @@ impl ToolSpec for ImageAnalyzeTool {
 
         let url = format!("{}/chat/completions", self.base_url());
         let api_key = self.api_key();
-        let route = DeepSeekClient::auxiliary_json_route(
-            self.route_client.as_ref(),
-            &self.base_url(),
-            &api_key,
-            &self.config.model,
-        )
+        let route = match self.host_policy.clone() {
+            Some(policy) => DeepSeekClient::auxiliary_json_route_with_policy(
+                self.route_client.as_ref(),
+                &self.base_url(),
+                &api_key,
+                &self.config.model,
+                Some(policy),
+            ),
+            None => DeepSeekClient::auxiliary_json_route(
+                self.route_client.as_ref(),
+                &self.base_url(),
+                &api_key,
+                &self.config.model,
+            ),
+        }
         .map_err(|e| {
             ToolError::execution_failed(format!("Failed to configure vision route: {e}"))
         })?;
