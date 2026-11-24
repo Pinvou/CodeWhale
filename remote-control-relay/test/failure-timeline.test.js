@@ -164,3 +164,25 @@ test("remote execution keeps the controlled authoritative terminal without mixin
   assert.equal(unknown.timeline_context.task_terminal_included,false);
   assert.equal(unknown.timeline.at(-1).remote_task_status,"unknown");
 });
+
+test("bulk remote timeline keeps a controller incident out of other samples", async () => {
+  const key="c".repeat(64);
+  const controller=event(1,{event_name:"remote_control_event",remote_role:"controller",remote_stage:"result_received",
+    remote_task_key:key,diagnostic_id:"controller_case",diagnostic_code:"remote_result_unknown",diagnostic_component:"remote_control"});
+  const controlled=event(2,{event_name:"remote_control_event",remote_role:"controlled",remote_stage:"task_terminal",
+    remote_task_key:key,remote_task_status:"failed",diagnostic_id:"controlled_case",diagnostic_code:"process_failed",diagnostic_component:"remote_control"});
+  const related=event(3,{execution_task_key:key});
+  const reports={audit() {},exportEvidence(){return new Map();}};
+  for (const events of [[controller,controlled,related],[controlled,related,controller]]) {
+    const chunks=[];
+    for await (const chunk of failureExport(events,{now:10_000},{groupBy:"all"},reports,"actor",e=>e.diagnostic_id)) {
+      chunks.push(chunk);
+    }
+    const {samples}=JSON.parse(chunks.join("")).groups[0];
+    assert.equal(samples.length,2);
+    for (const {id,timeline,timeline_context} of samples) {
+      const anchor=id==="controlled_case"?controlled:controller;
+      assert.deepEqual({timeline,timeline_context},failureTimeline(events,anchor));
+    }
+  }
+});

@@ -190,7 +190,7 @@ function timelineScope(event) {
   return null;
 }
 
-function projectSharedTurn(exact, common, incident, compare) {
+function projectJoinedTimeline(exact, common, incident, compare) {
   const exactEvents = exact.ordered, commonEvents = common.ordered;
   let exactIndex = exact.positions.get(incident);
   // Locate the incident in the merge without repeatedly expanding common rows.
@@ -257,12 +257,30 @@ function diagnosticHistory(events, groupedSamples) {
     sourceOrder.set(event, index);
   }
   const prepared = new WeakMap(), sharedHistories = new WeakMap();
+  const sharedHistoryFor = (rows, remote) => {
+    let history = sharedHistories.get(rows);
+    if (!history) {
+      history = {
+        projection: orderFailureHistory(rows, remote),
+        ids: new Set(rows.map(event => event.event_id)),
+      };
+      sharedHistories.set(rows, history);
+    }
+    return history;
+  };
   const compare = (a, b) => compareEventTime(a, b) || sourceOrder.get(a) - sourceOrder.get(b);
   return incident => {
     const scope = timelineScope(incident);
     const buckets = byDevice.get(incident.device_id);
     const exact = scope && buckets?.get(keyFor(incident, scope));
     if (!exact) return failureTimeline([], incident);
+    if (scope[0] === "execution" && incident.execution_task_key !== scope[1] && incident.remote_role !== "controlled") {
+      // A controller incident is always included in its own view. It is
+      // outside the indexed execution context for other incidents.
+      const context = sharedHistoryFor(exact, true);
+      if (context.ids.size !== exact.length || context.ids.has(incident.event_id)) return failureTimeline(exact, incident);
+      return projectJoinedTimeline(orderFailureHistory([incident], true), context.projection, incident, compare);
+    }
     const shared = sharedScope(scope);
     const common = shared && buckets.get(keyFor(incident, shared));
     let saved = prepared.get(exact);
@@ -270,13 +288,7 @@ function diagnosticHistory(events, groupedSamples) {
       const history = collectFailureHistory(exact, incident);
       let sharedHistory, canMerge = false;
       if (common?.length) {
-        if (!sharedHistories.has(common)) {
-          sharedHistories.set(common, {
-            projection: orderFailureHistory(common, false),
-            ids: new Set(common.map(event => event.event_id)),
-          });
-        }
-        sharedHistory = sharedHistories.get(common);
+        sharedHistory = sharedHistoryFor(common, false);
         canMerge = sharedHistory.ids.size === common.length && history.ordered.length === exact.length
           && !exact.some(event => sharedHistory.ids.has(event.event_id));
       }
@@ -284,7 +296,7 @@ function diagnosticHistory(events, groupedSamples) {
       prepared.set(exact, saved);
     }
     if (!common?.length) return projectFailureTimeline(saved.history, incident);
-    if (saved.canMerge) return projectSharedTurn(saved.history, saved.sharedHistory.projection, incident, compare);
+    if (saved.canMerge) return projectJoinedTimeline(saved.history, saved.sharedHistory.projection, incident, compare);
     // Preserve de-duplication for old or duplicate rows spanning both buckets.
     return failureTimeline([...exact, ...common].sort((a, b) => sourceOrder.get(a) - sourceOrder.get(b)), incident);
   };
