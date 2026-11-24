@@ -394,7 +394,8 @@ function assertWorkflowFailurePolicy(workflowText) {
     const receipt = namedStep(jobBlock("windows-relay-tools-test", text), "Preserve Windows relay tools process receipt");
     assert.equal(receipt.trimEnd(), [
       "      - name: Preserve Windows relay tools process receipt",
-      "        if: always()",
+      "        id: windows_relay_tools_receipts",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
@@ -402,8 +403,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
-      "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
-      "          if-no-files-found: warn",
+      "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "          if-no-files-found: error",
       "          retention-days: 7",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
@@ -651,7 +652,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const mutants = [
     original.replace("scripts/ci-artifact-node-options.cjs --network --diagnostics", "scripts/unreviewed-upload.cjs --configure-env"),
     original.replace(atomicConfig, atomicConfig.replace("scripts/ci-artifact-node-options.cjs", "scripts/unreviewed-upload.cjs")),
-    original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
+    original.replace(relayReceipt, relayReceipt.replace("${{ env.PINVOU_CI_RESOURCE_LEDGER }}/", "${{ runner.temp }}/")),
     original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
       "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),

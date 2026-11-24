@@ -2938,6 +2938,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Initialize Windows relay tools resource ledger
+        run: python scripts/ci-resource-ledger.py --init
       - name: Prepare CI transfer runtime (1)
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
@@ -2955,14 +2957,45 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
-        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+        id: windows_relay_tools_tests
+        run: python scripts/ci-fixture-process.py --receipt "$env:PINVOU_CI_RESOURCE_LEDGER/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+      - name: Confirm Windows relay tools resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        env:
+          WINDOWS_RELAY_TOOLS_TEST_OUTCOME: ${{ steps.windows_relay_tools_tests.outcome }}
+        run: |
+          $receipt = Join-Path $env:PINVOU_CI_RESOURCE_LEDGER 'windows-relay-tools-process.json'
+          $attempted = $env:WINDOWS_RELAY_TOOLS_TEST_OUTCOME -in @('success', 'failure', 'cancelled')
+          if ($attempted -and -not (Test-Path -LiteralPath $receipt -PathType Leaf)) {
+            Write-Output '::error::Current Windows Relay tools process receipt is missing.'
+            exit 1
+          }
+          python scripts/ci-resource-ledger.py --directory "$env:PINVOU_CI_RESOURCE_LEDGER"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($attempted) {
+            try {
+              $process = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+              Write-Output '::error::Current Windows Relay tools process receipt is unreadable.'
+              exit 1
+            }
+            $schema = $process.schema
+            if (($schema -isnot [int] -and $schema -isnot [long]) -or $schema -ne 1 -or
+                $process.kind -cne 'process' -or $process.state -cne 'released' -or
+                $process.PSObject.Properties.Name -cnotcontains 'cleanup_failed' -or
+                $process.cleanup_failed -isnot [bool] -or $process.cleanup_failed) {
+              Write-Output '::error::Current Windows Relay tools process retirement is unconfirmed.'
+              exit 1
+            }
+          }
       - name: Configure artifact transport for Preserve Windows relay tools process receipt
-        if: always()
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-artifact-node-options.cjs --network
       - name: Preserve Windows relay tools process receipt
-        if: always()
+        id: windows_relay_tools_receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
@@ -2972,9 +3005,12 @@ jobs:
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/windows-relay-tools-process.json
-          if-no-files-found: warn
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
           retention-days: 7
+      - name: Warn when Windows relay tools diagnostic delivery fails
+        if: ${{ always() && steps.windows_relay_tools_receipts.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   team-relay-hub-test:
     name: team-relay-hub-test
