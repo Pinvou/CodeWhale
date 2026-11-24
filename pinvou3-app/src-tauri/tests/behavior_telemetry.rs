@@ -8,7 +8,12 @@ mod platform {
     pub mod connector_lock {
         use std::path::Path;
 
-        pub fn registered_telemetry_cli(key: &str, program: &str, cwd: &Path) -> bool {
+        pub fn registered_telemetry_cli(
+            key: &str,
+            program: &str,
+            cwd: &Path,
+            _shell_path_inherited: bool,
+        ) -> bool {
             let installed = cwd.join("managed-fixture").join(super::fixture_cli_name());
             key == "feishu"
                 && pinvou3_lib::platform::behavior_telemetry_test_support::matches_installed_connector_launcher(
@@ -174,6 +179,9 @@ fn installed_launcher_excludes_workspace_shadow_and_missing_program() {
         Some(&path)
     ));
     std::fs::write(&installed, b"fixture").unwrap();
+    assert!(!matches_installed_connector_launcher(
+        "lark-cli", &work, &installed, None
+    ));
     assert!(matches_installed_connector_launcher(
         "lark-cli",
         &work,
@@ -200,6 +208,19 @@ fn installed_launcher_excludes_workspace_shadow_and_missing_program() {
         &installed,
         Some(&path),
     ));
+}
+
+#[test]
+fn bundled_node_does_not_replace_the_tmeet_launcher_identity() {
+    use pinvou3_lib::platform::behavior_telemetry_test_support::tmeet_launcher_path;
+    let base = tempfile::tempdir().unwrap();
+    let shim = base.path().join("tmeet");
+    let node = base.path().join("bundled-node");
+    let direct = std::process::Command::new(&shim);
+    let mut wrapped = std::process::Command::new(node);
+    wrapped.arg(&shim);
+    assert_eq!(tmeet_launcher_path(&direct), shim);
+    assert_eq!(tmeet_launcher_path(&wrapped), shim);
 }
 
 #[tokio::test]

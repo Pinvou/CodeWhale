@@ -121,8 +121,13 @@ pub fn locked_cli_path(name: &str) -> Option<std::path::PathBuf> {
 /// Resolve the app-managed source for a registered connector. The executable
 /// name alone says nothing about a launcher in the workspace or an earlier PATH
 /// directory. Derive the location from the same layout used by the installer.
-pub(crate) fn registered_telemetry_cli(key: &str, program: &str, cwd: &std::path::Path) -> bool {
-    use std::path::{Path, PathBuf};
+pub(crate) fn registered_telemetry_cli(
+    key: &str,
+    program: &str,
+    cwd: &std::path::Path,
+    shell_path_inherited: bool,
+) -> bool {
+    use std::path::Path;
 
     let installed = match key {
         "eip" | "zhidao" => {
@@ -137,9 +142,9 @@ pub(crate) fn registered_telemetry_cli(key: &str, program: &str, cwd: &std::path
                 dir.join(executable_name(&name.to_string_lossy()))
             })
         }
-        "tmeet" => Some(PathBuf::from(
-            super::os::connector_cli_command("tmeet", "tmeet").get_program(),
-        )),
+        "tmeet" => Some(tmeet_launcher_path(&super::os::connector_cli_command(
+            "tmeet", "tmeet",
+        ))),
         "feishu" | "wecom" | "dingtalk" => {
             let bin = match key {
                 "feishu" => "lark-cli",
@@ -155,10 +160,22 @@ pub(crate) fn registered_telemetry_cli(key: &str, program: &str, cwd: &std::path
         }
         _ => None,
     };
-    let path = std::env::var_os("PATH");
+    let path = shell_path_inherited
+        .then(|| std::env::var_os("PATH"))
+        .flatten();
     installed.is_some_and(|installed| {
         matches_installed_connector_launcher(program, cwd, &installed, path.as_deref())
     })
+}
+
+pub(crate) fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {
+    // The bundled Node route for TMeet wraps the app-resolved CLI shim as its
+    // first argument. On other routes the shim itself is the executable.
+    command
+        .get_args()
+        .next()
+        .unwrap_or_else(|| command.get_program())
+        .into()
 }
 
 pub(crate) fn matches_installed_connector_launcher(

@@ -79,6 +79,10 @@ pub mod behavior_telemetry_test_support {
     pub const TELEMETRY_DEFAULT_BASE_URL: &str = super::telemetry::TELEMETRY_DEFAULT_BASE_URL;
     pub const TELEMETRY_ENROLLMENT_TOKEN: &str = super::telemetry::TELEMETRY_ENROLLMENT_TOKEN;
 
+    pub fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {
+        super::connector_lock::tmeet_launcher_path(command)
+    }
+
     pub fn matches_installed_connector_launcher(
         program: &str,
         cwd: &Path,

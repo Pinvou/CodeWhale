@@ -132,7 +132,7 @@ pub(crate) async fn run_shell_producer_fixture(
     ) -> Option<Value>,
     connector: fn(
         &deepseek_tui::tools::shell::SharedShellManager,
-        &str, &str, &str, bool, Option<&Value>,
+        &str, &str, &str, bool, Option<&Value>, bool,
     ) -> Option<&'static str>,
     connector_command: fn(&std::path::Path, i64, bool) -> &'static str,
 ) {
@@ -302,9 +302,9 @@ pub(crate) async fn run_shell_producer_fixture(
                             );
                         }
                         let connector_key =
-                            connector(&manager, &session, turn, &id, success, original_metadata);
+                            connector(&manager, &session, turn, &id, success, original_metadata, false);
                         assert!(connector(
-                            &manager, &session, turn, "other_call", success, original_metadata
+                            &manager, &session, turn, "other_call", success, original_metadata, false
                         ).is_none());
                         let statuses = manager
                             .lock()

@@ -315,6 +315,7 @@ pub(crate) fn spawn_event_forwarder(
     scheduled_unattended: Arc<AtomicBool>,
     turn_lifecycle: Arc<TurnLifecycle>,
     shell_manager: SharedShellManager,
+    shell_path_inherited: bool,
     turn_shell_tasks: TurnShellTaskRegistry,
     steer_id_generation: u64,
     transcript_writer_active: Arc<AtomicBool>,
@@ -687,6 +688,7 @@ pub(crate) fn spawn_event_forwarder(
                                 &id,
                                 success,
                                 metadata.as_ref(),
+                                shell_path_inherited,
                             )
                         } else {
                             None

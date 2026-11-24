@@ -84,6 +84,7 @@ pub(crate) fn foreground_connector_key(
     call: &str,
     success: bool,
     metadata: Option<&Value>,
+    shell_path_inherited: bool,
 ) -> Option<&'static str> {
     if metadata.is_some_and(|value| {
         ["sandbox_denied", "blocked", "backgrounded", "canceled"]
@@ -93,14 +94,14 @@ pub(crate) fn foreground_connector_key(
         return None;
     }
     let jobs = manager.lock().ok()?.list_jobs_for_session(session);
-    terminal_connector_key(
-        &jobs,
-        session,
-        turn,
-        call,
-        success,
-        crate::platform::connector_lock::registered_telemetry_cli,
-    )
+    terminal_connector_key(&jobs, session, turn, call, success, |key, program, cwd| {
+        crate::platform::connector_lock::registered_telemetry_cli(
+            key,
+            program,
+            cwd,
+            shell_path_inherited,
+        )
+    })
 }
 
 fn terminal_connector_key(
