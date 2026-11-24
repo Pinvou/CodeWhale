@@ -2741,7 +2741,13 @@ mod tests {
             "root allOf must be stripped: {schema}"
         );
         assert!(schema["properties"].get("mode").is_some());
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): flattening a union whose
+        // branches share one surviving distinct required group discloses the
+        // relaxation instead of staying silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `mode`.")
+        );
     }
 
     #[test]
@@ -2780,7 +2786,13 @@ mod tests {
             schema.get("not").is_none(),
             "root not must be stripped: {schema}"
         );
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): the flattening pass now
+        // discloses one surviving distinct required group instead of staying
+        // silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("At least one of these parameter groups must be provided: `kind`.")
+        );
     }
 
     #[test]
@@ -3223,7 +3235,13 @@ mod tests {
             schema["properties"].get("inner").is_some(),
             "the shared root inner property must survive the fallback: {schema}"
         );
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): the flattening pass now
+        // discloses one surviving distinct required group instead of staying
+        // silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `inner`.")
+        );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&schema)
@@ -3501,7 +3519,13 @@ mod tests {
                 "branch property {name} must merge into the flattened root: {schema}"
             );
         }
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): the flattening pass now
+        // discloses one surviving distinct required group instead of staying
+        // silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `kind`.")
+        );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&schema)
@@ -4005,7 +4029,13 @@ mod tests {
             json!(["c"]),
             "the root's own requirement must survive"
         );
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): the flattening pass now
+        // discloses one surviving distinct required group instead of staying
+        // silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `c`.")
+        );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&schema)
@@ -4062,7 +4092,13 @@ mod tests {
             json!(["c"]),
             "the root's own requirement must survive"
         );
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): the flattening pass now
+        // discloses one surviving distinct required group instead of staying
+        // silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `c`.")
+        );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&schema)
@@ -4126,7 +4162,13 @@ mod tests {
             schema["properties"]["c"]["minLength"], 2,
             "the root's stronger constraint must survive the fallback: {schema}"
         );
-        assert_eq!(note, None);
+        // Merged single-group disclosure (#143): the flattening pass now
+        // discloses one surviving distinct required group instead of staying
+        // silent below the two-group gate.
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `c`.")
+        );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&schema)
