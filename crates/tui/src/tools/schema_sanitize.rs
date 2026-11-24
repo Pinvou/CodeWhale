@@ -5106,8 +5106,15 @@ mod tests {
                     },
                     "required": ["kind"],
                     "oneOf": [
-                        {"type": "object", "required": ["a"]},
-                        {"type": "object", "required": ["b"]}
+                        // The inner required names must be genuinely
+                        // dangling: the context-aware pruning keeps a
+                        // required-only branch whose names resolve against
+                        // the enclosing declared properties, so `a`/`b`
+                        // (declared above) would survive and the union
+                        // would not die. `zz1`/`zz2` resolve nowhere and
+                        // prune into all-accepting `{}` on both sides.
+                        {"type": "object", "required": ["zz1"]},
+                        {"type": "object", "required": ["zz2"]}
                     ]
                 },
                 {
