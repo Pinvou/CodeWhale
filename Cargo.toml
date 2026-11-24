@@ -115,11 +115,12 @@ lto = true
 strip = true
 codegen-units = 1
 
-# Patch unicode-width so that width() uses CJK tables when the cjk feature
-# is enabled. Vanilla unicode-width 0.2.2 provides width_cjk() as a separate
-# method but the original width() always uses non-CJK tables, so Ratatui
-# (which calls width() internally) measures ambiguous-width characters
-# (circled digits, enclosed alphanumerics) as 1 column. CJK terminals render
-# them as 2 columns, causing cell-offset rendering glitches. (#4479)
+# Patch unicode-width so width() measures three circled-number ranges as
+# 2 columns: a fixed override for U+2460..=U+24FF (enclosed alphanumerics),
+# U+2776..=U+2793 (dingbat circled digits) and U+3248..=U+324F (circled
+# numbers on black square). The override is unconditional — it does not read
+# the cjk feature, and width_cjk() is untouched. Vanilla unicode-width leaves
+# these ranges at width 1, so Ratatui (which calls width() internally)
+# under-measures them on CJK terminals and cell offsets drift. (#4479)
 [patch.crates-io]
 unicode-width = { path = "patches/unicode-width-0.2.2" }
