@@ -1,7 +1,7 @@
 /// Identify a single foreground connector invocation from tool input. The
 /// shell result belongs to the whole command, so an ambiguous command stays
 /// generic. Only the returned catalog key is eligible for telemetry.
-pub(super) fn connector_cli_key(command: &str) -> Option<&'static str> {
+pub(crate) fn connector_cli_key(command: &str) -> Option<&'static str> {
     let command = command.trim();
     let command = shell_payload(command).unwrap_or(command);
     let (command, call_operator) = match command.strip_prefix('&') {

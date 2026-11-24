@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
-    Meta, SessionNotification, SessionUpdate, ToolCall, ToolCallStatus, ToolCallUpdate, ToolKind,
+    SessionNotification, SessionUpdate, ToolCall, ToolCallStatus, ToolCallUpdate,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -1135,14 +1135,14 @@ impl EventBridge {
                 &self.pinvou_session_id,
                 turn_id,
                 &id,
-                &call.title,
+                telemetry_tool_title(&call),
             );
         }
         let terminal = is_terminal(call.status);
         self.tools.lock().insert(id.clone(), call.clone());
         self.emit_protocol("tool_call", call.clone(), notification_meta);
         if terminal {
-            self.record_tool_complete(&call, None);
+            self.record_tool_complete(&call);
             // When the first notification is already terminal (no later
             // update), the tool_update removal path never runs; leaving the
             // entry here would pin its raw_input/raw_output until bridge
@@ -1153,7 +1153,6 @@ impl EventBridge {
 
     fn tool_update(&self, update: ToolCallUpdate, notification_meta: Value) {
         let id = update.tool_call_id.to_string();
-        let exit_code = terminal_exit_code(update.meta.as_ref(), &id);
         let mut completed = None;
         {
             let mut tools = self.tools.lock();
@@ -1174,7 +1173,7 @@ impl EventBridge {
                         &self.pinvou_session_id,
                         turn_id,
                         &id,
-                        &call.title,
+                        telemetry_tool_title(&call),
                     );
                 }
                 if is_terminal(call.status) {
@@ -1185,37 +1184,28 @@ impl EventBridge {
         }
         self.emit_protocol("tool_call_update", update, notification_meta);
         if let Some(call) = completed {
-            self.record_tool_complete(&call, exit_code);
+            self.record_tool_complete(&call);
             self.tools.lock().remove(&id);
         }
     }
 
-    fn record_tool_complete(&self, call: &ToolCall, exit_code: Option<i64>) {
-        let id = call.tool_call_id.to_string();
-        let success = matches!(call.status, ToolCallStatus::Completed);
-        let exit_code = exit_code
-            .or_else(|| terminal_exit_code(call.meta.as_ref(), &id))
-            .or_else(|| call.raw_output.as_ref()?.get("exit_code")?.as_i64());
-        let shell_input = call.raw_input.as_ref().filter(|_| {
-            call.kind == ToolKind::Execute && exit_code.is_some_and(|code| (code == 0) == success)
-        });
+    fn record_tool_complete(&self, call: &ToolCall) {
         crate::features::memory::record_turn_tool_complete(
             &self.pinvou_session_id,
             &call.title,
             &call.raw_input.clone().unwrap_or_else(|| json!({})),
-            success,
+            matches!(call.status, ToolCallStatus::Completed),
         );
         if let Some(turn_id) = self.current_turn.read().as_deref() {
             crate::features::behavior_telemetry::track_tool_call_completed(
                 &self.app,
                 &self.pinvou_session_id,
                 turn_id,
-                &id,
+                &call.tool_call_id.to_string(),
                 &call.title,
-                success,
+                matches!(call.status, ToolCallStatus::Completed),
                 Some("tool_error"),
                 None,
-                shell_input,
             );
         }
     }
@@ -1358,12 +1348,34 @@ impl EventBridge {
     }
 }
 
-fn terminal_exit_code(meta: Option<&Meta>, call_id: &str) -> Option<i64> {
-    let terminal = meta?.get("terminal_exit")?;
-    if terminal.get("terminal_id")?.as_str()? != call_id {
-        return None;
+fn telemetry_tool_title(call: &ToolCall) -> &str {
+    if call
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("is_mcp_tool_call"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && let Some(input) = call.raw_input.as_ref()
+        && input
+            .get("tool")
+            .and_then(Value::as_str)
+            .is_some_and(|tool| !tool.is_empty())
+        && let Some(server @ ("hdm" | "iwencai")) = input.get("server").and_then(Value::as_str)
+    {
+        return server;
     }
-    terminal.get("exit_code")?.as_i64()
+    // ACP display titles alone do not establish the registered MCP server.
+    if matches!(
+        crate::features::behavior_telemetry::tool_registry_key(&call.title),
+        "hdm" | "iwencai"
+    ) {
+        return if call.title.starts_with("mcp_") {
+            "mcp_custom"
+        } else {
+            "unknown"
+        };
+    }
+    &call.title
 }
 
 fn is_terminal(status: ToolCallStatus) -> bool {
@@ -1975,12 +1987,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_exit_evidence_must_belong_to_the_current_tool_call() {
-        let metadata = json!({"terminal_exit": {"terminal_id": "connector-call", "exit_code": 0}});
-        let metadata = metadata.as_object();
-        assert_eq!(terminal_exit_code(metadata, "connector-call"), Some(0));
-        assert_eq!(terminal_exit_code(metadata, "different-call"), None);
-        assert_eq!(terminal_exit_code(None, "connector-call"), None);
+    fn connector_mcp_identity_uses_structured_acp_fields() {
+        let mut call = ToolCall::new("call-1", "mcp.hdm.search");
+        call.raw_input = Some(json!({"server":"hdm","tool":"search","arguments":{}}));
+        assert_eq!(telemetry_tool_title(&call), "mcp.hdm.search");
+        call.meta = json!({"is_mcp_tool_call":true}).as_object().cloned();
+        assert_eq!(telemetry_tool_title(&call), "hdm");
+        call.raw_input = Some(json!({"command":"lark-cli base list"}));
+        assert_eq!(telemetry_tool_title(&call), "mcp.hdm.search");
+        call.title = "mcp__hdm__search".into();
+        assert_eq!(telemetry_tool_title(&call), "mcp_custom");
+        call.title = "hdm".into();
+        assert_eq!(telemetry_tool_title(&call), "unknown");
     }
 
     #[test]

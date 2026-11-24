@@ -130,6 +130,11 @@ pub(crate) async fn run_shell_producer_fixture(
         bool,
         Option<&Value>,
     ) -> Option<Value>,
+    connector: fn(
+        &deepseek_tui::tools::shell::SharedShellManager,
+        &str, &str, &str, bool, Option<&Value>,
+    ) -> Option<&'static str>,
+    connector_command: fn(&std::path::Path, i64) -> &'static str,
 ) {
     // TestHome holds the harness-wide environment lock for the entire Engine
     // lifetime. All runtime state belongs to this fixture, never the user home.
@@ -145,9 +150,16 @@ pub(crate) async fn run_shell_producer_fixture(
         (2, "exit 0", None, None),
         (3, "sleep 4", Some(1), None),
         (4, "if true; then", None, None),
+        (5, "", None, None),
+        (6, "", None, Some(7)),
     ] {
         let folder = work.path().join(format!("case_{index}"));
         std::fs::create_dir_all(&folder).unwrap();
+        let command = if index >= 5 {
+            connector_command(&folder, expected_exit.unwrap_or(0))
+        } else {
+            command
+        };
         let session = format!("shell_diagnostic_session_{index}");
         let manager = deepseek_tui::tools::shell::new_shared_shell_manager(folder.join("jobs"));
         let api = deepseek_tui::config::Config::default();
@@ -288,6 +300,11 @@ pub(crate) async fn run_shell_producer_fixture(
                                 Some(explicit),
                             );
                         }
+                        let connector_key =
+                            connector(&manager, &session, turn, &id, success, original_metadata);
+                        assert!(connector(
+                            &manager, &session, turn, "other_call", success, original_metadata
+                        ).is_none());
                         let statuses = manager
                             .lock()
                             .unwrap()
@@ -304,6 +321,7 @@ pub(crate) async fn run_shell_producer_fixture(
                             success,
                             result.err().map(|e| e.to_string()).unwrap_or_default(),
                             metadata,
+                            connector_key,
                             statuses,
                         ));
                     }
@@ -323,10 +341,11 @@ pub(crate) async fn run_shell_producer_fixture(
             running.abort();
             panic!("fixture engine shutdown timed out");
         }
-        let (success, error, metadata, statuses) = observed
+        let (success, error, metadata, connector_key, statuses) = observed
             .expect("fixture turn timed out")
             .expect("real default bash did not execute");
-        assert_eq!(success, index == 2);
+        assert_eq!(success, matches!(index, 2 | 5));
+        assert_eq!(connector_key, (index >= 5).then_some("feishu"));
         assert_eq!(
             statuses.len(),
             1,
@@ -348,9 +367,17 @@ pub(crate) async fn run_shell_producer_fixture(
                 .diagnostic_error(&error, "tool_result")
                 .diagnostic_tool_metadata(metadata.as_ref());
         }
+        if let Some(key) = connector_key {
+            event = event.tool(key, key, "cli");
+        }
         telemetry.track(event);
         let outbox = telemetry.outbox.lock().unwrap();
         let event = &outbox.records[0].event;
+        if let Some(key) = connector_key {
+            assert_eq!(event["tool_key"], key);
+            assert_eq!(event["tool_name"], key);
+            assert!(!event.to_string().contains("lark-cli"));
+        }
         if index == 4 {
             // The tool name does not select a parser. Require the real host
             // shell's nonzero syntax-error receipt without assuming a

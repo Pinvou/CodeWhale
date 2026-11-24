@@ -846,50 +846,12 @@ fn tool_operation_key(session_id: &str, call_id: &str) -> String {
     format!("{session_id}\u{1f}{call_id}")
 }
 
-fn shell_connector(input: &Value) -> Option<&'static str> {
-    if input
-        .get("action")
-        .is_some_and(|action| action.as_str() != Some("run"))
-        || ["background", "run_in_background", "tty", "interactive"]
-            .iter()
-            .any(|flag| {
-                input
-                    .get(flag)
-                    .is_some_and(|value| value.as_bool() != Some(false))
-            })
-    {
-        return None;
-    }
-    tool_identity::connector_cli_key(input.get("command")?.as_str()?)
-}
-
 #[cfg(test)]
 mod tool_identity_tests {
-    use super::{managed_mcp_key, shell_connector, tool_registry_key};
-    use serde_json::json;
+    use super::{managed_mcp_key, tool_registry_key};
 
     #[test]
-    fn uses_catalog_keys_only_for_completed_connector_inputs() {
-        assert_eq!(
-            shell_connector(&json!({"command": "lark-cli base list"})),
-            Some("feishu")
-        );
-        assert_eq!(
-            shell_connector(&json!({"command": "wecom-cli list", "action": "run"})),
-            Some("wecom")
-        );
-        assert_eq!(
-            shell_connector(&json!({"command": "wecom-cli list", "action": "wait"})),
-            None
-        );
-        assert_eq!(
-            shell_connector(&json!({"command": "wecom-cli list", "background": true})),
-            None
-        );
-        assert_eq!(
-            shell_connector(&json!({"command": "lark-cli base list", "interactive": true})),
-            None
-        );
+    fn uses_catalog_keys_only_for_managed_mcp_names() {
         assert_eq!(tool_registry_key("hdm"), "hdm");
         assert_eq!(managed_mcp_key("mcp__hdm__search"), Some("hdm"));
         assert_eq!(managed_mcp_key("mcp_iwencai_query"), Some("iwencai"));
@@ -958,7 +920,6 @@ pub fn track_tool_call_completed(
     success: bool,
     error_category: Option<&str>,
     diagnostic_error: Option<&str>,
-    shell_input: Option<&Value>,
 ) {
     track_tool_call_completed_with_metadata(
         app,
@@ -970,7 +931,7 @@ pub fn track_tool_call_completed(
         error_category,
         diagnostic_error,
         None,
-        shell_input,
+        None,
     );
 }
 
@@ -984,7 +945,7 @@ pub fn track_tool_call_completed_with_metadata(
     error_category: Option<&str>,
     diagnostic_error: Option<&str>,
     diagnostic_metadata: Option<&Value>,
-    shell_input: Option<&Value>,
+    connector_key: Option<&'static str>,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
@@ -994,19 +955,11 @@ pub fn track_tool_call_completed_with_metadata(
         .lock()
         .ok()
         .and_then(|mut calls| calls.remove(&tool_operation_key(session_id, call_id)));
-    let Some(mut operation) = operation else {
+    let Some(operation) = operation else {
         return;
     };
     if !telemetry.lease_is_current(&operation.lease) {
         return;
-    }
-    if let Some(key) = shell_input
-        .filter(|_| operation.turn_id == turn_id)
-        .and_then(shell_connector)
-    {
-        operation.tool_key = key;
-        operation.tool_name = key.to_owned();
-        operation.tool_type = "cli";
     }
     let mut event = BehaviorEvent::new("tool_call_completed")
         .session(session_id)
@@ -1026,6 +979,10 @@ pub fn track_tool_call_completed_with_metadata(
             event = event.diagnostic_error(error, "tool_result");
         }
         event = event.diagnostic_tool_metadata(diagnostic_metadata);
+    }
+    if let Some(key) = connector_key.filter(|_| operation.turn_id == turn_id) {
+        // Interpret the native shell result before applying its funnel identity.
+        event = event.tool(key, key, "cli");
     }
     telemetry.track_for_lease(
         execution_fields(event, operation.execution_task_key.as_deref()),
@@ -1215,7 +1172,10 @@ pub fn model_registry_key(model: &str) -> &'static str {
 }
 
 pub fn classify_tool(tool_name: &str) -> &'static str {
-    if tool_name.starts_with("mcp_") || tool_name.contains("-mcp") {
+    if matches!(tool_name, "hdm" | "iwencai")
+        || tool_name.starts_with("mcp_")
+        || tool_name.contains("-mcp")
+    {
         "mcp"
     } else if matches!(
         tool_name,

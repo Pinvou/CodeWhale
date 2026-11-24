@@ -60,6 +60,10 @@ mod platform {
 }
 
 mod features {
+    pub mod behavior_telemetry {
+        pub(crate) use crate::behavior_telemetry::connector_cli_key;
+    }
+
     pub mod assistant {
         pub mod platform {
             pub mod bridge {
@@ -88,10 +92,27 @@ mod behavior_telemetry;
 #[path = "../src/features/assistant/shell_diagnostics.rs"]
 mod shell_diagnostics;
 
+#[cfg(unix)]
+fn synthetic_lark_command(folder: &std::path::Path, exit: i64) -> &'static str {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = folder.join("lark-cli");
+    std::fs::write(&executable, format!("#!/bin/sh\nexit {exit}\n")).unwrap();
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    "./lark-cli"
+}
+
+#[cfg(windows)]
+fn synthetic_lark_command(folder: &std::path::Path, exit: i64) -> &'static str {
+    std::fs::write(folder.join("lark-cli.cmd"), format!("@exit /b {exit}\r\n")).unwrap();
+    "./lark-cli.cmd"
+}
+
 #[tokio::test]
 async fn diagnostic_real_engine_default_bash_produces_exact_exit_facts() {
     behavior_telemetry::tests::shell_producer::run_shell_producer_fixture(
         shell_diagnostics::tool_completion_metadata,
+        shell_diagnostics::foreground_connector_key,
+        synthetic_lark_command,
     )
     .await;
 }
