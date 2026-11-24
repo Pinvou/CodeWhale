@@ -435,7 +435,8 @@ test("resolved receipts supersede unknown snapshots while B remains authoritativ
   }
 });
 
-test("dashboard sections reuse the remote join and refresh after ingestion, retention and installation changes", () => {
+test("dashboard sections reuse the remote join and refresh after ingestion, retention and installation changes", t => {
+  t.mock.method(Date, "now", () => now);
   const directory = mkdtempSync(join(tmpdir(), "pinvou-remote-projection-"));
   const store = new TelemetryStore(directory, "remote-projection-test-pepper-at-least-24-chars");
   try {
