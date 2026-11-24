@@ -1328,6 +1328,19 @@ function sortedRankingRows(groups, countKey, successfulActive, limit = 50, minim
     .slice(0, limit);
 }
 
+const MARKETPLACE_MCP_IDENTITIES = new Map([
+  ["hdm", "custom"],
+  ["iwencai", "iwencai"],
+]);
+
+function marketplaceMcpIdentity(event, key, name) {
+  if (event.event_name === "tool_call_completed" && key === "mcp_custom") {
+    const id = name?.match(/^mcp__(hdm|iwencai)__[a-z0-9_][a-z0-9_.-]*$|^mcp_(hdm|iwencai)_[a-z0-9_][a-z0-9_.-]*$/);
+    return id ? id[1] || id[2] : null;
+  }
+  return name && MARKETPLACE_MCP_IDENTITIES.get(name) === key ? name : null;
+}
+
 export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, range = "30", type = "call", now = Date.now(), options = {}) {
   behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
@@ -1374,15 +1387,16 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     if (!stage) continue;
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const normalizedName = normalizedToolName(event.tool_name);
-    const toolName = normalizedName || toolKey;
     const toolType = behaviorToolType(event.tool_type);
-    const toolNamePriority = normalizedName
+    const marketplaceId = toolType === "mcp" ? marketplaceMcpIdentity(event, toolKey, normalizedName) : null;
+    const toolName = marketplaceId || normalizedName || toolKey;
+    const toolNamePriority = marketplaceId ? 4 : normalizedName
       ? (event.event_name === "tool_call_completed" ? 3
         : event.event_name.startsWith("tool_configuration_") ? 2 : 1)
       : 0;
-    const groupKey = `${toolKey}\u001f${toolType}`;
+    const groupKey = marketplaceId ? `marketplace-mcp\u001f${marketplaceId}` : `${toolKey}\u001f${toolType}`;
     const row = funnelGroups.get(groupKey) || {
-      tool_key: toolKey,
+      tool_key: MARKETPLACE_MCP_IDENTITIES.get(marketplaceId) || toolKey,
       tool_name: toolName,
       tool_name_priority: toolNamePriority,
       tool_type: toolType,
@@ -1397,6 +1411,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       cancelled: new Set(),
       configuration_completed_events: [],
       successful_call_events: [],
+      observed_call: false,
       users: new Set(),
     };
     if (toolNamePriority > row.tool_name_priority
@@ -1418,6 +1433,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     if (event.event_name === "tool_call_completed" && event.success === true) {
       row.successful_call_events.push({ identity: eventIdentity(event), occurred_at: Number(event.occurred_at) });
     }
+    if (event.event_name === "tool_call_completed") row.observed_call = true;
     if (stageId && event.success === false) {
       row.failed.add(stageId);
       if (event.error_category === "user_cancelled") row.cancelled.add(stageId);
@@ -1444,6 +1460,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       configuration_started_count: row.configuration_started.size,
       configuration_succeeded_count: row.configuration_succeeded.size,
       call_succeeded_count: row.call_succeeded.size,
+      ...(!row.observed_call && ["cli", "skill"].includes(row.tool_type) ? { call_attribution: "unavailable" } : {}),
       failed_count: row.failed.size,
       cancelled_count: row.cancelled.size,
       impression_to_install_rate: reliableRate(row.install_started.size, row.impressions.size),

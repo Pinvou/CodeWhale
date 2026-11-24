@@ -1856,6 +1856,31 @@ test("tool adoption funnel joins stages by stable identity and prefers the call-
   assert.equal(result.funnel_rows[0].configuration_to_call_p50_ms, 60_000);
 });
 
+test("tool adoption joins known MCP calls and preserves unknown CLI attribution", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [
+    ["tool_install_completed", "custom", "hdm", "mcp"],
+    ["tool_configuration_finished", "iwencai", "iwencai", "mcp"],
+    ["tool_call_completed", "mcp_custom", "mcp__hdm__search", "mcp"],
+    ["tool_call_completed", "mcp_custom", "mcp_iwencai_query", "mcp"],
+    ["tool_call_completed", "mcp_custom", "mcp__hdm_extra__search", "mcp"],
+    ["tool_configuration_finished", "feishu", "feishu", "cli"],
+    ["tool_call_completed", "shell", "bash", "cli"],
+  ].map(([event_name, tool_key, tool_name, tool_type], index) => ({
+    event_name, tool_key, tool_name, tool_type, success: true, occurred_at: now - 7000 + index * 1000,
+    identity_id: "dev_a", event_id: `tool_adoption_${index}`, operation_id: `tool_operation_${index}`,
+  }));
+  const { funnel_rows: rows } = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "install", now, { minimumGroupSubjects: 0 });
+  const byName = Object.fromEntries(rows.map(row => [row.tool_name, row]));
+  assert.equal(byName.hdm.install_succeeded_count, 1);
+  assert.equal(byName.hdm.call_succeeded_count, 1);
+  assert.equal(byName.iwencai.call_succeeded_count, 1);
+  assert.equal(byName.iwencai.configuration_to_call_p50_ms, 2000);
+  assert.equal(byName.feishu.call_attribution, "unavailable");
+  assert.equal(byName.feishu.call_succeeded_count, 0);
+  assert.equal(byName.mcp__hdm_extra__search.call_succeeded_count, 1);
+});
+
 test("behavior rankings include small groups and clip per-subject daily contributions", () => {
   const now = at("2026-08-12T12:00:00");
   const events = Array.from({ length: 101 }, (_, index) => ({
