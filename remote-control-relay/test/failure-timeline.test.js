@@ -1,11 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { failureTimeline, redactDiagnosticText } from "../failure-diagnostics.js";
+import { failureExport, failureTimeline, redactDiagnosticText } from "../failure-diagnostics.js";
 import { validateBehaviorEventShape } from "../behavior-telemetry-schema.js";
 
 const event = (index, extra = {}) => ({event_id:`timeline_event_${index}`,device_id:"device_fixture",
   collection_period_id:"period_fixture",turn_id:"turn_fixture",attempt_id:"attempt_fixture",
   event_name:"tool_call_completed",occurred_at:1000+index*100,...extra});
+
+for (const shared of [false, true]) test(`bulk evidence indexes ${shared ? "shared" : "distinct"} lifecycles on the same installation`, async () => {
+  const count = 2048;
+  let turnReads = 0;
+  const cases = Array.from({length: count}, (_, index) => event(index, {
+    diagnostic_id: `sample_${index}`, diagnostic_code: "process_failed", diagnostic_component: "tool",
+    turn_id: shared ? "shared_turn" : `turn_${index}`,
+    attempt_id: shared ? "shared_attempt" : `attempt_${index}`,
+  }));
+  const events = cases.flatMap((incident, index) => {
+    const terminal = event(count + index, {
+      turn_id: incident.turn_id, attempt_id: incident.attempt_id, event_name: "task_finished", status: "failed",
+    });
+    const turn = terminal.turn_id;
+    Object.defineProperty(terminal, "turn_id", { get() { turnReads++; return turn; } });
+    return [incident, terminal];
+  });
+  const reports = { audit() {}, exportEvidence() { return new Map(); } };
+  const output = [];
+  for await (const chunk of failureExport(events, {now: 1_000_000}, {groupBy: "all"}, reports, "actor", e => e.diagnostic_id)) {
+    output.push(chunk);
+  }
+  const samples = JSON.parse(output.join("")).groups[0].samples;
+  assert.equal(samples.length, count);
+  assert(samples.every(sample => sample.timeline_context.total_events === (shared ? count * 2 : 2)
+    && sample.timeline_context.task_terminal_included));
+  for (const index of [0, count / 2, count - 1]) {
+    const {timeline, timeline_context} = samples[index];
+    assert.deepEqual({timeline, timeline_context}, failureTimeline(events, cases[index]));
+  }
+  assert(turnReads < count * 10, `expected bounded lifecycle lookups, got ${turnReads}`);
+});
 
 test("long tasks retain the incident and nearby events as well as the late task terminal", () => {
   const events=Array.from({length:120},(_,index)=>event(index));

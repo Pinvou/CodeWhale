@@ -30,7 +30,7 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
   const period=seed.startBehaviorCollection(device,{request_id:"related_fixture_start"}).collection_period_id;
   const events=Array.from({length:4},(_,index)=>({schema_version:1,
     event_id:`beh_related_fixture_${index}`,event_name:"task_finished",event_source:"client",
-    occurred_at:Date.now()+index,collection_period_id:period,producer:"pinvou_agent",
+    occurred_at:Date.now()-1000+index,collection_period_id:period,producer:"pinvou_agent",
     producer_version:"0.10.14",app_version:`0.10.${index+12}`,platform:"windows",arch:"x86_64",
     channel:"stable",locale:"en",session_id:"session_related_fixture",turn_id:`turn_related_${index}`,
     attempt_id:`attempt_related_${index}`,
@@ -77,12 +77,18 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
     body:JSON.stringify({password:environment.PINVOU_BEHAVIOR_ANALYTICS_PASSWORD})});
   assert.equal(analyst.status,200);
   assert.equal((await fetch(exportUrl)).status,401);
-  assert.equal((await fetch(exportUrl,{headers:{cookie:analyst.headers.get("set-cookie").split(";")[0]}})).status,403);
+  const analystHeaders={cookie:analyst.headers.get("set-cookie").split(";")[0]};
+  assert.equal((await fetch(exportUrl,{headers:analystHeaders})).status,403);
   assert.equal((await fetch(exportUrl+"?group_by=bad",{headers})).status,400);
   assert.equal((await fetch(exportUrl+"?group_by=component&group_value=invalid",{headers})).status,400);
   assert.equal((await (await fetch(exportUrl+"?group_by=component&group_value=model",{headers})).json()).groups[0].samples.length,4);
+  const summary=await (await fetch(base+"/behavior/failures",{headers})).json();
+  assert.deepEqual(summary.export_groups,{code:["stream_unexpected_eof"],component:["model"],stage:["model"]});
+  const defaultFile=await fetch(exportUrl+`?app_version=${events[2].app_version}`,{headers});
+  assert.deepEqual((await defaultFile.json()).groups[0].samples[0].reports,[]);
   for(const [mode,key] of [["all","all"],["code","stream_unexpected_eof"],["component","model"],["stage","model"]]) {
-    const res=await fetch(exportUrl+`?group_by=${mode}&app_version=${events[2].app_version}`,{headers});
+    const groupValue=mode==="all"?"":"&group_value="+key;
+    const res=await fetch(exportUrl+`?group_by=${mode}&app_version=${events[2].app_version}&include_evidence=1${groupValue}`,{headers});
     assert.equal(res.status,200);
     assert.match(res.headers.get("content-disposition"),/attachment/);
     assert.equal(res.headers.get("cache-control"),"no-store");
@@ -106,4 +112,7 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
   assert.deepEqual((await (await fetch(base+`/diagnostics/samples?fingerprint=${fingerprint}`,{headers})).json()).incidents,[]);
   assert.deepEqual((await (await fetch(exportUrl,{headers})).json()).groups,[]);
   assert.equal((await (await fetch(exportUrl+"?include_fixed=1",{headers})).json()).groups[0].samples.length,4);
+  const analystSummary=await (await fetch(base+"/behavior/failures",{headers:analystHeaders})).json();
+  assert.equal(analystSummary.detail_allowed,false);
+  assert.deepEqual(await (await fetch(base+"/behavior/failures?include_fixed=1",{headers:analystHeaders})).json(),analystSummary);
 });
