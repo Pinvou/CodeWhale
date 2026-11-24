@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
-    SessionNotification, SessionUpdate, ToolCall, ToolCallStatus, ToolCallUpdate,
+    Meta, SessionNotification, SessionUpdate, ToolCall, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -1142,7 +1142,7 @@ impl EventBridge {
         self.tools.lock().insert(id.clone(), call.clone());
         self.emit_protocol("tool_call", call.clone(), notification_meta);
         if terminal {
-            self.record_tool_complete(&call);
+            self.record_tool_complete(&call, None);
             // When the first notification is already terminal (no later
             // update), the tool_update removal path never runs; leaving the
             // entry here would pin its raw_input/raw_output until bridge
@@ -1153,6 +1153,7 @@ impl EventBridge {
 
     fn tool_update(&self, update: ToolCallUpdate, notification_meta: Value) {
         let id = update.tool_call_id.to_string();
+        let exit_code = terminal_exit_code(update.meta.as_ref(), &id);
         let mut completed = None;
         {
             let mut tools = self.tools.lock();
@@ -1184,28 +1185,37 @@ impl EventBridge {
         }
         self.emit_protocol("tool_call_update", update, notification_meta);
         if let Some(call) = completed {
-            self.record_tool_complete(&call);
+            self.record_tool_complete(&call, exit_code);
             self.tools.lock().remove(&id);
         }
     }
 
-    fn record_tool_complete(&self, call: &ToolCall) {
+    fn record_tool_complete(&self, call: &ToolCall, exit_code: Option<i64>) {
+        let id = call.tool_call_id.to_string();
+        let success = matches!(call.status, ToolCallStatus::Completed);
+        let exit_code = exit_code
+            .or_else(|| terminal_exit_code(call.meta.as_ref(), &id))
+            .or_else(|| call.raw_output.as_ref()?.get("exit_code")?.as_i64());
+        let shell_input = call.raw_input.as_ref().filter(|_| {
+            call.kind == ToolKind::Execute && exit_code.is_some_and(|code| (code == 0) == success)
+        });
         crate::features::memory::record_turn_tool_complete(
             &self.pinvou_session_id,
             &call.title,
             &call.raw_input.clone().unwrap_or_else(|| json!({})),
-            matches!(call.status, ToolCallStatus::Completed),
+            success,
         );
         if let Some(turn_id) = self.current_turn.read().as_deref() {
             crate::features::behavior_telemetry::track_tool_call_completed(
                 &self.app,
                 &self.pinvou_session_id,
                 turn_id,
-                &call.tool_call_id.to_string(),
+                &id,
                 &call.title,
-                matches!(call.status, ToolCallStatus::Completed),
+                success,
                 Some("tool_error"),
                 None,
+                shell_input,
             );
         }
     }
@@ -1346,6 +1356,14 @@ impl EventBridge {
         // this boundary stops future old-bridge writes, not a fsync guarantee.
         self.flush_journal();
     }
+}
+
+fn terminal_exit_code(meta: Option<&Meta>, call_id: &str) -> Option<i64> {
+    let terminal = meta?.get("terminal_exit")?;
+    if terminal.get("terminal_id")?.as_str()? != call_id {
+        return None;
+    }
+    terminal.get("exit_code")?.as_i64()
 }
 
 fn is_terminal(status: ToolCallStatus) -> bool {
@@ -1955,6 +1973,15 @@ fn with_owned_turn<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_exit_evidence_must_belong_to_the_current_tool_call() {
+        let metadata = json!({"terminal_exit": {"terminal_id": "connector-call", "exit_code": 0}});
+        let metadata = metadata.as_object();
+        assert_eq!(terminal_exit_code(metadata, "connector-call"), Some(0));
+        assert_eq!(terminal_exit_code(metadata, "different-call"), None);
+        assert_eq!(terminal_exit_code(None, "connector-call"), None);
+    }
 
     #[test]
     fn exact_turn_action_holds_the_real_guard_and_cannot_cancel_a_successor() {

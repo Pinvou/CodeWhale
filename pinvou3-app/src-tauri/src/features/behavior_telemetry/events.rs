@@ -846,6 +846,57 @@ fn tool_operation_key(session_id: &str, call_id: &str) -> String {
     format!("{session_id}\u{1f}{call_id}")
 }
 
+fn shell_connector(input: &Value) -> Option<&'static str> {
+    if input
+        .get("action")
+        .is_some_and(|action| action.as_str() != Some("run"))
+        || ["background", "run_in_background", "tty", "interactive"]
+            .iter()
+            .any(|flag| {
+                input
+                    .get(flag)
+                    .is_some_and(|value| value.as_bool() != Some(false))
+            })
+    {
+        return None;
+    }
+    tool_identity::connector_cli_key(input.get("command")?.as_str()?)
+}
+
+#[cfg(test)]
+mod tool_identity_tests {
+    use super::{managed_mcp_key, shell_connector, tool_registry_key};
+    use serde_json::json;
+
+    #[test]
+    fn uses_catalog_keys_only_for_completed_connector_inputs() {
+        assert_eq!(
+            shell_connector(&json!({"command": "lark-cli base list"})),
+            Some("feishu")
+        );
+        assert_eq!(
+            shell_connector(&json!({"command": "wecom-cli list", "action": "run"})),
+            Some("wecom")
+        );
+        assert_eq!(
+            shell_connector(&json!({"command": "wecom-cli list", "action": "wait"})),
+            None
+        );
+        assert_eq!(
+            shell_connector(&json!({"command": "wecom-cli list", "background": true})),
+            None
+        );
+        assert_eq!(
+            shell_connector(&json!({"command": "lark-cli base list", "interactive": true})),
+            None
+        );
+        assert_eq!(tool_registry_key("hdm"), "hdm");
+        assert_eq!(managed_mcp_key("mcp__hdm__search"), Some("hdm"));
+        assert_eq!(managed_mcp_key("mcp_iwencai_query"), Some("iwencai"));
+        assert_eq!(tool_registry_key("mcp__hdm_extra__search"), "mcp_custom");
+    }
+}
+
 pub fn track_tool_call_started(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -866,7 +917,11 @@ pub fn track_tool_call_started(
         started_at: now_ms(),
         turn_id: turn_id.to_string(),
         tool_key,
-        tool_name: normalized_tool_name(tool_name, tool_key),
+        tool_name: if managed_mcp_key(tool_name).is_some() {
+            tool_key.to_owned()
+        } else {
+            normalized_tool_name(tool_name, tool_key)
+        },
         tool_type,
         lease: lease.clone(),
         execution_task_key: super::remote_execution::tool_task_key(&telemetry, session_id, turn_id),
@@ -903,6 +958,7 @@ pub fn track_tool_call_completed(
     success: bool,
     error_category: Option<&str>,
     diagnostic_error: Option<&str>,
+    shell_input: Option<&Value>,
 ) {
     track_tool_call_completed_with_metadata(
         app,
@@ -914,19 +970,21 @@ pub fn track_tool_call_completed(
         error_category,
         diagnostic_error,
         None,
+        shell_input,
     );
 }
 
 pub fn track_tool_call_completed_with_metadata(
     app: &tauri::AppHandle,
     session_id: &str,
-    _turn_id: &str,
+    turn_id: &str,
     call_id: &str,
     _tool_name: &str,
     success: bool,
     error_category: Option<&str>,
     diagnostic_error: Option<&str>,
     diagnostic_metadata: Option<&Value>,
+    shell_input: Option<&Value>,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
@@ -936,11 +994,19 @@ pub fn track_tool_call_completed_with_metadata(
         .lock()
         .ok()
         .and_then(|mut calls| calls.remove(&tool_operation_key(session_id, call_id)));
-    let Some(operation) = operation else {
+    let Some(mut operation) = operation else {
         return;
     };
     if !telemetry.lease_is_current(&operation.lease) {
         return;
+    }
+    if let Some(key) = shell_input
+        .filter(|_| operation.turn_id == turn_id)
+        .and_then(shell_connector)
+    {
+        operation.tool_key = key;
+        operation.tool_name = key.to_owned();
+        operation.tool_type = "cli";
     }
     let mut event = BehaviorEvent::new("tool_call_completed")
         .session(session_id)
@@ -1163,6 +1229,19 @@ pub fn classify_tool(tool_name: &str) -> &'static str {
     }
 }
 
+fn managed_mcp_key(tool_name: &str) -> Option<&'static str> {
+    let (server, operation) = if let Some(name) = tool_name.strip_prefix("mcp__") {
+        name.split_once("__")?
+    } else {
+        tool_name.strip_prefix("mcp_")?.split_once('_')?
+    };
+    match (server, operation.is_empty()) {
+        ("hdm", false) => Some("hdm"),
+        ("iwencai", false) => Some("iwencai"),
+        _ => None,
+    }
+}
+
 pub fn tool_registry_key(tool_name: &str) -> &'static str {
     let key = match tool_name {
         "Bash" | "bash" | "exec_shell" | "task_shell_start" => "shell",
@@ -1181,6 +1260,7 @@ pub fn tool_registry_key(tool_name: &str) -> &'static str {
         "dingtalk" => "dingtalk",
         "tmeet" => "tmeet",
         "weather" => "weather",
+        "hdm" => "hdm",
         "iwencai" => "iwencai",
         "ima" => "ima",
         "tencent-docs" => "tencent_docs",
@@ -1194,7 +1274,9 @@ pub fn tool_registry_key(tool_name: &str) -> &'static str {
         "yuandian-mcp" => "yuandian",
         "gongwen" => "gongwen",
         "pptx" => "pptx",
-        name if name.starts_with("mcp_") || name.contains("-mcp") => "mcp_custom",
+        name if name.starts_with("mcp_") || name.contains("-mcp") => {
+            managed_mcp_key(name).unwrap_or("mcp_custom")
+        }
         _ => "custom",
     };
     controlled_registry_key(key, CONTROLLED_TOOL_KEYS, "unknown")
