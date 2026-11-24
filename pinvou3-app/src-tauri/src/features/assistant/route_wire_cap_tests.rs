@@ -505,13 +505,16 @@ async fn k31_normal_chat_wire_body_omits_thinking_and_reasoning_effort() {
     let env = lock_wire_cap_env();
     let project = env.root.join("user-project");
 
-    for (label, model) in [
-        ("k31-platform", "kimi-k3.1-pro"),
-        ("k31-kimi-code", "k3.1-pro-highspeed"),
+    for (label, model, declared_output) in [
+        ("k31-platform", "kimi-k3.1-pro", None),
+        ("k31-kimi-code", "k3.1-pro-highspeed", None),
         // The documented `[1m]` declaration form (ACP Kimi Code models1m
         // datalist entry) rides the same omission contract — pin the wire
         // body, not just the effort resolution (2026-11-04 review round 4).
-        ("k31-kimi-code-1m", "k3.1-pro[1m]"),
+        // The base's exact-list arms miss bracket spellings, so this one
+        // still rides the app anchor (1,048,576 − the 1,024 context
+        // reservation `route_limits_for_model` clamps to).
+        ("k31-kimi-code-1m", "k3.1-pro[1m]", Some(1_047_552)),
     ] {
         let (base_url, probe, server_task) = start_wire_cap_probe().await;
         let engine = boot_wire_cap_engine(
@@ -520,15 +523,15 @@ async fn k31_normal_chat_wire_body_omits_thinking_and_reasoning_effort() {
             model,
             &base_url,
             &project,
-            // The route-level output declaration used to pin 1,048,576 −
-            // 1,024 here (2026-11-05 review) via the app anchors; CodeWhale
-            // cc2adf8 (#137) catalogues all four K3.1 spellings on its
-            // output chain, so the fill-gap anchors yield and the route
-            // declaration is None — the documented cap is enforced by the
-            // base catalog itself inside the engine
-            // (KIMI_K31_MAX_OUTPUT_TOKENS), which is the stronger,
-            // single-sourced shape.
-            None,
+            // The plain spellings used to declare 1,048,576 − 1,024 at the
+            // route level (2026-11-05 review) via the app anchors;
+            // CodeWhale cc2adf8 (#137) catalogues all four plain K3.1
+            // spellings on its output chain, so the fill-gap anchors yield
+            // and the route declaration is None — the documented cap is
+            // enforced by the base catalog itself inside the engine
+            // (KIMI_K31_MAX_OUTPUT_TOKENS), the stronger single-sourced
+            // shape. Only the bracket composite keeps an anchor row.
+            declared_output,
             |saved| {
                 // Catalog rows stamp the vendor; the bridge routes by it
                 // (vendor "kimi" → moonshot) and recognizes the K3.1 family
