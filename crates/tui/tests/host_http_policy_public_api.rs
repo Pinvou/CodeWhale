@@ -19,8 +19,8 @@ impl ModelHttpPolicy for HostPolicy {
     }
 }
 
-#[test]
-fn forkguard_host_http_policy_public_registry_accepts_original_three_field_literal() {
+#[tokio::test]
+async fn forkguard_host_http_policy_public_registry_accepts_original_three_field_literal() {
     let policy = Arc::new(HostPolicy::default());
     let workspace = tempfile::tempdir().unwrap();
     let registry = ToolRegistryBuilder::new()
@@ -35,5 +35,20 @@ fn forkguard_host_http_policy_public_registry_accepts_original_three_field_liter
         )
         .build(ToolContext::new(workspace.path()));
     assert!(registry.get("image_analyze").is_some());
-    assert_eq!(policy.0.load(Ordering::SeqCst), 1);
+    // PR #151 on the post-refactor transport: registry construction builds
+    // no transport, so the policy consult happens when the first dial
+    // births the auxiliary route client. The dial itself fails on the
+    // discard port; the consult is what this test pins.
+    let image = workspace.path().join("sample.png");
+    std::fs::write(&image, b"owned image fixture").unwrap();
+    let tool = registry.get("image_analyze").unwrap();
+    let _ = tool
+        .execute(
+            serde_json::json!({"image_path": image.to_string_lossy()}),
+            &ToolContext::new(workspace.path()),
+        )
+        .await;
+    // The auxiliary fallback builds both transports (h2 + http1 twins), so
+    // the registry-installed policy consults once per transport.
+    assert_eq!(policy.0.load(Ordering::SeqCst), 2);
 }
