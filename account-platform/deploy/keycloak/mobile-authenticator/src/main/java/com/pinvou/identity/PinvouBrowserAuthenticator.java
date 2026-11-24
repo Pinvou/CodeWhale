@@ -69,7 +69,8 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 context.getAuthenticationSession().removeAuthNote(note("password_policy"));
             }
             if ("REGISTRATION_RESTART_REQUIRED".equals(error.code())) clearState(context);
-            if (("REGISTRATION_RECOVERING".equals(error.code()) || "REGISTRATION_MANUAL_REVIEW_REQUIRED".equals(error.code())) && "sms".equals(requestedMode)) {
+            if ("sms".equals(requestedMode) && ("REGISTRATION_RECOVERING".equals(error.code())
+                || "REGISTRATION_MANUAL_REVIEW_REQUIRED".equals(error.code()) || "SIGNUP_CONSENT_INVALID".equals(error.code()))) {
                 context.getAuthenticationSession().removeAuthNote(note("sms_challenge"));
                 context.getAuthenticationSession().removeAuthNote(note("sms_sent"));
             }
@@ -419,6 +420,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         return switch (code) {
             case "REGISTRATION_RECOVERING" -> "pinvouMobileSignupRecovering";
             case "REGISTRATION_MANUAL_REVIEW_REQUIRED" -> "pinvouMobileSignupManualReview";
+            case "SIGNUP_CONSENT_INVALID" -> "pinvouMobileSignupConsentChanged";
             case "MOBILE_INVALID" -> "pinvouMobileInvalid";
             case "USERNAME_INVALID" -> "pinvouUsernameInvalid";
             case "USERNAME_ALREADY_REGISTERED", "USERNAME_TAKEN" -> "pinvouUsernameTaken";

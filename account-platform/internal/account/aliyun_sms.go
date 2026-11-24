@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -155,7 +156,8 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return SMSDelivery{}, fmt.Errorf("send Aliyun SMS: %w", err)
+		// The transport error can embed the complete signed request URL.
+		return SMSDelivery{}, errors.New("Aliyun SMS send transport failed")
 	}
 	defer response.Body.Close()
 	var body struct {
@@ -207,6 +209,7 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 	response, err := p.client.Do(request)
 	if err != nil {
 		// The transport error can embed the complete signed request URL.
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "transport")
 		return false, errors.New("Aliyun SMS verification transport failed")
 	}
 	defer response.Body.Close()
@@ -219,9 +222,11 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 		} `json:"Model"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&body); err != nil {
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "response_decode", "status", response.StatusCode)
 		return false, errors.New("Aliyun SMS returned an invalid verification response")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" || !body.Success {
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "provider_rejected", "status", response.StatusCode)
 		return false, fmt.Errorf("Aliyun SMS rejected verification: %s", sanitizeProviderCode(body.Code))
 	}
 	switch body.Model.VerifyResult {
@@ -230,6 +235,7 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 	case "UNKNOWN":
 		return false, nil
 	default:
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "invalid_result")
 		return false, errors.New("Aliyun SMS returned an invalid verification result")
 	}
 }

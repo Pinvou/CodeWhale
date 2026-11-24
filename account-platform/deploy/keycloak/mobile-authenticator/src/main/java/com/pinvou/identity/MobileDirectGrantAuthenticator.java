@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.jboss.logging.Logger;
@@ -37,9 +38,14 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     private static final PinvouAuthClient DEFAULT_CLIENT = new PinvouAuthClient();
     private final PinvouAuthClient client;
+    private final Function<String, String> environment;
 
     public MobileDirectGrantAuthenticator() { this(DEFAULT_CLIENT); }
-    MobileDirectGrantAuthenticator(PinvouAuthClient client) { this.client = client; }
+    MobileDirectGrantAuthenticator(PinvouAuthClient client) { this(client, System::getenv); }
+    MobileDirectGrantAuthenticator(PinvouAuthClient client, Function<String, String> environment) {
+        this.client = client;
+        this.environment = environment;
+    }
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
@@ -135,9 +141,9 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     }
 
     private SMSVerification verifySMS(AuthenticationFlowContext context, String mobile, String challenge, String code) {
-        String endpoint = System.getenv("PINVOU_SMS_VERIFY_URL");
-        String tokenFile = System.getenv("PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE");
-        String developmentToken = System.getenv("PINVOU_INTERNAL_SERVICE_TOKEN");
+        String endpoint = environment.apply("PINVOU_SMS_VERIFY_URL");
+        String tokenFile = environment.apply("PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE");
+        String developmentToken = environment.apply("PINVOU_INTERNAL_SERVICE_TOKEN");
         if (endpoint == null || endpoint.isBlank() || ((tokenFile == null || tokenFile.isBlank()) && (developmentToken == null || developmentToken.isBlank()))) {
             LOG.error("SMS verification endpoint is not configured");
             return SMSVerification.UNAVAILABLE;

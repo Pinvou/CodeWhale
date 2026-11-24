@@ -170,7 +170,7 @@ WHERE id=$1
 	}
 	if _, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='EXPIRED',last_error_code='RESERVATION_EXPIRED',version=version+1,updated_at=$2
-WHERE mobile_e164=$1 AND status='SMS_PENDING' AND lease_expires_at<=$2`, operation.Mobile, now); err != nil {
+WHERE mobile_e164=$1 AND committed_user_id IS NULL AND status='SMS_PENDING' AND lease_expires_at<=$2`, operation.Mobile, now); err != nil {
 		return "", RegistrationOperation{}, err
 	}
 	operation.Status = "REGISTRATION_IN_PROGRESS"

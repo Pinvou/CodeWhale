@@ -4,8 +4,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import com.sun.net.httpserver.HttpServer;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
+import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -83,13 +86,17 @@ final class PasswordFailureFlowTest {
         }
 
         AuthenticationProcessor.Result attempt(boolean browser, boolean expectSuccess) {
+            return attempt(browser, expectSuccess, browser ? new PinvouBrowserAuthenticator(client) : new MobileDirectGrantAuthenticator(client));
+        }
+
+        AuthenticationProcessor.Result attempt(boolean browser, boolean expectSuccess, Authenticator authenticator) {
             AuthenticatorFactory authenticatorFactory = browser ? new PinvouBrowserAuthenticatorFactory() : new MobileDirectGrantAuthenticatorFactory();
             execution.setAuthenticator(authenticatorFactory.getId());
             doReturn(authenticatorFactory).when(factory).getProviderFactory(Authenticator.class, authenticatorFactory.getId());
-            Authenticator authenticator = browser ? new PinvouBrowserAuthenticator(client) : new MobileDirectGrantAuthenticator(client);
             var result = spy(processor.createAuthenticatorContext(execution, authenticator, List.of(execution)));
             LoginFormsProvider forms = mock(LoginFormsProvider.class, RETURNS_SELF);
             doAnswer(i -> { lastMessage = i.getArgument(0); return forms; }).when(forms).setError(anyString());
+            doAnswer(i -> { lastMessage = i.getArgument(0); return forms; }).when(forms).setInfo(anyString());
             when(forms.createForm(anyString())).thenReturn(Response.status(401).build());
             doReturn(forms).when(result).form();
             if (browser) authenticator.action(result); else authenticator.authenticate(result);
@@ -354,6 +361,102 @@ final class PasswordFailureFlowTest {
         assertFalse(f.notes.containsKey("pinvou.browser.sms_challenge"));
         assertFalse(f.notes.containsKey("pinvou.browser.sms_sent"));
         verifyNoInteractions(f.client);
+    }
+
+    @Test void browserSignupReportsRecoveryAndInvalidConsentAndClearsStaleSMS() throws Exception {
+        for (String outcome : List.of("REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED", "SIGNUP_CONSENT_INVALID")) {
+            Fixture f = new Fixture();
+            f.notes.put("pinvou.browser.mobile", "+8613800000000");
+            f.notes.put("pinvou.browser.device", "fixture-device");
+            f.notes.put("pinvou.browser.sms_challenge", "fixture-challenge");
+            f.notes.put("pinvou.browser.sms_sent", "true");
+            f.form.putSingle("mode", "sms");
+            f.form.putSingle("sms_code", "000000");
+            String expected;
+            if ("SIGNUP_CONSENT_INVALID".equals(outcome)) {
+                f.notes.put("pinvou.browser.signup_consent", "mobile-signup-v1");
+                f.notes.put("pinvou.browser.captcha_id", "fixture-captcha");
+                f.form.putSingle("intent", "send_sms");
+                f.form.putSingle("captcha_offset", "128");
+                when(f.client.sendSMS(anyMap(), anyString(), anyString())).thenThrow(new PinvouAuthClient.AuthClientException(400, outcome));
+                expected = "pinvouMobileSignupConsentChanged";
+            } else {
+                when(f.client.verifySMS(anyString(), anyString(), anyString(), anyString(), anyString())).thenThrow(new PinvouAuthClient.AuthClientException(409, outcome));
+                expected = "REGISTRATION_RECOVERING".equals(outcome) ? "pinvouMobileSignupRecovering" : "pinvouMobileSignupManualReview";
+            }
+            f.attempt(true);
+            assertEquals(expected, f.lastMessage);
+            assertFalse(f.notes.containsKey("pinvou.browser.sms_challenge"));
+            assertFalse(f.notes.containsKey("pinvou.browser.sms_sent"));
+            assertNull(f.authenticated.get());
+        }
+    }
+
+    @Test void browserBoundSMSRequiresAuthorizationForTheSameChallenge() throws Exception {
+        for (boolean allowed : new boolean[]{true, false}) {
+            Fixture f = new Fixture();
+            f.notes.put("pinvou.browser.mobile", "+8613800000000");
+            f.notes.put("pinvou.browser.device", "fixture-device");
+            f.notes.put("pinvou.browser.sms_challenge", "fixture-challenge");
+            f.form.putSingle("mode", "sms");
+            f.form.putSingle("sms_code", "000000");
+            when(f.session.users().getUserById(f.realm, "fixture-user")).thenReturn(f.user);
+            when(f.client.verifySMS(anyString(), eq("fixture-challenge"), anyString(), anyString(), anyString()))
+                .thenReturn(new PinvouAuthClient.SMSLogin("fixture-user", true));
+            when(f.client.authorizeLogin("fixture-user", "fixture-challenge"))
+                .thenReturn(new PinvouAuthClient.LoginAuthorization(allowed, "fixture-account-user"));
+            f.attempt(true, allowed);
+            verify(f.client).authorizeLogin("fixture-user", "fixture-challenge");
+            verify(f.client, never()).authorizeLogin(anyString());
+            assertSame(allowed ? f.user : null, f.authenticated.get());
+        }
+    }
+
+    @Test void directGrantSendsBindingAndHandlesBoundSuccessAndRegistrationOutcomes() throws Exception {
+        String challenge = "018f0f76-3f5d-7d43-b630-163e3f635e5a";
+        for (String outcome : List.of("", "REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED")) {
+            Fixture f = new Fixture();
+            HttpHeaders headers = mock(HttpHeaders.class);
+            when(headers.getHeaderString("X-Device-ID")).thenReturn("fixture-device");
+            when(f.request.getHttpHeaders()).thenReturn(headers);
+            f.form.putSingle("sms_challenge_id", challenge);
+            f.form.putSingle("sms_code", "000000");
+            when(f.session.users().getUserById(f.realm, "fixture-user")).thenReturn(f.user);
+            when(f.client.authorizeLogin("fixture-user", challenge)).thenReturn(new PinvouAuthClient.LoginAuthorization(true, "fixture-account-user"));
+            var binding = new AtomicReference<String>();
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext("/verify", exchange -> {
+                binding.set(exchange.getRequestHeaders().getFirst("X-Pinvou-SMS-Binding"));
+                if (outcome.isEmpty()) {
+                    exchange.getResponseHeaders().set("X-Pinvou-Identity-Subject", "fixture-user");
+                    exchange.getResponseHeaders().set("X-Pinvou-SMS-Binding", "v1");
+                } else {
+                    exchange.getResponseHeaders().set("X-Pinvou-SMS-Outcome", outcome);
+                }
+                exchange.sendResponseHeaders(outcome.isEmpty() ? 204 : 409, -1);
+                exchange.close();
+            });
+            server.start();
+            try {
+                var env = Map.of("PINVOU_SMS_VERIFY_URL", "http://127.0.0.1:" + server.getAddress().getPort() + "/verify",
+                    "PINVOU_INTERNAL_SERVICE_TOKEN", "controlled-test-workload-token");
+                var result = f.attempt(false, outcome.isEmpty(), new MobileDirectGrantAuthenticator(f.client, env::get));
+                assertEquals("v1", binding.get());
+                verify(f.client, never()).authorizeLogin(anyString());
+                if (outcome.isEmpty()) {
+                    verify(f.client).authorizeLogin("fixture-user", challenge);
+                    assertSame(f.user, f.authenticated.get());
+                } else {
+                    verify(f.client, never()).authorizeLogin(anyString(), anyString());
+                    assertEquals(FlowStatus.CHALLENGE, result.getStatus());
+                    try (Response response = result.getChallenge()) {
+                        assertEquals(503, response.getStatus());
+                        assertEquals(Map.of("error", "temporarily_unavailable", "error_description", outcome), response.getEntity());
+                    }
+                    assertNull(f.authenticated.get());
+                }
+            } finally { server.stop(0); }
+        }
     }
 
     @Test void newRegistrationAndResetSubmissionsClearOnlyFailedPasswordAttribution() throws Exception {
