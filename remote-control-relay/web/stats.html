@@ -188,7 +188,7 @@
 <script>
   const $=id=>document.getElementById(id),nf=new Intl.NumberFormat('zh-CN'),DAY_MS=24*60*60*1000,STATS_TIMEZONE_OFFSET_MS=8*60*60*1000;
   const behaviorOverviewSections=['summary','activation','voice','errors','versions','remote'];
-  const state={dailyMetrics:new Set(['active_devices','new_devices','turns']),hourlyMetrics:new Set(['active_devices','new_devices','turns']),role:null,overview:null,devices:[],behavior:null,behaviorErrors:{},behaviorRequestVersions:{},behaviorRangeRequests:{},dataRefreshVersion:0,behaviorSectionReports:{activation:null,voice:null,errors:null,versions:null,remote:null},toolCalls:null,toolInstalls:null,scenes:null,models:null,commercial:null,range:30,behaviorRanges:{summary:'30',remote:'30',activation:'30',voice:'30',errors:'30',toolCalls:'30',toolInstalls:'30',scenes:'30',models:'30',versions:'30'},view:'devices',status:'all',platform:'all',query:'',deviceSort:'turns_7d',deviceSortDirection:'desc',timer:null};
+  const state={dailyMetrics:new Set(['active_devices','new_devices','turns']),hourlyMetrics:new Set(['active_devices','new_devices','turns']),role:null,loggingOut:false,overview:null,devices:[],behavior:null,behaviorErrors:{},behaviorRequestVersions:{},behaviorRangeRequests:{},dataRefreshVersion:0,behaviorSectionReports:{activation:null,voice:null,errors:null,versions:null,remote:null},toolCalls:null,toolInstalls:null,scenes:null,models:null,commercial:null,range:30,behaviorRanges:{summary:'30',remote:'30',activation:'30',voice:'30',errors:'30',toolCalls:'30',toolInstalls:'30',scenes:'30',models:'30',versions:'30'},view:'devices',status:'all',platform:'all',query:'',deviceSort:'turns_7d',deviceSortDirection:'desc',timer:null};
   const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const platform=value=>({linux:'Linux',windows:'Windows',macos:'macOS'}[String(value||'').toLowerCase()]||value||'—');
   const dateTime=(value,timeZone)=>value?new Date(value).toLocaleString('zh-CN',{...(timeZone?{timeZone}:{}),hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
@@ -391,6 +391,7 @@
   function beginBehaviorRequest(section){return state.behaviorRequestVersions[section]=(state.behaviorRequestVersions[section]||0)+1}
   function isCurrentBehaviorRequest(section,version){return state.behaviorRequestVersions[section]===version}
   async function refreshBehaviorSection(section,range){
+    if(state.loggingOut)return;
     const version=beginBehaviorRequest(section);
     state.behaviorRangeRequests[section]=version;
     try{
@@ -428,6 +429,7 @@
     return !Object.keys(state.behaviorErrors).length;
   }
   async function refreshData(manual=false){
+    if(state.loggingOut)return;
     const version=++state.dataRefreshVersion,isCurrent=()=>state.dataRefreshVersion===version;
     if(manual)$('refreshButton').textContent='↻ 刷新';
     try{
@@ -500,8 +502,20 @@
   $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})},revision);if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
   $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
-  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
-  $('logout').addEventListener('click',async()=>{clearRemoteReport();try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
+  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();if(state.loggingOut)return;$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
+  $('logout').addEventListener('click',async()=>{
+    if(state.loggingOut)return;
+    state.loggingOut=true;
+    state.dataRefreshVersion++;
+    if(state.timer)clearInterval(state.timer);
+    state.timer=null;
+    clearRemoteReport();
+    try{await api('logout',{method:'POST',body:'{}'})}catch{}finally{
+      state.role=null;
+      state.loggingOut=false;
+      showLogin();
+    }
+  });
   Object.keys(state.behaviorRanges).forEach(syncBehaviorRangeControls);
   refreshData().then(()=>{if($('loginLayer').classList.contains('hidden')&&!state.timer)state.timer=setInterval(refreshData,30000)});
 </script>

@@ -959,9 +959,13 @@ test('retention labels follow known API semantics and behavior timestamps explic
 
 test("role changes discard previously authorized remote rows and delayed responses", async () => {
   let role = "operations_admin";
-  let releaseOldOverview;
+  let releaseOldOverview, releaseOldSession, releaseLogout;
+  let holdSession = false;
+  let sessionCalls = 0;
   let failOverview = false;
   const oldResponse = new Promise(resolve => { releaseOldOverview = resolve; });
+  const oldSession = new Promise(resolve => { releaseOldSession = resolve; });
+  const logoutResponse = new Promise(resolve => { releaseLogout = resolve; });
   const adminRows = [
     { sequence: 1, stage: "connection", outcome: "ok", reason: "none", count: 1 },
     { sequence: 2, stage: "attachment", outcome: "ok", reason: "none", count: 1 },
@@ -974,7 +978,12 @@ test("role changes discard previously authorized remote rows and delayed respons
       window.fetch = async url => {
         const path = new URL(String(url), "https://www.pinvou.com");
         const range = path.searchParams.get("range") || "30";
-        if (path.pathname.endsWith("/session")) return ok({ role });
+        if (path.pathname.endsWith("/session")) {
+          sessionCalls++;
+          if (holdSession) await oldSession;
+          return ok({ role });
+        }
+        if (path.pathname.endsWith("/logout")) { await logoutResponse; return ok({}); }
         if (path.pathname.endsWith("/login")) { role = "behavior_analyst"; return ok({ role }); }
         if (path.pathname.endsWith("/behavior/overview")) {
           if (role === "operations_admin" && range === "7") await oldResponse;
@@ -998,9 +1007,19 @@ test("role changes discard previously authorized remote rows and delayed respons
     assert.deepEqual(stages(), ["连接", "附件传输"]);
     document.querySelector('[data-behavior-section="remote"] [data-range="7"]').click();
     await tick();
+    holdSession = true;
+    document.querySelector("#refreshButton").click();
+    await tick();
+    const requestsBeforeLogout = sessionCalls;
     document.querySelector("#logout").click();
     await tick();
+    releaseOldSession();
+    document.querySelector("#refreshButton").click();
+    await tick();
     assert.deepEqual(stages(), []);
+    assert.equal(sessionCalls, requestsBeforeLogout);
+    releaseLogout();
+    await tick();
     failOverview = true;
     document.querySelector("#loginForm").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await tick();
