@@ -26,6 +26,10 @@ import java.util.Collections;
 import java.util.Map;
 
 final class PinvouAuthClient {
+    private static final int RESPONSE_LIMIT_BYTES = 64 * 1024;
+    // Account includes the 280x120 background and 44x44 piece as base64 PNGs.
+    private static final int CAPTCHA_RESPONSE_LIMIT_BYTES = 256 * 1024;
+
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -53,7 +57,7 @@ final class PinvouAuthClient {
     }
 
     Map<String, Object> createCaptcha(String mobile, String purpose, String source, String device) throws AuthClientException {
-        return post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/captcha/challenges"),
+        return post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/captcha/challenges"), CAPTCHA_RESPONSE_LIMIT_BYTES,
             Map.of("mobile", mobile, "purpose", purpose), Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 201).body();
     }
 
@@ -97,6 +101,10 @@ final class PinvouAuthClient {
     }
 
     private Response post(URI target, Map<String, Object> body, Map<String, String> headers, int... expectedStatuses) throws AuthClientException {
+        return post(target, RESPONSE_LIMIT_BYTES, body, headers, expectedStatuses);
+    }
+
+    private Response post(URI target, int successLimitBytes, Map<String, Object> body, Map<String, String> headers, int... expectedStatuses) throws AuthClientException {
         try {
             HttpRequest.Builder request = HttpRequest.newBuilder(target).timeout(Duration.ofSeconds(8))
                 .header("Content-Type", "application/json").header("Accept", "application/json")
@@ -105,7 +113,8 @@ final class PinvouAuthClient {
             // The deadline covers receipt of the complete bounded body, not
             // only response headers. Cancellation closes a stalled exchange.
             CompletableFuture<HttpResponse<byte[]>> pending = http.sendAsync(
-                request.build(), ignored -> new BoundedBodySubscriber());
+                request.build(), info -> new BoundedBodySubscriber(
+                    isExpectedStatus(info.statusCode(), expectedStatuses) ? successLimitBytes : RESPONSE_LIMIT_BYTES));
             HttpResponse<byte[]> response;
             try {
                 response = pending.get(8, TimeUnit.SECONDS);
@@ -117,7 +126,7 @@ final class PinvouAuthClient {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw new AuthClientException(response.statusCode(), string(payload.get("code")), boundedRetryAfter(response.headers().firstValue("Retry-After").orElse("")));
             }
-            if (java.util.Arrays.stream(expectedStatuses).noneMatch(status -> status == response.statusCode())) {
+            if (!isExpectedStatus(response.statusCode(), expectedStatuses)) {
                 throw new AuthClientException(503, "AUTH_SERVICE_UNAVAILABLE");
             }
             return new Response(response.statusCode(), payload, response.headers().map());
@@ -131,6 +140,13 @@ final class PinvouAuthClient {
         }
     }
 
+    private static boolean isExpectedStatus(int status, int[] expectedStatuses) {
+        for (int expected : expectedStatuses) {
+            if (expected == status) return true;
+        }
+        return false;
+    }
+
     private static int boundedRetryAfter(String value) {
         try {
             long seconds=value.matches("[0-9]{1,18}") ? Long.parseLong(value)
@@ -140,10 +156,14 @@ final class PinvouAuthClient {
     }
 
     private static final class BoundedBodySubscriber implements HttpResponse.BodySubscriber<byte[]> {
-        private static final int MAX_BYTES = 65_536;
+        private final int limitBytes;
         private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         private final CompletableFuture<byte[]> body = new CompletableFuture<>();
         private Flow.Subscription subscription;
+
+        BoundedBodySubscriber(int limitBytes) {
+            this.limitBytes = limitBytes;
+        }
 
         @Override public CompletionStage<byte[]> getBody() { return body; }
         @Override public void onSubscribe(Flow.Subscription incoming) {
@@ -154,7 +174,7 @@ final class PinvouAuthClient {
         @Override public void onNext(List<ByteBuffer> buffers) {
             if (body.isDone()) return;
             for (ByteBuffer buffer : buffers) {
-                if (buffer.remaining() > MAX_BYTES - bytes.size()) {
+                if (buffer.remaining() > limitBytes - bytes.size()) {
                     subscription.cancel();
                     body.completeExceptionally(new IOException("AUTH_SERVICE_UNAVAILABLE"));
                     return;
