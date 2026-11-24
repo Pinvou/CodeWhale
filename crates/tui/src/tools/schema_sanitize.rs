@@ -2667,7 +2667,14 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema.get("anyOf").is_none());
         assert!(schema["properties"].get("path").is_some());
-        assert_eq!(note, None);
+        // The shared flattener's note gate now discloses even a single
+        // required group (the merged Moonshot/xAI composition), so the
+        // mixed object/non-object union surfaces the surviving branch's
+        // contract instead of flattening silently.
+        assert_eq!(
+            note.as_deref(),
+            Some("At least one of these parameter groups must be provided: `path`.")
+        );
     }
 
     #[test]
