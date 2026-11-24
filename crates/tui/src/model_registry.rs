@@ -154,10 +154,18 @@ const SEED_MODEL_IDS: &[(&str, ModelProvider)] = &[
     ("gpt-5-codex", ModelProvider::OpenAiCodex),
     ("gpt-5.3-codex", ModelProvider::OpenAi),
     // --- Moonshot / Kimi (config DEFAULT_MOONSHOT_MODEL / KIMI_CODE) ---
+    ("kimi-k3", ModelProvider::Moonshot),
+    ("kimi-k3.1-pro", ModelProvider::Moonshot),
+    ("kimi-k3.1-pro-highspeed", ModelProvider::Moonshot),
     ("kimi-k2.7-code", ModelProvider::Moonshot),
     ("kimi-k2.7-code-highspeed", ModelProvider::Moonshot),
     ("kimi-k2.6", ModelProvider::Moonshot),
+    ("k3", ModelProvider::Moonshot),
+    ("k3-256k", ModelProvider::Moonshot),
+    ("k3.1-pro", ModelProvider::Moonshot),
+    ("k3.1-pro-highspeed", ModelProvider::Moonshot),
     ("kimi-for-coding", ModelProvider::Moonshot),
+    ("kimi-for-coding-highspeed", ModelProvider::Moonshot),
     ("moonshotai/kimi-k2.7-code", ModelProvider::Moonshot),
     ("moonshotai/kimi-k2.6", ModelProvider::Moonshot),
     // --- Z.ai GLM (config DEFAULT_ZAI_MODEL) ---

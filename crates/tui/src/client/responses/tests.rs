@@ -449,6 +449,55 @@ fn responses_body_serializes_the_child_catalog_without_duplication() {
     );
 }
 
+#[test]
+fn responses_always_disables_strict_and_normalizes_explicit_non_strict_tools() {
+    let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
+    let mut request = minimal_responses_request();
+    request.tools = Some(tools.clone());
+    let body = build_responses_body(&request);
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["strict"] == json!(false))
+    );
+
+    let mut apply_patch = tools[0].clone();
+    apply_patch.name = "apply_patch".to_string();
+    apply_patch.strict = Some(false);
+    apply_patch.input_schema = json!({
+        "type": "object",
+        "properties": {
+            "patch": {"type": "string"},
+            "replace": {"type": "array"}
+        },
+        "oneOf": [
+            {"required": ["patch"]},
+            {"required": ["replace"]}
+        ]
+    });
+    let mut non_strict_request = minimal_responses_request();
+    non_strict_request.tools = Some(vec![apply_patch.clone()]);
+    let non_strict_body = build_responses_body(&non_strict_request);
+    let mut expected = apply_patch.input_schema.clone();
+    crate::tools::schema_sanitize::sanitize(&mut expected);
+    crate::tools::schema_canonicalize::canonicalize_schema(&mut expected);
+    crate::tools::schema_sanitize::sanitize_for_responses(&mut expected);
+    assert_eq!(non_strict_body["tools"][0]["parameters"], expected);
+    assert_ne!(
+        non_strict_body["tools"][0]["parameters"],
+        apply_patch.input_schema
+    );
+
+    let mut strict_tool = tools[0].clone();
+    strict_tool.strict = Some(true);
+    let mut strict_request = minimal_responses_request();
+    strict_request.tools = Some(vec![strict_tool]);
+    let strict_body = build_responses_body(&strict_request);
+    assert_eq!(strict_body["tools"][0]["strict"], json!(false));
+}
+
 #[tokio::test]
 async fn responses_stream_open_preserves_wire_headers_through_shared_seam() {
     use wiremock::matchers::header;

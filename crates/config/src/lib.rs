@@ -4172,17 +4172,17 @@ fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
         (ProviderKind::Arcee, "arcee-trinity-large-preview") => {
             ARCEE_TRINITY_LARGE_PREVIEW_MODEL.to_string()
         }
+        (ProviderKind::Moonshot, "kimi" | "kimi-k2" | "kimi-code") => {
+            DEFAULT_MOONSHOT_MODEL.to_string()
+        }
         (
             ProviderKind::Moonshot,
-            "kimi"
-            | "kimi-k2"
-            | "kimi-k2.7"
+            "kimi-k2.7"
             | "kimi-k2-7"
             | "kimi-k2.7-code"
             | "kimi-k2-7-code"
-            | "kimi-code"
             | "moonshot-kimi-k2.7-code",
-        ) => DEFAULT_MOONSHOT_MODEL.to_string(),
+        ) => MOONSHOT_KIMI_K2_7_CODE_MODEL.to_string(),
         (ProviderKind::Moonshot, "kimi-k2.6" | "kimi-k2-6" | "moonshot-kimi-k2.6") => {
             MOONSHOT_KIMI_K2_6_MODEL.to_string()
         }

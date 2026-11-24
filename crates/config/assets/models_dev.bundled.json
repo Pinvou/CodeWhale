@@ -150,21 +150,39 @@
           "id": "kimi-k3",
           "name": "Kimi K3",
           "family": "kimi-k3",
+          "default": true,
           "reasoning": true,
           "tool_call": true,
           "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
           "limit": { "context": 1048576, "output": 131072 },
           "cost": { "input": 3.00, "output": 15.00, "cache_read": 0.30 }
         },
+        "kimi-k3.1-pro": {
+          "id": "kimi-k3.1-pro",
+          "name": "Kimi K3.1 Pro",
+          "family": "kimi-k3",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "limit": { "context": 1048576, "output": 131072 }
+        },
+        "kimi-k3.1-pro-highspeed": {
+          "id": "kimi-k3.1-pro-highspeed",
+          "name": "Kimi K3.1 Pro (high-speed)",
+          "family": "kimi-k3",
+          "reasoning": true,
+          "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "limit": { "context": 1048576, "output": 131072 }
+        },
         "kimi-k2.7-code": {
           "id": "kimi-k2.7-code",
           "name": "Kimi K2.7 Code",
           "family": "kimi",
-          "default": true,
           "reasoning": true,
           "tool_call": true,
           "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
+          "limit": { "context": 262144, "output": 32768 },
           "cost": { "input": 0.95, "output": 4.00, "cache_read": 0.19 }
         },
         "kimi-k2.7-code-highspeed": {
@@ -174,7 +192,7 @@
           "reasoning": true,
           "tool_call": true,
           "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
+          "limit": { "context": 262144, "output": 32768 },
           "cost": { "input": 1.90, "output": 8.00, "cache_read": 0.38 }
         },
         "kimi-k2.6": {
@@ -184,7 +202,7 @@
           "reasoning": true,
           "tool_call": true,
           "modalities": { "input": ["text"], "output": ["text"] },
-          "limit": { "context": 262144, "output": 262144 },
+          "limit": { "context": 262144, "output": 32768 },
           "cost": { "input": 0.95, "output": 4.00, "cache_read": 0.16 }
         }
       }

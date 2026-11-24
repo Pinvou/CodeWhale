@@ -6072,18 +6072,18 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
         "responses/anthropic must drop their unsupported dependency keyword"
     );
 
-    // Moonshot/Kimi must retain the supported field vocabulary while dropping
-    // the one root dependency keyword MFJS cannot represent.
+    // Moonshot's strict pipeline rejects conditional requirements instead of
+    // erasing them into a wider tool contract. Rejection is transactional.
     let mut kimi = agent_schema.clone();
-    schema_sanitize::sanitize_for_kimi_parameters(&mut kimi)
-        .expect("agent schema must stay Kimi-compatible");
+    let original = kimi.clone();
+    assert_eq!(
+        schema_sanitize::sanitize_for_kimi_parameters(&mut kimi).unwrap_err(),
+        schema_sanitize::KimiParameterSchemaError::UnsupportedKeyword
+    );
+    assert_eq!(kimi, original);
     assert_eq!(
         kimi["properties"]["type"]["enum"], expected,
-        "kimi sanitize must not erase or widen the role enum"
-    );
-    assert!(
-        kimi.get("dependentSchemas").is_none(),
-        "Kimi MFJS must receive a schema without dependentSchemas"
+        "the rejected schema retains the original closed role enum"
     );
 }
 
@@ -6204,9 +6204,13 @@ fn agent_tool_schema_rejects_empty_input_across_provider_forms() {
     forms.push(("responses", responses));
 
     let mut kimi = agent_schema;
-    schema_sanitize::sanitize_for_kimi_parameters(&mut kimi)
-        .expect("agent schema must stay Kimi-compatible");
-    forms.push(("kimi", kimi));
+    let original = kimi.clone();
+    assert_eq!(
+        schema_sanitize::sanitize_for_kimi_parameters(&mut kimi).unwrap_err(),
+        schema_sanitize::KimiParameterSchemaError::UnsupportedKeyword,
+        "strict Moonshot handling rejects dependent requirements instead of flattening them"
+    );
+    assert_eq!(kimi, original);
 
     let empty = json!({});
     assert_eq!(

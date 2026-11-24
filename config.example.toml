@@ -60,9 +60,11 @@ base_url = "https://api.deepseek.com/beta"
 #   GLM-5.1                       — direct Z.AI smaller model
 #   GLM-5-Turbo                   — direct Z.AI fast model (scout fast sibling of 5.2)
 #   step-3.7-flash                — default direct StepFun / StepFlash model ID
-#   kimi-k3                         — direct Moonshot K3 model ID (1M context)
-#   kimi-k2.7-code                  — default direct Moonshot/Kimi K2.7 model ID
+#   kimi-k3                         — default direct Moonshot K3 model ID (1M context)
+#   kimi-k3.1-pro[-highspeed]       — direct Moonshot K3.1 model IDs (1M context)
+#   kimi-k2.7-code[-highspeed]      — previous-generation direct Moonshot/Kimi model IDs
 #   k3                              — Kimi Code membership K3 API model ID
+#   k3.1-pro[-highspeed]            — Kimi Code membership K3.1 API model IDs
 #   kimi-for-coding                 — Kimi Code membership K2.7 compatibility ID
 #   kimi-for-coding-highspeed       — Kimi Code membership high-speed roster ID
 #   gpt-4.1                         — default generic OpenAI-compatible model ID
@@ -665,16 +667,20 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 [providers.moonshot]
 # api_key = "YOUR_MOONSHOT_API_KEY"           # or KIMI_API_KEY
 # base_url = "https://api.moonshot.ai/v1"      # or KIMI_BASE_URL
-# model = "kimi-k3"                         # direct Moonshot K3 wire ID
-# Direct K3 is always-thinking: off -> low, medium -> high, and max remains max.
-# The exact route sends top-level reasoning_effort, max_completion_tokens, and
-# omits temperature/top_p per https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.
+# model = "kimi-k3"                         # default; or kimi-k3.1-pro[-highspeed]
+# Direct K3/K3.1 is always-thinking: off -> low, medium -> high, max stays max.
+# Exact direct K3/K3.1 routes send top-level reasoning_effort and
+# max_completion_tokens, and omit temperature/top_p. Direct K2.6/K2.7 legacy
+# off -> thinking enabled without an adjustable effort field.
+# K3 quickstart: https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.
 # Kimi Code membership path (key: https://www.kimi.com/code/console):
 # api_key = "YOUR_KIMI_CODE_API_KEY"
-# base_url = "https://api.kimi.com/coding/v1"
-# model = "k3"                              # Kimi Code K3 wire ID
-# K3 membership off -> enabled/low; dispatched auto selects a concrete tier.
-# Only an omitted reasoning setting leaves the provider default in control.
+# base_url = "https://api.kimi.com/coding/v1" # or https://api.kimi.ai/coding/v1
+# model = "k3"                              # or k3.1-pro[-highspeed]
+# K3/K3.1 membership uses nested thinking.effort; off -> enabled/low.
+# Legacy kimi-for-coding[-highspeed] off -> enabled without an effort field.
+# Dispatched auto selects a concrete tier; only an omitted reasoning setting
+# leaves the provider default in control.
 # Moderato plans are capped at 262144; Allegretto and above unlock up to 1048576.
 # context_window = 262144                    # manually cap k3 to the Moderato/256K window
 # context_window = 1048576                   # Allegretto+ only; do not claim an unavailable entitlement

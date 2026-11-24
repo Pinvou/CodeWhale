@@ -318,22 +318,12 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
             // `/model` normally resolves against the active provider's
             // catalog-default endpoint so it retains the existing local
             // provider/model validation. The endpoint-sensitive model
-            // selections are Kimi Code's bare `k3` and the K3.1 family
-            // spellings on the committed membership route: resolve them
-            // against the committed Kimi Code route rather than silently
-            // falling back to Moonshot's direct API route. Do not pass an
-            // unrelated stale endpoint through here; doing so would turn a
-            // foreign provider model into an apparent custom-route selection.
-            let route_base_url = (crate::config::is_exact_kimi_code_k3_route(
-                app.api_provider,
-                &app.active_route_base_url,
-                &model_id,
-            ) || crate::config::is_kimi_code_k31_route(
-                app.api_provider,
-                &app.active_route_base_url,
-                &model_id,
-            ))
-            .then(|| app.active_route_base_url.clone());
+            // endpoint-sensitive model selections must be checked against the
+            // committed Moonshot endpoint before any default-route fallback.
+            // Other providers retain their catalog-default resolution.
+            let route_base_url = (app.api_provider == ApiProvider::Moonshot)
+                .then(|| app.active_route_base_url.clone())
+                .filter(|base_url| !base_url.trim().is_empty());
             match crate::route_runtime::resolve_route_candidate_with_context_metadata(
                 app.api_provider,
                 Some(&model_id),
@@ -1244,6 +1234,10 @@ mod tests {
             !direct.is_error,
             "direct kimi-k3.1-pro remains valid: {direct:?}"
         );
+        assert_eq!(app.model, crate::config::MOONSHOT_KIMI_K31_PRO_MODEL);
+
+        let alias = model(&mut app, Some("k3.1-pro[1m]"));
+        assert!(alias.is_error, "the Claude alias must fail on direct too");
         assert_eq!(app.model, crate::config::MOONSHOT_KIMI_K31_PRO_MODEL);
     }
 

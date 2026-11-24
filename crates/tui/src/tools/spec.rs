@@ -1413,6 +1413,13 @@ pub trait ToolSpec: Send + Sync {
     /// Returns the JSON Schema for the tool's input parameters.
     fn input_schema(&self) -> Value;
 
+    /// Explicit provider strict-mode choice. `None` keeps the normal strict
+    /// behavior; only a tool whose API contract requires non-MFJS schemas
+    /// should return `Some(false)`.
+    fn strict(&self) -> Option<bool> {
+        None
+    }
+
     /// Returns the capabilities this tool has.
     fn capabilities(&self) -> Vec<ToolCapability>;
 

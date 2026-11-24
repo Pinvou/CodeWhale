@@ -1282,14 +1282,12 @@ fn canonical_moonshot_model_id(model: &str) -> Option<&'static str> {
     let normalized = model.trim().to_ascii_lowercase();
     let normalized = normalized.replace(['_', ' '], "-");
     match normalized.as_str() {
-        "kimi"
-        | "kimi-k2"
-        | "kimi-k2.7"
+        "kimi" | "kimi-k2" | "kimi-code" => Some(DEFAULT_MOONSHOT_MODEL),
+        "kimi-k2.7"
         | "kimi-k2-7"
         | "kimi-k2.7-code"
         | "kimi-k2-7-code"
-        | "kimi-code"
-        | "moonshot-kimi-k2.7-code" => Some(DEFAULT_MOONSHOT_MODEL),
+        | "moonshot-kimi-k2.7-code" => Some(MOONSHOT_KIMI_K2_7_CODE_MODEL),
         "kimi-k2.6" | "kimi-k2-6" | "moonshot-kimi-k2.6" => Some(MOONSHOT_KIMI_K2_6_MODEL),
         _ => None,
     }
@@ -1586,8 +1584,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         }
         ApiProvider::Arcee => vec![DEFAULT_ARCEE_MODEL, ARCEE_TRINITY_LARGE_PREVIEW_MODEL],
         // Moonshot's direct platform API (the provider's default route) serves
-        // `kimi-k3`; advertising only `kimi-k2.7-code` is half of why a
-        // dogfood user reported "I can't find k3" on v0.9.1.
+        // the current K3/K3.1 family and the still-supported K2.6/K2.7 ids.
         //
         // The bare `k3` id and `kimi-for-coding` deliberately stay out: they
         // belong to the Kimi Code coding-plan endpoint
@@ -1598,8 +1595,11 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         // ids through the configured model and the route-aware picker rows.
         ApiProvider::Moonshot => vec![
             DEFAULT_MOONSHOT_MODEL,
-            MOONSHOT_KIMI_K3_MODEL,
+            MOONSHOT_KIMI_K31_PRO_MODEL,
+            MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
             MOONSHOT_KIMI_K2_6_MODEL,
+            MOONSHOT_KIMI_K2_7_CODE_MODEL,
+            MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
         ],
         ApiProvider::Huggingface => {
             vec![DEFAULT_HUGGINGFACE_MODEL, DEFAULT_HUGGINGFACE_FLASH_MODEL]
@@ -5077,6 +5077,9 @@ impl Config {
         ) {
             Err(error) if error == KIMI_CODE_CLAUDE_ALIAS_GUIDANCE => {
                 return Err(SafeConfigDiagnostic::KimiCodeClaudeAlias.into());
+            }
+            Err(error) if error == KIMI_CODE_K31_CLAUDE_ALIAS_GUIDANCE => {
+                return Err(SafeConfigDiagnostic::KimiCodeK31ClaudeAlias.into());
             }
             result => result.map_err(anyhow::Error::msg)?,
         }
@@ -10095,6 +10098,36 @@ pub(crate) fn is_exact_direct_moonshot_k3_route(
         && model.trim().eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
 }
 
+/// Exact direct route carrying a model for which the strict current-model
+/// parameter intersection is known. Retired K2.5/moonshot-v1 ids and compatible
+/// gateways deliberately stay outside this gate.
+pub(crate) fn is_exact_direct_moonshot_supported_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_direct_platform(base_url)
+        && (MOONSHOT_DIRECT_PLATFORM_MODELS
+            .iter()
+            .chain(MOONSHOT_KIMI_K31_MODELS.iter())
+            .any(|id| model.trim().eq_ignore_ascii_case(id)))
+}
+
+/// Exact membership route carrying one of the six currently supported ids.
+pub(crate) fn is_exact_kimi_code_supported_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_kimi_code(base_url)
+        && (KIMI_CODE_MEMBERSHIP_MODELS
+            .iter()
+            .chain(KIMI_CODE_K31_MODELS.iter())
+            .any(|id| model.trim().eq_ignore_ascii_case(id)))
+}
+
 /// Whether a route is exactly xAI's first-party Grok 4.6 endpoint.
 #[must_use]
 pub(crate) fn is_exact_xai_grok_4_6_route(
@@ -10162,7 +10195,9 @@ pub(crate) fn is_kimi_k31_model_spelling(model: &str) -> bool {
 pub(crate) fn is_kimi_code_k31_route(provider: ApiProvider, base_url: &str, model: &str) -> bool {
     provider == ApiProvider::Moonshot
         && moonshot_base_url_is_exact_kimi_code(base_url)
-        && is_kimi_k31_model_spelling(model)
+        && KIMI_CODE_K31_MODELS
+            .iter()
+            .any(|id| model.trim().eq_ignore_ascii_case(id))
 }
 
 /// The direct-platform counterpart of [`is_kimi_code_k31_route`]: the exact
@@ -10178,7 +10213,9 @@ pub(crate) fn is_kimi_k31_on_direct_platform_route(
 ) -> bool {
     provider == ApiProvider::Moonshot
         && moonshot_base_url_is_exact_direct_platform(base_url)
-        && is_kimi_k31_model_spelling(model)
+        && MOONSHOT_KIMI_K31_MODELS
+            .iter()
+            .any(|id| model.trim().eq_ignore_ascii_case(id))
 }
 
 /// Whether a route is one of Z.ai's exact first-party Chat endpoints.
@@ -10353,18 +10390,22 @@ pub(crate) fn is_kimi_code_membership_model(model: &str) -> bool {
 
 /// The Moonshot direct-platform roster, as one fact. Mirror of
 /// [`KIMI_CODE_MEMBERSHIP_MODELS`] for the pay-as-you-go product.
-pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
+pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 4] = [
     MOONSHOT_KIMI_K3_MODEL,
-    DEFAULT_MOONSHOT_MODEL,
     MOONSHOT_KIMI_K2_6_MODEL,
+    MOONSHOT_KIMI_K2_7_CODE_MODEL,
+    MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
 ];
 
 pub(crate) const KIMI_CODE_CLAUDE_ALIAS_GUIDANCE: &str = "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3\". If your Kimi Code plan includes 1M context, also set context_window = 1048576; otherwise keep the 262144 safe default.";
+pub(crate) const KIMI_CODE_K31_CLAUDE_ALIAS_GUIDANCE: &str = "Kimi Code model `k3.1-pro[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3.1-pro\". Direct Moonshot uses model = \"kimi-k3.1-pro\".";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SafeConfigDiagnostic {
     #[error("{}", KIMI_CODE_CLAUDE_ALIAS_GUIDANCE)]
     KimiCodeClaudeAlias,
+    #[error("{}", KIMI_CODE_K31_CLAUDE_ALIAS_GUIDANCE)]
+    KimiCodeK31ClaudeAlias,
 }
 
 /// The two official Kimi Code membership endpoints, named as one fact so the
@@ -10397,11 +10438,14 @@ pub(crate) fn validate_kimi_code_api_model_id(
     if model.is_empty() {
         return Ok(());
     }
+    if model.eq_ignore_ascii_case("k3[1m]") {
+        return Err(KIMI_CODE_CLAUDE_ALIAS_GUIDANCE.to_string());
+    }
+    if model.eq_ignore_ascii_case("k3.1-pro[1m]") {
+        return Err(KIMI_CODE_K31_CLAUDE_ALIAS_GUIDANCE.to_string());
+    }
 
     if moonshot_base_url_is_exact_kimi_code(base_url) {
-        if model.eq_ignore_ascii_case("k3[1m]") {
-            return Err(KIMI_CODE_CLAUDE_ALIAS_GUIDANCE.to_string());
-        }
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
@@ -10464,11 +10508,7 @@ mod kimi_code_pairing_tests {
 
     #[test]
     fn direct_platform_ids_fail_on_kimi_code_endpoint() {
-        for model in [
-            MOONSHOT_KIMI_K3_MODEL,
-            DEFAULT_MOONSHOT_MODEL,
-            MOONSHOT_KIMI_K2_6_MODEL,
-        ] {
+        for model in MOONSHOT_DIRECT_PLATFORM_MODELS {
             let err = validate_kimi_code_api_model_id(
                 ApiProvider::Moonshot,
                 DEFAULT_KIMI_CODE_BASE_URL,
@@ -10553,21 +10593,25 @@ mod kimi_code_pairing_tests {
         }
     }
 
-    /// The K3.1 family predicates stay route-scoped: canonical spellings on
-    /// the membership endpoint (both hosts, any spelling) match, while the
-    /// direct platform, custom gateways, and near-miss spellings do not.
+    /// The K3.1 family predicates stay route-scoped: only canonical
+    /// membership spellings on either membership host match. Direct-platform
+    /// spellings, custom gateways, and near-miss spellings do not.
     #[test]
     fn k31_route_predicate_scopes_to_the_exact_membership_endpoint() {
         for base_url in [DEFAULT_KIMI_CODE_BASE_URL, "https://api.kimi.ai/coding/v1"] {
+            for model in [KIMI_CODE_K31_PRO_MODEL, KIMI_CODE_K31_PRO_HIGHSPEED_MODEL] {
+                assert!(
+                    is_kimi_code_k31_route(ApiProvider::Moonshot, base_url, model),
+                    "{base_url} / {model} must be a K3.1 membership route"
+                );
+            }
             for model in [
-                KIMI_CODE_K31_PRO_MODEL,
-                KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
                 MOONSHOT_KIMI_K31_PRO_MODEL,
                 MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
             ] {
                 assert!(
-                    is_kimi_code_k31_route(ApiProvider::Moonshot, base_url, model),
-                    "{base_url} / {model} must be a K3.1 membership route"
+                    !is_kimi_code_k31_route(ApiProvider::Moonshot, base_url, model),
+                    "{base_url} / {model} is a direct-platform spelling, not membership"
                 );
             }
         }
@@ -10778,17 +10822,17 @@ fn model_for_provider(provider: ApiProvider, normalized: String) -> String {
         (ApiProvider::Together, "inkling" | "together-inkling" | "thinkingmachines/inkling") => {
             TOGETHER_INKLING_MODEL.to_string()
         }
+        (ApiProvider::Moonshot, "kimi" | "kimi-k2" | "kimi-code") => {
+            DEFAULT_MOONSHOT_MODEL.to_string()
+        }
         (
             ApiProvider::Moonshot,
-            "kimi"
-            | "kimi-k2"
-            | "kimi-k2.7"
+            "kimi-k2.7"
             | "kimi-k2-7"
             | "kimi-k2.7-code"
             | "kimi-k2-7-code"
-            | "kimi-code"
             | "moonshot-kimi-k2.7-code",
-        ) => DEFAULT_MOONSHOT_MODEL.to_string(),
+        ) => MOONSHOT_KIMI_K2_7_CODE_MODEL.to_string(),
         (ApiProvider::Moonshot, "kimi-k2.6" | "kimi-k2-6" | "moonshot-kimi-k2.6") => {
             MOONSHOT_KIMI_K2_6_MODEL.to_string()
         }

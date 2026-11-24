@@ -9845,6 +9845,10 @@ impl ToolSpec for AgentTool {
     /// knobs, deliberate/spawn-contract knobs, wait/status extras) stays
     /// parse-accepted unchanged for saved transcripts, ACP/MCP clients and
     /// Fleet configs, exactly like `token_budget`; see docs/SUBAGENTS.md.
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     fn input_schema(&self) -> Value {
         let target_required = json!([
             {

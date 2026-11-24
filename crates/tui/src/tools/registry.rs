@@ -275,8 +275,11 @@ impl ToolRegistry {
                 if evidence_only {
                     project_readonly_evidence_schema(tool.name(), &mut schema);
                 }
-                schema_sanitize::sanitize(&mut schema);
-                schema_canonicalize::canonicalize_schema(&mut schema);
+                if tool.strict() != Some(false) && schema_within_shared_normalization_depth(&schema)
+                {
+                    schema_sanitize::sanitize(&mut schema);
+                    schema_canonicalize::canonicalize_schema(&mut schema);
+                }
                 Tool {
                     tool_type: None,
                     name: tool.name().to_string(),
@@ -285,7 +288,7 @@ impl ToolRegistry {
                     allowed_callers: Some(vec!["direct".to_string()]),
                     defer_loading: Some(tool.defer_loading()),
                     input_examples: None,
-                    strict: None,
+                    strict: tool.strict(),
                     cache_control: None,
                 }
             })
@@ -1614,12 +1617,35 @@ pub(crate) fn mcp_result_to_bounded_rich_tool_result(result: Value) -> RichToolR
 
 #[cfg(test)]
 pub(super) fn mcp_tool_adapter_for_test(name: &str) -> Arc<dyn ToolSpec> {
+    mcp_tool_adapter_with_schema_for_test(name, serde_json::json!({"type": "object"}))
+}
+
+fn schema_within_shared_normalization_depth(schema: &Value) -> bool {
+    const MAX_DEPTH: usize = 64;
+    let mut pending = vec![(schema, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        if depth > MAX_DEPTH {
+            return false;
+        }
+        match value {
+            Value::Object(object) => {
+                pending.extend(object.values().map(|value| (value, depth + 1)))
+            }
+            Value::Array(items) => pending.extend(items.iter().map(|value| (value, depth + 1))),
+            _ => {}
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+fn mcp_tool_adapter_with_schema_for_test(name: &str, input_schema: Value) -> Arc<dyn ToolSpec> {
     Arc::new(McpToolAdapter {
         name: name.to_string(),
         tool: crate::mcp::McpTool {
             name: name.to_string(),
             description: None,
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema,
         },
         pool: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
             crate::mcp::McpConfig::default(),
@@ -1631,3 +1657,65 @@ pub(super) fn mcp_tool_adapter_for_test(name: &str) -> Arc<dyn ToolSpec> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod raw_budget_tests {
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn large_schema_still_runs_shared_normalization() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "description": "x".repeat(130_000)
+                }
+            }
+        });
+        let mut registry =
+            ToolRegistry::new(ToolContext::new(tempdir().unwrap().path().to_path_buf()));
+        registry.register(mcp_tool_adapter_with_schema_for_test("large", schema));
+
+        let tools = registry.to_api_tools();
+
+        assert!(
+            tools[0].input_schema["properties"]["text"]
+                .get("anyOf")
+                .is_none()
+        );
+        assert_eq!(
+            tools[0].input_schema["properties"]["text"]["nullable"],
+            true
+        );
+        assert_eq!(
+            tools[0].input_schema["properties"]["text"]["description"]
+                .as_str()
+                .map(str::len),
+            Some(130_000)
+        );
+        assert_eq!(tools[0].strict, None);
+    }
+
+    #[test]
+    fn over_budget_schema_skips_recursive_registry_preprocessing() {
+        let mut literal = json!("leaf");
+        for _ in 0..=64 {
+            literal = json!({"nested": literal});
+        }
+        let schema = json!({"type": "object", "default": literal});
+        let mut registry =
+            ToolRegistry::new(ToolContext::new(tempdir().unwrap().path().to_path_buf()));
+        registry.register(mcp_tool_adapter_with_schema_for_test(
+            "deep",
+            schema.clone(),
+        ));
+
+        let tools = registry.to_api_tools();
+
+        assert_eq!(tools[0].input_schema, schema);
+    }
+}

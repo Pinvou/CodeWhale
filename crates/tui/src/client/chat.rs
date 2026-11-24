@@ -2,7 +2,7 @@
 //!
 //! This is the production code path. Streaming (`create_message_stream`),
 //! request building (`build_chat_messages*`), and SSE parsing
-//! (`parse_sse_chunk_with_reasoning_style`) all live here.
+//! (`parse_sse_chunk_with_reasoning_style_and_owners`) all live here.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -15,10 +15,12 @@ use serde_json::{Value, json};
 use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
-    TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_k31_route, is_kimi_code_membership_model,
-    is_kimi_k31_on_direct_platform_route, minimax_m3_route_uses_max_completion_tokens,
+    TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route,
+    is_exact_direct_moonshot_supported_route, is_exact_kimi_code_k3_route,
+    is_exact_kimi_code_supported_route, is_exact_xai_grok_4_6_route, is_exact_zai_chat_route,
+    is_exact_zai_forced_thinking_route, is_exact_zai_tiered_effort_route, is_kimi_code_k31_route,
+    is_kimi_code_membership_model, is_kimi_k31_on_direct_platform_route,
+    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_direct_platform,
     moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
@@ -54,7 +56,7 @@ use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
     apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
-    release_stream_buffer, system_to_instructions, to_api_tool_name,
+    release_stream_buffer, system_to_instructions, to_api_tool_name, try_from_api_tool_name,
 };
 use crate::models::Role;
 
@@ -68,8 +70,9 @@ fn apply_provider_token_limit(
     let use_max_completion_tokens = provider == ApiProvider::XiaomiMimo
         || (provider == ApiProvider::Openai && model_is_openai_reasoning_family(model))
         || minimax_m3_route_uses_max_completion_tokens(provider, base_url, model)
-        || is_exact_direct_moonshot_k3_route(provider, base_url, model)
-        || is_kimi_k31_on_direct_platform_route(provider, base_url, model);
+        // Every currently supported direct Kimi model accepts the modern
+        // field. Membership keeps its separately documented legacy contract.
+        || is_exact_direct_moonshot_supported_route(provider, base_url, model);
     if !use_max_completion_tokens {
         return;
     }
@@ -593,6 +596,49 @@ fn modelstudio_reasoning_effort_for_model(effort: &str) -> Option<&'static str> 
     }
 }
 
+/// K2.6/K2.7 direct and the membership coding ids share only an enabled
+/// thinking control with the always-thinking K3 family. Do not use K2.6's
+/// disabled form, K2.8's off route, or an adjustable-effort field that the
+/// membership highspeed model cannot express.
+fn is_moonshot_legacy_reasoning_route(provider: ApiProvider, base_url: &str, model: &str) -> bool {
+    let direct_legacy = provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_direct_platform(base_url)
+        && [
+            crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+            crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL,
+            crate::config::MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
+        ]
+        .iter()
+        .any(|id| model.trim().eq_ignore_ascii_case(id));
+    let membership_legacy = provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_kimi_code(base_url)
+        && [
+            crate::config::DEFAULT_KIMI_CODE_MODEL,
+            crate::config::KIMI_CODE_HIGHSPEED_MODEL,
+        ]
+        .iter()
+        .any(|id| model.trim().eq_ignore_ascii_case(id));
+    direct_legacy || membership_legacy
+}
+
+fn apply_moonshot_legacy_reasoning_controls(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    effort: Option<&str>,
+) {
+    if !is_moonshot_legacy_reasoning_route(provider, base_url, model) {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("reasoning_effort");
+    }
+    if effort.is_some_and(|effort| !reasoning_effort_enables_thinking(Some(effort))) {
+        body["thinking"] = json!({ "type": "enabled" });
+    }
+}
+
 /// Final reasoning-control pass shared by streaming and non-streaming Chat
 /// Completions requests. Route-specific shapers run after the generic provider
 /// layer so they can remove fields that are invalid for their exact endpoint.
@@ -611,6 +657,7 @@ pub(super) fn apply_route_reasoning_controls(
     apply_xai_grok_4_6_reasoning_effort(body, provider, base_url, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
+    apply_moonshot_legacy_reasoning_controls(body, provider, base_url, model, effort);
     apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_mistral_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_google_thinking_level(body, provider, base_url, model, effort);
@@ -940,23 +987,17 @@ fn apply_mistral_route_reasoning_controls(
     }
 }
 
-/// The direct K3 Chat Completions schema exposes fixed sampling behavior and
-/// omits `temperature` and `top_p`. Strip legacy/generic values only from the
-/// exact first-party route so compatible gateways keep their own contract.
-/// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
-///
-/// The K3.1 direct-platform spellings share this contract: models-overview
-/// lists them in the same K3-series parameter column, so a stale sampling
-/// value would meet the same fixed-sampling schema the bare `kimi-k3` does.
-fn apply_direct_moonshot_k3_fixed_sampling(
+/// Every currently supported direct Kimi model owns its sampling behavior.
+/// The strict intersection therefore omits `temperature` and `top_p` for
+/// K3/K3.1, legacy K2.6, and K2.7-code[-highspeed] alike. Exact route gating
+/// keeps compatible gateways and retired model ids on their own contract.
+fn apply_direct_moonshot_fixed_sampling(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
 ) {
-    if !is_exact_direct_moonshot_k3_route(provider, base_url, model)
-        && !is_kimi_k31_on_direct_platform_route(provider, base_url, model)
-    {
+    if !is_exact_direct_moonshot_supported_route(provider, base_url, model) {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -1122,6 +1163,222 @@ fn mirror_minimax_reasoning_details_for_body(
 /// safety net.
 ///
 /// Returns the names of the dropped tools, in catalog order.
+#[derive(Clone, Copy)]
+enum ObjectComposition<'a> {
+    AllOf(&'a [Value]),
+    AnyOf(&'a [Value]),
+}
+
+enum ObjectProofTask<'a> {
+    Evaluate {
+        schema: &'a Value,
+        references: Vec<String>,
+        depth: usize,
+    },
+    ChooseComposition {
+        options: Vec<ObjectComposition<'a>>,
+        next: usize,
+        references: Vec<String>,
+        depth: usize,
+    },
+    AllOf {
+        branches: &'a [Value],
+        next: usize,
+        found_object: bool,
+        references: Vec<String>,
+        depth: usize,
+    },
+    AnyOf {
+        branches: &'a [Value],
+        next: usize,
+        found_non_object: bool,
+        references: Vec<String>,
+        depth: usize,
+    },
+}
+
+fn moonshot_parameters_prove_object(schema: &Value) -> bool {
+    const MAX_REFERENCE_DEPTH: usize = 64;
+    const MAX_PROOF_STEPS: usize = 512;
+
+    let root = schema;
+    let mut tasks = vec![ObjectProofTask::Evaluate {
+        schema,
+        references: Vec::new(),
+        depth: 0,
+    }];
+    let mut result = None;
+    let mut steps = 0usize;
+    while let Some(task) = tasks.pop() {
+        steps += 1;
+        if steps > MAX_PROOF_STEPS {
+            return false;
+        }
+        match task {
+            ObjectProofTask::Evaluate {
+                schema,
+                references,
+                depth,
+            } => {
+                if depth > MAX_REFERENCE_DEPTH {
+                    return false;
+                }
+                let Some(object) = schema.as_object() else {
+                    result = Some(false);
+                    continue;
+                };
+                if object.get("type").and_then(Value::as_str) == Some("object") {
+                    result = Some(true);
+                    continue;
+                }
+                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                    if !reference.starts_with("#/")
+                        || references.iter().any(|item| item == reference)
+                    {
+                        result = Some(false);
+                        continue;
+                    }
+                    let Some(target) = root.pointer(&reference[1..]) else {
+                        result = Some(false);
+                        continue;
+                    };
+                    let mut references = references;
+                    references.push(reference.to_string());
+                    tasks.push(ObjectProofTask::Evaluate {
+                        schema: target,
+                        references,
+                        depth: depth + 1,
+                    });
+                    continue;
+                }
+                let mut options = Vec::new();
+                if let Some(branches) = object.get("allOf").and_then(Value::as_array) {
+                    options.push(ObjectComposition::AllOf(branches));
+                }
+                if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+                    options.push(ObjectComposition::AnyOf(branches));
+                }
+                if let Some(branches) = object.get("oneOf").and_then(Value::as_array) {
+                    options.push(ObjectComposition::AnyOf(branches));
+                }
+                tasks.push(ObjectProofTask::ChooseComposition {
+                    options,
+                    next: 0,
+                    references,
+                    depth,
+                });
+            }
+            ObjectProofTask::ChooseComposition {
+                options,
+                next,
+                references,
+                depth,
+            } => {
+                if result == Some(true) {
+                    result = Some(true);
+                    continue;
+                }
+                let Some(composition) = options.get(next).copied() else {
+                    result = Some(false);
+                    continue;
+                };
+                result = None;
+                tasks.push(ObjectProofTask::ChooseComposition {
+                    options,
+                    next: next + 1,
+                    references: references.clone(),
+                    depth,
+                });
+                match composition {
+                    ObjectComposition::AllOf(branches) => {
+                        tasks.push(ObjectProofTask::AllOf {
+                            branches,
+                            next: 0,
+                            found_object: false,
+                            references,
+                            depth,
+                        });
+                    }
+                    ObjectComposition::AnyOf(branches) => {
+                        tasks.push(ObjectProofTask::AnyOf {
+                            branches,
+                            next: 0,
+                            found_non_object: false,
+                            references,
+                            depth,
+                        });
+                    }
+                }
+            }
+            ObjectProofTask::AllOf {
+                branches,
+                next,
+                found_object,
+                references,
+                depth,
+            } => {
+                let found_object = found_object || result.take().unwrap_or(false);
+                if found_object {
+                    result = Some(true);
+                    continue;
+                }
+                if next >= branches.len() {
+                    result = Some(false);
+                    continue;
+                }
+                tasks.push(ObjectProofTask::AllOf {
+                    branches,
+                    next: next + 1,
+                    found_object,
+                    references: references.clone(),
+                    depth,
+                });
+                if !found_object {
+                    result = None;
+                    tasks.push(ObjectProofTask::Evaluate {
+                        schema: &branches[next],
+                        references,
+                        depth,
+                    });
+                }
+            }
+            ObjectProofTask::AnyOf {
+                branches,
+                next,
+                found_non_object,
+                references,
+                depth,
+            } => {
+                let found_non_object = found_non_object || !result.take().unwrap_or(true);
+                if found_non_object || branches.is_empty() {
+                    result = Some(false);
+                    continue;
+                }
+                if next >= branches.len() {
+                    result = Some(true);
+                    continue;
+                }
+                tasks.push(ObjectProofTask::AnyOf {
+                    branches,
+                    next: next + 1,
+                    found_non_object,
+                    references: references.clone(),
+                    depth,
+                });
+                if !found_non_object {
+                    result = None;
+                    tasks.push(ObjectProofTask::Evaluate {
+                        schema: &branches[next],
+                        references,
+                        depth,
+                    });
+                }
+            }
+        }
+    }
+    result.unwrap_or(false)
+}
+
 fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
     let mut dropped = Vec::new();
     chat_tools.retain_mut(|tool| {
@@ -1132,6 +1389,29 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
         else {
             return true;
         };
+        if function.get("strict").and_then(Value::as_bool) == Some(false) {
+            if function.get("parameters").is_some_and(|parameters| {
+                crate::tools::schema_sanitize::validate_kimi_relaxed_resource_budgets(parameters)
+                    .is_ok()
+                    && moonshot_parameters_prove_object(parameters)
+            }) {
+                // Explicit API opt-in to the non-MFJS lane. Preserve the
+                // original schema and description verbatim, including root
+                // composition, bounds, defaults, and dependent keywords.
+                return true;
+            }
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_string();
+            tracing::warn!(
+                tool = %name,
+                "dropping Moonshot strict:false tool: parameters exceed local budgets or do not prove a JSON object root"
+            );
+            dropped.push(name);
+            return false;
+        }
         let Some(parameters) = function.get_mut("parameters") else {
             return true;
         };
@@ -1193,6 +1473,18 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
 /// valid tool. Returns the dropped tools' REGISTRY spellings plus the
 /// surviving mint spellings (registry -> wire), which the forced-choice
 /// check uses to tell a shadowed name from a live one.
+fn moonshot_wire_name_is_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes
+            .first()
+            .is_some_and(|first| first.is_ascii_alphabetic() || *first == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+}
+
 fn prefix_digit_led_tool_names_for_moonshot(
     chat_tools: &mut Vec<Value>,
     registry_names: &[String],
@@ -1206,7 +1498,6 @@ fn prefix_digit_led_tool_names_for_moonshot(
                 .map(str::to_owned)
         })
         .collect();
-    const MFJS_MAX_NAME_LENGTH: usize = 128;
     let mut dropped = Vec::new();
     let mut minted_names = std::collections::HashMap::new();
     chat_tools.retain_mut(|tool| {
@@ -1222,98 +1513,149 @@ fn prefix_digit_led_tool_names_for_moonshot(
             .and_then(Value::as_str)
             .map(str::to_owned)
         else {
-            return true;
+            dropped.push("<unnamed>".to_string());
+            return false;
         };
-        if !name.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            return true;
-        }
-        let minted = format!("_{name}");
-        if minted.len() > MFJS_MAX_NAME_LENGTH {
+        let digit_led = name.as_bytes().first().is_some_and(u8::is_ascii_digit);
+        let final_name = if digit_led {
+            format!("_{name}")
+        } else {
+            name.clone()
+        };
+        if !moonshot_wire_name_is_valid(&final_name) {
             tracing::warn!(
                 tool = %name,
-                wire_length = minted.len(),
-                "dropping Moonshot tool from this request: the minted wire name exceeds the documented 128-character maximum"
+                wire_length = final_name.len(),
+                "dropping Moonshot tool from this request: final wire name violates ^[a-zA-Z_][a-zA-Z0-9-_]{{0,127}}$"
             );
             dropped.push(name);
             return false;
         }
-        // Both walls compare the same API spelling the mint produces: the
-        // wire names are already `to_api_tool_name`-encoded, and a RAW
-        // registry name must be encoded the same way before the compare —
-        // raw `_3d--render` encodes to `_3d----render`, so comparing its
-        // raw spelling against the minted `_3d--render` falsely collided a
-        // pair that stays distinct on the wire and dropped the digit-led
-        // tool (and its forced choice) for a custom catalog (review
-        // 4604994816). Dispatch resolves through the encoded spelling
-        // (`from_api_tool_name`), so the encoded form is the collision
-        // identity that matters.
-        if wire_names.iter().any(|existing| existing == &minted)
-            || registry_names
-                .iter()
-                .any(|existing| to_api_tool_name(existing) == minted)
+        if digit_led
+            && (wire_names.iter().any(|existing| existing == &final_name)
+                || registry_names
+                    .iter()
+                    .any(|existing| to_api_tool_name(existing) == final_name))
         {
-            // A schema-dropped `_3d_render` sibling keeps its handler in the
-            // registry, and dispatch exact-matches the registry: letting the
-            // digit-led survivor take the minted spelling would route the
-            // survivor's calls onto the sibling's handler, so the ambiguity
-            // is refused — neither tool is advertised (review 5910671961).
             tracing::warn!(
                 tool = %name,
-                wire = %minted,
+                wire = %final_name,
                 "dropping Moonshot tool from this request: the minted wire name collides with an existing catalog tool"
             );
             dropped.push(name);
             return false;
         }
-        minted_names.insert(name, minted.clone());
-        function.insert("name".into(), json!(minted));
+        if digit_led {
+            minted_names.insert(name, final_name.clone());
+            function.insert("name".into(), json!(final_name));
+        }
         true
     });
     (dropped, minted_names)
 }
 
-/// Prefix one `function` object's `name` in place when it starts with an
-/// ASCII digit. The tools array goes through the collision-aware
-/// [`prefix_digit_led_tool_names_for_moonshot`] instead; this variant
-/// rewrites the replayed assistant `tool_calls`, which must carry the same
-/// wire spelling; dispatch resolves the prefixed spelling back to the
-/// registry name (see the digit-led wire recovery in the engine's tool
-/// resolution).
-fn prefix_digit_led_function_name(function: &mut serde_json::Map<String, Value>) {
-    let digit_led = function
-        .get("name")
-        .and_then(Value::as_str)
-        .and_then(|name| name.as_bytes().first())
-        .is_some_and(u8::is_ascii_digit);
-    if digit_led
-        && let Some(name) = function
-            .get("name")
+/// Map each response-visible decoded identity to its exact registry owner.
+/// The final tools array is authoritative; mint restoration additionally
+/// requires this request's decoded mint-owner map. Duplicate decoded
+/// identities are rejected instead of resolved by map iteration order.
+fn moonshot_response_tool_owners(
+    body: &Value,
+    mint_owners: &std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut response_owners = std::collections::HashMap::new();
+    let Some(tools) = body.get("tools").and_then(Value::as_array) else {
+        return Ok(response_owners);
+    };
+    for tool in tools {
+        let wire = tool
+            .pointer("/function/name")
             .and_then(Value::as_str)
-            .map(str::to_owned)
-    {
-        function.insert("name".into(), json!(format!("_{name}")));
+            .context("Moonshot tool is missing its final wire name")?;
+        if !moonshot_wire_name_is_valid(wire) {
+            bail!("Moonshot final tool wire name violates the documented pattern");
+        }
+        let decoded = try_from_api_tool_name(wire)?;
+        let registry = mint_owners
+            .iter()
+            .find(|(_, minted)| *minted == &decoded)
+            .map(|(registry, _)| registry.clone())
+            .unwrap_or_else(|| decoded.clone());
+        if response_owners.insert(decoded.clone(), registry).is_some() {
+            bail!("Moonshot request has a collision on decoded tool identity '{decoded}'");
+        }
     }
+    Ok(response_owners)
 }
 
-/// Re-prefix digit-led names on replayed assistant `tool_calls` for Moonshot.
-///
-/// Assistant turns persist the registry spelling (dispatch resolves the
-/// digit-led wire prefix back before executing), so the history carries
-/// `3d_render` while the tools array advertises `_3d_render`. Re-applying
-/// the prefix here keeps the replayed turns consistent with the tools array
-/// and inside Kimi's documented `name` pattern. Idempotent: names already
-/// carrying the wire prefix are not digit-led and stay untouched.
-fn prefix_digit_led_tool_call_names_for_moonshot(messages: &mut [Value]) {
-    for message in messages.iter_mut() {
+fn moonshot_response_tool_name(
+    wire: &str,
+    owners: &std::collections::HashMap<String, String>,
+) -> Result<String> {
+    if !moonshot_wire_name_is_valid(wire) {
+        bail!("Moonshot response tool name violates the final wire-name pattern");
+    }
+    let decoded = try_from_api_tool_name(wire)?;
+    owners.get(&decoded).cloned().ok_or_else(|| {
+        anyhow::anyhow!("Moonshot response tool '{decoded}' was not offered by this request")
+    })
+}
+
+/// Reconcile replayed assistant calls with this request's owner map. A raw
+/// digit-led registry name may only be minted when that exact owner survived;
+/// an already-prefixed spelling must be owned either by a live mint or by a
+/// raw tool on this request. Otherwise the old identity is ambiguous and the
+/// request fails rather than being rebound by the current catalog.
+fn apply_moonshot_history_tool_call_identities(
+    body: &mut Value,
+    mint_owners: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let response_owners = moonshot_response_tool_owners(body, mint_owners)?;
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for message in messages {
         let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
             continue;
         };
-        for call in calls.iter_mut() {
-            if let Some(function) = call.get_mut("function").and_then(Value::as_object_mut) {
-                prefix_digit_led_function_name(function);
+        for call in calls {
+            let Some(function) = call.get_mut("function").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("Moonshot replayed tool call is missing its name")?;
+            let decoded = try_from_api_tool_name(&name)?;
+            let digit_led = decoded.as_bytes().first().is_some_and(u8::is_ascii_digit);
+            if !digit_led && !moonshot_wire_name_is_valid(&name) {
+                bail!("Moonshot replayed tool name '{name}' violates the final wire-name pattern");
             }
+            let mint_shaped = decoded.len() > 1
+                && decoded.starts_with('_')
+                && decoded.as_bytes()[1].is_ascii_digit();
+            let final_decoded = if digit_led {
+                mint_owners.get(&decoded).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Moonshot cannot replay digit-led tool '{decoded}': this request has no mint owner for it"
+                    )
+                })?
+            } else {
+                if mint_shaped && !response_owners.contains_key(&decoded) {
+                    bail!(
+                        "Moonshot cannot replay ambiguous prefixed tool '{decoded}' without a request owner"
+                    );
+                }
+                decoded
+            };
+            let final_wire = to_api_tool_name(&final_decoded);
+            if !moonshot_wire_name_is_valid(&final_wire) {
+                bail!("Moonshot replayed tool name exceeds the final wire contract");
+            }
+            function.insert("name".into(), json!(final_wire));
         }
     }
+    Ok(())
 }
 
 /// The final Chat Completions wire payload for one request.
@@ -1333,9 +1675,8 @@ pub(crate) struct ChatWireBody {
     /// The model id actually placed on the wire (may differ from the
     /// configured/display model for routed providers).
     pub(crate) model: String,
-    /// Tokens re-sent because thinking-mode replay substituted
-    /// `reasoning_content`. Only computed on the streaming path, which is the
-    /// only path that runs the replay sanitizer today.
+    /// Tokens re-sent because thinking-mode replay substituted or preserved
+    /// `reasoning_content`, on Chat Completions paths that run the sanitizer.
     pub(crate) replay_input_tokens: Option<u32>,
     /// Wire-normalized tool names omitted because Moonshot's MFJS validator
     /// rejected their parameter schemas. Kept outside the wire body so the
@@ -1353,9 +1694,9 @@ pub(crate) struct ChatWireBody {
 
 /// Build the Chat Completions wire body for `request`.
 ///
-/// `stream` selects the streaming shape (`stream` + `stream_options`) and, to
-/// preserve historical behavior exactly, also gates the thinking-mode replay
-/// sanitizer — the blocking path has never run it.
+/// `stream` selects the streaming shape (`stream` + `stream_options`). The
+/// replay sanitizer also runs on supported Moonshot blocking requests so both
+/// transports honor the same final effective thinking state.
 pub(crate) fn build_chat_wire_body(
     request: &MessageRequest,
     provider: ApiProvider,
@@ -1405,14 +1746,21 @@ pub(crate) fn build_chat_wire_body(
     if let Some(tools) = request.tools.as_ref() {
         let mut chat_tools: Vec<_> = tools
             .iter()
-            .map(|tool| tool_to_chat_for_base_url(tool, base_url))
+            .map(|tool| {
+                if provider == crate::config::ApiProvider::Moonshot {
+                    tool_to_chat_for_base_url(tool, base_url)
+                } else {
+                    let mut tool = tool.clone();
+                    super::normalize_explicit_non_strict_tool(&mut tool);
+                    tool_to_chat_for_base_url(&tool, base_url)
+                }
+            })
             .collect();
-        // Moonshot function parameters must end at a plain object root (the
-        // Tool Use documentation; a root union is flattened on the strict
-        // face of the conflicting documents). Flatten remaining root
-        // composition, preserve valid nested anyOf, and drop only the tools
-        // whose parameters cannot pass MFJS validation so one incompatible
-        // tool never sinks the whole request.
+        // Strict Moonshot function parameters must end at a plain object root.
+        // Root composition that cannot be represented without losing
+        // constraints drops the strict tool; only an explicit strict:false
+        // preserves it verbatim. Per-tool degradation keeps one incompatible
+        // tool from sinking the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
             // Registry spellings of the FULL catalog, captured before any
             // filtering: a minted wire name must not collide with a tool
@@ -1443,6 +1791,15 @@ pub(crate) fn build_chat_wire_body(
                 prefix_digit_led_tool_names_for_moonshot(&mut chat_tools, &registry_names);
             omitted_tool_names.extend(collision_dropped);
             moonshot_minted_names = minted_names;
+        }
+        if provider != crate::config::ApiProvider::Moonshot {
+            for tool in &mut chat_tools {
+                if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut)
+                    && function.get("strict").and_then(Value::as_bool) == Some(false)
+                {
+                    function.remove("strict");
+                }
+            }
         }
         // xAI rejects a parameters root that is neither an object schema nor
         // a root-level union of object branches (e.g. apply_patch's root
@@ -1481,6 +1838,15 @@ pub(crate) fn build_chat_wire_body(
         if !chat_tools.is_empty() {
             body["tools"] = json!(chat_tools);
         }
+    }
+    if let Some(choice) = request.tool_choice.as_ref() {
+        validate_moonshot_tool_choice(
+            provider,
+            base_url,
+            &model,
+            request.reasoning_effort.as_deref(),
+            choice,
+        )?;
     }
     if should_send_tool_choice_for_chat(provider, request.reasoning_effort.as_deref())
         && let Some(choice) = request.tool_choice.as_ref()
@@ -1546,7 +1912,7 @@ pub(crate) fn build_chat_wire_body(
         &model,
         request.reasoning_effort.as_deref(),
     );
-    apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_direct_moonshot_fixed_sampling(&mut body, provider, base_url, &model);
     apply_kimi_code_fixed_sampling(&mut body, provider, base_url, &model);
 
     // Bulletproof final sanitizer: walk the wire payload and force
@@ -1557,7 +1923,10 @@ pub(crate) fn build_chat_wire_body(
     // misses a case (e.g. a session restored from disk, a sub-agent
     // adding messages directly, or a cached prefix mismatch), this pass
     // still produces a valid request.
-    let replay_input_tokens = if stream {
+    let replay_input_tokens = if stream
+        || is_exact_direct_moonshot_supported_route(provider, base_url, &model)
+        || is_exact_kimi_code_supported_route(provider, base_url, &model)
+    {
         sanitize_thinking_mode_messages_for_route(
             &mut body,
             &model,
@@ -1579,8 +1948,17 @@ pub(crate) fn build_chat_wire_body(
     // (review 5916467676).
     let moonshot_mint_owners = moonshot_minted_names
         .iter()
-        .map(|(registry, minted)| (from_api_tool_name(registry), from_api_tool_name(minted)))
+        .map(|(registry, minted)| {
+            let registry = try_from_api_tool_name(registry)
+                .expect("minted registry names were validated on the final wire");
+            let minted = try_from_api_tool_name(minted)
+                .expect("minted names were validated on the final wire");
+            (registry, minted)
+        })
         .collect();
+    if provider == ApiProvider::Moonshot {
+        apply_moonshot_history_tool_call_identities(&mut body, &moonshot_mint_owners)?;
+    }
 
     Ok(ChatWireBody {
         body,
@@ -1598,6 +1976,11 @@ impl DeepSeekClient {
         cacheable: bool,
     ) -> Result<MessageResponse> {
         let body = &prepared.body;
+        let response_tool_owners = if self.api_provider == ApiProvider::Moonshot {
+            moonshot_response_tool_owners(body, &prepared.moonshot_mint_owners)?
+        } else {
+            std::collections::HashMap::new()
+        };
 
         let response_cache_key = if cacheable {
             let wire_body =
@@ -1644,7 +2027,12 @@ impl DeepSeekClient {
             .context("Failed to read Chat API response body")?;
         let value: Value =
             serde_json::from_str(&response_text).context("Failed to parse Chat API JSON")?;
-        let parsed = parse_chat_message_for_route(&value, self.api_provider, &self.base_url)?;
+        let parsed = parse_chat_message_for_route_with_owners(
+            &value,
+            self.api_provider,
+            &self.base_url,
+            (self.api_provider == ApiProvider::Moonshot).then_some(&response_tool_owners),
+        )?;
         if let Some(key) = response_cache_key {
             crate::llm_response_cache::response_cache().put(key, parsed.clone());
         }
@@ -1680,6 +2068,11 @@ impl DeepSeekClient {
         &self,
         prepared: super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
+        let response_tool_owners = if self.api_provider == ApiProvider::Moonshot {
+            moonshot_response_tool_owners(&prepared.body, &prepared.moonshot_mint_owners)?
+        } else {
+            std::collections::HashMap::new()
+        };
         // Try true SSE streaming via chat completions (widely supported).
         // Body and endpoint both come from the shared prepared-request seam,
         // so a preview or a non-stream call can never diverge from the
@@ -1882,6 +2275,7 @@ impl DeepSeekClient {
                                 capture_reasoning_details,
                                 &mut inline_reasoning_tags,
                                 reasoning_stream_style,
+                                (api_provider == ApiProvider::Moonshot).then_some(&response_tool_owners),
                             ) {
                                 SseDataFrame::Done => {
                                     saw_done = true;
@@ -1978,6 +2372,7 @@ impl DeepSeekClient {
                         capture_reasoning_details,
                         &mut inline_reasoning_tags,
                         reasoning_stream_style,
+                        (api_provider == ApiProvider::Moonshot).then_some(&response_tool_owners),
                     ) {
                         SseDataFrame::Done => saw_done = true,
                         SseDataFrame::Events(events) => {
@@ -2001,6 +2396,16 @@ impl DeepSeekClient {
                 }
             }
 
+            // Direct [DONE] has no finish_reason to drain tool_indices. Close
+            // each open tool exactly once only with terminal proof; a bare EOF
+            // must leave it open so the engine cannot execute partial input.
+            if !stream_failed && (saw_done || saw_finish_reason) {
+                let mut open_tool_indices: Vec<u32> = tool_indices.drain().map(|(_, index)| index).collect();
+                open_tool_indices.sort_unstable();
+                for tool_block_index in open_tool_indices {
+                    yield Ok(StreamEvent::ContentBlockStop { index: tool_block_index });
+                }
+            }
             // Close any open blocks — content_index points to the
             // currently active open block (it is only incremented
             // *after* a block is closed, not when opened).
@@ -2145,9 +2550,6 @@ impl<'a> PromptBuilder<'a> {
         }
         if !is_exact_google_chat_route(provider, base_url) {
             strip_google_tool_call_extra_content(&mut messages);
-        }
-        if provider == ApiProvider::Moonshot {
-            prefix_digit_led_tool_call_names_for_moonshot(&mut messages);
         }
         messages
     }
@@ -3527,6 +3929,68 @@ fn deepseek_base_url_supports_strict_tools(base_url: &str) -> bool {
     !is_deepseek || trimmed.ends_with("/beta")
 }
 
+/// Refuse tool-choice semantics that the strict current-model intersection
+/// cannot represent. In particular, `any` means "at least one call" and must
+/// never be weakened to `auto`; named choice is unavailable while thinking is
+/// active. Other providers retain the generic mapping below.
+fn validate_moonshot_tool_choice(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    effort: Option<&str>,
+    choice: &Value,
+) -> Result<()> {
+    if !is_exact_direct_moonshot_supported_route(provider, base_url, model)
+        && !is_exact_kimi_code_supported_route(provider, base_url, model)
+    {
+        return Ok(());
+    }
+    let choice_type = choice
+        .as_str()
+        .or_else(|| choice.get("type").and_then(Value::as_str));
+    if matches!(choice_type, Some("any" | "required")) {
+        bail!(
+            "Moonshot cannot preserve forced tool_choice semantics on this model; 'any'/'required' is unsupported and will not be weakened to 'auto'"
+        );
+    }
+    let named = matches!(choice_type, Some("tool" | "function"))
+        || choice.pointer("/function/name").is_some();
+    if named {
+        if choice_type == Some("tool") && choice.get("name").and_then(Value::as_str).is_none() {
+            bail!("Moonshot named tool_choice is missing its tool name");
+        }
+        let direct_k27 = provider == ApiProvider::Moonshot
+            && moonshot_base_url_is_exact_direct_platform(base_url)
+            && [
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
+            ]
+            .iter()
+            .any(|id| model.trim().eq_ignore_ascii_case(id));
+        let membership_k27 = provider == ApiProvider::Moonshot
+            && moonshot_base_url_is_exact_kimi_code(base_url)
+            && model
+                .trim()
+                .eq_ignore_ascii_case(crate::config::KIMI_CODE_HIGHSPEED_MODEL);
+        let always_thinking = direct_k27
+            || membership_k27
+            || is_exact_direct_moonshot_k3_route(provider, base_url, model)
+            || crate::config::is_kimi_k31_on_direct_platform_route(provider, base_url, model)
+            || is_exact_kimi_code_k3_route(provider, base_url, model)
+            || is_kimi_code_k31_route(provider, base_url, model);
+        if always_thinking || effort.is_some() {
+            bail!(
+                "Moonshot cannot preserve named tool_choice while thinking is enabled on this model"
+            );
+        }
+        return Ok(());
+    }
+    if matches!(choice_type, Some("auto" | "none")) {
+        return Ok(());
+    }
+    bail!("Moonshot tool_choice shape is outside the supported strict intersection")
+}
+
 fn map_tool_choice_for_chat(choice: &Value) -> Option<Value> {
     if let Some(choice_str) = choice.as_str() {
         return Some(json!(choice_str));
@@ -3793,8 +4257,8 @@ fn should_replay_reasoning_content_for_provider(
 ///
 /// The K3.1 family spellings inherit the K3 replay contract verbatim through
 /// their own arm below — always-reasoning, so like bare K3 the arm precedes
-/// the effort check. All four spellings replay on both vendor routes (the
-/// membership and direct-platform endpoints); models-overview documents the
+/// the effort check. Each spelling replays only on its own vendor route;
+/// models-overview documents the
 /// K3-series constraints as shared with `kimi-k3`
 /// (<https://platform.kimi.com/docs/api/models-overview>, verified
 /// 2026-11-13), and the API answers HTTP 400 — "thinking is enabled but
@@ -3808,6 +4272,19 @@ fn should_replay_reasoning_content_for_provider_on_route(
     model: &str,
     effort: Option<&str>,
 ) -> bool {
+    if provider == ApiProvider::Moonshot
+        && ((moonshot_base_url_is_exact_kimi_code(base_url)
+            && crate::config::MOONSHOT_KIMI_K31_MODELS
+                .iter()
+                .any(|id| model.trim().eq_ignore_ascii_case(id)))
+            || (moonshot_base_url_is_exact_direct_platform(base_url)
+                && crate::config::KIMI_CODE_K31_MODELS
+                    .iter()
+                    .any(|id| model.trim().eq_ignore_ascii_case(id))))
+    {
+        return false;
+    }
+
     // Exact always-thinking routes replay their reasoning trace regardless of
     // a stale caller effort: the API contract requires the assistant
     // reasoning field on later tool turns for multi-turn continuity.
@@ -3856,6 +4333,15 @@ fn should_replay_reasoning_content_for_provider_on_route(
         return lower.contains("deepseek-v4")
             || lower.starts_with("deepseek-chat")
             || lower.starts_with("deepseek-reasoner");
+    }
+
+    if is_moonshot_legacy_reasoning_route(provider, base_url, model)
+        && effort.is_some_and(|effort| !reasoning_effort_enables_thinking(Some(effort)))
+    {
+        // The route shaper has already selected enabled thinking for these
+        // legacy off aliases; replay must follow that effective state rather
+        // than stripping the trace for the raw request value.
+        return true;
     }
 
     if effort
@@ -4357,10 +4843,20 @@ pub(super) fn parse_chat_message(payload: &Value) -> Result<MessageResponse> {
     parse_chat_message_for_route(payload, ApiProvider::Openai, "")
 }
 
+#[cfg(test)]
 fn parse_chat_message_for_route(
     payload: &Value,
     provider: ApiProvider,
     base_url: &str,
+) -> Result<MessageResponse> {
+    parse_chat_message_for_route_with_owners(payload, provider, base_url, None)
+}
+
+fn parse_chat_message_for_route_with_owners(
+    payload: &Value,
+    provider: ApiProvider,
+    base_url: &str,
+    response_tool_owners: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<MessageResponse> {
     let id = payload
         .get("id")
@@ -4462,11 +4958,25 @@ fn parse_chat_message_for_route(
                 &id,
                 "Non-streaming response",
             );
-            let arguments = function
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .map(|raw| serde_json::from_str(raw).unwrap_or(Value::String(raw.to_string())))
-                .unwrap_or(Value::Null);
+            let arguments = if provider == ApiProvider::Moonshot {
+                let raw = function
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let value: Value = serde_json::from_str(raw).map_err(|error| {
+                    anyhow::anyhow!("malformed Moonshot tool arguments: {error}")
+                })?;
+                if !value.is_object() {
+                    bail!("malformed Moonshot tool arguments: expected a JSON object");
+                }
+                value
+            } else {
+                function
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                    .map(|raw| serde_json::from_str(raw).unwrap_or(Value::String(raw.to_string())))
+                    .unwrap_or(Value::Null)
+            };
             let caller = call.get("caller").and_then(|v| {
                 v.get("type")
                     .and_then(Value::as_str)
@@ -4487,9 +4997,14 @@ fn parse_chat_message_for_route(
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
+            let name = if let Some(owners) = response_tool_owners {
+                moonshot_response_tool_name(&name, owners)?
+            } else {
+                from_api_tool_name(&name)
+            };
             content_blocks.push(ContentBlock::ToolUse {
                 id,
-                name: from_api_tool_name(&name),
+                name,
                 input: arguments,
                 caller,
                 thought_signature,
@@ -4694,6 +5209,7 @@ fn parse_sse_data_frame(
     capture_reasoning_details: bool,
     inline_reasoning_tags: &mut InlineReasoningTagState,
     reasoning_stream_style: ReasoningStreamStyle,
+    response_tool_owners: Option<&std::collections::HashMap<String, String>>,
 ) -> SseDataFrame {
     if data.trim() == "[DONE]" {
         return SseDataFrame::Done;
@@ -4701,7 +5217,7 @@ fn parse_sse_data_frame(
     let events = serde_json::from_str::<Value>(data).map_or_else(
         |_| Vec::new(),
         |chunk_json| {
-            parse_sse_chunk_with_reasoning_style(
+            parse_sse_chunk_with_reasoning_style_and_owners(
                 &chunk_json,
                 content_index,
                 text_started,
@@ -4712,6 +5228,7 @@ fn parse_sse_data_frame(
                 capture_reasoning_details,
                 inline_reasoning_tags,
                 reasoning_stream_style,
+                response_tool_owners,
             )
         },
     );
@@ -4758,6 +5275,7 @@ pub(super) fn parse_sse_chunk(
 }
 
 // Same deliberate shared parser-state set as `parse_sse_data_frame`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn parse_sse_chunk_with_reasoning_style(
     chunk: &Value,
@@ -4770,6 +5288,35 @@ fn parse_sse_chunk_with_reasoning_style(
     capture_reasoning_details: bool,
     inline_reasoning_tags: &mut InlineReasoningTagState,
     reasoning_stream_style: ReasoningStreamStyle,
+) -> Vec<StreamEvent> {
+    parse_sse_chunk_with_reasoning_style_and_owners(
+        chunk,
+        content_index,
+        text_started,
+        thinking_started,
+        tool_indices,
+        reasoning_detail_buffers,
+        reasoning_details_buffer,
+        capture_reasoning_details,
+        inline_reasoning_tags,
+        reasoning_stream_style,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_sse_chunk_with_reasoning_style_and_owners(
+    chunk: &Value,
+    content_index: &mut u32,
+    text_started: &mut bool,
+    thinking_started: &mut bool,
+    tool_indices: &mut std::collections::HashMap<u32, u32>,
+    reasoning_detail_buffers: &mut std::collections::HashMap<u32, String>,
+    reasoning_details_buffer: &mut ReasoningDetailsBuffer,
+    capture_reasoning_details: bool,
+    inline_reasoning_tags: &mut InlineReasoningTagState,
+    reasoning_stream_style: ReasoningStreamStyle,
+    response_tool_owners: Option<&std::collections::HashMap<String, String>>,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
@@ -5031,11 +5578,24 @@ fn parse_sse_chunk_with_reasoning_style(
                             let thought_signature = tool_call_thought_signature(tc, delta)
                                 .filter(|value| !value.is_empty())
                                 .map(str::to_string);
+                            let name = if let Some(owners) = response_tool_owners {
+                                match moonshot_response_tool_name(&name, owners) {
+                                    Ok(name) => name,
+                                    Err(error) => {
+                                        events.push(StreamEvent::Error {
+                                            error: json!({ "message": error.to_string() }),
+                                        });
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                from_api_tool_name(&name)
+                            };
                             events.push(StreamEvent::ContentBlockStart {
                                 index: block_index,
                                 content_block: ContentBlockStart::ToolUse {
                                     id,
-                                    name: from_api_tool_name(&name),
+                                    name,
                                     input: json!({}),
                                     caller,
                                     thought_signature,
@@ -6036,15 +6596,14 @@ mod alias_thinking_detection_tests {
     //! turn. See upstream API docs:
     //! <https://api-docs.deepseek.com/guides/thinking_mode>
     use super::{
-        REASONING_REPLAY_PLACEHOLDER, ReasoningStreamStyle,
-        apply_direct_moonshot_k3_fixed_sampling, apply_inkling_reasoning_effort,
-        apply_kimi_code_fixed_sampling, apply_kimi_code_k3_reasoning_effort,
-        apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
-        build_chat_wire_body, is_reasoning_model_for_stream,
-        is_reasoning_model_for_stream_on_route, provider_accepts_reasoning_content,
-        reasoning_stream_style_for_route, requires_reasoning_content,
-        sanitize_thinking_mode_messages_for_route, should_replay_reasoning_content,
-        should_replay_reasoning_content_for_provider,
+        REASONING_REPLAY_PLACEHOLDER, ReasoningStreamStyle, apply_direct_moonshot_fixed_sampling,
+        apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
+        apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
+        apply_provider_token_limit, apply_route_reasoning_controls, build_chat_wire_body,
+        is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
+        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
+        requires_reasoning_content, sanitize_thinking_mode_messages_for_route,
+        should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
     use crate::config::ApiProvider;
@@ -7260,7 +7819,7 @@ mod alias_thinking_detection_tests {
                     "top_p": 0.9,
                 });
                 apply_provider_token_limit(&mut direct, ApiProvider::Moonshot, base_url, model, 64);
-                apply_direct_moonshot_k3_fixed_sampling(
+                apply_direct_moonshot_fixed_sampling(
                     &mut direct,
                     ApiProvider::Moonshot,
                     base_url,
@@ -7289,7 +7848,7 @@ mod alias_thinking_detection_tests {
             crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
             64,
         );
-        apply_direct_moonshot_k3_fixed_sampling(
+        apply_direct_moonshot_fixed_sampling(
             &mut neighbor,
             ApiProvider::Moonshot,
             "https://proxy.example/v1",
@@ -7446,15 +8005,16 @@ mod alias_thinking_detection_tests {
             })
         };
 
-        for base_url in [
-            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            "https://api.kimi.ai/coding/v1",
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+        for (base_url, model) in [
+            (crate::config::DEFAULT_KIMI_CODE_BASE_URL, "k3.1-pro"),
+            ("https://api.kimi.ai/coding/v1", "k3.1-pro"),
+            (crate::config::DEFAULT_MOONSHOT_BASE_URL, "kimi-k3.1-pro"),
         ] {
             let mut wire = body();
+            wire["model"] = json!(model);
             let sanitized = sanitize_thinking_mode_messages_for_route(
                 &mut wire,
-                "k3.1-pro",
+                model,
                 Some("off"),
                 ApiProvider::Moonshot,
                 base_url,
@@ -7466,6 +8026,20 @@ mod alias_thinking_detection_tests {
                 "{base_url}: a dropped trace must replay as the placeholder"
             );
         }
+
+        // Cross-product spellings do not inherit the other endpoint's replay
+        // contract, even before config pairing validation runs.
+        let mut crossed = body();
+        assert!(
+            sanitize_thinking_mode_messages_for_route(
+                &mut crossed,
+                "k3.1-pro",
+                Some("off"),
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            )
+            .is_none()
+        );
 
         // A custom gateway is not a replay gate: the trace stays absent.
         let mut gateway = body();
@@ -7496,7 +8070,7 @@ mod alias_thinking_detection_tests {
             crate::config::MOONSHOT_KIMI_K3_MODEL,
             64,
         );
-        apply_direct_moonshot_k3_fixed_sampling(
+        apply_direct_moonshot_fixed_sampling(
             &mut direct,
             ApiProvider::Moonshot,
             crate::config::DEFAULT_MOONSHOT_BASE_URL,
@@ -7519,7 +8093,7 @@ mod alias_thinking_detection_tests {
             crate::config::MOONSHOT_KIMI_K3_MODEL,
             64,
         );
-        apply_direct_moonshot_k3_fixed_sampling(
+        apply_direct_moonshot_fixed_sampling(
             &mut neighbor,
             ApiProvider::Moonshot,
             "https://proxy.example/v1",
@@ -8152,7 +8726,7 @@ mod alias_thinking_detection_tests {
         // supported set and `to_api_tool_name` only escapes characters the
         // pattern cannot express anywhere. The Moonshot path gives such a
         // name a `_` prefix; every other provider keeps the name unmodified.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![
             digit_led_name_probe_tool("3d_render"),
             digit_led_name_probe_tool("mcp__server__tool"),
@@ -8182,7 +8756,7 @@ mod alias_thinking_detection_tests {
 
         // A non-Moonshot provider has no documented leading-character ban and
         // keeps the raw name.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
         let body = crate::client::chat::build_chat_wire_body(
             &request,
@@ -8209,7 +8783,7 @@ mod alias_thinking_detection_tests {
         // instead: the array carries only the genuine underscore tool, the
         // drop is reported like the schema drops, and forcing either
         // spelling bails instead of dispatching ambiguously.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
         underscore_probe.description = "underscore probe".to_string();
         request.tools = Some(vec![
@@ -8255,7 +8829,7 @@ mod alias_thinking_detection_tests {
         // falsely collided a pair that stays distinct on the wire and
         // dropped the digit-led tool (and refused its forced choice) for a
         // custom catalog.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut hyphen_probe = digit_led_name_probe_tool("3d-render");
         hyphen_probe.description = "hyphen probe".to_string();
         request.tools = Some(vec![hyphen_probe, digit_led_name_probe_tool("_3d--render")]);
@@ -8305,7 +8879,7 @@ mod alias_thinking_detection_tests {
         // digit-led tool lists nothing, so dispatch can never claim its
         // spelling through the engine's active set.
         // Live mint: `3d_render` survives and owns `_3d_render`.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
         let body = crate::client::chat::build_chat_wire_body(
             &request,
@@ -8325,7 +8899,7 @@ mod alias_thinking_detection_tests {
         // Collision drop: the raw `_3d_render` twin wins the spelling, so
         // the digit-led tool went out on NO wire name and owns no mint —
         // the map must be empty for it even though it stayed active.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![
             digit_led_name_probe_tool("3d_render"),
             digit_led_name_probe_tool("_3d_render"),
@@ -8346,7 +8920,7 @@ mod alias_thinking_detection_tests {
         // Length drop: a 128-character digit-led name mints past the cap
         // and is dropped whole — no mint, no owner.
         let long_name = format!("3{}", "a".repeat(127));
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![digit_led_name_probe_tool(&long_name)]);
         let body = crate::client::chat::build_chat_wire_body(
             &request,
@@ -8361,7 +8935,7 @@ mod alias_thinking_detection_tests {
         );
 
         // Non-Moonshot routes never mint: the map stays empty.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
         let body = crate::client::chat::build_chat_wire_body(
             &request,
@@ -8382,7 +8956,7 @@ mod alias_thinking_detection_tests {
         // The ownership map must therefore store the DECODED minted
         // identity, or its reverse lookup misses exactly the names the
         // codec changed.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![digit_led_name_probe_tool("3d-render")]);
         let body = crate::client::chat::build_chat_wire_body(
             &request,
@@ -8421,7 +8995,7 @@ mod alias_thinking_detection_tests {
         // forcing THAT spelling proceeds unambiguously. Forcing the dropped
         // digit-led registry name bails: it would map onto a wire name this
         // request's drop shadows (review 5886233560).
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
         underscore_probe.description = "underscore probe".to_string();
         request.tools = Some(vec![
@@ -8444,7 +9018,7 @@ mod alias_thinking_detection_tests {
             "the bail must name the shadowed wire spelling: {message}"
         );
 
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
         underscore_probe.description = "underscore probe".to_string();
         request.tools = Some(vec![
@@ -8487,7 +9061,7 @@ mod alias_thinking_detection_tests {
         // 5910671961). The ambiguity is therefore refused — the mint
         // collision check now counts the whole registry catalog, so the
         // survivor is dropped too and neither name is advertised.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
         invalid_underscore.description = "invalid sibling".to_string();
         // A non-object parameters root is rejected outright by the Kimi
@@ -8528,7 +9102,7 @@ mod alias_thinking_detection_tests {
         // spelling is not offered (review 5897491074), and the digit-led
         // survivor has no minted alias to answer for it.
         for forced in ["_3d_render", "3d_render"] {
-            let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+            let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
             let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
             invalid_underscore.input_schema = json!({"type": "string"});
             request.tools = Some(vec![
@@ -8562,7 +9136,7 @@ mod alias_thinking_detection_tests {
         let name_128 = format!("3{}", "a".repeat(127));
         assert_eq!(name_127.len(), 127);
         assert_eq!(name_128.len(), 128);
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut overlong = digit_led_name_probe_tool(&name_128);
         overlong.description = "overlong".to_string();
         request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
@@ -8592,7 +9166,7 @@ mod alias_thinking_detection_tests {
 
         // Forcing the dropped tool fails fast; forcing the survivor
         // proceeds.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         let mut overlong = digit_led_name_probe_tool(&name_128);
         overlong.description = "overlong".to_string();
         request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
@@ -8610,7 +9184,7 @@ mod alias_thinking_detection_tests {
             "the bail must name the offered predicate: {error}"
         );
 
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
         request.tools = Some(vec![digit_led_name_probe_tool(&name_127)]);
         request.tool_choice = Some(json!({"type": "tool", "name": name_127}));
         let body = crate::client::chat::build_chat_wire_body(
@@ -8651,24 +9225,17 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn moonshot_replay_prefixes_digit_led_assistant_tool_call_names() {
-        use crate::client::chat::build_chat_messages_for_request_and_provider;
-        use crate::models::{ContentBlock, Message, MessageRequest, Role};
+    fn moonshot_replay_requires_the_request_owned_identity() {
+        use crate::models::{ContentBlock, Message, Role};
 
-        // Assistant turns persist the registry spelling: dispatch resolves
-        // the digit-led wire prefix back before executing (see the engine's
-        // digit-led wire recovery). The replay must re-apply the prefix so
-        // the history matches the tools array
-        // (`moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern`)
-        // and stays inside Kimi's documented `name` pattern.
-        let request = MessageRequest {
-            model: crate::config::DEFAULT_MOONSHOT_MODEL.to_string(),
-            messages: vec![
+        let request_for = |name: &str, tools: Vec<crate::models::Tool>| {
+            let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+            request.messages = vec![
                 Message {
                     role: Role::Assistant,
                     content: vec![ContentBlock::ToolUse {
-                        id: "call-probe-1".to_string(),
-                        name: "3d_render".to_string(),
+                        id: "call-probe".to_string(),
+                        name: name.to_string(),
                         input: json!({"path": "scene.glb"}),
                         caller: None,
                         thought_signature: None,
@@ -8677,67 +9244,352 @@ mod alias_thinking_detection_tests {
                 Message {
                     role: Role::User,
                     content: vec![ContentBlock::ToolResult {
-                        tool_use_id: "call-probe-1".to_string(),
+                        tool_use_id: "call-probe".to_string(),
                         content: "rendered".to_string(),
                         is_error: None,
                         content_blocks: None,
                     }],
                 },
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-probe-2".to_string(),
-                        // A history entry that already carries the wire
-                        // prefix (pre-fixture sessions) is not digit-led
-                        // and must pass through untouched — idempotence.
-                        name: "_3d_render".to_string(),
-                        input: json!({"path": "scene.glb"}),
-                        caller: None,
-                        thought_signature: None,
-                    }],
-                },
-                Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: "call-probe-2".to_string(),
-                        content: "rendered".to_string(),
-                        is_error: None,
-                        content_blocks: None,
-                    }],
-                },
-            ],
-            max_tokens: 16,
-            system: None,
-            tools: None,
-            tool_choice: None,
-            metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            stream: None,
-            temperature: None,
-            top_p: None,
+            ];
+            request.tools = Some(tools);
+            request
         };
 
-        let messages =
-            build_chat_messages_for_request_and_provider(&request, ApiProvider::Moonshot);
+        let minted = crate::client::chat::build_chat_wire_body(
+            &request_for("3d_render", vec![digit_led_name_probe_tool("3d_render")]),
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the request owner permits this mint");
         assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["name"],
-            json!("_3d_render"),
-            "the registry spelling is re-prefixed on the wire"
-        );
-        assert_eq!(
-            messages[2]["tool_calls"][0]["function"]["name"],
-            json!("_3d_render"),
-            "a stored wire spelling passes through unchanged"
+            minted.body["messages"][0]["tool_calls"][0]["function"]["name"],
+            json!("_3d_render")
         );
 
-        // Other providers keep the registry spelling on the wire: the
-        // documented leading-character ban is Moonshot-only.
-        let messages = build_chat_messages_for_request_and_provider(&request, ApiProvider::Openai);
+        let raw = crate::client::chat::build_chat_wire_body(
+            &request_for("_3d_render", vec![digit_led_name_probe_tool("_3d_render")]),
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("a raw underscore owner keeps its identity");
         assert_eq!(
-            messages[0]["tool_calls"][0]["function"]["name"],
-            json!("3d_render")
+            raw.body["messages"][0]["tool_calls"][0]["function"]["name"],
+            json!("_3d_render")
         );
+
+        let error = crate::client::chat::build_chat_wire_body(
+            &request_for(
+                "3d_render",
+                vec![
+                    digit_led_name_probe_tool("3d_render"),
+                    digit_led_name_probe_tool("_3d_render"),
+                ],
+            ),
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("a current collision must not rebind the old call to the raw twin");
+        assert!(error.to_string().contains("no mint owner"), "{error}");
+    }
+
+    #[test]
+    fn direct_current_models_share_the_strict_sampling_and_tool_choice_intersection() {
+        for model in [
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+            crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+            crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL,
+            crate::config::MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
+        ] {
+            let mut request = sampling_probe_request(model);
+            request.tools = Some(vec![digit_led_name_probe_tool("probe")]);
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                false,
+            )
+            .expect("supported direct model");
+            assert!(body.body.get("temperature").is_none(), "{model}");
+            assert!(body.body.get("top_p").is_none(), "{model}");
+            assert!(body.body.get("max_tokens").is_none(), "{model}");
+            assert_eq!(body.body["max_completion_tokens"], json!(64), "{model}");
+
+            for choice in [json!("required"), json!({"type": "any"})] {
+                request.tool_choice = Some(choice);
+                let error = crate::client::chat::build_chat_wire_body(
+                    &request,
+                    ApiProvider::Moonshot,
+                    crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                    false,
+                )
+                .err()
+                .expect("forced semantics must not degrade to auto");
+                assert!(
+                    error.to_string().contains("will not be weakened"),
+                    "{error}"
+                );
+            }
+            for choice in [json!("auto"), json!("none")] {
+                request.tool_choice = Some(choice.clone());
+                let body = crate::client::chat::build_chat_wire_body(
+                    &request,
+                    ApiProvider::Moonshot,
+                    crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                    false,
+                )
+                .expect("auto/none remain expressible");
+                assert_eq!(body.body["tool_choice"], choice);
+            }
+        }
+
+        let mut other = sampling_probe_request("gpt-5.5");
+        other.tools = Some(vec![digit_led_name_probe_tool("probe")]);
+        other.tool_choice = Some(json!({"type": "any"}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &other,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("other providers keep their existing mapping");
+        assert_eq!(body.body["tool_choice"], json!("auto"));
+    }
+
+    #[test]
+    fn moonshot_named_choice_is_rejected_when_thinking_is_active() {
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_HIGHSPEED_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K3_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K3_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+        ] {
+            let mut request = sampling_probe_request(model);
+            request.tools = Some(vec![digit_led_name_probe_tool("probe")]);
+            request.tool_choice = Some(json!({"type": "tool", "name": "probe"}));
+            crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .err()
+            .expect("always-thinking models cannot express named choice");
+        }
+
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::DEFAULT_KIMI_CODE_MODEL,
+            ),
+        ] {
+            let mut request = sampling_probe_request(model);
+            request.tools = Some(vec![digit_led_name_probe_tool("probe")]);
+            request.tool_choice = Some(json!({"type": "tool", "name": "probe"}));
+            crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .expect("an explicitly non-thinking legacy request can name a tool");
+
+            request.reasoning_effort = Some("off".to_string());
+            let error = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .err()
+            .expect("off maps to the common enabled-thinking behavior");
+            assert!(error.to_string().contains("thinking is enabled"), "{error}");
+
+            request.tool_choice = Some(json!("auto"));
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .expect("auto remains valid with enabled thinking");
+            assert_eq!(body.body["thinking"]["type"], json!("enabled"));
+            assert!(body.body.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn moonshot_rejects_every_invalid_final_wire_name() {
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool(""),
+            digit_led_name_probe_tool("-leading-hyphen"),
+            digit_led_name_probe_tool(".leading-dot"),
+            digit_led_name_probe_tool(&"a".repeat(129)),
+            digit_led_name_probe_tool(&"a".repeat(128)),
+        ]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("invalid tools degrade closed while the valid tool survives");
+        let tools = body.body["tools"].as_array().expect("one valid tool");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], json!("a".repeat(128)));
+        assert_eq!(body.omitted_tool_names.len(), 4);
+    }
+
+    #[test]
+    fn moonshot_responses_use_request_owners_on_both_transports() {
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d-render"),
+            digit_led_name_probe_tool("foo_x00002Ebar"),
+        ]);
+        let wire = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("wire body");
+        let owners = super::moonshot_response_tool_owners(&wire.body, &wire.moonshot_mint_owners)
+            .expect("response owners");
+        let payload = json!({
+            "id": "chatcmpl-test",
+            "model": request.model,
+            "choices": [{"message": {"role": "assistant", "tool_calls": [
+                {"id": "call-1", "function": {"name": "_3d--render", "arguments": "{}"}},
+                {"id": "call-2", "function": {"name": "foo_x00002Ebar", "arguments": "{}"}}
+            ]}, "finish_reason": "tool_calls"}]
+        });
+        let parsed = super::parse_chat_message_for_route_with_owners(
+            &payload,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            Some(&owners),
+        )
+        .expect("offered response identities");
+        let names: Vec<_> = parsed
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolUse { name, .. } => name.as_str(),
+                _ => panic!("unexpected block"),
+            })
+            .collect();
+        assert_eq!(names, ["3d-render", "foo_x00002Ebar"]);
+
+        let unknown = json!({
+            "choices": [{"message": {"tool_calls": [
+                {"id": "call-x", "function": {"name": "_3d_render", "arguments": "{}"}}
+            ]}}]
+        });
+        super::parse_chat_message_for_route_with_owners(
+            &unknown,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            Some(&owners),
+        )
+        .expect_err("an unoffered identity must fail the non-streaming response");
+
+        let malformed = json!({
+            "choices": [{"message": {"tool_calls": [
+                {"id": "call-x", "function": {"name": "_3d--render-x00002E", "arguments": "{}"}}
+            ]}}]
+        });
+        super::parse_chat_message_for_route_with_owners(
+            &malformed,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            Some(&owners),
+        )
+        .expect_err("a non-canonical response codec identity must fail closed");
+
+        for raw in ["[]", "1", "null", "\"text\"", "{"] {
+            let malformed_arguments = json!({
+                "choices": [{"message": {"tool_calls": [
+                    {"id": "call-x", "function": {"name": "foo_x00002Ebar", "arguments": raw}}
+                ]}}]
+            });
+            let error = super::parse_chat_message_for_route_with_owners(
+                &malformed_arguments,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                Some(&owners),
+            )
+            .expect_err("Moonshot completed arguments must be a JSON object");
+            assert!(error.to_string().contains("malformed"), "{error}");
+        }
+        let other_provider = super::parse_chat_message(&json!({
+            "choices": [{"message": {"tool_calls": [
+                {"id": "call-x", "function": {"name": "foo", "arguments": "[]"}}
+            ]}}]
+        }))
+        .expect("other providers keep their existing argument contract");
+        assert!(matches!(
+            &other_provider.content[0],
+            ContentBlock::ToolUse { input, .. } if input.is_array()
+        ));
+
+        let chunk = json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call-1", "function": {"name": "_3d--render", "arguments": ""}}
+        ]}}]});
+        let events = super::parse_sse_chunk_with_reasoning_style_and_owners(
+            &chunk,
+            &mut 0,
+            &mut false,
+            &mut false,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut super::ReasoningDetailsBuffer::default(),
+            false,
+            &mut super::InlineReasoningTagState::default(),
+            super::ReasoningStreamStyle::None,
+            Some(&owners),
+        );
+        assert!(matches!(
+            &events[0],
+            crate::models::StreamEvent::ContentBlockStart {
+                content_block: crate::models::ContentBlockStart::ToolUse { name, .. },
+                ..
+            } if name == "3d-render"
+        ));
     }
 
     #[test]
@@ -8797,12 +9649,10 @@ mod alias_thinking_detection_tests {
         }
     }
 
-    /// Advisory keywords the MFJS specification does not list (title,
-    /// minLength, ...) are stripped in place — a semantics-lossless or
-    /// soft-constraint-losing simplification — so the tool still ships and
-    /// the wire carries only the document's supported set.
+    /// Bounds are validation constraints, not annotations. Strict mode must
+    /// drop the tool instead of deleting the bounds and widening its contract.
     #[test]
-    fn advisory_keywords_are_stripped_from_the_wire() {
+    fn bounds_drop_the_strict_tool_instead_of_being_silently_widened() {
         let schema = serde_json::json!({
             "title": "Annotated tool",
             "type": "object",
@@ -8822,25 +9672,8 @@ mod alias_thinking_detection_tests {
         )
         .expect("Kimi Code wire body");
 
-        assert!(
-            body.omitted_tool_names.is_empty(),
-            "advisory keywords must not drop the tool: {:?}",
-            body.omitted_tool_names
-        );
-        let parameters = &body.body["tools"][0]["function"]["parameters"];
-        for keyword in ["title", "minLength", "maxLength", "minimum", "maximum"] {
-            assert!(
-                !serde_json::to_string(parameters)
-                    .unwrap()
-                    .contains(&format!("\"{keyword}\"")),
-                "{keyword} must not reach the wire: {parameters}"
-            );
-        }
-        assert_eq!(parameters["type"], "object");
-        assert_eq!(
-            parameters["properties"]["label"]["type"], "string",
-            "the supported vocabulary survives the strip: {parameters}"
-        );
+        assert_eq!(body.omitted_tool_names, ["annotated_tool"]);
+        assert!(body.body.get("tools").is_none());
     }
 }
 
@@ -8856,6 +9689,7 @@ mod image_block_wire_tests {
     use super::{ApiProvider, build_chat_messages, build_chat_wire_body};
     use crate::models::Role;
     use crate::models::{ContentBlock, ImageUrlContent, Message, MessageRequest, Tool};
+    use serde_json::json;
 
     const DATA_URL: &str = "data:image/png;base64,QUJD";
 
@@ -10104,17 +10938,17 @@ mod image_block_wire_tests {
     /// fetched 2026-11-05). The MFJS specification lists `anyOf` as an
     /// applicator but does not authorize it at a parameters root; on the
     /// conflicting documents the strict face wins, so a root union of object
-    /// branches — even though a 2026-11-04 live probe observed the endpoint
-    /// returning 200 for one (probe facts are observations only and never a
-    /// shipping basis) — is flattened into one merged object on the wire.
+    /// branches is rejected in the strict lane because merging away their
+    /// constraints would be lossy. An explicit `strict:false` preserves the
+    /// exact same root union without an MFJS note.
     #[test]
-    fn kimi_chat_flattens_root_union_of_object_branches() {
+    fn kimi_chat_root_union_requires_explicit_strict_false() {
         let union_schema = serde_json::json!({
             "anyOf": [
                 {
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string"},
+                        "kind": {"type": "string", "pattern": "^[a-z]+$", "format": "email", "minLength": 1},
                         "outline": {"type": "string"}
                     },
                     "required": ["kind", "outline"],
@@ -10129,7 +10963,9 @@ mod image_block_wire_tests {
                     "required": ["kind", "content"],
                     "additionalProperties": false
                 }
-            ]
+            ],
+            "dependentSchemas": {"kind": {"required": ["outline"]}},
+            "default": {"kind": "outline"}
         });
         let tool = Tool {
             tool_type: None,
@@ -10142,7 +10978,7 @@ mod image_block_wire_tests {
             strict: None,
             cache_control: None,
         };
-        let request = MessageRequest {
+        let mut request = MessageRequest {
             model: crate::config::KIMI_CODE_K3_MODEL.to_string(),
             messages: vec![Message {
                 role: Role::User,
@@ -10171,31 +11007,151 @@ mod image_block_wire_tests {
         )
         .expect("Kimi Code wire body");
 
-        assert!(
-            body.omitted_tool_names.is_empty(),
-            "the flattenable union must not be dropped: {:?}",
-            body.omitted_tool_names
-        );
-        let parameters = &body.body["tools"][0]["function"]["parameters"];
-        assert_eq!(
-            parameters["type"], "object",
-            "the wire root must be a plain object schema: {parameters}"
-        );
-        assert!(
-            parameters.get("anyOf").is_none(),
-            "no root union may survive on the wire: {parameters}"
-        );
-        // The flatten merges the branch properties into one object; the
-        // per-branch required groups are gone, which is exactly the
-        // constraint loss the root composition note documents.
-        let properties = parameters["properties"].as_object().unwrap();
-        for name in ["kind", "outline", "content"] {
-            assert!(properties.contains_key(name), "{name} left the merge");
+        assert_eq!(body.omitted_tool_names, ["deck"]);
+        assert!(body.body.get("tools").is_none());
+
+        let original_parameters = request.tools.as_ref().unwrap()[0].input_schema.clone();
+        let original_description = request.tools.as_ref().unwrap()[0].description.clone();
+        request.tools.as_mut().unwrap()[0].strict = Some(false);
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            false,
+        )
+        .expect("explicit strict:false preserves an object-proving root union");
+        assert!(body.omitted_tool_names.is_empty());
+        let function = &body.body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(function["parameters"], original_parameters);
+        assert_eq!(function["description"], json!(original_description));
+    }
+
+    #[test]
+    fn strict_false_still_rejects_a_root_that_is_not_provably_an_object() {
+        let mut request = MessageRequest {
+            model: crate::config::MOONSHOT_KIMI_K3_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "probe".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![Tool {
+                tool_type: None,
+                name: "not_always_an_object".to_string(),
+                description: "probe".to_string(),
+                input_schema: json!({
+                    "anyOf": [
+                        {"type": "object", "properties": {"value": {"type": "string"}}},
+                        {"type": "string"}
+                    ]
+                }),
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            }]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+        request.tools.as_mut().unwrap()[0].strict = Some(false);
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the invalid tool is refused without automatic downgrading");
+        assert_eq!(body.omitted_tool_names, ["not_always_an_object"]);
+        assert!(body.body.get("tools").is_none());
+
+        request.tools.as_mut().unwrap()[0].input_schema = json!({
+            "allOf": [
+                {"type": "object", "properties": {"value": {"type": "string"}}},
+                {"required": ["value"]}
+            ]
+        });
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("allOf with an object branch proves the root object");
+        assert_eq!(body.body["tools"][0]["function"]["strict"], json!(false));
+
+        request.tools.as_mut().unwrap()[0].input_schema = json!({
+            "type": "object",
+            "description": "x".repeat(120_001)
+        });
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("raw oversized strict:false input must fail closed");
+        assert_eq!(body.omitted_tool_names, ["not_always_an_object"]);
+        assert!(body.body.get("tools").is_none());
+
+        let mut deep = json!("leaf");
+        for _ in 0..=64 {
+            deep = json!({"nested": deep});
         }
-        assert!(
-            parameters.get("required").is_none(),
-            "no required set survives a union of disagreeing branches: {parameters}"
+        request.tools.as_mut().unwrap()[0].input_schema =
+            json!({"type": "object", "default": deep});
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("raw over-depth strict:false input must fail closed");
+        assert_eq!(body.omitted_tool_names, ["not_always_an_object"]);
+        assert!(body.body.get("tools").is_none());
+
+        let referenced = json!({
+            "$defs": {"arguments": {"type": "object"}},
+            "$ref": "#/$defs/arguments"
+        });
+        let original = referenced.clone();
+        assert!(super::moonshot_parameters_prove_object(&referenced));
+        assert_eq!(
+            referenced, original,
+            "root proof must not mutate the schema"
         );
+        assert!(!super::moonshot_parameters_prove_object(&json!({
+            "$ref": "#/$defs/missing"
+        })));
+        assert!(!super::moonshot_parameters_prove_object(&json!({
+            "$defs": {
+                "a": {"$ref": "#/$defs/b"},
+                "b": {"$ref": "#/$defs/a"}
+            },
+            "$ref": "#/$defs/a"
+        })));
+        let mut deep_reference = json!({"type": "string"});
+        for index in 0..65 {
+            deep_reference = json!({
+                "$defs": {"next": deep_reference},
+                "$ref": "#/$defs/next"
+            });
+            assert!(
+                !super::moonshot_parameters_prove_object(&deep_reference),
+                "depth {index}"
+            );
+        }
     }
 }
 

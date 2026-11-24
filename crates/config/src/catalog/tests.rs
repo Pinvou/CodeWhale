@@ -766,8 +766,11 @@ fn bundled_asset_yields_real_chat_offerings_for_key_models() {
         kimi_k27.limit.as_ref().and_then(|l| l.context),
         Some(262_144)
     );
+    assert_eq!(kimi_k27.limit.as_ref().and_then(|l| l.output), Some(32_768));
+    assert!(!kimi_k27.default_for_provider);
 
     let kimi_k3 = find(&rows, "moonshot", "kimi-k3");
+    assert!(kimi_k3.default_for_provider);
     assert_eq!(
         kimi_k3.limit.as_ref().and_then(|l| l.context),
         Some(1_048_576)
@@ -782,6 +785,21 @@ fn bundled_asset_yields_real_chat_offerings_for_key_models() {
         .map(String::as_str)
         .collect::<Vec<_>>();
     assert_eq!(kimi_k3_input_modalities, ["text", "image", "video"]);
+
+    for model in ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+        let k31 = find(&rows, "moonshot", model);
+        assert_eq!(k31.limit.as_ref().and_then(|l| l.context), Some(1_048_576));
+        assert_eq!(k31.limit.as_ref().and_then(|l| l.output), Some(131_072));
+        let modalities = k31
+            .modalities
+            .as_ref()
+            .expect("K3.1 modalities")
+            .input
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(modalities, ["text", "image"], "{model}");
+    }
 
     let minimax_m3 = find(&rows, "minimax-anthropic", "MiniMax-M3");
     assert_eq!(

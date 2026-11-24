@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::dispatch::normalize_schema_json_containers;
+use super::dispatch::{normalize_schema_json_containers, parse_completed_tool_input_for_provider};
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::events::TOOL_CALL_CANCELLED_METADATA_KEY;
@@ -822,6 +822,7 @@ struct StreamOutcome {
     usage: Usage,
     usage_reported: bool,
     stop_reason: Option<String>,
+    stream_completed: bool,
     pending_message_complete: bool,
     last_text_index: Option<usize>,
     stream_errors: u32,
@@ -2542,6 +2543,7 @@ impl Engine {
                 usage,
                 usage_reported,
                 stop_reason,
+                stream_completed,
                 pending_message_complete,
                 last_text_index,
                 stream_errors,
@@ -2907,27 +2909,36 @@ impl Engine {
                     // is rewritten into a fresh incarnation here; everything
                     // downstream treats the id as opaque.
                     let id = fresh_fallback_tool_id(&call.id);
-                    let _ = self
-                        .tx_event
-                        .send(Event::ToolCallStarted {
-                            id: id.clone(),
-                            name: call.name.clone(),
-                            input: call.args.clone(),
-                        })
-                        .await;
+                    let input = if stream_completed {
+                        call.args
+                    } else {
+                        malformed_tool_arguments_input(&call.args.to_string())
+                    };
+                    if stream_completed {
+                        let _ = self
+                            .tx_event
+                            .send(Event::ToolCallStarted {
+                                id: id.clone(),
+                                name: call.name.clone(),
+                                input: input.clone(),
+                            })
+                            .await;
+                    }
                     tool_uses.push(ToolUseState {
                         id,
                         name: call.name,
-                        input: call.args,
+                        input,
                         caller: None,
                         thought_signature: None,
                         input_buffer: String::new(),
-                        input_parse_error: None,
+                        input_parse_error: (!stream_completed)
+                            .then(|| INCOMPLETE_STREAM_TOOL_INPUT_ERROR.to_string()),
                         input_parse_proof: Default::default(),
                     });
                 }
             }
 
+            reject_non_object_moonshot_tool_inputs(self.api_provider, &mut tool_uses);
             repair_tool_arguments_with_request_owned_schemas(
                 &mut tool_uses,
                 &tool_catalog,
@@ -3993,10 +4004,18 @@ impl Engine {
                 )));
             }
 
+            let incomplete_stream_input =
+                tool.input_parse_error.as_deref() == Some(INCOMPLETE_STREAM_TOOL_INPUT_ERROR);
             if blocked_error.is_none()
                 && let Some(error) = tool.input_parse_error.clone()
             {
                 blocked_error = Some(ToolError::invalid_input(error));
+            }
+            if incomplete_stream_input
+                && let Some(error) =
+                    incomplete_stream_missing_field(tool_registry, &tool_name, &tool_input)
+            {
+                blocked_error = Some(error);
             }
 
             // #3027: deny wins over allow — check the deny-list first so a
@@ -5906,6 +5925,7 @@ impl Engine {
         let mut fake_wrapper_notice_emitted = false;
         let mut pending_message_complete = false;
         let mut last_text_index: Option<usize> = None;
+        let mut saw_message_stop = false;
         let mut stream_errors = 0u32;
         // #103 transparent retry bookkeeping. `any_content_received` flips
         // on the first non-MessageStart event so we know whether DeepSeek
@@ -6526,54 +6546,32 @@ impl Engine {
                                 tool_state.name, tool_state.input_buffer, tool_state.input
                             ));
                         }
-                        if !tool_state.input_buffer.trim().is_empty() {
-                            if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
-                                tool_state.input = value;
-                                if self.active_turn_tool_security.is_some() {
-                                    crate::logging::info(
-                                        "Restricted tool final input (details redacted)",
-                                    );
-                                } else {
-                                    crate::logging::info(format!(
-                                        "Tool '{}' final input: {:?}",
-                                        tool_state.name, tool_state.input
-                                    ));
-                                }
-                            } else {
-                                if self.active_turn_tool_security.is_some() {
-                                    crate::logging::warn(
-                                        "Restricted tool input parse failed (details redacted)",
-                                    );
-                                } else {
-                                    crate::logging::warn(format!(
-                                        "Tool '{}' failed to parse final input buffer: '{}'",
-                                        tool_state.name, tool_state.input_buffer
-                                    ));
-                                }
-                                let error =
-                                    malformed_tool_arguments_error(&tool_state.input_buffer);
-                                tool_state.input_parse_error = Some(error);
-                                tool_state.input =
-                                    malformed_tool_arguments_input(&tool_state.input_buffer);
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::status(format!(
-                                        "⚠ Tool '{}' received malformed arguments from model",
-                                        tool_state.name
-                                    )))
-                                    .await;
-                            }
-                        } else {
+                        finalize_stream_tool_arguments(self.api_provider, tool_state);
+                        if tool_state.input_parse_error.is_some() {
                             if self.active_turn_tool_security.is_some() {
                                 crate::logging::warn(
-                                    "Restricted tool input buffer is empty (details redacted)",
+                                    "Restricted tool input parse failed (details redacted)",
                                 );
                             } else {
                                 crate::logging::warn(format!(
-                                    "Tool '{}' input buffer is empty, using initial input: {:?}",
-                                    tool_state.name, tool_state.input
+                                    "Tool '{}' failed to parse final input buffer: '{}'",
+                                    tool_state.name, tool_state.input_buffer
                                 ));
                             }
+                            let _ = self
+                                .tx_event
+                                .send(Event::status(format!(
+                                    "⚠ Tool '{}' received malformed arguments from model",
+                                    tool_state.name
+                                )))
+                                .await;
+                        } else if self.active_turn_tool_security.is_some() {
+                            crate::logging::info("Restricted tool final input (details redacted)");
+                        } else {
+                            crate::logging::info(format!(
+                                "Tool '{}' final input: {:?}",
+                                tool_state.name, tool_state.input
+                            ));
                         }
 
                         // Now that the input is finalized, announce the
@@ -6603,7 +6601,8 @@ impl Engine {
                         merge_stream_usage(&mut usage, u);
                     }
                 }
-                StreamEvent::MessageStop | StreamEvent::Ping => {}
+                StreamEvent::MessageStop => saw_message_stop = true,
+                StreamEvent::Ping => {}
                 StreamEvent::Error { error } => {
                     // #3014: providers surface mid-stream failures as a
                     // chunk-level `error` object (chat.rs converts the frame
@@ -6632,6 +6631,43 @@ impl Engine {
                 }
             }
         }
+        let stream_completed = saw_message_stop
+            && stream_error.is_none()
+            && !rate_limit_interrupted
+            && pending_resume.is_none()
+            && !self.cancel_token.is_cancelled()
+            && stream_stop_reason_allows_tool_execution(stop_reason.as_deref());
+        let mut unfinished_tool_indices: Vec<usize> = current_tool_indices.into_values().collect();
+        unfinished_tool_indices.sort_unstable();
+        for tool_idx in unfinished_tool_indices {
+            if let Some(tool_state) = tool_uses.get_mut(tool_idx) {
+                tool_state.invalidate_input_parse_proof();
+                if !stream_completed {
+                    tool_state.input_parse_error =
+                        Some(INCOMPLETE_STREAM_TOOL_INPUT_ERROR.to_string());
+                    continue;
+                }
+                finalize_stream_tool_arguments(self.api_provider, tool_state);
+                let final_input = final_tool_input(tool_state);
+                let _ = self
+                    .tx_event
+                    .send(Event::ToolCallStarted {
+                        id: tool_state.id.clone(),
+                        name: tool_state.name.clone(),
+                        input: final_input,
+                    })
+                    .await;
+                if tool_state.input_parse_error.is_some() {
+                    let _ = self
+                        .tx_event
+                        .send(Event::status(format!(
+                            "⚠ Tool '{}' received malformed arguments from model",
+                            tool_state.name
+                        )))
+                        .await;
+                }
+            }
+        }
         StreamOutcome {
             current_text_raw,
             current_text_visible,
@@ -6645,6 +6681,7 @@ impl Engine {
             usage,
             usage_reported,
             stop_reason,
+            stream_completed,
             pending_message_complete,
             last_text_index,
             stream_errors,
@@ -7752,50 +7789,21 @@ fn resolve_tool_definition<'a>(
             .find(|def| def.name.as_str() == tool_name.as_str());
     }
 
-    // Moonshot digit-led wire recovery: the Moonshot request path prefixes a
-    // digit-led registry name with `_` to satisfy Kimi's documented `name`
-    // pattern, and the response decoder deliberately leaves that prefix in
-    // place — a bare underscore strip here would corrupt genuinely
-    // underscore-led names. This recovery runs BEFORE the fuzzy alias
-    // resolution below: a `_<digit>` spelling is this request's own minted
-    // identity, so it must restore to the exact unprefixed name rather than
-    // alias onto a case-variant or suffix-variant sibling through the
-    // resolver's equivalence chain (with catalog `3d_render` + `_3D_render`,
-    // the wire spelling `_3d_render` must dispatch `3d_render`, not
-    // case-fold onto the sibling's handler — review 5914018939). When the
-    // mint owner was advertised, the ownership claim above already answered;
-    // the raw exact lookup and this recovery cover the remaining shapes: a
-    // registry that really contains both spellings resolves exactly, and a
-    // spelling whose unprefixed name exists only in the registry restores
-    // that name (failing dispatch if no definition carries it). The recovery
-    // is Moonshot-gated (review 4539829148): only the Moonshot request path
-    // mints `_<digit>` spellings, so the same shape from any other provider
-    // can only be a hallucinated name, which must fail dispatch rather than
-    // resolve onto a digit-led registry tool it never saw advertised.
     if moonshot_wire
         && tool_def.is_none()
         && tool_name.len() > 1
         && tool_name.starts_with('_')
         && tool_name.as_bytes()[1].is_ascii_digit()
     {
-        let unprefixed = tool_name[1..].to_string();
-        if let Some(def) = tool_catalog
-            .iter()
-            .find(|def| def.name.as_str() == unprefixed)
-        {
-            tool_def = Some(def);
-            *tool_name = unprefixed;
-        } else if tool_registry.is_some_and(|registry| registry.get(&unprefixed).is_some()) {
-            *tool_name = unprefixed;
-        }
+        return None;
     }
 
     // Resolve hallucinated tool names before policy gates run. Hidden legacy
     // handlers keep their executable name, while policy uses the canonical
-    // model-facing family definition. Minted `_<digit>` spellings only reach
-    // this alias chain when the unprefixed name exists nowhere — the mint's
-    // own tool is gone — so treating the spelling as a hallucinated alias is
-    // the same semantics every other unrecognized name gets.
+    // model-facing family definition. There is deliberately no engine-wide
+    // `_<digit>` stripping fallback: only this request's owner map may restore
+    // a minted identity; an unowned spelling must fail rather than being
+    // rebound to a same-named current registry entry.
     if tool_def.is_none()
         && let Some(registry) = tool_registry
         && let Some(canonical) = registry.resolve(tool_name.as_str())
@@ -7850,6 +7858,31 @@ fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
                 | "model_length"
                 | "output_limit"
                 | "max_completion_tokens"
+        )
+    )
+}
+
+fn stream_stop_reason_allows_tool_execution(stop_reason: Option<&str>) -> bool {
+    if stop_reason_is_output_limit(stop_reason) || is_incomplete_stop_reason(stop_reason) {
+        return false;
+    }
+    !matches!(
+        stop_reason
+            .map(|reason| reason.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "aborted"
+                | "cancelled"
+                | "canceled"
+                | "deadline_exceeded"
+                | "error"
+                | "failed"
+                | "failure"
+                | "interrupted"
+                | "provider_error"
+                | "stream_error"
+                | "timed_out"
+                | "timeout"
         )
     )
 }
@@ -7992,6 +8025,64 @@ fn repair_schema_lookup_name<'a>(
 /// deferred twin corrupts the owner's argument before the ownership map
 /// restores the execution name, and the rewritten value reaches assistant
 /// history).
+const INCOMPLETE_STREAM_TOOL_INPUT_ERROR: &str =
+    "malformed tool arguments from model: stream ended without normal completion";
+
+fn incomplete_stream_missing_field(
+    registry: Option<&crate::tools::ToolRegistry>,
+    tool_name: &str,
+    input: &Value,
+) -> Option<ToolError> {
+    let canonical_name = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
+    let schema = registry?.get(canonical_name)?.input_schema();
+    let input = input.as_object()?;
+    schema
+        .get("required")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|field| !input.contains_key(*field))
+        .map(ToolError::missing_field)
+}
+
+fn finalize_stream_tool_arguments(provider: ApiProvider, tool_state: &mut ToolUseState) {
+    if tool_state.input_buffer.trim().is_empty() {
+        if provider == ApiProvider::Moonshot {
+            tool_state.input_parse_error = Some(
+                parse_completed_tool_input_for_provider(provider, &tool_state.input_buffer)
+                    .expect_err("empty Moonshot arguments must be malformed"),
+            );
+            tool_state.input = malformed_tool_arguments_input(&tool_state.input_buffer);
+        }
+        return;
+    }
+    match parse_completed_tool_input_for_provider(provider, &tool_state.input_buffer) {
+        Ok(value) => {
+            tool_state.input = value;
+            tool_state.input_parse_error = None;
+        }
+        Err(error) => {
+            tool_state.input_parse_error = Some(error);
+            tool_state.input = malformed_tool_arguments_input(&tool_state.input_buffer);
+        }
+    }
+}
+
+fn reject_non_object_moonshot_tool_inputs(provider: ApiProvider, tool_uses: &mut [ToolUseState]) {
+    if provider != ApiProvider::Moonshot {
+        return;
+    }
+    for tool in tool_uses {
+        if tool.input_parse_error.is_none() && !tool.input.is_object() {
+            tool.input_parse_error = Some(format!(
+                "malformed tool arguments from model: expected a JSON object, got {}",
+                tool.input
+            ));
+            tool.input = malformed_tool_arguments_input(&tool.input.to_string());
+        }
+    }
+}
+
 fn repair_tool_arguments_with_request_owned_schemas(
     tool_uses: &mut [ToolUseState],
     tool_catalog: &[Tool],
@@ -8940,12 +9031,9 @@ mod tests {
     }
 
     #[test]
-    fn moonshot_digit_led_wire_name_resolves_to_the_registry_tool() {
-        // The Moonshot chat path advertises a digit-led registry tool as
-        // `_3d_render` on the wire (Kimi's documented name pattern), the
-        // response decoder deliberately keeps that spelling, and dispatch
-        // must fall back to the unprefixed registry name — otherwise the
-        // model's calls can never dispatch.
+    fn moonshot_digit_led_wire_name_requires_a_request_owner() {
+        // The engine never strips a prefix on its own. Only the outgoing
+        // request's mint-owner map may restore the digit-led registry name.
         let tmp = tempfile::tempdir().expect("tempdir");
         let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
         let mut registry = crate::tools::ToolRegistry::new(context);
@@ -8953,8 +9041,18 @@ mod tests {
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None);
-        assert!(tool_def.is_some(), "digit-led wire name must resolve");
+        assert!(
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None).is_none(),
+            "an unowned mint must not be guessed from the current registry"
+        );
+        assert_eq!(name, "_3d_render");
+
+        let owners = [("3d_render".to_string(), "_3d_render".to_string())]
+            .into_iter()
+            .collect();
+        let tool_def =
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, Some(&owners));
+        assert!(tool_def.is_some(), "the request-owned mint must resolve");
         assert_eq!(name, "3d_render");
         assert!(registry.get(&name).is_some());
 
@@ -9002,8 +9100,8 @@ mod tests {
     #[test]
     fn moonshot_digit_led_collision_resolves_to_the_exact_spelling() {
         // When the registry contains both spellings, the wire name
-        // `_3d_render` must keep resolving to the underscore twin — the
-        // fallback only fires after every exact lookup missed.
+        // `_3d_render` must keep resolving to the underscore twin through
+        // exact identity; no prefix fallback is involved.
         let tmp = tempfile::tempdir().expect("tempdir");
         let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
         let mut registry = crate::tools::ToolRegistry::new(context);
@@ -9072,7 +9170,7 @@ mod tests {
         // missed every exact lookup and fell through to the fuzzy resolver,
         // whose ASCII case-insensitive step selected `_3D_render` and
         // rewrote the execution name onto the sibling's handler. The minted
-        // identity must restore exactly: the unprefixed lookup runs before
+        // identity must restore exactly through the request owner, before
         // the alias chain, so the call dispatches `3d_render`.
         let tmp = tempfile::tempdir().expect("tempdir");
         let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
@@ -9082,7 +9180,16 @@ mod tests {
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None);
+        assert!(
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None).is_none(),
+            "an unowned mint must not fuzzy-alias the case-variant sibling"
+        );
+
+        let owners = [("3d_render".to_string(), "_3d_render".to_string())]
+            .into_iter()
+            .collect();
+        let tool_def =
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, Some(&owners));
         assert!(
             tool_def.is_some(),
             "the minted wire spelling must dispatch to its own tool"
@@ -9161,6 +9268,31 @@ mod tests {
         let mut corrupted = serde_json::json!({"payload": "{}"});
         normalize_schema_json_containers(&mut corrupted, &twin_schema);
         assert_eq!(corrupted, serde_json::json!({"payload": {}}));
+    }
+
+    #[test]
+    fn moonshot_text_fallback_arguments_cannot_bypass_the_object_gate() {
+        let mut calls = vec![ToolUseState {
+            id: "call-scalar".to_string(),
+            name: "probe".to_string(),
+            input: serde_json::json!([]),
+            caller: None,
+            thought_signature: None,
+            input_buffer: String::new(),
+            input_parse_error: None,
+            input_parse_proof: Default::default(),
+        }];
+        reject_non_object_moonshot_tool_inputs(ApiProvider::Moonshot, &mut calls);
+        assert!(
+            calls[0]
+                .input_parse_error
+                .as_deref()
+                .is_some_and(|error| error.contains("expected a JSON object"))
+        );
+
+        calls[0].input_parse_error = None;
+        reject_non_object_moonshot_tool_inputs(ApiProvider::Openai, &mut calls);
+        assert!(calls[0].input_parse_error.is_none());
     }
 
     #[test]

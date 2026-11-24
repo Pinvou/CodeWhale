@@ -392,6 +392,23 @@ pub(super) fn final_tool_input(state: &ToolUseState) -> serde_json::Value {
     state.input.clone()
 }
 
+pub(super) fn parse_completed_tool_input_for_provider(
+    provider: crate::config::ApiProvider,
+    buffer: &str,
+) -> Result<serde_json::Value, String> {
+    let value = if provider == crate::config::ApiProvider::Moonshot {
+        serde_json::from_str(buffer).map_err(|_| malformed_tool_arguments_error(buffer))?
+    } else {
+        parse_tool_input(buffer).ok_or_else(|| malformed_tool_arguments_error(buffer))?
+    };
+    if provider == crate::config::ApiProvider::Moonshot && !value.is_object() {
+        return Err(format!(
+            "malformed tool arguments from model: expected a JSON object, got {buffer:?}"
+        ));
+    }
+    Ok(value)
+}
+
 pub(super) fn parse_tool_input(buffer: &str) -> Option<serde_json::Value> {
     let trimmed = buffer.trim();
     if trimmed.is_empty() {
@@ -711,5 +728,28 @@ mod schema_json_container_tests {
 
         assert_eq!(normalize_schema_json_containers(&mut input, &schema), 0);
         assert_eq!(input, before);
+    }
+
+    #[test]
+    fn moonshot_completed_arguments_require_a_json_object() {
+        for raw in ["[]", "1", "null", "\"text\"", "{"] {
+            let error =
+                parse_completed_tool_input_for_provider(crate::config::ApiProvider::Moonshot, raw)
+                    .expect_err("non-object or invalid JSON must be malformed");
+            assert!(error.contains("malformed tool arguments"), "{error}");
+        }
+        assert_eq!(
+            parse_completed_tool_input_for_provider(
+                crate::config::ApiProvider::Moonshot,
+                "{\"ok\":true}",
+            )
+            .unwrap(),
+            json!({"ok": true})
+        );
+        assert_eq!(
+            parse_completed_tool_input_for_provider(crate::config::ApiProvider::Openai, "[]")
+                .unwrap(),
+            json!([])
+        );
     }
 }

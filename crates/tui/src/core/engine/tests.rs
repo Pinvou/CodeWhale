@@ -9597,94 +9597,97 @@ async fn injected_chat_content_filter_never_becomes_a_completed_answer() {
 async fn injected_model_complete_tool_block_at_max_output_tokens_executes() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
-    let workspace = tempdir().expect("tempdir");
-    fs::write(
-        workspace.path().join("truncated-tool-ran.txt"),
-        "truncated-tool-executed",
-    )
-    .expect("write fixture");
-    let usage = Usage {
-        input_tokens: 52,
-        output_tokens: 23,
-        ..Default::default()
-    };
-    let truncated_tool_turn = vec![
-        canned::message_start("mock_msg_truncated_tool"),
-        canned::tool_use_block_start(0, "call-truncated", "File"),
-        canned::tool_input_delta(0, r#"{"action":"read","path":"truncated-tool-ran.txt"}"#),
-        canned::block_stop(0),
-        canned::message_delta("max_output_tokens", Some(usage.clone())),
-        canned::message_stop(),
-    ];
-    let followup_turn = canned::simple_text_turn("Done.");
-    let mock = std::sync::Arc::new(MockLlmClient::new(vec![truncated_tool_turn, followup_turn]));
-    let client: crate::core::model_client::SharedModelClient = mock.clone();
-    let (engine, handle) = Engine::new_with_model_client(
-        deterministic_engine_config(workspace.path()),
-        &Config::default(),
-        client,
-    );
-    let task = tokio::spawn(engine.run());
-    handle
-        .send(external_user_message_op(
-            "Read the fixture file.",
-            AppMode::Agent,
+    for stop_reason in ["max_output_tokens", "length"] {
+        let workspace = tempdir().expect("tempdir");
+        fs::write(
+            workspace.path().join("truncated-tool-ran.txt"),
+            "truncated-tool-executed",
+        )
+        .expect("write fixture");
+        let usage = Usage {
+            input_tokens: 52,
+            output_tokens: 23,
+            ..Default::default()
+        };
+        let truncated_tool_turn = vec![
+            canned::message_start("mock_msg_truncated_tool"),
+            canned::tool_use_block_start(0, "call-truncated", "File"),
+            canned::tool_input_delta(0, r#"{"action":"read","path":"truncated-tool-ran.txt"}"#),
+            canned::block_stop(0),
+            canned::message_delta(stop_reason, Some(usage.clone())),
+            canned::message_stop(),
+        ];
+        let followup_turn = canned::simple_text_turn("Done.");
+        let mock =
+            std::sync::Arc::new(MockLlmClient::new(vec![truncated_tool_turn, followup_turn]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let (engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
             &Config::default(),
-        ))
-        .await
-        .expect("send truncated-tool trajectory");
+            client,
+        );
+        let task = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "Read the fixture file.",
+                AppMode::Agent,
+                &Config::default(),
+            ))
+            .await
+            .expect("send truncated-tool trajectory");
 
-    let mut saw_turn_usage = false;
-    let mut saw_tool_start = false;
-    let mut saw_tool_success = false;
-    let mut rx = handle.rx_event.write().await;
-    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
-        .await
-        .expect("timed out waiting for truncated-tool trajectory")
-    {
-        match event {
-            Event::TurnUsage { .. } => saw_turn_usage = true,
-            Event::ToolCallStarted { id, name, .. } => {
-                assert_eq!(id, "call-truncated");
-                assert_eq!(name, "File");
-                saw_tool_start = true;
+        let mut saw_turn_usage = false;
+        let mut saw_tool_start = false;
+        let mut saw_tool_success = false;
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for truncated-tool trajectory")
+        {
+            match event {
+                Event::TurnUsage { .. } => saw_turn_usage = true,
+                Event::ToolCallStarted { id, name, .. } => {
+                    assert_eq!(id, "call-truncated");
+                    assert_eq!(name, "File");
+                    saw_tool_start = true;
+                }
+                Event::ToolCallComplete {
+                    id, name, result, ..
+                } => {
+                    assert_eq!(id, "call-truncated");
+                    assert_eq!(name, "File");
+                    let result = result.expect("complete tool call closes with a tool result");
+                    assert!(
+                        result.success,
+                        "complete tool call must be accepted and executed: {result:?}"
+                    );
+                    saw_tool_success = true;
+                }
+                Event::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    assert!(error.is_none(), "no terminal error expected: {error:?}");
+                    break;
+                }
+                _ => {}
             }
-            Event::ToolCallComplete {
-                id, name, result, ..
-            } => {
-                assert_eq!(id, "call-truncated");
-                assert_eq!(name, "File");
-                let result = result.expect("complete tool call closes with a tool result");
-                assert!(
-                    result.success,
-                    "complete tool call must be accepted and executed: {result:?}"
-                );
-                saw_tool_success = true;
-            }
-            Event::TurnComplete { status, error, .. } => {
-                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-                assert!(error.is_none(), "no terminal error expected: {error:?}");
-                break;
-            }
-            _ => {}
         }
-    }
-    drop(rx);
+        drop(rx);
 
-    assert!(saw_turn_usage, "reported usage must be emitted");
-    assert!(saw_tool_start, "the streamed tool lifecycle must open");
-    assert!(
-        saw_tool_success,
-        "the complete tool call must be accepted and executed"
-    );
-    let requests = mock.captured_requests();
-    assert_eq!(
-        requests.len(),
-        2,
-        "the loop must continue with a follow-up request after the tool result"
-    );
-    handle.send(Op::Shutdown).await.expect("shutdown engine");
-    task.await.expect("engine task");
+        assert!(saw_turn_usage, "reported usage must be emitted");
+        assert!(saw_tool_start, "the streamed tool lifecycle must open");
+        assert!(
+            saw_tool_success,
+            "the complete tool call must be accepted and executed"
+        );
+        let requests = mock.captured_requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "the loop must continue with a follow-up request after the tool result"
+        );
+        handle.send(Op::Shutdown).await.expect("shutdown engine");
+        task.await.expect("engine task");
+    }
 }
 
 #[tokio::test]
@@ -9746,6 +9749,372 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
     assert_eq!(mock.call_count(), 2);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn moonshot_unclosed_tool_blocks_fail_closed_and_replay_raw_arguments() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for arguments in ["", " ", "{"] {
+        let workspace = tempdir().expect("tempdir");
+        let malformed_turn = vec![
+            canned::message_start("moonshot-unclosed"),
+            canned::tool_use_block_start(0, "call-unclosed", "File"),
+            canned::tool_input_delta(0, arguments),
+            canned::message_delta("tool_use", None),
+            canned::message_stop(),
+        ];
+        let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+            malformed_turn,
+            canned::simple_text_turn("Recovered after malformed arguments."),
+        ]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            default_text_model: Some("kimi-k3".to_string()),
+            ..Default::default()
+        };
+        let (engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            client,
+        );
+        let task = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "Validate unclosed tool arguments.",
+                AppMode::Agent,
+                &config,
+            ))
+            .await
+            .expect("send unclosed trajectory");
+
+        let mut malformed_error = None;
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for unclosed tool validation")
+        {
+            match event {
+                Event::ToolCallComplete { name, result, .. } if name == "File" => {
+                    malformed_error = Some(match result {
+                        Ok(result) => result.content,
+                        Err(error) => error.to_string(),
+                    });
+                }
+                Event::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+        let error = malformed_error.expect("malformed tool result");
+        assert!(error.to_ascii_lowercase().contains("json"), "{error}");
+
+        let requests = mock.captured_requests();
+        assert_eq!(requests.len(), 2);
+        let replayed = requests[1]
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match block {
+                crate::models::ContentBlock::ToolUse { input, .. }
+                    if input.get("raw_arguments").is_some() =>
+                {
+                    Some(input)
+                }
+                _ => None,
+            })
+            .expect("raw_arguments object on the next replay");
+        assert!(replayed.is_object(), "{replayed}");
+        handle.send(Op::Shutdown).await.expect("shutdown engine");
+        task.await.expect("engine task");
+    }
+}
+
+#[tokio::test]
+async fn tool_started_is_emitted_exactly_once_for_normal_and_unclosed_stops() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for unclosed in [false, true] {
+        let workspace = tempdir().expect("tempdir");
+        fs::write(workspace.path().join("lifecycle.txt"), "lifecycle").expect("fixture");
+        let mut turn = vec![
+            canned::message_start("moonshot-lifecycle"),
+            canned::tool_use_block_start(0, "call-lifecycle", "tool_search"),
+            canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        ];
+        if !unclosed {
+            turn.push(canned::block_stop(0));
+        }
+        turn.extend([
+            canned::message_delta("tool_use", None),
+            canned::message_stop(),
+        ]);
+        let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+            turn,
+            canned::simple_text_turn("Lifecycle complete."),
+        ]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let config = Config {
+            provider: Some("openai".to_string()),
+            default_text_model: Some("gpt-5.5".to_string()),
+            ..Default::default()
+        };
+        let (engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            client,
+        );
+        let task = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "Read the lifecycle fixture.",
+                AppMode::Agent,
+                &config,
+            ))
+            .await
+            .expect("send lifecycle trajectory");
+
+        let mut starts = 0;
+        let mut completions = 0;
+        let mut lifecycle = Vec::new();
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for lifecycle completion")
+        {
+            match event {
+                Event::ToolCallStarted { name, .. } if name == "tool_search" => {
+                    starts += 1;
+                    lifecycle.push("started");
+                }
+                Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                    completions += 1;
+                    lifecycle.push("completed");
+                    assert!(result.is_ok(), "valid arguments must execute: {result:?}");
+                }
+                Event::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+        assert_eq!(starts, 1, "unclosed={unclosed}");
+        assert_eq!(completions, 1, "unclosed={unclosed}");
+        assert_eq!(lifecycle, ["started", "completed"], "unclosed={unclosed}");
+        handle.send(Op::Shutdown).await.expect("shutdown engine");
+        task.await.expect("engine task");
+    }
+}
+
+#[tokio::test]
+async fn provider_error_and_length_never_execute_unclosed_valid_tool_arguments() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    for (label, text_fallback, terminal) in [
+        (
+            "provider error",
+            false,
+            StreamEvent::Error {
+                error: json!({"message": "provider interrupted the stream"}),
+            },
+        ),
+        ("length", false, canned::message_delta("length", None)),
+        (
+            "text fallback provider error",
+            true,
+            StreamEvent::Error {
+                error: json!({"message": "provider interrupted the stream"}),
+            },
+        ),
+    ] {
+        let workspace = tempdir().expect("tempdir");
+        let mut turn = vec![canned::message_start("incomplete-tool")];
+        if text_fallback {
+            turn.extend([
+                canned::text_block_start(0),
+                canned::text_delta(
+                    0,
+                    "<invoke name=\"tool_search\"><parameter name=\"query\">read</parameter></invoke>",
+                ),
+            ]);
+        } else {
+            turn.extend([
+                canned::tool_use_block_start(0, "call-incomplete", "tool_search"),
+                canned::tool_input_delta(0, r#"{"query":"read"}"#),
+            ]);
+        }
+        turn.push(terminal);
+        let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn]));
+        let client: crate::core::model_client::SharedModelClient = mock.clone();
+        let config = Config::default();
+        let (engine, handle) = Engine::new_with_model_client(
+            deterministic_engine_config(workspace.path()),
+            &config,
+            client,
+        );
+        let task = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "This valid-looking tool call must not execute.",
+                AppMode::Agent,
+                &config,
+            ))
+            .await
+            .expect("send incomplete stream");
+
+        let mut starts = 0;
+        let mut completions = 0;
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for incomplete tool rejection")
+        {
+            match event {
+                Event::ToolCallStarted { name, .. } if name == "tool_search" => starts += 1,
+                Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                    completions += 1;
+                    let error = result.expect_err("incomplete arguments must not execute");
+                    assert!(
+                        error.to_string().contains("without normal completion"),
+                        "{label}: {error}"
+                    );
+                }
+                Event::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+        drop(rx);
+        assert_eq!(starts, 0, "{label}");
+        assert_eq!(completions, 1, "{label}");
+        handle.send(Op::Shutdown).await.expect("shutdown engine");
+        task.await.expect("engine task");
+    }
+}
+
+#[tokio::test]
+async fn real_chat_tool_execution_requires_terminal_proof() {
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for (label, terminal, expect_execution) in [
+        ("bare EOF", "", false),
+        ("direct DONE", "data: [DONE]\n\n", true),
+    ] {
+        let workspace = tempdir().expect("tempdir");
+        let server = MockServer::start().await;
+        let tool_sse = format!(
+            concat!(
+                "data: {{\"id\":\"chatcmpl-terminal-proof\",\"choices\":[{{\"index\":0,",
+                "\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_terminal_proof\",",
+                "\"type\":\"function\",\"function\":{{\"name\":\"tool_search\",",
+                "\"arguments\":\"{{\\\"query\\\":\\\"read\\\"}}\"}}}}]}},",
+                "\"finish_reason\":null}}]}}\n\n",
+                "{}"
+            ),
+            terminal
+        );
+        let followup_sse = concat!(
+            "data: {\"id\":\"chatcmpl-after-tool\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("tool_call_id"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(followup_sse),
+            )
+            .expect(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(tool_sse),
+            )
+            .expect(1)
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let config = Config {
+            api_key: Some("test-key".to_string()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            ..Config::default()
+        };
+        let (engine, handle) = Engine::new(deterministic_engine_config(workspace.path()), &config);
+        let task = tokio::spawn(engine.run());
+        handle
+            .send(external_user_message_op(
+                "Exercise terminal tool execution proof.",
+                AppMode::Agent,
+                &config,
+            ))
+            .await
+            .expect("send terminal-proof trajectory");
+
+        let mut starts = 0;
+        let mut completions = 0;
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {label} terminal"))
+        {
+            match event {
+                Event::ToolCallStarted { name, .. } if name == "tool_search" => starts += 1,
+                Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                    completions += 1;
+                    if expect_execution {
+                        assert!(result.is_ok(), "{label}: {result:?}");
+                    } else {
+                        let error = result.expect_err("bare EOF must not execute");
+                        assert!(
+                            error.to_string().contains("without normal completion"),
+                            "{label}: {error}"
+                        );
+                    }
+                }
+                Event::TurnComplete { status, .. } => {
+                    if expect_execution {
+                        assert_eq!(status, TurnOutcomeStatus::Completed, "{label}");
+                    } else {
+                        assert_ne!(status, TurnOutcomeStatus::Completed, "{label}");
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+        assert_eq!(
+            starts,
+            if expect_execution { 1 } else { 0 },
+            "{label}: bare EOF must leave the tool unstarted; DONE closes it exactly once"
+        );
+        assert_eq!(completions, 1, "{label}");
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .expect("request receipts")
+                .len(),
+            2,
+            "{label}: tool feedback must allow one bounded recovery response"
+        );
+        handle.send(Op::Shutdown).await.expect("shutdown engine");
+        task.await.expect("engine task");
+    }
 }
 
 #[tokio::test]

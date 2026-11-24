@@ -654,8 +654,13 @@ impl DeepSeekClient {
                 }
             }
 
-            // Emit MessageStop.
-            yield Ok(StreamEvent::MessageStop);
+            if done {
+                yield Ok(StreamEvent::MessageStop);
+            } else {
+                yield Err(anyhow::anyhow!(
+                    "Responses API stream closed before a terminal response event or [DONE]"
+                ));
+            }
         };
 
         Ok(Box::pin(stream))
@@ -1224,6 +1229,8 @@ pub(super) fn convert_messages_to_responses_input(
 
 /// Convert a CodeWhale tool definition to a Responses API function tool.
 fn tool_to_responses_function(tool: &Tool) -> Value {
+    let mut tool = tool.clone();
+    super::normalize_explicit_non_strict_tool(&mut tool);
     let mut parameters = tool.input_schema.clone();
     let constraint_note = schema_sanitize::sanitize_for_responses(&mut parameters);
     let description = match constraint_note {

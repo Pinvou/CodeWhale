@@ -120,6 +120,7 @@ fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, InvalidS
                 false,
                 &mut self.inline_reasoning_tags,
                 ReasoningStreamStyle::SeparateField,
+                None,
             ) {
                 SseDataFrame::Done => SseDataFrame::Done,
                 SseDataFrame::Events(frame_events) => {
@@ -771,6 +772,7 @@ fn decoder_treats_done_frame_as_terminal() {
         false,
         &mut inline_reasoning_tags,
         ReasoningStreamStyle::SeparateField,
+        None,
     );
 
     assert!(

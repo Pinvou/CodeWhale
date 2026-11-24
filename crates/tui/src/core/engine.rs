@@ -9783,12 +9783,12 @@ use self::approval::{ApprovalDecision, ApprovalResult, UserInputDecision};
 use self::dispatch::{
     ParallelToolResult, ParallelToolResultEntry, ToolApprovalStamp, ToolExecGuard, ToolExecOutcome,
     ToolExecutionBatch, ToolExecutionPlan, caller_allowed_for_tool, caller_type_for_tool_use,
-    final_tool_input, format_tool_error_with_schema, malformed_tool_arguments_error,
-    malformed_tool_arguments_input, mcp_tool_is_parallel_safe, parse_parallel_tool_calls,
-    parse_tool_input, plan_tool_execution_batches, stamp_tool_result_approval,
+    final_tool_input, format_tool_error_with_schema, malformed_tool_arguments_input,
+    mcp_tool_is_parallel_safe, parse_parallel_tool_calls, plan_tool_execution_batches,
+    stamp_tool_result_approval,
 };
 #[cfg(test)]
-use self::dispatch::{format_tool_error, should_parallelize_tool_batch};
+use self::dispatch::{format_tool_error, parse_tool_input, should_parallelize_tool_batch};
 #[cfg(test)]
 use self::lsp_hooks::edited_paths_for_tool;
 #[cfg(test)]
