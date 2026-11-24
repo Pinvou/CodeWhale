@@ -398,10 +398,18 @@
       else if(section==='scenes')value=await api(`behavior/scenes?range=${range}`);
       else if(section==='models')value=await api(`behavior/models?range=${range}`);
       else throw new Error('unknown_behavior_section');
-      if(!isCurrentBehaviorRequest(section,version))return;
+      if(!isCurrentBehaviorRequest(section,version))return null;
       verifyBehaviorRange(value,range);storeBehaviorReport(section,value);state.behaviorRanges[section]=range;syncBehaviorRangeControls(section);renderBehavior();
-    }catch(error){if(!isCurrentBehaviorRequest(section,version))return;if(error.message==='unauthorized'){showLogin();throw error}state.behaviorErrors[section]=true;renderBehaviorErrors();throw error}
+    }catch(error){if(!isCurrentBehaviorRequest(section,version))return null;if(error.message==='unauthorized'){showLogin();throw error}state.behaviorErrors[section]=true;renderBehaviorErrors();throw error}
     finally{if(state.behaviorRangeRequests[section]===version)delete state.behaviorRangeRequests[section]}
+  }
+  let pendingDiagnosticErrors=null;
+  function refreshDiagnosticErrors(range){
+    const request=refreshBehaviorSection('errors',range);
+    pendingDiagnosticErrors=request;
+    const clear=()=>{if(pendingDiagnosticErrors===request)pendingDiagnosticErrors=null};
+    void request.then(clear,clear);
+    return request;
   }
   async function refreshBehavior(){
     const requestedRanges={...state.behaviorRanges},overviewRanges=[...new Set(behaviorOverviewSections.map(section=>requestedRanges[section]))];
@@ -431,6 +439,7 @@
       const session=await api('session');
       if(!isCurrent())return;
       if(!state.role)failureLogoutPending=false;
+      if(state.role!==session.role)$('failureIncludeFixed').checked=false;
       if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
       state.role=session.role;
       const diagnosticsRefresh=manual&&state.view==='diagnostics';
@@ -439,10 +448,10 @@
         $('loginLayer').classList.add('hidden');renderPageTabs();
         const [groups, errors]=await Promise.allSettled([
           loadFailures(),
-          state.behaviorRangeRequests.errors?Promise.resolve():refreshBehaviorSection('errors',state.behaviorRanges.errors),
+          pendingDiagnosticErrors||refreshDiagnosticErrors(state.behaviorRanges.errors),
         ]);
-        diagnosticsOk=groups.status==='fulfilled'&&groups.value===null?null:
-          groups.status==='fulfilled'&&groups.value&&errors.status==='fulfilled';
+        const superseded=[groups,errors].some(result=>result.status==='fulfilled'&&result.value===null);
+        diagnosticsOk=superseded?null:groups.status==='fulfilled'&&groups.value&&errors.status==='fulfilled';
       }else if(state.role==='behavior_analyst'){
         if(!['behavior','remote','diagnostics'].includes(state.view))state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();
         if(!isCurrent())return;
@@ -461,7 +470,7 @@
   document.querySelectorAll('[data-hourly-metric]').forEach(input=>input.addEventListener('change',()=>{if(input.checked)state.hourlyMetrics.add(input.dataset.hourlyMetric);else state.hourlyMetrics.delete(input.dataset.hourlyMetric);renderHourlyTrend()}));
   document.querySelectorAll('.seg button[data-days]').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.seg button[data-days]').forEach(item=>item.classList.remove('active'));button.classList.add('active');state.range=Number(button.dataset.days);renderTrend()}));
   document.querySelectorAll('.page-tab').forEach(button=>button.addEventListener('click',()=>{state.view=button.dataset.view;renderPageTabs();if(state.view==='diagnostics')void loadFailures()}));
-  document.querySelectorAll('.behavior-range button').forEach(button=>button.addEventListener('click',async()=>{const section=button.closest('.behavior-range').dataset.behaviorSection,range=button.dataset.range;if(state.behaviorRanges[section]===range)return;setBehaviorRangeBusy(section,true);try{await refreshBehaviorSection(section,range)}catch{syncBehaviorRangeControls(section)}finally{setBehaviorRangeBusy(section,false)}}));
+  document.querySelectorAll('.behavior-range button').forEach(button=>button.addEventListener('click',async()=>{const section=button.closest('.behavior-range').dataset.behaviorSection,range=button.dataset.range;if(state.behaviorRanges[section]===range)return;setBehaviorRangeBusy(section,true);try{await (section==='errors'?refreshDiagnosticErrors(range):refreshBehaviorSection(section,range))}catch{syncBehaviorRangeControls(section)}finally{setBehaviorRangeBusy(section,false)}}));
   document.querySelectorAll('.platform-tab').forEach(button=>button.addEventListener('click',()=>{state.platform=button.dataset.platform;renderDevices()}));
   $('deviceSearch').addEventListener('input',event=>{state.query=event.target.value.trim();renderDevices()});
   document.querySelectorAll('th.sortable[data-sort]').forEach(header=>header.addEventListener('click',()=>{const sort=header.dataset.sort;if(state.deviceSort===sort)state.deviceSortDirection=state.deviceSortDirection==='desc'?'asc':'desc';else{state.deviceSort=sort;state.deviceSortDirection='desc'}renderDevices()}));
@@ -496,7 +505,7 @@
   $('failureExportGroup').addEventListener('change',updateFailureExportGroups);
   $('failureExportValue').addEventListener('change',syncFailureExport);
   $('failureExportEvidence').addEventListener('change',syncFailureExport);
-  function clearFailureDetail(preserveExport=false){if(!preserveExport)clearFailureExport();$('failurePanel').setAttribute('aria-busy','false');selectedFailure=null;$('failureTimelineStatus').textContent='';$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
+  function clearFailureDetail(preserveExport=false){if(!preserveExport){clearFailureExport();$('failureFixedFilter').classList.add('hidden')}$('failurePanel').setAttribute('aria-busy','false');selectedFailure=null;$('failureTimelineStatus').textContent='';$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
   async function diagnosticApi(path,options,revision){try{return await api(path,options)}catch(error){if(revision!==failureRevision)throw error;if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
   function failureFilterParams(){return new URLSearchParams({include_fixed:$('failureIncludeFixed').checked?'1':'0',days:$('failureDays').value,app_version:$('failureVersion').value.trim(),diagnostic_code:$('failureCode').value.trim(),provider_key:$('failureProvider').value.trim(),platform:$('failurePlatform').value,mode:$('failureMode').value})}
   async function loadFailures(){

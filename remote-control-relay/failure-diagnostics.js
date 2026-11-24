@@ -40,12 +40,26 @@ function diagnosticExecutionKey(incident) {
   return typeof executionKey === "string" && /^[a-f0-9]{64}$/.test(executionKey) ? executionKey : null;
 }
 
+const TIMELINE_LIMIT = 32;
+const compareEventTime = (a, b) => a.occurred_at - b.occurred_at;
+
+function orderFailureHistory(events, remote) {
+  const ordered = [...events].sort(compareEventTime);
+  const isTerminal = event => remote
+    ? event.event_name === "remote_control_event" && event.remote_role === "controlled"
+      && event.remote_stage === "task_terminal"
+      && ["success", "failed", "interrupted", "cancelled"].includes(event.remote_task_status)
+    : event.event_name === "task_finished";
+  return {
+    ordered,
+    positions: new Map(ordered.map((event, index) => [event, index])),
+    lastTerminal: ordered.findLast(isTerminal),
+  };
+}
+
 function collectFailureHistory(events, incident) {
   const executionKey = diagnosticExecutionKey(incident);
   const remote = executionKey !== null;
-  const remoteTerminal = event => event.event_name === "remote_control_event"
-    && event.remote_role === "controlled" && event.remote_stage === "task_terminal"
-    && ["success", "failed", "interrupted", "cancelled"].includes(event.remote_task_status);
   const sameLifecycle = event => event.device_id === incident.device_id
     && event.collection_period_id === incident.collection_period_id
     && (remote ? Boolean(incident.device_id && incident.collection_period_id)
@@ -60,22 +74,18 @@ function collectFailureHistory(events, incident) {
     if (sameLifecycle(event)) unique.set(event.event_id, event);
   }
   unique.set(incident.event_id, incident);
-  const ordered = [...unique.values()].sort((a,b) => a.occurred_at - b.occurred_at);
-  return {
-    ordered,
-    positions: new Map(ordered.map((event, index) => [event, index])),
-    lastTerminal: ordered.findLast(event => remote ? remoteTerminal(event) : event.event_name === "task_finished"),
-  };
+  return orderFailureHistory(unique.values(), remote);
 }
 
-function projectFailureTimeline({ ordered, positions, lastTerminal }, incident) {
-  const anchor = positions.get(incident);
+function timelineStart(anchor, count) {
+  return Math.max(0, Math.min(anchor - 15, count - TIMELINE_LIMIT));
+}
+
+function projectTimelineWindow(window, count, lastTerminal, incident) {
   const terminal = lastTerminal?.occurred_at >= incident.occurred_at ? lastTerminal : undefined;
-  const budget = 32;
-  const start = Math.max(0, Math.min(anchor - 15, ordered.length - budget));
-  const selected = new Set(ordered.slice(start, start + budget));
+  const selected = new Set(window);
   if (terminal) selected.add(terminal);
-  if (selected.size > budget) {
+  if (selected.size > TIMELINE_LIMIT) {
     const furthest = [...selected].filter(event => event !== incident && event !== terminal)
       .sort((a,b) => Math.abs(b.occurred_at - incident.occurred_at) - Math.abs(a.occurred_at - incident.occurred_at))[0];
     selected.delete(furthest);
@@ -85,12 +95,17 @@ function projectFailureTimeline({ ordered, positions, lastTerminal }, incident) 
     "diagnostic_code", "diagnostic_exit_code", "diagnostic_http_status",
     "remote_role", "remote_stage", "remote_task_status", "remote_outcome", "remote_reason"];
   return {
-    timeline: [...selected].sort((a,b) => a.occurred_at - b.occurred_at)
+    timeline: [...selected].sort(compareEventTime)
       .map(event => Object.fromEntries(fields.filter(key => event[key] !== undefined).map(key => [key,event[key]]))),
-    timeline_context: { total_events: ordered.length, returned_events: selected.size,
-      truncated: selected.size < ordered.length, incident_included: selected.has(incident),
+    timeline_context: { total_events: count, returned_events: selected.size,
+      truncated: selected.size < count, incident_included: selected.has(incident),
       task_terminal_included: Boolean(terminal && selected.has(terminal)) },
   };
+}
+
+function projectFailureTimeline({ ordered, positions, lastTerminal }, incident) {
+  const start = timelineStart(positions.get(incident), ordered.length);
+  return projectTimelineWindow(ordered.slice(start, start + TIMELINE_LIMIT), ordered.length, lastTerminal, incident);
 }
 
 export function failureTimeline(events, incident) {
@@ -175,8 +190,39 @@ function timelineScope(event) {
   return null;
 }
 
+function projectSharedTurn(exact, common, incident, compare) {
+  const exactEvents = exact.ordered, commonEvents = common.ordered;
+  let exactIndex = exact.positions.get(incident);
+  // Locate the incident in the merge without repeatedly expanding common rows.
+  let low = 0, high = commonEvents.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (compare(commonEvents[middle], incident) < 0) low = middle + 1;
+    else high = middle;
+  }
+  let commonIndex = low;
+  const anchor = exactIndex + commonIndex;
+  const count = exactEvents.length + commonEvents.length;
+  const start = timelineStart(anchor, count);
+  for (let index = anchor; index > start; index--) {
+    const fromExact = commonIndex === 0 || (exactIndex > 0
+      && compare(exactEvents[exactIndex - 1], commonEvents[commonIndex - 1]) > 0);
+    if (fromExact) exactIndex--;
+    else commonIndex--;
+  }
+  const window = [];
+  while (window.length < Math.min(TIMELINE_LIMIT, count - start)) {
+    const fromExact = commonIndex === commonEvents.length || (exactIndex < exactEvents.length
+      && compare(exactEvents[exactIndex], commonEvents[commonIndex]) < 0);
+    window.push(fromExact ? exactEvents[exactIndex++] : commonEvents[commonIndex++]);
+  }
+  const a = exact.lastTerminal, b = common.lastTerminal;
+  const lastTerminal = b && (!a || compare(a, b) < 0) ? b : a;
+  return projectTimelineWindow(window, count, lastTerminal, incident);
+}
+
 function diagnosticHistory(events, groupedSamples) {
-  const keyFor = (event, scope) => JSON.stringify([event.collection_period_id, ...scope]);
+  const keyFor = (event, scope) => JSON.stringify([typeof event.collection_period_id, event.collection_period_id, ...scope]);
   const sharedScope = scope => scope[0] === "turn-attempt" ? ["turn-unscoped", scope[1]] : null;
   const byDevice = new Map();
   for (const samples of groupedSamples.values()) for (const event of samples) {
@@ -210,23 +256,37 @@ function diagnosticHistory(events, groupedSamples) {
     }
     sourceOrder.set(event, index);
   }
-  const prepared = new WeakMap();
+  const prepared = new WeakMap(), sharedHistories = new WeakMap();
+  const compare = (a, b) => compareEventTime(a, b) || sourceOrder.get(a) - sourceOrder.get(b);
   return incident => {
     const scope = timelineScope(incident);
     const buckets = byDevice.get(incident.device_id);
     const exact = scope && buckets?.get(keyFor(incident, scope));
     if (!exact) return failureTimeline([], incident);
-    let history = prepared.get(exact);
-    if (!history?.positions.has(incident)) {
-      const shared = sharedScope(scope);
-      const common = shared && buckets.get(keyFor(incident, shared));
-      // Both lists retain source order. Sort their two runs together so equal
-      // timestamps and duplicate IDs follow the single-incident projection.
-      const rows = common?.length ? [...exact, ...common].sort((a, b) => sourceOrder.get(a) - sourceOrder.get(b)) : exact;
-      history = collectFailureHistory(rows, incident);
-      prepared.set(exact, history);
+    const shared = sharedScope(scope);
+    const common = shared && buckets.get(keyFor(incident, shared));
+    let saved = prepared.get(exact);
+    if (!saved?.history.positions.has(incident)) {
+      const history = collectFailureHistory(exact, incident);
+      let sharedHistory, canMerge = false;
+      if (common?.length) {
+        if (!sharedHistories.has(common)) {
+          sharedHistories.set(common, {
+            projection: orderFailureHistory(common, false),
+            ids: new Set(common.map(event => event.event_id)),
+          });
+        }
+        sharedHistory = sharedHistories.get(common);
+        canMerge = sharedHistory.ids.size === common.length && history.ordered.length === exact.length
+          && !exact.some(event => sharedHistory.ids.has(event.event_id));
+      }
+      saved = { history, canMerge, sharedHistory };
+      prepared.set(exact, saved);
     }
-    return projectFailureTimeline(history, incident);
+    if (!common?.length) return projectFailureTimeline(saved.history, incident);
+    if (saved.canMerge) return projectSharedTurn(saved.history, saved.sharedHistory.projection, incident, compare);
+    // Preserve de-duplication for old or duplicate rows spanning both buckets.
+    return failureTimeline([...exact, ...common].sort((a, b) => sourceOrder.get(a) - sourceOrder.get(b)), incident);
   };
 }
 

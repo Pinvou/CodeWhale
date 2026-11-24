@@ -9,8 +9,9 @@ const fingerprint = "a".repeat(64);
 function dashboard(role = "operations_admin", timelineContext) {
   const requests = [];
   let detailGate = null;
+  let refreshTimer;
   const dom = new JSDOM(html, { runScripts: "dangerously", url: "https://stats.invalid/pinvou3/stats", beforeParse(window) {
-    window.setInterval = () => 1; window.clearInterval = () => {};
+    window.setInterval = callback => { refreshTimer=callback; return 1; }; window.clearInterval = () => {};
     window.fetch = async (url, options = {}) => {
       const path = String(url); requests.push({path,options});
       let value = { rows: [], metrics: {}, devices: [] };
@@ -29,7 +30,7 @@ function dashboard(role = "operations_admin", timelineContext) {
       return {ok:true,status:200,json:async()=>value};
     };
   }});
-  return {dom,requests,delayDetail:gate=>{detailGate=gate;}};
+  return {dom,requests,delayDetail:gate=>{detailGate=gate;},refresh:()=>refreshTimer()};
 }
 
 test("admin filters drill down safely, save status, and fence delayed evidence after logout", async () => {
@@ -311,5 +312,60 @@ test("logging out clears administrator-only diagnostic export options", async ()
     assert.equal(value.options.length,0);
     assert.equal(document.querySelector("#failureExportValueLabel").hidden,true);
     assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
+  } finally {dom.window.close();}
+});
+
+test("a session role downgrade immediately clears diagnostic filters and export controls", async () => {
+  const {dom,refresh}=dashboard("operations_admin");
+  try {
+    const {document}=dom.window;
+    await tick();
+    document.querySelector('[data-view="diagnostics"]').click();
+    await tick();
+    const filter=document.querySelector("#failureFixedFilter");
+    const checkbox=document.querySelector("#failureIncludeFixed");
+    assert.notEqual(dom.window.getComputedStyle(filter).display,"none");
+    checkbox.checked=true;
+    const fetch=dom.window.fetch;
+    dom.window.fetch=async (url,options)=>String(url).endsWith("/session")
+      ? {ok:true,status:200,json:async()=>({role:"behavior_analyst"})}
+      : fetch(url,options);
+    await refresh();
+    assert.equal(checkbox.checked,false);
+    assert.equal(dom.window.getComputedStyle(filter).display,"none");
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureExport")).display,"none");
+    assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
+  } finally {dom.window.close();}
+});
+
+test("manual diagnostics refresh waits for the active error range result", async () => {
+  const {dom}=dashboard();
+  try {
+    const {document}=dom.window;
+    await tick();
+    document.querySelector('[data-view="diagnostics"]').click();
+    await tick();
+    let release, rangeRequests=0;
+    const pending=new Promise(resolve=>{release=resolve;});
+    const fetch=dom.window.fetch;
+    dom.window.fetch=async (url,options)=>{
+      if(String(url).includes("/behavior/overview?range=7")){
+        rangeRequests++;
+        await pending;
+        return {ok:false,status:503,json:async()=>({})};
+      }
+      return fetch(url,options);
+    };
+    document.querySelector('[data-behavior-section="errors"] [data-range="7"]').click();
+    await tick();
+    const header=document.querySelector("#refreshButton");
+    header.click();
+    await tick();
+    assert.equal(rangeRequests,1);
+    assert.equal(header.textContent,"↻ 刷新");
+    release();
+    await tick();
+    assert.match(header.textContent,/部分失败/);
+    assert.match(document.querySelector("#diagnosticsErrorStatus").textContent,/刷新失败/);
   } finally {dom.window.close();}
 });
