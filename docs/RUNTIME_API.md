@@ -1096,6 +1096,10 @@ validated against the provider's catalog before it is applied, and `persisted`
 reports whether it was written to config or applied to the live session only.
 Rejects an unknown provider id and the `deepseek-cn` alias with `400`.
 
+Embedding hosts can retain in-memory model transport capabilities across Runtime
+API reloads and provider switches; see [Host model HTTP policies](MODEL_HTTP_POLICY.md)
+for installation, trust boundaries and the separate vision-route lifetime.
+
 ## Runtime data model
 
 The runtime uses a durable Thread/Turn/Item lifecycle.

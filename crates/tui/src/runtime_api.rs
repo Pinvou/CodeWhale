@@ -148,9 +148,32 @@ fn runtime_token_alias_warning(
     (!cli_token_is_used && environment.legacy_alias_used).then_some(LEGACY_RUNTIME_TOKEN_WARNING)
 }
 
+/// Trusted in-memory capabilities outlive disk configuration snapshots, including
+/// a vision route being disabled and later enabled again.
+#[derive(Clone)]
+struct HostModelHttpPolicies {
+    primary: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
+    vision: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
+}
+
+impl HostModelHttpPolicies {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            primary: config.model_http_policy.clone(),
+            vision: config.vision_model_http_policy.clone(),
+        }
+    }
+
+    fn apply_to(&self, config: &mut Config) {
+        config.model_http_policy = self.primary.clone();
+        config.vision_model_http_policy = self.vision.clone();
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeApiState {
     config: Arc<parking_lot::RwLock<Config>>,
+    host_model_http_policies: HostModelHttpPolicies,
     workspace: PathBuf,
     plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     task_manager: SharedTaskManager,
@@ -941,6 +964,7 @@ pub async fn run_http_server(
     let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, options.workers);
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config.clone())),
+        host_model_http_policies: HostModelHttpPolicies::from_config(&config),
         workspace,
         plugin_discovery,
         task_manager,
@@ -6553,8 +6577,9 @@ async fn switch_provider(
     // swap in the new config. A failure here means an active thread's
     // route is invalid under the new provider — surface it so the GUI can
     // tell the user to fix their config.
-    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
+    let mut reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
         .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    state.host_model_http_policies.apply_to(&mut reloaded);
     state
         .runtime_threads
         .reload_config(reloaded.clone())
@@ -6971,8 +6996,9 @@ fn normalize_runtime_config_model(provider: ApiProvider, value: &str) -> Result<
 async fn reload_config(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<ReloadConfigResponse>, ApiError> {
-    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
+    let mut reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
         .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    state.host_model_http_policies.apply_to(&mut reloaded);
     state
         .runtime_threads
         .reload_config(reloaded.clone())
