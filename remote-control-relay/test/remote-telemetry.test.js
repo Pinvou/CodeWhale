@@ -134,6 +134,19 @@ test("passive B success cannot become first-day activation or technical value", 
   assert.equal(report.funnels.activation.task_succeeded_installations, 0);
 });
 
+test("remote event groups use earliest observed order and keep their counts", () => {
+  const rows = [
+    event("controller", "attachment", { event_id: "late_attachment", occurred_at: now - 1000 }),
+    event("controller", "connection", { event_id: "initial_connection", occurred_at: now - 5000 }),
+    event("controller", "attachment", { event_id: "first_attachment", occurred_at: now - 3000 }),
+    event("controller", "claim", { event_id: "last_claim", occurred_at: now - 2000 }),
+  ];
+  const report = buildBehaviorOverview(devices, [], rows, "today", now);
+  assert.deepEqual(report.remote_control.rows.map(({ stage, sequence, count }) => [sequence, stage, count]), [
+    [1, "connection", 1], [2, "attachment", 2], [3, "claim", 1],
+  ]);
+});
+
 test("B-only admission rejection reports its reason without an invocation or origin activity", () => {
   const rows = [event("controlled", "task_rejected", { remote_outcome: "rejected", remote_reason: "permission_required" })];
   const report = buildBehaviorOverview(devices, [], rows, "today", now);
@@ -440,10 +453,11 @@ test("dashboard sections reuse the remote join and refresh after ingestion, rete
   const store = new TelemetryStore(directory, "remote-projection-test-pepper-at-least-24-chars");
   try {
     for (const device of devices) store.devices.set(device.device_id, { ...device });
+    const capturedAt = Date.now();
     let stageReads = 0;
     store.behaviorEvents = invocation().map(row => {
       const stage = row.remote_stage;
-      return { ...row, occurred_at: Date.now() - 10000,
+      return { ...row, occurred_at: capturedAt - 10000, received_at: capturedAt,
         get remote_stage() { stageReads++; return stage; } };
     });
     // Avoid unrelated due-compaction replacing the source between section reads.
@@ -459,7 +473,7 @@ test("dashboard sections reuse the remote join and refresh after ingestion, rete
     store.overview(); store.deviceList();
     assert.equal(stageReads, 0, "adjacent section requests must not regroup remote tasks");
     const second = invocation().map(row => ({ ...row, remote_task_key: "b".repeat(64),
-      event_id: `second_${row.event_id}`, occurred_at: Date.now() - 5000 }));
+      event_id: `second_${row.event_id}`, occurred_at: capturedAt - 5000, received_at: capturedAt }));
     store.behaviorEvents.push(...second);
     assert.equal(store.behaviorOverview("today").remote_control.task_count, 2);
     // Device identity upgrades can change eligibility without changing events.

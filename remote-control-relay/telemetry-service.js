@@ -390,7 +390,11 @@ function buildHourlyUsageTrend(devices, taskEvents, now) {
   const todayHour = (statsDay(now) * DAY_MS - STATS_TIMEZONE_OFFSET_MS) / HOUR_MS;
   const startHour = todayHour - 24;
   const endHour = todayHour + 23;
+  const weekAgoHour = todayHour - 7 * 24;
   const rows = new Map();
+  for (let hour = weekAgoHour; hour < weekAgoHour + 24; hour += 1) {
+    rows.set(hour, { hour: hour * HOUR_MS, device_ids: new Set(), new_devices: 0, turns: 0 });
+  }
   for (let hour = startHour; hour <= endHour; hour += 1) {
     rows.set(hour, { hour: hour * HOUR_MS, device_ids: new Set(), new_devices: 0, turns: 0 });
   }
@@ -414,10 +418,11 @@ function buildHourlyUsageTrend(devices, taskEvents, now) {
   const hourly = [...rows.values()].map(({ device_ids, ...row }) => ({ ...row, active_devices: device_ids.size }));
   return {
     current: hourly.filter(row => row.hour >= (currentHour - 23) * HOUR_MS && row.hour <= currentHour * HOUR_MS),
-    today: hourly.slice(24).map(row => row.hour > now
+    today: hourly.slice(48).map(row => row.hour > now
       ? { hour: row.hour, active_devices: null, new_devices: null, turns: null }
       : row),
-    previous: hourly.slice(0, 24),
+    previous: hourly.slice(24, 48),
+    weekAgo: hourly.slice(0, 24),
   };
 }
 
@@ -523,6 +528,7 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
     usage_trend_hourly: hourlyTrend.current,
     usage_trend_hourly_today: hourlyTrend.today,
     usage_trend_hourly_previous: hourlyTrend.previous,
+    usage_trend_hourly_week_ago: hourlyTrend.weekAgo,
     active_versions: versionRows(versionMap),
     active_versions_by_platform: Object.fromEntries(Object.entries(platformVersionMaps)
       .map(([platform, versions]) => [platform, versionRows(versions)])),
