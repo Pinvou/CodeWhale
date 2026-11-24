@@ -205,7 +205,7 @@
   const statsDay=value=>Math.floor((Number(value)+STATS_TIMEZONE_OFFSET_MS)/DAY_MS);
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-  function showLogin(message=''){failureRevision++;clearFailureDetail();clearFailureExport();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
+  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
   function linePath(values,max,left=35,right=770,top=22,bottom=184){
     let connected=false;
     return values.map((value,index)=>{
@@ -429,7 +429,7 @@
     try{
       const session=await api('session');
       if(!isCurrent())return;
-      if(state.role!==session.role){failureRevision++;clearFailureDetail();clearFailureExport();$('failureRows').replaceChildren()}
+      if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
       state.role=session.role;
       const diagnosticsRefresh=manual&&state.view==='diagnostics';
       let diagnosticsOk=true;
@@ -486,11 +486,11 @@
   $('failureExportGroup').addEventListener('change',updateFailureExportGroups);
   $('failureExportValue').addEventListener('change',syncFailureExport);
   $('failureExportEvidence').addEventListener('change',syncFailureExport);
-  function clearFailureDetail(){$('failurePanel').setAttribute('aria-busy','false');selectedFailure=null;$('failureTimelineStatus').textContent='';$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
-  async function diagnosticApi(path,options,revision){try{return await api(path,options)}catch(error){if(revision!==failureRevision)throw error;if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();clearFailureExport();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
+  function clearFailureDetail(preserveExport=false){if(!preserveExport)clearFailureExport();$('failurePanel').setAttribute('aria-busy','false');selectedFailure=null;$('failureTimelineStatus').textContent='';$('failureAdmin').classList.add('hidden');$('failureEvidence').textContent='';$('failureImages').replaceChildren();$('failureSamples').replaceChildren()}
+  async function diagnosticApi(path,options,revision){try{return await api(path,options)}catch(error){if(revision!==failureRevision)throw error;if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
   function failureFilterParams(){return new URLSearchParams({include_fixed:$('failureIncludeFixed').checked?'1':'0',days:$('failureDays').value,app_version:$('failureVersion').value.trim(),diagnostic_code:$('failureCode').value.trim(),provider_key:$('failureProvider').value.trim(),platform:$('failurePlatform').value,mode:$('failureMode').value})}
   async function loadFailures(){
-    const revision=++failureRevision;clearFailureDetail();clearFailureExport();$('failureFixedFilter').classList.toggle('hidden',state.role!=='operations_admin');$('failureRows').replaceChildren();$('failurePanel').setAttribute('aria-busy','true');$('failureStatus').textContent='加载中…';
+    const revision=++failureRevision;clearFailureDetail();$('failureFixedFilter').classList.toggle('hidden',state.role!=='operations_admin');$('failureRows').replaceChildren();$('failurePanel').setAttribute('aria-busy','true');$('failureStatus').textContent='加载中…';
     const params=failureFilterParams();
     try{const report=await diagnosticApi(`behavior/failures?${params}`,undefined,revision);if(revision!==failureRevision)return null;
       if(report.detail_allowed){appliedFailureParams=params;failureExportGroups=report.export_groups||{};updateFailureExportGroups()}
@@ -502,7 +502,7 @@
   $('failureFilters').addEventListener('submit',event=>{event.preventDefault();void loadFailures()});
   $('failureRows').addEventListener('click',async event=>{
     const button=event.target.closest('[data-failure-group]');if(!button||state.role!=='operations_admin')return;
-    const revision=++failureRevision;clearFailureDetail();selectedFailure=button.dataset.failureGroup;$('failureAdmin').classList.remove('hidden');$('failureIssueStatus').value=button.dataset.failureState;$('failureFixedVersion').value=button.dataset.fixedVersion;
+    const revision=++failureRevision;clearFailureDetail(true);selectedFailure=button.dataset.failureGroup;$('failureAdmin').classList.remove('hidden');$('failureIssueStatus').value=button.dataset.failureState;$('failureFixedVersion').value=button.dataset.fixedVersion;
     try{const result=await diagnosticApi(`diagnostics/samples?${appliedFailureParams||failureFilterParams()}&fingerprint=${encodeURIComponent(selectedFailure)}`,undefined,revision);if(revision!==failureRevision)return;
       if(!result.incidents.length)$('failureSamples').textContent='当前条件下暂无可用样本。';
       for(const item of result.incidents){const sample=document.createElement('button');sample.type='button';sample.className='filter';sample.setAttribute('aria-pressed','false');sample.textContent=`${new Date(item.at).toLocaleString()} · ${item.version} · ${item.mode||'—'} · ${item.code}`;sample.dataset.failureIncident=item.id;$('failureSamples').append(sample)}
@@ -521,7 +521,7 @@
     }catch{if(revision===failureRevision)$('failureEvidence').textContent='证据读取失败或已过期。'}
   });
   $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})},revision);if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
-  $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();clearFailureExport();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
+  $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
   $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
