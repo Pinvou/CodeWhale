@@ -279,7 +279,11 @@ function diagnosticHistory(events, groupedSamples) {
       // outside the indexed execution context for other incidents.
       const context = sharedHistoryFor(exact, true);
       if (context.ids.size !== exact.length || context.ids.has(incident.event_id)) return failureTimeline(exact, incident);
-      return projectJoinedTimeline(orderFailureHistory([incident], true), context.projection, incident, compare);
+      // Single-incident detail adds this anchor after collecting all matching
+      // context, so timestamp ties put it after that context.
+      const compareAnchorLast = (a, b) => compareEventTime(a, b)
+        || (Number(a === incident) - Number(b === incident)) || compare(a, b);
+      return projectJoinedTimeline(orderFailureHistory([incident], true), context.projection, incident, compareAnchorLast);
     }
     const shared = sharedScope(scope);
     const common = shared && buckets.get(keyFor(incident, shared));

@@ -172,8 +172,17 @@ test("bulk remote timeline keeps a controller incident out of other samples", as
   const controlled=event(2,{event_name:"remote_control_event",remote_role:"controlled",remote_stage:"task_terminal",
     remote_task_key:key,remote_task_status:"failed",diagnostic_id:"controlled_case",diagnostic_code:"process_failed",diagnostic_component:"remote_control"});
   const related=event(3,{execution_task_key:key});
+  const sameTime={...controller,occurred_at:controlled.occurred_at};
+  const tiedContext=Array.from({length:40},(_,index)=>event(10+index,{
+    occurred_at:controlled.occurred_at,execution_task_key:key,duration_ms:index,
+  }));
   const reports={audit() {},exportEvidence(){return new Map();}};
-  for (const events of [[controller,controlled,related],[controlled,related,controller]]) {
+  for (const events of [
+    [controller,controlled,related],
+    [controlled,related,controller],
+    [sameTime,controlled,...tiedContext],
+    [...tiedContext,controlled,sameTime],
+  ]) {
     const chunks=[];
     for await (const chunk of failureExport(events,{now:10_000},{groupBy:"all"},reports,"actor",e=>e.diagnostic_id)) {
       chunks.push(chunk);
@@ -181,7 +190,7 @@ test("bulk remote timeline keeps a controller incident out of other samples", as
     const {samples}=JSON.parse(chunks.join("")).groups[0];
     assert.equal(samples.length,2);
     for (const {id,timeline,timeline_context} of samples) {
-      const anchor=id==="controlled_case"?controlled:controller;
+      const anchor=events.find(event=>event.diagnostic_id===id);
       assert.deepEqual({timeline,timeline_context},failureTimeline(events,anchor));
     }
   }
