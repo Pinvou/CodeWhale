@@ -2,6 +2,14 @@
 
 Terima kasih atas minat Anda untuk berkontribusi pada Codewhale! Dokumen ini memberikan panduan dan instruksi untuk berkontribusi.
 
+> **Catatan fork (Pinvou/CodeWhale):** repositori ini adalah fork Pinvou.
+> Cabang `main` hanya mencerminkan upstream dan tidak menerima pekerjaan
+> fork; pull request pemeliharaan internal menargetkan cabang publik
+> **`pinvou3-clean`** yang dilindungi (dokumen ini tidak memuat kebijakan
+> fork — aturan cabang di atas adalah seluruh kontrak yang dibutuhkan
+> klon). Proses di bawah ini adalah proses kontribusi upstream warisan
+> dan berlaku untuk kontribusi upstream.
+
 ---
 
 ## Memulai (Getting Started)
