@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
-import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureGroups, failureSamples, failureTimeline } from "./failure-diagnostics.js";
+import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureExport, failureGroups, failureSamples, failureTimeline } from "./failure-diagnostics.js";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
 import {
   DAY_MS, STATS_TIMEZONE_OFFSET_MS, MIN_RELIABLE_SAMPLE,
@@ -1725,6 +1727,17 @@ function readCookies(req) {
   return values;
 }
 
+function diagnosticSelection(params, reports) {
+  const filters = Object.fromEntries([...params]
+    .filter(([key]) => ["days", "app_version", "platform", "mode", "provider_key", "diagnostic_code"].includes(key)));
+  const include = event => {
+    if (params.get("include_fixed") === "1") return true;
+    const issue = reports.issue(diagnosticFingerprint(event));
+    return issue.status !== "fixed" || event.occurred_at > issue.updated_at;
+  };
+  return { filters, include };
+}
+
 async function readJson(req, limit = MAX_JSON_BYTES, idleTimeoutMs = 0) {
   const chunks = [];
   let size = 0;
@@ -3159,10 +3172,14 @@ export function createTelemetryService(options = {}) {
       }
       if (routePath === `${STATS_PREFIX}/api/behavior/failures` && req.method === "GET") {
         const session = adminAuthorized(req);
-        const filters = Object.fromEntries([...new URL(req.url, "http://localhost").searchParams]
-          .filter(([key]) => ["days", "app_version", "platform", "mode", "provider_key", "diagnostic_code"].includes(key)));
-        const rows = failureGroups(store.behaviorEvents, filters, session.role === "operations_admin" ? 1 : Math.max(20, MIN_PRIVACY_GROUP_SUBJECTS));
-        json(res, 200, { rows: rows.map(row => ({ ...row, ...store.failureReports.issue(row.fingerprint) })), detail_allowed: session.role === "operations_admin" });
+        const { filters, include } = diagnosticSelection(new URL(req.url, "http://localhost").searchParams, store.failureReports);
+        const rows = failureGroups(store.behaviorEvents, filters, session.role === "operations_admin" ? 1 : Math.max(20, MIN_PRIVACY_GROUP_SUBJECTS), include);
+        json(res, 200, { rows: rows.map(row => {
+          const issue = store.failureReports.issue(row.fingerprint);
+          return issue.status === "fixed" && row.last_seen > issue.updated_at
+            ? { ...row, status: "open", fixed_version: "" }
+            : { ...row, ...issue };
+        }), detail_allowed: session.role === "operations_admin" });
         return true;
       }
       if (routePath.startsWith(`${STATS_PREFIX}/api/diagnostics/`)) {
@@ -3173,10 +3190,29 @@ export function createTelemetryService(options = {}) {
         const params = new URL(req.url, "http://localhost").searchParams;
         if (routePath.endsWith("/samples") && req.method === "GET") {
           const fingerprint = params.get("fingerprint");
+          const { filters, include } = diagnosticSelection(params, store.failureReports);
           store.failureReports.audit("samples_read", /^[a-f0-9]{64}$/.test(fingerprint || "") ? fingerprint : "invalid", actor);
-          const incidents = failureSamples(store.behaviorEvents, fingerprint, Object.fromEntries(params))
+          const incidents = failureSamples(store.behaviorEvents, fingerprint, filters, include)
             .map(e => ({ id: diagnosticCaseId(e), at: e.occurred_at, version: e.app_version, mode: e.mode, platform: e.platform, code: e.diagnostic_code }));
           json(res, 200, { incidents }); return true;
+        }
+        if (routePath === `${STATS_PREFIX}/api/diagnostics/export` && req.method === "GET") {
+          const { filters, include } = diagnosticSelection(params, store.failureReports);
+          const groupBy = params.get("group_by") || "all";
+          const groupValue = params.get("group_value") || "";
+          const records = failureExport(store.behaviorEvents, filters, { groupBy, groupValue }, store.failureReports, actor, diagnosticCaseId, include);
+          res.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Disposition": `attachment; filename="pinvou-failures-${groupBy}.json"`,
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          });
+          try {
+            await pipeline(Readable.from(records), res);
+          } catch {
+            res.destroy();
+          }
+          return true;
         }
         if (routePath.endsWith("/incident") && req.method === "GET") {
           const incident = store.behaviorEvents.find(e => e.diagnostic_id && diagnosticCaseId(e) === params.get("id"));

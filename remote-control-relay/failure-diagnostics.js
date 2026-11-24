@@ -104,18 +104,25 @@ function boundedText(value, max, bytes = false, redact = redactDiagnosticText) {
   return result+suffix;
 }
 
-export function failureGroups(events, filters = {}, minimumSubjects = 1) {
+function selectedFailureEvents(events, filters, include = () => true) {
   const now = Number.isSafeInteger(filters.now) && filters.now >= 0 ? filters.now : Date.now();
   const days = [1, 7, 30].includes(Number(filters.days)) ? Number(filters.days) : 7;
-  const groups = new Map();
   const seen = new Set();
-  for (const event of events) {
-    if (!event.diagnostic_id || !DIAGNOSTIC_CODES.includes(event.diagnostic_code)) continue;
-    if (Number(event.occurred_at) < now - days * DAY || Number(event.occurred_at) > now) continue;
-    if (["app_version", "platform", "mode", "provider_key", "diagnostic_code"].some(key => filters[key] && (event[key] ?? event.diagnostic_environment?.[key]) !== filters[key])) continue;
+  return events.filter(event => {
+    if (!event.diagnostic_id || !DIAGNOSTIC_CODES.includes(event.diagnostic_code)
+      || event.occurred_at < now - days * DAY || event.occurred_at > now
+      || ["app_version", "platform", "mode", "provider_key", "diagnostic_code"].some(key => filters[key] && (event[key] ?? event.diagnostic_environment?.[key]) !== filters[key])
+      || !include(event)) return false;
     const unique = `${event.device_id}:${event.diagnostic_id}`;
-    if (seen.has(unique)) continue;
+    if (seen.has(unique)) return false;
     seen.add(unique);
+    return true;
+  });
+}
+
+export function failureGroups(events, filters = {}, minimumSubjects = 1, include) {
+  const groups = new Map();
+  for (const event of selectedFailureEvents(events, filters, include)) {
     const fingerprint = diagnosticFingerprint(event);
     const group = groups.get(fingerprint) || { fingerprint, code: event.diagnostic_code,
       component: event.diagnostic_component, stage: event.stage || "unknown", count: 0, sampled_details: 0,
@@ -136,17 +143,50 @@ export function failureGroups(events, filters = {}, minimumSubjects = 1) {
     .sort((a, b) => b.count - a.count || b.last_seen - a.last_seen).slice(0, 200);
 }
 
-export function failureSamples(events, fingerprint, filters = {}) {
-  const days = [1, 7, 30].includes(Number(filters.days)) ? Number(filters.days) : 7;
-  const now = Date.now();
-  const seen = new Set();
-  return events.filter(event => {
-    const id = `${event.device_id}:${event.diagnostic_id}`;
-    if (!event.diagnostic_id || seen.has(id) || diagnosticFingerprint(event) !== fingerprint
-      || event.occurred_at < now - days * DAY || event.occurred_at > now
-      || ["app_version", "platform", "mode", "provider_key", "diagnostic_code"].some(key => filters[key] && (event[key] ?? event.diagnostic_environment?.[key]) !== filters[key])) return false;
-    seen.add(id); return true;
-  }).sort((a, b) => Number(b.diagnostic_sampled !== false) - Number(a.diagnostic_sampled !== false) || b.occurred_at - a.occurred_at).slice(0, 50);
+export function failureSamples(events, fingerprint, filters = {}, include = () => true) {
+  return selectedFailureEvents(events, filters, event => diagnosticFingerprint(event) === fingerprint && include(event))
+    .sort((a, b) => Number(b.diagnostic_sampled !== false) - Number(a.diagnostic_sampled !== false) || b.occurred_at - a.occurred_at).slice(0, 50);
+}
+
+export function failureExport(events, filters, { groupBy, groupValue }, reports, actor, caseId, include) {
+  const groupField = { code: "diagnostic_code", component: "diagnostic_component", stage: "stage" };
+  if (groupBy !== "all" && !Object.hasOwn(groupField, groupBy)) fail("invalid_diagnostic_export_group");
+  const groupValues = { code: DIAGNOSTIC_CODES, component: DIAGNOSTIC_COMPONENTS, stage: DIAGNOSTIC_STAGES };
+  if (groupValue && !groupValues[groupBy]?.includes(groupValue)) fail("invalid_diagnostic_export_group");
+  const groups = new Map();
+  const historyByDevice = new Map();
+  for (const event of selectedFailureEvents(events, filters, include)) {
+    const key = groupBy === "all" ? "all" : event[groupField[groupBy]] || "unknown";
+    if (groupValue && key !== groupValue) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+    if (!historyByDevice.has(event.device_id)) historyByDevice.set(event.device_id, []);
+  }
+  for (const event of events) historyByDevice.get(event.device_id)?.push(event);
+  reports.audit("samples_read", ["export", groupBy, groupValue].filter(Boolean).join(":"), actor);
+  const evidenceByIncident = reports.exportEvidence();
+
+  return (function* () {
+    yield `{"schema_version":1,"group_by":${JSON.stringify(groupBy)},"groups":[`;
+    let firstGroup = true;
+    for (const [key, samples] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+      yield `${firstGroup ? "" : ","}{"key":${JSON.stringify(key)},"samples":[`;
+      firstGroup = false;
+      let firstSample = true;
+      for (const event of samples) {
+        const item = {
+          id: caseId(event), occurred_at: event.occurred_at, version: event.app_version, platform: event.platform,
+          mode: event.mode, code: event.diagnostic_code, component: event.diagnostic_component, stage: event.stage || "unknown",
+          ...failureTimeline(historyByDevice.get(event.device_id), event),
+          reports: evidenceByIncident.get(`${event.device_id}:${event.diagnostic_id}`) || [],
+        };
+        yield (firstSample ? "" : ",") + JSON.stringify(item);
+        firstSample = false;
+      }
+      yield "]}";
+    }
+    yield "]}";
+  })();
 }
 
 function validateReport(input, redact = redactDiagnosticText) {
@@ -344,6 +384,16 @@ export class FailureReportStore {
     this.saveMetadata({ ...this.state, audit: [...this.state.audit, { at: Date.now(), action, target, actor }].slice(-2000) });
   }
   issue(fingerprint) { this.ensureHealthy(); return this.state.issues[fingerprint] || { status: "open", fixed_version: "" }; }
+  exportEvidence() {
+    this.ensureHealthy();
+    const byIncident = new Map();
+    for (const { device_id, incident_id, confirmed_at, received_at, notes, attachments } of this.state.reports) {
+      const id = `${device_id}:${incident_id}`;
+      if (!byIncident.has(id)) byIncident.set(id, []);
+      byIncident.get(id).push({ confirmed_at, received_at, notes, attachments });
+    }
+    return byIncident;
+  }
   update(fingerprint, value, actor) {
     if (!/^[a-f0-9]{64}$/.test(fingerprint) || !value || Object.keys(value).some(k => !["status", "fixed_version"].includes(k))
       || !["open", "reproduced", "fixed"].includes(value.status) || typeof value.fixed_version !== "string"

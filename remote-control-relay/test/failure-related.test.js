@@ -12,7 +12,8 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
   const environment={PINVOU_TELEMETRY_DATA_DIR:directory,
     PINVOU_TELEMETRY_ENROLLMENT_TOKEN:"related-fixture-enrollment",
     PINVOU_TELEMETRY_DEVICE_PEPPER:"related-fixture-pepper-value",
-    PINVOU_STATS_ADMIN_PASSWORD:"related-fixture-admin"};
+    PINVOU_STATS_ADMIN_PASSWORD:"related-fixture-admin",
+    PINVOU_BEHAVIOR_ANALYTICS_PASSWORD:"related-fixture-analyst"};
   const previous=Object.fromEntries(Object.keys(environment).map(key=>[key,process.env[key]]));
   Object.assign(process.env,environment);
   t.after(()=>{
@@ -40,6 +41,11 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
   const receipt=seed.appendBehaviorEvents(device,events);
   assert(receipt.results.every(row=>row.status==="accepted"),JSON.stringify(receipt));
   assert.equal(seed.behaviorEvents.length,4);
+  seed.failureReports.append(device, {
+    report_id: "related_export_report", incident_id: events[2].diagnostic_id,
+    collection_period_id: period, notice_version: "failure-diagnostics-v1", confirmed_at: Date.now(),
+    notes: "export fixture evidence", attachments: [{ kind: "text", content: "redacted fixture" }],
+  }, seed.behaviorEvents[2]);
   clearTimeout(seed.saveTimer);seed.saveNow();
   // New ingestion requires a trace. Exercise the defensive route through
   // stored legacy rows, while keeping the normal production loader in the path.
@@ -66,4 +72,38 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
     assert.deepEqual(detail.related.map(row=>row.id),index<2?[]:
       [incidents.find(row=>row.version===events[index===2?3:2].app_version).id]);
   }
+  const exportUrl=base+"/diagnostics/export";
+  const analyst=await fetch(base+"/login",{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({password:environment.PINVOU_BEHAVIOR_ANALYTICS_PASSWORD})});
+  assert.equal(analyst.status,200);
+  assert.equal((await fetch(exportUrl)).status,401);
+  assert.equal((await fetch(exportUrl,{headers:{cookie:analyst.headers.get("set-cookie").split(";")[0]}})).status,403);
+  assert.equal((await fetch(exportUrl+"?group_by=bad",{headers})).status,400);
+  assert.equal((await fetch(exportUrl+"?group_by=component&group_value=invalid",{headers})).status,400);
+  assert.equal((await (await fetch(exportUrl+"?group_by=component&group_value=model",{headers})).json()).groups[0].samples.length,4);
+  for(const [mode,key] of [["all","all"],["code","stream_unexpected_eof"],["component","model"],["stage","model"]]) {
+    const res=await fetch(exportUrl+`?group_by=${mode}&app_version=${events[2].app_version}`,{headers});
+    assert.equal(res.status,200);
+    assert.match(res.headers.get("content-disposition"),/attachment/);
+    assert.equal(res.headers.get("cache-control"),"no-store");
+    const content=await res.text();
+    const {groups}=JSON.parse(content);
+    assert.equal(groups.length,1);
+    assert.equal(groups[0].key,key);
+    assert.equal(groups[0].samples.length,1);
+    assert.equal(groups[0].samples[0].reports[0].notes,"export fixture evidence");
+    assert.equal(groups[0].samples[0].reports[0].attachments[0].content,"redacted fixture");
+    assert(!content.includes(device.device_id));
+    assert(!content.includes(period));
+    assert(!content.includes("session_related_fixture"));
+  }
+  const fingerprint=diagnosticFingerprint(events[0]);
+  const updated=await fetch(base+"/diagnostics/issue",{method:"POST",headers:{...headers,"content-type":"application/json","x-pinvou-diagnostics":"1"},
+    body:JSON.stringify({fingerprint,issue:{status:"fixed",fixed_version:"0.10.20"}})});
+  assert.equal(updated.status,200);
+  assert.equal((await (await fetch(base+"/behavior/failures",{headers})).json()).rows.length,0);
+  assert.equal((await (await fetch(base+"/behavior/failures?include_fixed=1",{headers})).json()).rows[0].status,"fixed");
+  assert.deepEqual((await (await fetch(base+`/diagnostics/samples?fingerprint=${fingerprint}`,{headers})).json()).incidents,[]);
+  assert.deepEqual((await (await fetch(exportUrl,{headers})).json()).groups,[]);
+  assert.equal((await (await fetch(exportUrl+"?include_fixed=1",{headers})).json()).groups[0].samples.length,4);
 });

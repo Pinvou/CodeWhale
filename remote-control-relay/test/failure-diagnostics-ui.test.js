@@ -35,6 +35,15 @@ test("admin filters drill down safely, save status, and fence delayed evidence a
     document.querySelector("#failureVersion").value="0.10.12";
     document.querySelector("#failureFilters").dispatchEvent(new Event("submit",{cancelable:true})); await tick();
     assert(requests.some(r=>r.path.includes("app_version=0.10.12")));
+    assert(document.querySelector("#diagnosticsView #errorRows"));
+    const group=document.querySelector("#failureExportGroup");
+    group.value="component";group.dispatchEvent(new Event("change"));
+    const value=document.querySelector("#failureExportValue");
+    value.value="model";value.dispatchEvent(new Event("change"));
+    const download=new URL(document.querySelector("#failureDownload").href);
+    assert.equal(download.searchParams.get("include_fixed"),"0");
+    assert.equal(download.searchParams.get("group_value"),"model");
+    assert.equal(download.searchParams.get("app_version"),"0.10.12");
     document.querySelector("[data-failure-group]").click(); await tick();
     assert(requests.some(r=>r.path.includes("/diagnostics/samples")&&r.path.includes("app_version=0.10.12")));
     document.querySelector("[data-failure-incident]").click(); await tick();
@@ -50,6 +59,7 @@ test("admin filters drill down safely, save status, and fence delayed evidence a
     assert.equal(document.querySelector("#failureEvidence").textContent,"");
     assert.equal(document.querySelector("#failureRows").children.length,0);
     assert.equal(document.querySelector("#failureAdmin").classList.contains("hidden"),true);
+    assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
   } finally {dom.window.close();}
 });
 
