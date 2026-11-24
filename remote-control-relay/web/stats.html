@@ -27,7 +27,7 @@
     .metric-filters label{display:flex;align-items:center;gap:6px;cursor:pointer;min-height:28px}.metric-filters input{width:14px;height:14px;margin:0;accent-color:var(--metric-color)}.metric-filters input:focus-visible{outline:2px solid #3267e3;outline-offset:3px}.metric-filters label:has(input:not(:checked)){color:#98a2b3}
     .period-legend{font-size:11px;gap:16px;margin-top:6px}.period-legend i{width:22px;height:0;border-top:2px solid #778399;border-radius:0}.period-legend .previous-key{border-top-style:dashed;opacity:.5}
     .chart-tooltip .comparison-label{margin-top:8px;font-size:11px;color:#778399}
-    .diagnostic-cards{display:grid;gap:14px}.failure-filters .failure-checkbox{display:flex;align-items:center;gap:6px;flex:0 0 auto;min-height:38px}.failure-filters .failure-checkbox.hidden{display:none}.failure-filters .failure-checkbox input{width:auto;height:auto;margin:0}.failure-export{margin:0 22px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.failure-export a{text-decoration:none}.failure-export select{font:inherit;color:inherit}
+    .diagnostic-cards{display:grid;gap:14px}.failure-filters .failure-checkbox{display:flex;align-items:center;gap:6px;flex:0 0 auto;min-height:38px}.failure-filters .failure-checkbox input{width:auto;height:auto;margin:0}.failure-export{margin:0 22px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.failure-export.hidden,#diagnosticsErrorStatus.hidden{display:none}.failure-export a{text-decoration:none}.failure-export select{font:inherit;color:inherit}
     .failure-filters,.failure-issue-form{display:flex;flex-wrap:wrap;align-items:end;gap:12px}.failure-filters{padding:4px 22px 16px;border-bottom:1px solid var(--line)}.failure-filters label,.failure-issue-form label{display:grid;gap:7px;flex:1 1 140px;min-width:0;color:#718096;font-size:12px}.failure-filters input,.failure-filters select,.failure-issue-form input,.failure-issue-form select{width:100%;min-width:0;height:38px;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:#f8fafc;color:#59667c;font:inherit;outline:none}.failure-filters :is(input,select):focus,.failure-issue-form :is(input,select):focus{border-color:#b7c8eb;background:#fff;box-shadow:0 0 0 3px rgba(50,103,227,.1)}.failure-apply{height:38px;background:#edf3ff;color:var(--blue);border-color:#c5d4f5;white-space:nowrap}.failure-status{padding:0 22px;color:var(--muted);font-size:12px;line-height:1.6}#failureAdmin.hidden{display:none}#failurePanel{margin-bottom:16px}#failurePanel table{min-width:1040px}#failurePanel td{line-height:1.8}#failurePanel td:first-child{white-space:normal;min-width:200px;overflow-wrap:anywhere}.failure-samples{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0;max-height:240px;overflow:auto}.failure-samples button{text-align:left;white-space:normal;overflow-wrap:anywhere}.failure-samples button[aria-pressed="true"]{background:#edf3ff;border-color:#c5d4f5;color:var(--blue)}.failure-issue-form{padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.failure-issue-form label{flex:0 1 220px}.failure-evidence{margin:16px 0 0;padding:16px;border:1px solid var(--line);border-radius:12px;background:#f8fafc;color:#53627a;font-size:12px;line-height:1.7;max-height:440px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.failure-evidence:empty{display:none}#failureImages{display:grid;gap:12px;margin-top:12px}@media(max-width:680px){.failure-filters label,.failure-issue-form label{flex:1 1 100%}.failure-apply{width:100%}#diagnosticsView .table-head{flex-wrap:wrap;gap:12px}}
   </style>
   <style>
@@ -56,6 +56,7 @@
       outline-offset: 2px;
       border-radius: 4px;
     }
+    #failureFixedFilter.hidden{display:none}
   </style>
 </head>
 <body>
@@ -429,6 +430,7 @@
     try{
       const session=await api('session');
       if(!isCurrent())return;
+      if(!state.role)failureLogoutPending=false;
       if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
       state.role=session.role;
       const diagnosticsRefresh=manual&&state.view==='diagnostics';
@@ -464,7 +466,7 @@
   $('deviceSearch').addEventListener('input',event=>{state.query=event.target.value.trim();renderDevices()});
   document.querySelectorAll('th.sortable[data-sort]').forEach(header=>header.addEventListener('click',()=>{const sort=header.dataset.sort;if(state.deviceSort===sort)state.deviceSortDirection=state.deviceSortDirection==='desc'?'asc':'desc';else{state.deviceSort=sort;state.deviceSortDirection='desc'}renderDevices()}));
   $('statusFilter').addEventListener('click',()=>{state.status=state.status==='all'?'online':state.status==='online'?'offline':'all';$('statusFilter').textContent={all:'全部状态⌄',online:'仅在线⌄',offline:'仅离线⌄'}[state.status];renderDevices()});
-  let failureRevision=0,selectedFailure=null,appliedFailureParams=null,failureExportGroups={};
+  let failureRevision=0,selectedFailure=null,appliedFailureParams=null,failureExportGroups={},failureLogoutPending=false;
   function syncFailureExport(){
     const visible=state.role==='operations_admin'&&appliedFailureParams!==null;
     $('failureExport').classList.toggle('hidden',!visible);
@@ -482,7 +484,15 @@
     select.replaceChildren(new Option('所有分组',''),...groups.map(group=>new Option(group,group)));
     syncFailureExport();
   }
-  function clearFailureExport(){appliedFailureParams=null;failureExportGroups={};$('failureExportEvidence').checked=false;syncFailureExport()}
+  function clearFailureExport(){
+    appliedFailureParams=null;
+    failureExportGroups={};
+    $('failureExportGroup').value='all';
+    $('failureExportValue').replaceChildren();
+    $('failureExportValueLabel').hidden=true;
+    $('failureExportEvidence').checked=false;
+    syncFailureExport();
+  }
   $('failureExportGroup').addEventListener('change',updateFailureExportGroups);
   $('failureExportValue').addEventListener('change',syncFailureExport);
   $('failureExportEvidence').addEventListener('change',syncFailureExport);
@@ -490,6 +500,7 @@
   async function diagnosticApi(path,options,revision){try{return await api(path,options)}catch(error){if(revision!==failureRevision)throw error;if(error.message==='unauthorized')showLogin();else if(error.message==='forbidden'){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='权限已改变，请刷新后重试。'}throw error}}
   function failureFilterParams(){return new URLSearchParams({include_fixed:$('failureIncludeFixed').checked?'1':'0',days:$('failureDays').value,app_version:$('failureVersion').value.trim(),diagnostic_code:$('failureCode').value.trim(),provider_key:$('failureProvider').value.trim(),platform:$('failurePlatform').value,mode:$('failureMode').value})}
   async function loadFailures(){
+    if(failureLogoutPending)return null;
     const revision=++failureRevision;clearFailureDetail();$('failureFixedFilter').classList.toggle('hidden',state.role!=='operations_admin');$('failureRows').replaceChildren();$('failurePanel').setAttribute('aria-busy','true');$('failureStatus').textContent='加载中…';
     const params=failureFilterParams();
     try{const report=await diagnosticApi(`behavior/failures?${params}`,undefined,revision);if(revision!==failureRevision)return null;
@@ -521,7 +532,7 @@
     }catch{if(revision===failureRevision)$('failureEvidence').textContent='证据读取失败或已过期。'}
   });
   $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})},revision);if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
-  $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
+  $('logout').addEventListener('click',()=>{failureLogoutPending=true;failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
   $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});

@@ -100,7 +100,8 @@ test("analysts receive aggregates and cannot trigger admin evidence through a fo
     document.querySelector("#failureFilters").dispatchEvent(new Event("submit",{cancelable:true})); await tick();
     assert.equal(document.querySelector("[data-failure-group]"),null);
     const button=document.createElement("button");button.dataset.failureGroup=fingerprint;document.querySelector("#failureRows").append(button);button.click();await tick();
-    assert.equal(document.querySelector("#failureFixedFilter").classList.contains("hidden"),true);
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureExport")).display,"none");
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureFixedFilter")).display,"none");
     assert.equal(requests.some(r=>r.path.includes("/diagnostics/")),false);
     assert.equal(document.querySelector("#failureAdmin").classList.contains("hidden"),true);
   }finally{dom.window.close();}
@@ -279,3 +280,36 @@ for (const role of ["operations_admin", "behavior_analyst"]) {
     } finally {dom.window.close();}
   });
 }
+
+test("logging out clears administrator-only diagnostic export options", async () => {
+  const {dom,requests}=dashboard("operations_admin");
+  try {
+    const { document, Event }=dom.window;
+    await tick();
+    document.querySelector('[data-view="diagnostics"]').click();
+    await tick();
+    const dimension=document.querySelector("#failureExportGroup");
+    const value=document.querySelector("#failureExportValue");
+    dimension.value="stage";
+    dimension.dispatchEvent(new Event("change"));
+    assert(Array.from(value.options).some(option => option.value==="output"));
+    const fetch=dom.window.fetch;
+    let releaseLogout;
+    const logout=new Promise(resolve=>{releaseLogout=resolve;});
+    dom.window.fetch=async (url,options)=>{
+      if(String(url).endsWith("/logout"))await logout;
+      return fetch(url,options);
+    };
+    const before=requests.filter(request=>request.path.includes("/behavior/failures")).length;
+    document.querySelector("#logout").click();
+    document.querySelector("#failureFilters").dispatchEvent(new Event("submit",{cancelable:true}));
+    await tick();
+    assert.equal(requests.filter(request=>request.path.includes("/behavior/failures")).length,before);
+    releaseLogout();
+    await tick();
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureExport")).display,"none");
+    assert.equal(value.options.length,0);
+    assert.equal(document.querySelector("#failureExportValueLabel").hidden,true);
+    assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
+  } finally {dom.window.close();}
+});

@@ -7,13 +7,13 @@ const event = (index, extra = {}) => ({event_id:`timeline_event_${index}`,device
   collection_period_id:"period_fixture",turn_id:"turn_fixture",attempt_id:"attempt_fixture",
   event_name:"tool_call_completed",occurred_at:1000+index*100,...extra});
 
-for (const shared of [false, true]) test(`bulk evidence indexes ${shared ? "shared" : "distinct"} lifecycles on the same installation`, async () => {
+for (const scenario of ["distinct turns", "same attempt", "distinct attempts"]) test(`bulk evidence indexes ${scenario} on the same installation`, async () => {
   const count = 2048;
   let turnReads = 0;
   const cases = Array.from({length: count}, (_, index) => event(index, {
     diagnostic_id: `sample_${index}`, diagnostic_code: "process_failed", diagnostic_component: "tool",
-    turn_id: shared ? "shared_turn" : `turn_${index}`,
-    attempt_id: shared ? "shared_attempt" : `attempt_${index}`,
+    turn_id: scenario === "distinct turns" ? `turn_${index}` : "shared_turn",
+    attempt_id: scenario === "same attempt" ? "shared_attempt" : `attempt_${index}`,
   }));
   const events = cases.flatMap((incident, index) => {
     const terminal = event(count + index, {
@@ -23,6 +23,9 @@ for (const shared of [false, true]) test(`bulk evidence indexes ${shared ? "shar
     Object.defineProperty(terminal, "turn_id", { get() { turnReads++; return turn; } });
     return [incident, terminal];
   });
+  if (scenario === "distinct attempts") {
+    events.splice(1, 0, event(count * 2, { turn_id: "shared_turn", attempt_id: undefined, occurred_at: cases[0].occurred_at }));
+  }
   const reports = { audit() {}, exportEvidence() { return new Map(); } };
   const output = [];
   for await (const chunk of failureExport(events, {now: 1_000_000}, {groupBy: "all"}, reports, "actor", e => e.diagnostic_id)) {
@@ -30,7 +33,8 @@ for (const shared of [false, true]) test(`bulk evidence indexes ${shared ? "shar
   }
   const samples = JSON.parse(output.join("")).groups[0].samples;
   assert.equal(samples.length, count);
-  assert(samples.every(sample => sample.timeline_context.total_events === (shared ? count * 2 : 2)
+  const expectedTotal = { "distinct turns": 2, "same attempt": count * 2, "distinct attempts": 3 }[scenario];
+  assert(samples.every(sample => sample.timeline_context.total_events === expectedTotal
     && sample.timeline_context.task_terminal_included));
   for (const index of [0, count / 2, count - 1]) {
     const {timeline, timeline_context} = samples[index];

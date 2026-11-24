@@ -165,53 +165,68 @@ export function failureSamples(events, fingerprint, filters = {}, include = () =
     .sort((a, b) => Number(b.diagnostic_sampled !== false) - Number(a.diagnostic_sampled !== false) || b.occurred_at - a.occurred_at).slice(0, 50);
 }
 
-function timelineKey(event) {
+function timelineScope(event) {
   const execution = diagnosticExecutionKey(event);
-  if (execution) {
-    return event.device_id && event.collection_period_id
-      ? JSON.stringify([event.collection_period_id, "execution", execution])
-      : null;
-  }
-  for (const [kind, id] of [["turn", event.turn_id], ["attempt", event.attempt_id], ["operation", event.operation_id]]) {
-    if (id) return JSON.stringify([event.collection_period_id, kind, id]);
-  }
+  if (execution) return event.device_id && event.collection_period_id ? ["execution", execution] : null;
+  if (event.turn_id) return event.attempt_id
+    ? ["turn-attempt", event.turn_id, event.attempt_id] : ["turn", event.turn_id];
+  if (event.attempt_id) return ["attempt", event.attempt_id];
+  if (event.operation_id) return ["operation", event.operation_id];
   return null;
 }
 
 function diagnosticHistory(events, groupedSamples) {
+  const keyFor = (event, scope) => JSON.stringify([event.collection_period_id, ...scope]);
+  const sharedScope = scope => scope[0] === "turn-attempt" ? ["turn-unscoped", scope[1]] : null;
   const byDevice = new Map();
   for (const samples of groupedSamples.values()) for (const event of samples) {
-    const key = timelineKey(event);
-    if (!key) continue;
+    const scope = timelineScope(event);
+    if (!scope) continue;
     if (!byDevice.has(event.device_id)) byDevice.set(event.device_id, new Map());
     const buckets = byDevice.get(event.device_id);
-    if (!buckets.has(key)) buckets.set(key, []);
+    const addBucket = scope => {
+      const key = keyFor(event, scope);
+      if (!buckets.has(key)) buckets.set(key, []);
+    };
+    addBucket(scope);
+    const shared = sharedScope(scope);
+    if (shared) addBucket(shared);
   }
-  for (const event of events) {
+  const sourceOrder = new Map();
+  for (const [index, event] of events.entries()) {
     const buckets = byDevice.get(event.device_id);
     if (!buckets) continue;
-    const add = (kind, id) => {
-      if (id) buckets.get(JSON.stringify([event.collection_period_id, kind, id]))?.push(event);
-    };
-    add("turn", event.turn_id);
-    add("attempt", event.attempt_id);
-    add("operation", event.operation_id);
-    add("execution", event.execution_task_key);
-    if (event.remote_role === "controlled" && event.remote_task_key !== event.execution_task_key) {
-      add("execution", event.remote_task_key);
+    const add = scope => buckets.get(keyFor(event, scope))?.push(event);
+    const { turn_id: turn, attempt_id: attempt, operation_id: operation } = event;
+    if (turn) {
+      add(["turn", turn]);
+      add(attempt ? ["turn-attempt", turn, attempt] : ["turn-unscoped", turn]);
     }
+    if (attempt) add(["attempt", attempt]);
+    if (operation) add(["operation", operation]);
+    if (event.execution_task_key) add(["execution", event.execution_task_key]);
+    if (event.remote_role === "controlled" && event.remote_task_key && event.remote_task_key !== event.execution_task_key) {
+      add(["execution", event.remote_task_key]);
+    }
+    sourceOrder.set(event, index);
   }
   const prepared = new WeakMap();
   return incident => {
-    const events = byDevice.get(incident.device_id)?.get(timelineKey(incident));
-    if (!events) return failureTimeline([], incident);
-    const attempt = incident.turn_id && !diagnosticExecutionKey(incident) ? incident.attempt_id || null : null;
-    let previous = prepared.get(events);
-    if (!previous || previous.attempt !== attempt || !previous.history.positions.has(incident)) {
-      previous = { attempt, history: collectFailureHistory(events, incident) };
-      prepared.set(events, previous);
+    const scope = timelineScope(incident);
+    const buckets = byDevice.get(incident.device_id);
+    const exact = scope && buckets?.get(keyFor(incident, scope));
+    if (!exact) return failureTimeline([], incident);
+    let history = prepared.get(exact);
+    if (!history?.positions.has(incident)) {
+      const shared = sharedScope(scope);
+      const common = shared && buckets.get(keyFor(incident, shared));
+      // Both lists retain source order. Sort their two runs together so equal
+      // timestamps and duplicate IDs follow the single-incident projection.
+      const rows = common?.length ? [...exact, ...common].sort((a, b) => sourceOrder.get(a) - sourceOrder.get(b)) : exact;
+      history = collectFailureHistory(rows, incident);
+      prepared.set(exact, history);
     }
-    return projectFailureTimeline(previous.history, incident);
+    return projectFailureTimeline(history, incident);
   };
 }
 
