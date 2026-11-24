@@ -40,6 +40,14 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # humantime unmaintained - transitive via cucumber (dev-only), no safe
+    # upgrade (2.4.0 is latest). Published 2026-11-17, after the fork gate's
+    # last green advisory run.
+    "RUSTSEC-2026-0542",
+    # chrono unmaintained - direct workspace dependency (nine crates) plus
+    # oauth2 and rmcp; migrating to jiff/time is a dedicated refactor, not a
+    # dep-sweep item. Waived until that migration lands.
+    "RUSTSEC-2026-0543",
 ]
 
 [bans]

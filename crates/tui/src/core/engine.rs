@@ -977,6 +977,8 @@ impl Drop for ReservedSteer {
 #[derive(Clone)]
 pub struct EngineHandle {
     run_completion: Option<tokio::sync::watch::Receiver<Option<EngineRunCompletion>>>,
+    // Process-local cache retirement, not a model/user/wire operation.
+    idle_retirement: Option<mpsc::Sender<idle_shutdown::IdleRetirement>>,
     /// Send operations to the engine
     pub tx_op: mpsc::Sender<Op>,
     /// Receive events from the engine
@@ -1199,7 +1201,7 @@ pub struct Engine {
     /// remains the I/O authority while typed routes still validate receipts,
     /// endpoint metadata, and budgets.
     model_client_injected: bool,
-    deepseek_client_error: Option<String>,
+    deepseek_client_error: Option<ErrorEnvelope>,
     api_key_env_only_recovery: Option<String>,
     session: Session,
     /// One lazy, session-scoped working kernel for inline `repl` blocks.
@@ -1274,6 +1276,7 @@ pub struct Engine {
     active_route_declared_limits: Option<codewhale_config::route::RouteLimits>,
     active_route_capabilities: codewhale_config::route::RouteCapabilities,
     rx_op: mpsc::Receiver<Op>,
+    rx_idle_retirement: mpsc::Receiver<idle_shutdown::IdleRetirement>,
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
     compaction_cancellation: Arc<StdMutex<CompactionCancellationState>>,
     /// Clone of the op-channel sender, so the engine can self-dispatch ops
@@ -1309,6 +1312,7 @@ pub struct Engine {
     /// delivery.
     delivered_subagent_completion_ids: HashSet<String>,
     cancel_token: CancellationToken,
+    model_recovery_interrupted: bool,
     shared_cancel_token: SharedCancelToken,
     /// Latched reason for the current cancellation, mirrored to
     /// `EngineHandle::cancel_reason`. Read by `approval.rs` when
@@ -1574,6 +1578,7 @@ const SHELL_WAKE_POLL_MS: u64 = 750;
 
 enum EngineRunInput {
     Operation(Box<Op>),
+    IdleRetirement(idle_shutdown::IdleRetirement),
     SubAgentCompletion(SubAgentCompletion),
     /// A background shell job finished while the engine sat idle with an
     /// active goal. Shell completion is pull-only (no channel), so without
@@ -1897,6 +1902,20 @@ impl Engine {
         self.config.model.clone_from(&self.session.model);
     }
 
+    /// Ancillary controls need the concrete HTTP client even when turn I/O
+    /// uses an injected model. Preserve its safe host-setup receipt while
+    /// retaining the legacy generic diagnostic for other unavailable clients.
+    fn concrete_client_unavailable_error(&self, action: &str) -> ErrorEnvelope {
+        let mut error = self
+            .deepseek_client_error
+            .as_ref()
+            .filter(|error| error.code == "model_transport_setup")
+            .cloned()
+            .unwrap_or_else(|| ErrorEnvelope::fatal_auth("API client not configured"));
+        error.message = format!("{action}: {}", error.message);
+        error
+    }
+
     /// Activate a structurally resolved route at the engine boundary. Normal
     /// engines construct the concrete client before any turn state changes.
     /// Embedders/tests that explicitly injected a provider-neutral client keep
@@ -1905,9 +1924,9 @@ impl Engine {
     fn install_resolved_runtime_route(
         &mut self,
         mut route: ResolvedRuntimeRoute,
-    ) -> Result<(), String> {
+    ) -> Result<(), ErrorEnvelope> {
         if !self.model_client_injected {
-            self.install_validated_runtime_route(route.validate()?);
+            self.install_validated_runtime_route(route.validate_with_error_envelope()?);
             return Ok(());
         }
 
@@ -1943,7 +1962,7 @@ impl Engine {
             }
             Err(err) => {
                 self.deepseek_client = None;
-                self.deepseek_client_error = Some(err.to_string());
+                self.deepseek_client_error = Some(ErrorEnvelope::from_client_setup_error(&err));
             }
         }
         self.session.model = model;
@@ -2238,6 +2257,10 @@ impl Engine {
         }
 
         let (tx_op, rx_op) = mpsc::channel(ENGINE_OP_CHANNEL_CAPACITY);
+        // Capacity 1 keeps at most one retirement proposal in flight: a second
+        // concurrent host blocks in `send` until this boundary dequeues the
+        // first, which is what serializes proposals. Do not raise it.
+        let (idle_retirement, rx_idle_retirement) = mpsc::channel(1);
         let (tx_event, rx_event) = mpsc::channel(256);
         let (tx_approval, rx_approval) = mpsc::channel(64);
         let (tx_user_input, rx_user_input) = mpsc::channel(32);
@@ -2275,7 +2298,7 @@ impl Engine {
         // Create clients for both providers
         let (deepseek_client, deepseek_client_error) = match DeepSeekClient::new(api_config) {
             Ok(client) => (Some(client), None),
-            Err(err) => (None, Some(err.to_string())),
+            Err(err) => (None, Some(ErrorEnvelope::from_client_setup_error(&err))),
         };
         let model_client = deepseek_client
             .as_ref()
@@ -2517,6 +2540,7 @@ impl Engine {
             active_route_declared_limits,
             active_route_capabilities: codewhale_config::route::RouteCapabilities::default(),
             rx_op,
+            rx_idle_retirement,
             live_runtime_authority: Arc::clone(&live_runtime_authority),
             compaction_cancellation: Arc::clone(&compaction_cancellation),
             tx_op: tx_op.clone(),
@@ -2537,6 +2561,7 @@ impl Engine {
             rx_subagent_completion,
             delivered_subagent_completion_ids: HashSet::new(),
             cancel_token: cancel_token.clone(),
+            model_recovery_interrupted: false,
             shared_cancel_token: shared_cancel_token.clone(),
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
@@ -2560,6 +2585,7 @@ impl Engine {
         };
         let handle = EngineHandle {
             run_completion: None,
+            idle_retirement: Some(idle_retirement),
             tx_op,
             rx_event: Arc::new(RwLock::new(rx_event)),
             cancel_token: shared_cancel_token,
@@ -2593,7 +2619,8 @@ impl Engine {
         let (mut engine, mut handle) = Self::new(config, api_config);
         engine.model_client = Some(client);
         engine.model_client_injected = true;
-        engine.deepseek_client_error = None;
+        // The injected model is the turn I/O authority. Keep the concrete
+        // client's setup receipt for ancillary compaction/purge diagnostics.
         handle.client_preflight_required = false;
         (engine, handle)
     }
@@ -3181,11 +3208,7 @@ impl Engine {
                     // The synthetic token sits behind every operation that was
                     // already queued when it was scheduled. Drain FIFO through
                     // that token before accepting an idle child completion.
-                    return self
-                        .rx_op
-                        .recv()
-                        .await
-                        .map(|op| EngineRunInput::Operation(Box::new(op)));
+                    return self.next_operation_or_retirement().await;
                 }
 
                 if let Some(ready_at) = ready_at {
@@ -3201,6 +3224,9 @@ impl Engine {
                         // cancels this exact record in its normal handler.
                         op = self.rx_op.recv() => {
                             return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                        }
+                        Some(request) = self.rx_idle_retirement.recv() => {
+                            return Some(EngineRunInput::IdleRetirement(request));
                         }
                         () = tokio::time::sleep(ready_at.saturating_duration_since(Instant::now())) => {
                             if let Some(scheduled) = self.scheduled_goal_continuation.as_mut()
@@ -3219,11 +3245,7 @@ impl Engine {
                 // A record that is ready but could not enter the full mailbox
                 // waits for one queued control. The next loop pass retries the
                 // same coalesced token, so there is no spin or duplicate turn.
-                return self
-                    .rx_op
-                    .recv()
-                    .await
-                    .map(|op| EngineRunInput::Operation(Box::new(op)));
+                return self.next_operation_or_retirement().await;
             } else {
                 // A per-message restriction is removed from
                 // `active_turn_tool_security` after the turn returns, while
@@ -3238,6 +3260,9 @@ impl Engine {
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                    }
+                    Some(request) = self.rx_idle_retirement.recv() => {
+                        return Some(EngineRunInput::IdleRetirement(request));
                     }
                     completion = self.rx_subagent_completion.recv(), if automatic_followups_allowed => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
@@ -3434,6 +3459,29 @@ impl Engine {
             }
 
             match input {
+                EngineRunInput::IdleRetirement(request) => {
+                    if self.accept_idle_shutdown(request).await {
+                        // Committed: report both external inputs and autonomous
+                        // work observed after the sealed wait. Pending event
+                        // slots also include reserved permits, not just sends.
+                        let (residual, event_slots, shell_work) = self.retirement_residuals();
+                        if residual > 0 || event_slots > 0 || shell_work {
+                            tracing::warn!(
+                                residual,
+                                event_slots,
+                                shell_work,
+                                ops = self.rx_op.len(),
+                                subagent_completions = self.rx_subagent_completion.len(),
+                                steers = self.rx_steer.len(),
+                                pending_steers = self.pending_steers.len(),
+                                approvals = self.rx_approval.len(),
+                                user_inputs = self.rx_user_input.len(),
+                                "engine retired with residual work observed after the retirement commit"
+                            );
+                        }
+                        break;
+                    }
+                }
                 EngineRunInput::SubAgentCompletion(completion) => {
                     self.handle_idle_subagent_completion(completion).await;
                 }
@@ -4207,6 +4255,22 @@ impl Engine {
             manager.flush_pending_persist();
         }
 
+        self.shutdown_mcp_pool().await;
+    }
+
+    async fn shutdown_mcp_pool(&mut self) {
+        // Boot owns the same pool in a background task. Drain it before the
+        // shutdown pass so a late handshake cannot insert a live transport
+        // after shutdown_all (or outlive the engine's op-channel closure).
+        // Scope note: this covers the current-generation boot only. A boot
+        // already invalidated by a workspace change holds only the dropped
+        // pool — nothing it inserts later is reachable from here, and its
+        // transports die with that task.
+        if self.mcp_boot_in_flight {
+            // The host may already have stopped consuming UI events. Join
+            // the worker without draining/emitting its progress notifications.
+            self.join_mcp_boot().await;
+        }
         // #420: graceful MCP shutdown — send SIGTERM and give stdio servers
         // a brief window to exit before drop fires SIGKILL via kill_on_drop.
         // Best-effort: pool may not exist (no MCP configured) and the lock
@@ -5890,20 +5954,21 @@ impl Engine {
         let dispatched_base_url = route.candidate.endpoint().base_url.clone();
         let dispatched_product =
             crate::route_billing::capture_product(&route.config, effective_provider);
-        if let Err(err) = self.install_resolved_runtime_route(route) {
+        if let Err(mut err) = self.install_resolved_runtime_route(route) {
             self.sync_unstarted_goal_for_terminal_projection(
                 goal_objective.as_deref(),
                 goal_token_budget,
                 goal_status,
             );
-            self.reject_unstarted_submission(
-                submission_id,
-                ErrorEnvelope::fatal_auth(format!(
-                    "Cannot start the turn because its provider route is not ready: {err}"
-                )),
-            )
-            .await;
-            let outcome = SendMessageOutcome::NotStarted { error: Some(err) };
+            err.message = format!(
+                "Cannot start the turn because its provider route is not ready: {}",
+                err.message
+            );
+            self.reject_unstarted_submission(submission_id, err.clone())
+                .await;
+            let outcome = SendMessageOutcome::NotStarted {
+                error: Some(err.message),
+            };
             self.reconcile_non_completed_goal_turn(&outcome).await;
             return outcome;
         }
@@ -6125,15 +6190,13 @@ impl Engine {
         let snapshot_prompt_post = content.clone();
 
         if self.model_client.is_none() {
-            let message = self
+            let mut error = self
                 .deepseek_client_error
-                .as_deref()
-                .map(|err| format!("Failed to send message: {err}"))
-                .unwrap_or_else(|| "Failed to send message: API client not configured".to_string());
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+                .clone()
+                .unwrap_or_else(|| ErrorEnvelope::fatal_auth("API client not configured"));
+            error.message = format!("Failed to send message: {}", error.message);
+            let message = error.message.clone();
+            let _ = self.tx_event.send(Event::error(error)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -6409,16 +6472,18 @@ impl Engine {
         let foreground_children_for_turn = mailbox_for_runtime
             .as_ref()
             .map(|barrier| Arc::clone(&barrier.foreground_children));
-        let turn_result = std::panic::AssertUnwindSafe(async {
-            self.run_turn(
-                &mut turn,
-                surface,
-                foreground_children_for_turn,
-                Some(tool_surface),
-            )
-            .await
-        })
-        .catch_unwind()
+        let turn_result = crate::llm_client::rate_limit::with_turn_provider_waits(
+            std::panic::AssertUnwindSafe(async {
+                self.run_turn(
+                    &mut turn,
+                    surface,
+                    foreground_children_for_turn,
+                    Some(tool_surface),
+                )
+                .await
+            })
+            .catch_unwind(),
+        )
         .await;
         let (mut status, error) = match turn_result {
             Ok(outcome) => outcome,
@@ -6466,13 +6531,13 @@ impl Engine {
         // event can no longer arrive after `TurnComplete` and be mistaken for
         // the following turn (or lost by a runtime monitor that already
         // settled the record).
-        if let Some(barrier) = mailbox_for_runtime.take() {
-            if status == TurnOutcomeStatus::Completed {
-                barrier.park_and_flush().await;
-            } else {
-                barrier.cancel_and_flush().await;
-            }
-        }
+        settle_turn_mailbox(
+            mailbox_for_runtime.take(),
+            status,
+            std::mem::take(&mut self.model_recovery_interrupted),
+            self.cancel_token.is_cancelled(),
+        )
+        .await;
         if let Some(owner) = interactive_runtime_cost_owner.as_deref() {
             crate::cost_status::finish_runtime_usage_owner(owner);
         }
@@ -6641,16 +6706,16 @@ impl Engine {
                 .await;
             return;
         };
-        if let Err(err) = self.install_resolved_runtime_route(route) {
-            let message =
-                format!("Cannot compact context because its provider route is not ready: {err}");
+        if let Err(mut err) = self.install_resolved_runtime_route(route) {
+            err.message = format!(
+                "Cannot compact context because its provider route is not ready: {}",
+                err.message
+            );
+            let message = err.message.clone();
             self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())
                 .await;
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+            let _ = self.tx_event.send(Event::error(err)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -6679,14 +6744,12 @@ impl Engine {
             ..Usage::default()
         };
         let Some(client) = self.deepseek_client.clone() else {
-            let message = "Manual compaction unavailable: API client not configured".to_string();
+            let error = self.concrete_client_unavailable_error("Manual compaction unavailable");
+            let message = error.message.clone();
             self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())
                 .await;
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+            let _ = self.tx_event.send(Event::error(error)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -6873,12 +6936,10 @@ impl Engine {
             ..Usage::default()
         };
         let Some(client) = self.deepseek_client.clone() else {
-            let message = "Purge unavailable: API client not configured".to_string();
+            let error = self.concrete_client_unavailable_error("Purge unavailable");
+            let message = error.message.clone();
             emit_purge_failed(&self.tx_event, message.clone()).await;
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+            let _ = self.tx_event.send(Event::error(error)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -8077,7 +8138,7 @@ impl Engine {
         }
     }
 
-    async fn wait_for_mcp_boot(&mut self) {
+    async fn join_mcp_boot(&mut self) {
         if let Some(rx) = self.mcp_boot_done.as_mut() {
             while !*rx.borrow() {
                 if rx.changed().await.is_err() {
@@ -8085,6 +8146,10 @@ impl Engine {
                 }
             }
         }
+    }
+
+    async fn wait_for_mcp_boot(&mut self) {
+        self.join_mcp_boot().await;
         self.drain_mcp_boot_updates().await;
     }
 
@@ -9313,6 +9378,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     steer_control_state.begin_turn();
     let handle = EngineHandle {
         run_completion: None,
+        idle_retirement: None,
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
         cancel_token: shared_cancel_token,
@@ -9464,6 +9530,25 @@ fn terminal_turn_status_at_settlement(
         TurnOutcomeStatus::Interrupted
     } else {
         status
+    }
+}
+
+async fn settle_turn_mailbox(
+    barrier: Option<TurnMailboxBarrier>,
+    status: TurnOutcomeStatus,
+    model_recovery_interrupted: bool,
+    cancelled: bool,
+) {
+    if let Some(barrier) = barrier {
+        if status == TurnOutcomeStatus::Completed
+            || (status == TurnOutcomeStatus::Interrupted
+                && model_recovery_interrupted
+                && !cancelled)
+        {
+            barrier.park_and_flush().await;
+        } else {
+            barrier.cancel_and_flush().await;
+        }
     }
 }
 
@@ -9648,6 +9733,7 @@ impl SubAgentWiring {
 mod approval;
 mod context;
 mod handle;
+mod idle_shutdown;
 mod run_completion;
 pub use run_completion::EngineRunCompletion;
 pub mod preview;

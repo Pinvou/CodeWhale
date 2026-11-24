@@ -43,13 +43,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
+        # Gate strength aligned with upstream ci.yml: --all-targets was
+        # missing here even though the v0.9.10 release incident came from
+        # unlinted test targets, and -A clippy::collapsible_if is gone now
+        # that its last two sites were rewritten as let-chains (upstream
+        # policy: "no longer allowed"). assertions_on_constants stays the
+        # single deliberate fork allowance; it has no active triggers.
         run: >-
-          cargo clippy --workspace --all-features --locked --
+          cargo clippy --workspace --all-targets --all-features --locked --
           -D warnings
           -A clippy::uninlined_format_args
           -A clippy::too_many_arguments
           -A clippy::unnecessary_map_or
-          -A clippy::collapsible_if
           -A clippy::assertions_on_constants
       - uses: taiki-e/install-action@nextest
       - name: Test workspace
@@ -58,6 +63,33 @@ jobs:
         run: cargo test --workspace --all-features --locked --doc
       - name: Check lockfile drift
         run: git diff --exit-code -- Cargo.lock
+
+  msrv:
+    name: msrv (1.89)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' }}
+      - name: Check workspace under the declared MSRV floor
+        run: cargo +1.89.0 check --workspace --locked --all-targets --all-features
 
   gitleaks:
     name: Gitleaks
@@ -97,14 +129,16 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [check, gitleaks]
+    needs: [check, msrv, gitleaks]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require successful validation
         env:
           CHECK_RESULT: ${{ needs.check.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
           GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
         run: |
           test "$CHECK_RESULT" = success
+          test "$MSRV_RESULT" = success
           test "$GITLEAKS_RESULT" = success

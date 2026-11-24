@@ -683,6 +683,7 @@ fn authority_mutation_paths(name: &str, input: &Value) -> Result<Option<Vec<Stri
 /// Builder for constructing a `ToolRegistry` with common tools.
 pub struct ToolRegistryBuilder {
     tools: Vec<Arc<dyn ToolSpec>>,
+    vision_http_policy: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
 }
 
 /// Feature/config-dependent native Agent-mode tool surface.
@@ -724,7 +725,10 @@ impl ToolRegistryBuilder {
     /// Create a new builder.
     #[must_use]
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            vision_http_policy: None,
+        }
     }
 
     /// Add a custom tool.
@@ -1015,6 +1019,17 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(FinanceTool::new()))
     }
 
+    /// Install the host capability before registering the vision surface.
+    /// This also covers injected model clients without a DeepSeekClient.
+    #[must_use]
+    pub fn with_vision_http_policy(
+        mut self,
+        policy: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
+    ) -> Self {
+        self.vision_http_policy = policy;
+        self
+    }
+
     /// Register the `image_analyze` vision tool.
     /// Only registered when `[vision_model]` is configured in config.toml.
     #[must_use]
@@ -1024,10 +1039,13 @@ impl ToolRegistryBuilder {
         route_client: Option<DeepSeekClient>,
     ) -> Self {
         use crate::vision::tools::ImageAnalyzeTool;
-        self.with_tool(Arc::new(ImageAnalyzeTool::new_with_route_client(
-            config,
-            route_client,
-        )))
+        let tool = match self.vision_http_policy.clone() {
+            Some(policy) => {
+                ImageAnalyzeTool::new_with_host_policy(config, route_client, Some(policy))
+            }
+            None => ImageAnalyzeTool::new_with_route_client(config, route_client),
+        };
+        self.with_tool(Arc::new(tool))
     }
 
     /// Include request_user_input tool.
@@ -1453,27 +1471,9 @@ struct McpToolAdapter {
 }
 
 fn is_mcp_read_helper(name: &str) -> bool {
-    matches!(
-        name,
-        "list_mcp_resources"
-            | "list_mcp_resource_templates"
-            | "mcp_read_resource"
-            | "read_mcp_resource"
-            | "mcp_get_prompt"
-            // The host's first-party session-reader surface (a bundled
-            // read-only MCP server, key "session-reader"): L0 transcript
-            // reads with a server-side contract — cursor-paginated,
-            // completed-turns-only, per-item truncation, isolated
-            // session-id prefixes refused — so it is genuinely read-only
-            // and misclassifying it as an approval-required network tool
-            // dead-ends every read-only posture (e.g. a Plan-pinned aux
-            // lane whose sole tool is the scoped read) before execution.
-            // Exact-name matching keeps prefixed impostors
-            // ("mcp_session-reader_read_session_export") on the
-            // approval-required side.
-            | "mcp_session-reader_read_session"
-            | "mcp_session-reader_list_sessions"
-    )
+    // Shared with the engine preparation path so both lanes classify
+    // identically; see `MCP_READ_HELPER_TOOLS` for the contract.
+    crate::mcp::is_mcp_read_helper(name)
 }
 
 #[async_trait::async_trait]
@@ -1494,7 +1494,7 @@ impl ToolSpec for McpToolAdapter {
 
     fn capabilities(&self) -> Vec<ToolCapability> {
         // Conservatively treat MCP tools as requiring approval and
-        // network access unless they're known discovery helpers.
+        // network access unless they're known read-only helpers.
         if is_mcp_read_helper(&self.name) {
             vec![ToolCapability::ReadOnly]
         } else {
@@ -1511,7 +1511,7 @@ impl ToolSpec for McpToolAdapter {
     }
 
     fn defer_loading(&self) -> bool {
-        // Discovery helpers stay loaded; everything else is deferred.
+        // Read-only helpers stay loaded; everything else is deferred.
         !is_mcp_read_helper(&self.name)
     }
 
