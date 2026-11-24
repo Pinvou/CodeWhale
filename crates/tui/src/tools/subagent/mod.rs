@@ -7704,7 +7704,11 @@ impl SubAgentManager {
                 // operator-explicit, so a resume can never replace a fresh
                 // dual-stamped profile with an ambiguous one whose empty
                 // explicit set would let the bounded read-only bash
-                // carve-out override an untraceable restriction.
+                // carve-out override an untraceable restriction. A record
+                // stamped by the dual-ledger save skips the migration: its
+                // empty explicit set is meaningful provenance (clamp or
+                // authority rules stay liftable exactly as before the
+                // save — review 6033553944), not an ambiguity.
                 let preserved = preserved.with_ambiguous_denies_treated_explicit();
                 runtime.worker_profile = preserved.clone();
                 preserved
@@ -7721,7 +7725,10 @@ impl SubAgentManager {
                 runtime.worker_profile = profile.clone();
                 profile
             }
-        };
+        }
+        // Persisted with the spec, so a later resume can tell a stamped
+        // dual-ledger record from a genuinely ambiguous schema-1 one.
+        .with_persisted_explicit_denies();
         // A child spawned from inside an isolated worktree without its own
         // `worktree`/`cwd` request keeps that worktree (or a path inside it)
         // as its workspace, so its writes are confined there exactly like its

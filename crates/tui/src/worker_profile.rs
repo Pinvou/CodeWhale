@@ -175,6 +175,19 @@ pub struct WorkerRuntimeProfile {
     /// the same way it unions `denied_tools`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub explicit_denied_tools: Vec<String>,
+    /// Whether `explicit_denied_tools` was persisted together with this
+    /// record by the dual-ledger save. Schema-1 records never serialized the
+    /// explicit ledger, so a deserialized empty set proves nothing about
+    /// provenance and a resume must treat every deny as potentially
+    /// operator-asked (the conservative migration). Records stamped by the
+    /// current save carry `true`: their empty explicit set is **meaningful
+    /// provenance** — every `denied_tools` entry is a clamp or
+    /// authority-derived rule the bounded carve-outs may lift (review
+    /// 6033553944: promoting it on resume removed a bash surface the child
+    /// had before the save). Old payloads deserialize `false`, so the
+    /// legacy migration keeps its conservative behavior.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_denies_persisted: bool,
     /// Remaining nested-delegation budget. A worker may spawn children while
     /// `max_spawn_depth > 0`; each level decrements it. Clamped to the workspace
     /// ceiling.
@@ -263,6 +276,9 @@ impl WorkerRuntimeProfile {
             // wins via `derive_child`, same as every other role.
             reasoning_effort: matches!(role, FleetRole::Consultant).then(|| "high".to_string()),
             denied_tools: Vec::new(),
+            // A freshly constructed role posture has no persisted-ledger
+            // provenance yet; the save site stamps it.
+            explicit_denies_persisted: false,
             explicit_denied_tools: Vec::new(),
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
             max_steps: Self::default_max_steps(role.clone()),
@@ -293,10 +309,29 @@ impl WorkerRuntimeProfile {
     /// read-only bash carve-out may override the automatic role clamps,
     /// never an untraceable restriction. Records that already carry explicit
     /// entries (fresh dual-stamped saves) pass through unchanged.
+    ///
+    /// A record stamped `explicit_denies_persisted` (saved by the dual-ledger
+    /// code) skips the migration entirely: its empty explicit set is
+    /// meaningful provenance — clamp/authority rules stay liftable by the
+    /// carve-outs exactly as they were before the save (review 6033553944).
     pub fn with_ambiguous_denies_treated_explicit(mut self) -> Self {
+        if self.explicit_denies_persisted {
+            return self;
+        }
         if self.explicit_denied_tools.is_empty() && !self.denied_tools.is_empty() {
             self.explicit_denied_tools = self.denied_tools.clone();
+            // The promoted ledger is now recorded on this profile and is
+            // persisted with it, so later resumes see a non-ambiguous record.
+            self.explicit_denies_persisted = true;
         }
+        self
+    }
+
+    /// Stamp this profile as carrying a persisted explicit ledger. Applied
+    /// at the save site for every profile the dual-ledger code constructed.
+    #[must_use]
+    pub fn with_persisted_explicit_denies(mut self) -> Self {
+        self.explicit_denies_persisted = true;
         self
     }
 
@@ -355,6 +390,8 @@ impl WorkerRuntimeProfile {
                 .or_else(|| self.reasoning_effort.clone()),
             denied_tools,
             explicit_denied_tools,
+            explicit_denies_persisted: self.explicit_denies_persisted
+                || requested.explicit_denies_persisted,
             max_spawn_depth,
             max_steps: requested.max_steps,
             background: requested.background,
@@ -460,6 +497,71 @@ mod tests {
         assert_eq!(
             untouched.explicit_denied_tools, fresh.explicit_denied_tools,
             "a record carrying explicit provenance passes through unchanged"
+        );
+    }
+
+    /// (review 6033553944: resuming an ordinary workflow removed a
+    /// capability that was available before the save) The exact-Fleet
+    /// workflow path installs its derived authority clamp in `denied_tools`
+    /// WITHOUT operator bookkeeping — the bounded surfaces the authority
+    /// deliberately kept must stay liftable by the carve-outs. A record
+    /// saved by the dual-ledger code carries that provenance in its empty
+    /// explicit set; the full save → deserialize → resume lifecycle must
+    /// preserve it, while a genuine schema-1 payload (field absent) still
+    /// promotes.
+    #[test]
+    fn stamped_resume_preserves_the_liftable_clamp_across_save_and_reopen() {
+        // The exact-Fleet authority clamp shape: `bash` denied as a clamp,
+        // explicit ledger empty (the authority bypass is why it is empty).
+        let saved =
+            WorkerRuntimeProfile::for_role(FleetRole::Verifier).with_persisted_explicit_denies();
+        let mut saved = saved;
+        saved.denied_tools = vec!["bash".to_string()];
+        saved.explicit_denied_tools.clear();
+
+        // Full lifecycle: persist → load (serde round trip is the storage
+        // contract) → the resume-side migration sees the stamp and must NOT
+        // promote the clamp into the operator ledger.
+        let json = serde_json::to_string(&saved).expect("persist the spec profile");
+        let reloaded: WorkerRuntimeProfile =
+            serde_json::from_str(&json).expect("reload the spec profile");
+        assert!(
+            reloaded.explicit_denies_persisted,
+            "the stamp must survive the storage round trip"
+        );
+        let resumed = reloaded.with_ambiguous_denies_treated_explicit();
+        assert!(
+            !resumed.explicit_denied_tools.contains(&"bash".to_string()),
+            "a stamped record's clamp stays liftable across save and resume: \
+             {:?}",
+            resumed.explicit_denied_tools
+        );
+
+        // The same shape WITHOUT the stamp — a schema-1 payload (field
+        // absent) deserializes unstamped, and its genuinely ambiguous deny
+        // must still promote (the conservative migration is unchanged).
+        let mut legacy_json = serde_json::to_value(&saved).expect("legacy shape");
+        // A schema-1 payload omits the ledger-stamp field entirely (the
+        // serde default is what a missing field deserializes to).
+        legacy_json
+            .as_object_mut()
+            .expect("object payload")
+            .remove("explicit_denies_persisted");
+        let legacy: WorkerRuntimeProfile =
+            serde_json::from_value(legacy_json).expect("reload a schema-1 payload");
+        assert!(!legacy.explicit_denies_persisted);
+        let migrated = legacy.with_ambiguous_denies_treated_explicit();
+        assert!(
+            migrated.explicit_denied_tools.contains(&"bash".to_string()),
+            "a schema-1 payload's ambiguous deny still promotes: {:?}",
+            migrated.explicit_denied_tools
+        );
+
+        // The promotion itself re-stamps: its ledger is now recorded, so a
+        // later resume cycle cannot re-open the ambiguity.
+        assert!(
+            migrated.explicit_denies_persisted,
+            "a promoted ledger is a recorded ledger"
         );
     }
 
