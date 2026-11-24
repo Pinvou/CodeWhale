@@ -5,6 +5,28 @@
 //! while the small platform surface delegates to the real library adapters.
 
 mod platform {
+    pub mod connector_lock {
+        use std::path::Path;
+
+        pub fn registered_telemetry_cli(key: &str, program: &str, cwd: &Path) -> bool {
+            let installed = cwd.join("managed-fixture").join(super::fixture_cli_name());
+            key == "feishu"
+                && pinvou3_lib::platform::behavior_telemetry_test_support::matches_installed_connector_launcher(
+                    program, cwd, &installed, None,
+                )
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn fixture_cli_name() -> &'static str {
+        "lark-cli.cmd"
+    }
+
+    #[cfg(unix)]
+    pub fn fixture_cli_name() -> &'static str {
+        "lark-cli"
+    }
+
     pub mod telemetry {
         pub use pinvou3_lib::platform::behavior_telemetry_test_support::{
             TELEMETRY_DEFAULT_BASE_URL, TELEMETRY_ENROLLMENT_TOKEN,
@@ -93,18 +115,91 @@ mod behavior_telemetry;
 mod shell_diagnostics;
 
 #[cfg(unix)]
-fn synthetic_lark_command(folder: &std::path::Path, exit: i64) -> &'static str {
+fn synthetic_lark_command(folder: &std::path::Path, exit: i64, managed: bool) -> &'static str {
     use std::os::unix::fs::PermissionsExt;
-    let executable = folder.join("lark-cli");
+    let location = if managed {
+        folder.join("managed-fixture")
+    } else {
+        folder.to_path_buf()
+    };
+    std::fs::create_dir_all(&location).unwrap();
+    let executable = location.join(platform::fixture_cli_name());
     std::fs::write(&executable, format!("#!/bin/sh\nexit {exit}\n")).unwrap();
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    "./lark-cli"
+    if managed {
+        "./managed-fixture/lark-cli"
+    } else {
+        "./lark-cli"
+    }
 }
 
 #[cfg(windows)]
-fn synthetic_lark_command(folder: &std::path::Path, exit: i64) -> &'static str {
-    std::fs::write(folder.join("lark-cli.cmd"), format!("@exit /b {exit}\r\n")).unwrap();
-    "./lark-cli.cmd"
+fn synthetic_lark_command(folder: &std::path::Path, exit: i64, managed: bool) -> &'static str {
+    let location = if managed {
+        folder.join("managed-fixture")
+    } else {
+        folder.to_path_buf()
+    };
+    std::fs::create_dir_all(&location).unwrap();
+    std::fs::write(
+        location.join(platform::fixture_cli_name()),
+        format!("@exit /b {exit}\r\n"),
+    )
+    .unwrap();
+    if managed {
+        "./managed-fixture/lark-cli.cmd"
+    } else {
+        "./lark-cli.cmd"
+    }
+}
+
+#[test]
+fn installed_launcher_excludes_workspace_shadow_and_missing_program() {
+    use pinvou3_lib::platform::behavior_telemetry_test_support::matches_installed_connector_launcher;
+
+    let root = tempfile::tempdir().unwrap();
+    let work = root.path().join("workspace");
+    let managed = root.path().join("managed");
+    let wrong = root.path().join("earlier");
+    for directory in [&work, &managed, &wrong] {
+        std::fs::create_dir(directory).unwrap();
+    }
+    let executable = platform::fixture_cli_name();
+    let installed = managed.join(executable);
+    let path = std::env::join_paths([&wrong, &managed]).unwrap();
+    assert!(!matches_installed_connector_launcher(
+        "lark-cli",
+        &work,
+        &installed,
+        Some(&path)
+    ));
+    std::fs::write(&installed, b"fixture").unwrap();
+    assert!(matches_installed_connector_launcher(
+        "lark-cli",
+        &work,
+        &installed,
+        Some(&path)
+    ));
+    std::fs::write(wrong.join(executable), b"unrelated fixture").unwrap();
+    assert!(!matches_installed_connector_launcher(
+        "lark-cli",
+        &work,
+        &installed,
+        Some(&path)
+    ));
+    std::fs::write(work.join(executable), b"unrelated fixture").unwrap();
+    assert!(!matches_installed_connector_launcher(
+        &format!("./{executable}"),
+        &work,
+        &installed,
+        Some(&path),
+    ));
+    assert!(matches_installed_connector_launcher(
+        installed.to_str().unwrap(),
+        &work,
+        &installed,
+        Some(&path),
+    ));
 }
 
 #[tokio::test]

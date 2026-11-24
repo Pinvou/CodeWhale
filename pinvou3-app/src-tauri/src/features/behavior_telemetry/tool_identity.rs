@@ -1,9 +1,14 @@
-/// Identify a single foreground connector invocation from tool input. The
+use std::path::Path;
+
+/// Identify a single foreground connector invocation from the executed command. The
 /// shell result belongs to the whole command, so an ambiguous command stays
 /// generic. Only the returned catalog key is eligible for telemetry.
-pub(crate) fn connector_cli_key(command: &str) -> Option<&'static str> {
+pub(crate) fn connector_cli_key(
+    command: &str,
+    cwd: &Path,
+    is_installed: impl FnOnce(&str, &str, &Path) -> bool,
+) -> Option<&'static str> {
     let command = command.trim();
-    let command = shell_payload(command).unwrap_or(command);
     let (command, call_operator) = match command.strip_prefix('&') {
         Some(rest) if rest.starts_with(char::is_whitespace) => (rest.trim_start(), true),
         Some(_) => return None,
@@ -72,37 +77,36 @@ pub(crate) fn connector_cli_key(command: &str) -> Option<&'static str> {
         .iter()
         .find_map(|extension| executable.strip_suffix(extension))
         .unwrap_or(&executable);
-    match name {
-        "lark-cli" => Some("feishu"),
-        "wecom-cli" => Some("wecom"),
-        "dws" => Some("dingtalk"),
-        "tmeet" => Some("tmeet"),
-        "eip" | "eip-cli" | "eip-cli-aarch64" => Some("eip"),
-        "zhidao" | "zhidao-cli" | "zhidao-cli-aarch64" => Some("zhidao"),
-        _ => None,
-    }
-}
-
-fn shell_payload(command: &str) -> Option<&str> {
-    let (shell, rest) = command.split_once(char::is_whitespace)?;
-    let (flag, argument) = rest.trim_start().split_once(char::is_whitespace)?;
-    if !matches!(shell.rsplit('/').next()?, "bash" | "zsh" | "sh")
-        || !matches!(flag, "-c" | "-lc" | "-cl")
-    {
-        return None;
-    }
-    let body = argument.trim().strip_prefix('\'')?.strip_suffix('\'')?;
-    // Restrict unwrapping to a single literal argument with no extra shell
-    // syntax around it. The command inside is checked again as a normal input.
-    (!body.contains('\'')).then_some(body.trim())
+    let key = match name {
+        "lark-cli" => "feishu",
+        "wecom-cli" => "wecom",
+        "dws" => "dingtalk",
+        "tmeet" => "tmeet",
+        "eip" | "eip-cli" | "eip-cli-aarch64" => "eip",
+        "zhidao" | "zhidao-cli" | "zhidao-cli-aarch64" => "zhidao",
+        _ => return None,
+    };
+    is_installed(key, program, cwd).then_some(key)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::connector_cli_key;
+    use super::*;
+
+    fn installed_cli(command: &str) -> Option<&'static str> {
+        connector_cli_key(command, Path::new("."), |_, _, _| true)
+    }
 
     #[test]
     fn recognizes_only_the_executed_connector() {
+        assert_eq!(
+            connector_cli_key("./lark-cli", Path::new("."), |key, program, _| {
+                assert_eq!(key, "feishu");
+                assert_eq!(program, "./lark-cli");
+                false
+            }),
+            None
+        );
         for (command, key) in [
             (
                 "lark-cli base list --params '{\"filter\":\"a|b\"}'",
@@ -114,11 +118,10 @@ mod tests {
             ),
             ("dws calendar list", "dingtalk"),
             ("tmeet schedule list", "tmeet"),
-            ("/bin/bash -lc 'lark-cli base list'", "feishu"),
             ("/opt/local/bin/eip-cli-aarch64 status", "eip"),
             ("zhidao search \\\n --query demo", "zhidao"),
         ] {
-            assert_eq!(connector_cli_key(command), Some(key), "{command}");
+            assert_eq!(installed_cli(command), Some(key), "{command}");
         }
 
         for command in [
@@ -126,6 +129,7 @@ mod tests {
             "\"lark-cli\"",
             "wecom-cli-helper list",
             "lark-cli list || true",
+            "/bin/bash -lc 'lark-cli list'",
             "/bin/bash -lc 'lark-cli list || true'",
             "/bin/bash -lc 'lark-cli list' ; 'true'",
             "lark-cli list | sort",
@@ -135,7 +139,7 @@ mod tests {
             "lark-cli list --value \x60wecom-cli\x60",
             "lark-cli list --value 'unclosed",
         ] {
-            assert_eq!(connector_cli_key(command), None, "{command}");
+            assert_eq!(installed_cli(command), None, "{command}");
         }
     }
 }

@@ -134,7 +134,7 @@ pub(crate) async fn run_shell_producer_fixture(
         &deepseek_tui::tools::shell::SharedShellManager,
         &str, &str, &str, bool, Option<&Value>,
     ) -> Option<&'static str>,
-    connector_command: fn(&std::path::Path, i64) -> &'static str,
+    connector_command: fn(&std::path::Path, i64, bool) -> &'static str,
 ) {
     // TestHome holds the harness-wide environment lock for the entire Engine
     // lifetime. All runtime state belongs to this fixture, never the user home.
@@ -152,11 +152,12 @@ pub(crate) async fn run_shell_producer_fixture(
         (4, "if true; then", None, None),
         (5, "", None, None),
         (6, "", None, Some(7)),
+        (7, "", None, None),
     ] {
         let folder = work.path().join(format!("case_{index}"));
         std::fs::create_dir_all(&folder).unwrap();
         let command = if index >= 5 {
-            connector_command(&folder, expected_exit.unwrap_or(0))
+            connector_command(&folder, expected_exit.unwrap_or(0), index != 7)
         } else {
             command
         };
@@ -344,8 +345,8 @@ pub(crate) async fn run_shell_producer_fixture(
         let (success, error, metadata, connector_key, statuses) = observed
             .expect("fixture turn timed out")
             .expect("real default bash did not execute");
-        assert_eq!(success, matches!(index, 2 | 5));
-        assert_eq!(connector_key, (index >= 5).then_some("feishu"));
+        assert_eq!(success, matches!(index, 2 | 5 | 7));
+        assert_eq!(connector_key, matches!(index, 5 | 6).then_some("feishu"));
         assert_eq!(
             statuses.len(),
             1,

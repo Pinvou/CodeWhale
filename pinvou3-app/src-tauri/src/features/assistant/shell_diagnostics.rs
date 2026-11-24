@@ -2,6 +2,7 @@
 //! This observer never executes, consumes or reassigns a job/completion receipt.
 use deepseek_tui::tools::shell::{SharedShellManager, ShellJobSnapshot, ShellStatus};
 use serde_json::{Value, json};
+use std::path::Path;
 
 pub(crate) fn is_shell_execution_tool(name: &str) -> bool {
     matches!(name, "bash" | "exec_shell" | "task_shell_start" | "Bash")
@@ -91,9 +92,15 @@ pub(crate) fn foreground_connector_key(
     }) {
         return None;
     }
-    let mut manager = manager.lock().ok()?;
-    let jobs = manager.list_jobs_for_session(session);
-    terminal_connector_key(&jobs, session, turn, call, success)
+    let jobs = manager.lock().ok()?.list_jobs_for_session(session);
+    terminal_connector_key(
+        &jobs,
+        session,
+        turn,
+        call,
+        success,
+        crate::platform::connector_lock::registered_telemetry_cli,
+    )
 }
 
 fn terminal_connector_key(
@@ -102,15 +109,16 @@ fn terminal_connector_key(
     turn: &str,
     call: &str,
     success: bool,
+    is_installed: impl FnOnce(&str, &str, &Path) -> bool,
 ) -> Option<&'static str> {
     let job = unique_shell_job(jobs, session, turn, call)?;
     match (success, &job.status, job.exit_code) {
         (true, ShellStatus::Completed, Some(0)) => {}
-        (false, ShellStatus::Failed, Some(code)) if code != 0 => {}
+        (false, ShellStatus::Failed, Some(code)) if !matches!(code, 0 | 126 | 127) => {}
         _ => return None,
     }
     // The job stores the command actually executed after any input rewrite.
-    crate::features::behavior_telemetry::connector_cli_key(&job.command)
+    crate::features::behavior_telemetry::connector_cli_key(&job.command, &job.cwd, is_installed)
 }
 
 #[cfg(test)]
@@ -190,19 +198,19 @@ mod tests {
         terminal.exit_code = Some(0);
         let jobs = [terminal];
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "call", true),
+            terminal_connector_key(&jobs, "session", "turn", "call", true, |_, _, _| true),
             Some("wecom")
         );
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "denied", false),
+            terminal_connector_key(&jobs, "session", "turn", "denied", false, |_, _, _| true),
             None
         );
         assert_eq!(
-            terminal_connector_key(&jobs, "session", "turn", "call", false),
+            terminal_connector_key(&jobs, "session", "turn", "call", false, |_, _, _| true),
             None
         );
         assert_eq!(
-            terminal_connector_key(&[], "session", "turn", "call", false),
+            terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _| true),
             None
         );
     }

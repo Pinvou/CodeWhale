@@ -118,6 +118,105 @@ pub fn locked_cli_path(name: &str) -> Option<std::path::PathBuf> {
     Some(super::paths::assets_cli_dir(name, &pin.version).join(executable_name(name)))
 }
 
+/// Resolve the app-managed source for a registered connector. The executable
+/// name alone says nothing about a launcher in the workspace or an earlier PATH
+/// directory. Derive the location from the same layout used by the installer.
+pub(crate) fn registered_telemetry_cli(key: &str, program: &str, cwd: &std::path::Path) -> bool {
+    use std::path::{Path, PathBuf};
+
+    let installed = match key {
+        "eip" | "zhidao" => {
+            let Some(name) = Path::new(program).file_name() else {
+                return false;
+            };
+            let dir = super::paths::bundle_skills_dir().join(key).join("bin");
+            let exact = dir.join(name);
+            Some(if exact.is_file() {
+                exact
+            } else {
+                dir.join(executable_name(&name.to_string_lossy()))
+            })
+        }
+        "tmeet" => Some(PathBuf::from(
+            super::os::connector_cli_command("tmeet", "tmeet").get_program(),
+        )),
+        "feishu" | "wecom" | "dingtalk" => {
+            let bin = match key {
+                "feishu" => "lark-cli",
+                "wecom" => "wecom-cli",
+                _ => "dws",
+            };
+            locked_cli_path(bin)
+                .filter(|path| path.is_file())
+                .or_else(|| {
+                    super::paths::managed_connector_bin_dir()
+                        .map(|dir| dir.join(executable_name(bin)))
+                })
+        }
+        _ => None,
+    };
+    let path = std::env::var_os("PATH");
+    installed.is_some_and(|installed| {
+        matches_installed_connector_launcher(program, cwd, &installed, path.as_deref())
+    })
+}
+
+pub(crate) fn matches_installed_connector_launcher(
+    program: &str,
+    cwd: &std::path::Path,
+    installed: &std::path::Path,
+    path: Option<&std::ffi::OsStr>,
+) -> bool {
+    use std::path::Path;
+
+    if !installed.is_absolute() || !installed.is_file() {
+        return false;
+    }
+    let normalize = |value: &Path| super::os::platform_compat_path(&value.to_string_lossy());
+    let installed = normalize(installed);
+    let matches = |value: &Path| {
+        let value = normalize(value);
+        if cfg!(windows) {
+            value
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+                .eq(installed
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase()))
+        } else {
+            value == installed
+        }
+    };
+    let requested = Path::new(program);
+    if requested.is_absolute() || program.contains(['/', '\\']) {
+        // Explicit paths point at a single executable. Merely having the
+        // official CLI basename somewhere outside the installed path is insufficient.
+        return matches(&cwd.join(requested));
+    }
+
+    let suffixes: &[&str] = if cfg!(windows) && requested.extension().is_none() {
+        &["", ".com", ".exe", ".bat", ".cmd", ".ps1"]
+    } else {
+        &[""]
+    };
+    let directory_match = |directory: &Path| {
+        let mut found = suffixes
+            .iter()
+            .map(|suffix| directory.join(format!("{program}{suffix}")))
+            .filter(|filename| filename.is_file());
+        let first = found.next()?;
+        // Multiple plausible launchers in one directory are ambiguous.
+        Some(matches(&first) && found.all(|filename| matches(&filename)))
+    };
+    if directory_match(cwd) == Some(false) {
+        return false;
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .find_map(|directory| directory_match(&cwd.join(directory)))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
