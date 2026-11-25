@@ -1104,7 +1104,8 @@ pub(super) fn resolve_workspace_references(
     let mut unique = BTreeSet::new();
     let mut references = Vec::new();
     for raw in relative_paths {
-        let relative = normalize_relative_path(raw)?;
+        let relative = normalize_relative_path(raw)
+            .map_err(|error| super::AcpPromptValidationError(error.to_string()))?;
         // 词法判定与 preview 同约束:解析前的调用方拼写先过一次黑名单
         // (解析后落点另有一次)。
         if relative_path_crosses_blocked_component(&relative) {
@@ -1124,7 +1125,9 @@ pub(super) fn resolve_workspace_references(
             .metadata()
             .with_context(|| format!("读取工作区文件失败: {}", absolute_path.display()))?;
         if !metadata.is_file() {
-            bail!("工作区引用不是文件: {relative}");
+            bail!(super::AcpPromptValidationError(format!(
+                "工作区引用不是文件: {relative}"
+            )));
         }
         references.push(WorkspacePromptReference {
             relative_path: relative,
@@ -2930,6 +2933,23 @@ mod tests {
         let resolved = resolve_workspace_references(root.path(), &["notes.md".to_string()])
             .expect("ordinary references stay allowed");
         assert_eq!(resolved.len(), 1);
+    }
+
+    #[test]
+    fn workspace_prompt_reference_distinguishes_invalid_input_from_io_error() {
+        let root = TestDir::new("prompt-validation");
+        fs::create_dir(root.path().join("directory")).unwrap();
+        for path in ["../notes.md", "directory"] {
+            let error = resolve_workspace_references(root.path(), &[path.into()])
+                .err()
+                .expect("invalid prompt reference");
+            assert!(error.is::<super::super::AcpPromptValidationError>());
+        }
+        let error = resolve_workspace_references(root.path(), &["missing.md".into()])
+            .err()
+            .expect("missing prompt reference");
+        assert!(error.is::<std::io::Error>());
+        assert!(!error.is::<super::super::AcpPromptValidationError>());
     }
 
     /// A clean-named symlink (`notes.txt -> .env`) must be caught at the judgment on
