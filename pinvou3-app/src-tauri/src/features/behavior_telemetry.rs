@@ -75,6 +75,7 @@ const CONTROLLED_TOOL_KEYS: &[&str] = &[
     "dingtalk",
     "tmeet",
     "weather",
+    "hdm",
     "iwencai",
     "ima",
     "tencent_docs",
@@ -1834,6 +1835,9 @@ fn nonempty(value: String) -> Option<String> {
 
 #[path = "behavior_telemetry/events.rs"]
 mod events;
+#[path = "behavior_telemetry/tool_identity.rs"]
+mod tool_identity;
+pub(crate) use tool_identity::connector_cli_key;
 
 #[path = "behavior_telemetry/diagnostic_redaction.rs"]
 mod diagnostic_redaction;

@@ -854,7 +854,9 @@ test("behavior ranges refresh only the selected overview or table section", asyn
     const initialFixedMetrics = fixedMetrics();
     assert.match(document.querySelector("#retentionD30Sample").textContent, /首次成功起算 · 实时更新/);
     assert.match(document.querySelector("#retentionD30Sample").textContent, /纳入 80 · 留存 24 · 今日观察 3/);
-    assert.match(document.querySelector("#retentionD30Sample").textContent, /历史可能不完整/);
+    for (const horizon of ["D1", "D7", "D30"]) {
+      assert.doesNotMatch(document.querySelector(`#retention${horizon}Sample`).textContent, /历史可能不完整/);
+    }
 
     let requestStart = requested.length;
     document.querySelector('[data-behavior-section="toolCalls"] [data-range="today"]').click();

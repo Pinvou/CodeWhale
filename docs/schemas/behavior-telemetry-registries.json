@@ -20,7 +20,7 @@
   "tools": [
     "shell", "read_file", "edit_file", "search_files", "search", "web_search",
     "view_image", "image_generation", "load_skill", "tool_search", "request_user_input",
-    "update_plan", "feishu", "wecom", "dingtalk", "tmeet", "weather", "iwencai",
+    "update_plan", "feishu", "wecom", "dingtalk", "tmeet", "weather", "hdm", "iwencai",
     "ima", "tencent_docs", "wecom_bot", "eip", "zhidao", "qcc", "patsnap_search",
     "canva", "obsidian", "yuandian", "gongwen", "pptx", "mcp_custom", "custom", "unknown"
   ]
