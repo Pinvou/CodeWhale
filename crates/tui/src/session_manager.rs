@@ -957,25 +957,31 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
 }
 
 /// Manager for session persistence operations
+/// The process-wide archive/retention exclusion (reviews 6051224372,
+/// 6051443775, and 6057332xxx on #154): every `SessionManager` in this
+/// process addresses the same sessions directory through the shipped
+/// topologies — the boot janitor and the exact-id archive command each
+/// construct their own manager (lib.rs / session.rs) — so the exclusion
+/// between archive persistence and retention deletion must live on the
+/// storage, not on any one instance. A per-instance mutex serialized the
+/// two operations only when tests shared one manager; the shipped callers
+/// each held their own unrelated lock and the race survived. One process
+/// serves one sessions directory, so one process-wide gate closes the
+/// boundary; a second OS process sharing the directory remains outside
+/// any in-process coordination, exactly as the existing live-session
+/// registry documents.
+static RETENTION_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 #[derive(Debug)]
 pub struct SessionManager {
     /// Directory where sessions are stored
     sessions_dir: PathBuf,
+
     /// Unix seconds of the last save-triggered retention-janitor run (0 =
     /// never run this instance). Throttles the per-save scan; see
     /// [`JANITOR_MIN_INTERVAL_SECS`]. Direct
     /// [`SessionManager::cleanup_old_sessions`] calls are never throttled.
     janitor_last_run_secs: std::sync::atomic::AtomicI64,
-    /// Serializes archive persistence against retention deletion
-    /// (reviews 6051224372 / 6051443775 on #154): the janitor's
-    /// candidate selection and its deletes run inside this gate, and so
-    /// does `set_session_archived`'s load-persist-receipt sequence, so an
-    /// archive that reported success can never be deleted by a cleanup
-    /// whose list snapshot predates it — and an archive racing a cleanup
-    /// either lands before the selection (the snapshot then excludes the
-    /// record) or after the deletes (the exact-id load then misses and
-    /// reports a real error instead of a phantom success).
-    retention_gate: parking_lot::Mutex<()>,
     /// Test-only count of retention-janitor executions (throttled and
     /// direct), so tests can observe the throttle without timing races.
     #[cfg(test)]
@@ -1144,7 +1150,6 @@ impl SessionManager {
         Ok(Self {
             sessions_dir,
             janitor_last_run_secs: std::sync::atomic::AtomicI64::new(0),
-            retention_gate: parking_lot::Mutex::new(()),
             #[cfg(test)]
             janitor_runs: std::sync::atomic::AtomicU32::new(0),
         })
@@ -1730,7 +1735,10 @@ impl SessionManager {
         // load (then it already deleted, and the load below misses with a
         // real error) or runs after this receipt (its snapshot then sees
         // `archived = true` and exempts the record).
-        let _retention_gate = self.retention_gate.lock();
+        // The gate is process-wide, so the exclusion holds between the
+        // boot janitor's manager and this command's independently
+        // constructed one (review 6057332xxx).
+        let _retention_gate = RETENTION_GATE.lock();
         let mut session = self.load_session(id)?;
         if session.metadata.archived == archived {
             return Ok(session.metadata);
@@ -2007,7 +2015,10 @@ impl SessionManager {
         // whole pass makes the archive either land before the selection
         // (the snapshot then excludes the record) or after the deletes
         // (its exact-id load then misses and reports a real error).
-        let _retention_gate = self.retention_gate.lock();
+        // The gate is process-wide: the shipped callers construct separate
+        // managers for the same directory, and only a storage-scoped
+        // exclusion holds between them (review 6057332xxx).
+        let _retention_gate = RETENTION_GATE.lock();
         let sessions = self.list_sessions()?;
 
         // Cap only the non-archived history: archived records are exempt (see
@@ -3448,14 +3459,21 @@ mod tests {
         use std::time::Duration;
 
         let tmp = tempdir().expect("tempdir");
-        let manager = Arc::new(SessionManager::new(tmp.path().join("sessions")).expect("manager"));
+        let sessions_dir = tmp.path().join("sessions");
+        // The two production owners, built exactly as the shipped
+        // topologies build them: each constructs its own manager over the
+        // same directory.
+        let janitor_manager =
+            Arc::new(SessionManager::new(sessions_dir.clone()).expect("janitor manager"));
+        let archive_manager =
+            Arc::new(SessionManager::new(sessions_dir.clone()).expect("archive manager"));
         let workspace = tmp.path().join("ws");
         let extra = 5usize;
 
         // A stale candidate beyond the cap plus enough active records to
         // fill it — the exact janitor shape the reviews describe.
         write_session_record(
-            &manager,
+            &janitor_manager,
             "stale-candidate",
             &workspace,
             Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra + 1) as i64),
@@ -3464,7 +3482,7 @@ mod tests {
         for i in 0..MAX_SESSIONS + extra - 1 {
             let id = format!("active-{i:04}");
             write_session_record(
-                &manager,
+                &janitor_manager,
                 &id,
                 &workspace,
                 Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
@@ -3475,8 +3493,8 @@ mod tests {
         // The archive side holds the gate first: the janitor must block
         // until the receipt is durable — it must never delete the record
         // with a snapshot taken before the archive persisted.
-        let gate = manager.retention_gate.lock();
-        let archiver_manager = Arc::clone(&manager);
+        let gate = RETENTION_GATE.lock();
+        let archiver_manager = Arc::clone(&archive_manager);
         let archiver = std::thread::spawn(move || {
             archiver_manager
                 .set_session_archived("stale-candidate", true, SessionMutator::External)
@@ -3496,16 +3514,13 @@ mod tests {
         // The janitor now runs inside the same gate: its snapshot sees the
         // persisted `archived = true` and exempts the record. The
         // acknowledged archive — document and artifact directory — survives.
-        let artifact_dir = manager
-            .sessions_dir()
-            .join("stale-candidate")
-            .join("artifacts");
+        let artifact_dir = sessions_dir.join("stale-candidate").join("artifacts");
         fs::create_dir_all(&artifact_dir).expect("artifact dir");
         fs::write(artifact_dir.join("art.txt"), "evidence").expect("artifact file");
 
-        manager.cleanup_old_sessions().expect("cleanup");
+        janitor_manager.cleanup_old_sessions().expect("cleanup");
 
-        let remaining = manager.list_sessions().expect("list");
+        let remaining = janitor_manager.list_sessions().expect("list");
         assert!(
             remaining.iter().any(|s| s.id == "stale-candidate"),
             "an archive that returned success must survive the retention pass"
@@ -3519,10 +3534,10 @@ mod tests {
         // block until the selection-and-delete pass completes, then either
         // land on the surviving record or miss it with a real error — never
         // report success for a document the cleanup deleted.
-        let gate = manager.retention_gate.lock();
-        let janitor_manager = Arc::clone(&manager);
+        let gate = RETENTION_GATE.lock();
+        let janitor_thread_manager = Arc::clone(&janitor_manager);
         let janitor = std::thread::spawn(move || {
-            janitor_manager
+            janitor_thread_manager
                 .cleanup_old_sessions()
                 .expect("cleanup joins")
         });
