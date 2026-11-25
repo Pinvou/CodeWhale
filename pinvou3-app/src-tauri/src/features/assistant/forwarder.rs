@@ -2057,6 +2057,19 @@ pub(crate) fn spawn_event_forwarder(
                         session_id
                     );
                 }
+                // 底座 cc2adf8（CodeWhale#141）的有界模型限流恢复回执：引擎在
+                // 429 退避后自行重试并恢复。宿主暂不向前端投影恢复进度条，
+                // 仅记录诊断日志；终态仍由既有 turn/error 事件流承载。
+                Event::ModelRecovery { receipt } => {
+                    log::debug!(
+                        "[pinvou3][chat] model recovery sid={} turn={:?} state={} attempt={}/{}",
+                        session_id,
+                        receipt.turn_id,
+                        receipt.state,
+                        receipt.attempt,
+                        receipt.max_attempts
+                    );
+                }
                 Event::Status { message } => {
                     log::debug!(
                         "[pinvou3][chat] engine status sid={}: {}",

@@ -248,4 +248,99 @@ mod tests {
         assert!(locked_cli_path("no-such-cli").is_none());
         assert!(all_artifact_pins().len() >= 3, "lock 表应含全部制品");
     }
+
+    #[test]
+    fn registered_telemetry_cli_accepts_only_the_resolved_installation() {
+        use crate::platform::{
+            paths,
+            test_support::{
+                EnvRestore, managed_connector_bin_dir_or_assert_unsupported, with_temp_home,
+            },
+        };
+        use std::path::{Component, Path, PathBuf};
+
+        fn launcher(root: &Path, path: &Path) {
+            let relative = path
+                .strip_prefix(root)
+                .expect("fixture escaped its temporary home");
+            assert!(
+                relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create_new(path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+
+        with_temp_home("connector-registry", || {
+            let home_dir =
+                PathBuf::from(std::env::var("PINVOU3_HOME").expect("temporary home must be UTF-8"));
+            assert!(home_dir.is_absolute());
+            assert_eq!(paths::pinvou3_home(), home_dir);
+            let Some(managed) = managed_connector_bin_dir_or_assert_unsupported() else {
+                return;
+            };
+            let cwd = home_dir.join("work");
+            let npm_prefix = home_dir.join("npm-prefix");
+            let _npm_env = EnvRestore::capture(&["NPM_CONFIG_PREFIX"]);
+            // SAFETY: with_temp_home holds the shared ENV_LOCK through restoration.
+            unsafe { std::env::set_var("NPM_CONFIG_PREFIX", &npm_prefix) };
+            let tmeet_shim = if cfg!(windows) {
+                npm_prefix.join("tmeet.cmd")
+            } else {
+                npm_prefix.join("bin/tmeet")
+            };
+            let skill_shim = |key: &str| {
+                let filename = if cfg!(windows) {
+                    format!("{key}.cmd")
+                } else {
+                    key.to_owned()
+                };
+                paths::bundle_skills_dir()
+                    .join(key)
+                    .join("bin")
+                    .join(filename)
+            };
+            let fixtures = [
+                ("eip", skill_shim("eip")),
+                ("zhidao", skill_shim("zhidao")),
+                ("tmeet", tmeet_shim),
+                ("feishu", managed.join(executable_name("lark-cli"))),
+            ];
+            for (key, installed) in &fixtures {
+                launcher(&home_dir, installed);
+                let basename = installed.file_name().unwrap().to_str().unwrap();
+                let lookalike = cwd.join(basename);
+                launcher(&home_dir, &lookalike);
+                assert!(
+                    registered_telemetry_cli(key, installed.to_str().unwrap(), &cwd),
+                    "{key}"
+                );
+                assert!(
+                    !registered_telemetry_cli(key, lookalike.to_str().unwrap(), &cwd),
+                    "{key}"
+                );
+                assert!(!registered_telemetry_cli(key, basename, &cwd), "{key}");
+            }
+
+            let current =
+                locked_cli_path("lark-cli").expect("supported platform must pin lark-cli");
+            launcher(&home_dir, &current);
+            assert!(registered_telemetry_cli(
+                "feishu",
+                current.to_str().unwrap(),
+                &cwd
+            ));
+            assert!(!registered_telemetry_cli(
+                "feishu",
+                fixtures[3].1.to_str().unwrap(),
+                &cwd
+            ));
+        });
+    }
 }

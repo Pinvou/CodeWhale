@@ -869,6 +869,16 @@ pub fn track_tool_call_started(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
+    start_tool_call(&telemetry, session_id, turn_id, call_id, tool_name);
+}
+
+pub(super) fn start_tool_call(
+    telemetry: &BehaviorTelemetry,
+    session_id: &str,
+    turn_id: &str,
+    call_id: &str,
+    tool_name: &str,
+) {
     let Some(lease) = telemetry.current_lease() else {
         return;
     };
@@ -886,7 +896,7 @@ pub fn track_tool_call_started(
         },
         tool_type,
         lease: lease.clone(),
-        execution_task_key: super::remote_execution::tool_task_key(&telemetry, session_id, turn_id),
+        execution_task_key: super::remote_execution::tool_task_key(telemetry, session_id, turn_id),
     };
     if let Ok(mut calls) = telemetry.tool_calls.lock() {
         let key = tool_operation_key(session_id, call_id);
@@ -950,6 +960,30 @@ pub fn track_tool_call_completed_with_metadata(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
+    complete_tool_call(
+        &telemetry,
+        session_id,
+        turn_id,
+        call_id,
+        success,
+        error_category,
+        diagnostic_error,
+        diagnostic_metadata,
+        resolve_connector_key,
+    );
+}
+
+pub(super) fn complete_tool_call(
+    telemetry: &BehaviorTelemetry,
+    session_id: &str,
+    turn_id: &str,
+    call_id: &str,
+    success: bool,
+    error_category: Option<&str>,
+    diagnostic_error: Option<&str>,
+    diagnostic_metadata: Option<&Value>,
+    resolve_connector_key: impl FnOnce() -> Option<&'static str>,
+) {
     let operation = telemetry
         .tool_calls
         .lock()

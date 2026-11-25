@@ -307,6 +307,24 @@ pub(crate) async fn run_shell_producer_fixture(
                         }
                         let connector_key =
                             connector(&manager, &session, turn, &id, success, original_metadata);
+                        let veto_results = matches!(index, 5 | 6).then(|| {
+                            // Same real job and origin tuple as the attributable control.
+                            ["sandbox_denied", "blocked", "backgrounded", "canceled"].map(|flag| {
+                                let veto = serde_json::json!({ (flag): true });
+                                let allowed = serde_json::json!({ (flag): false });
+                                let vetoed =
+                                    connector(&manager, &session, turn, &id, success, Some(&veto));
+                                let attributed = connector(
+                                    &manager,
+                                    &session,
+                                    turn,
+                                    &id,
+                                    success,
+                                    Some(&allowed),
+                                );
+                                (flag, vetoed, attributed)
+                            })
+                        });
                         assert!(
                             connector(
                                 &manager,
@@ -335,6 +353,7 @@ pub(crate) async fn run_shell_producer_fixture(
                             result.err().map(|e| e.to_string()).unwrap_or_default(),
                             metadata,
                             connector_key,
+                            veto_results,
                             statuses,
                         ));
                     }
@@ -345,16 +364,18 @@ pub(crate) async fn run_shell_producer_fixture(
             observation
         })
         .await;
-        handle.send(Op::Shutdown).await.unwrap();
+        let shutdown = handle.send(Op::Shutdown).await;
         let mut running = running;
-        if tokio::time::timeout(Duration::from_secs(10), &mut running)
-            .await
-            .is_err()
-        {
-            running.abort();
-            panic!("fixture engine shutdown timed out");
+        match tokio::time::timeout(Duration::from_secs(10), &mut running).await {
+            Ok(result) => result.expect("fixture engine task failed"),
+            Err(_) => {
+                running.abort();
+                let _ = running.await;
+                panic!("fixture engine shutdown timed out");
+            }
         }
-        let (success, error, metadata, connector_key, statuses) = observed
+        shutdown.expect("fixture engine did not accept shutdown");
+        let (success, error, metadata, connector_key, veto_results, statuses) = observed
             .expect("fixture turn timed out")
             .expect("real default bash did not execute");
         assert_eq!(success, matches!(index, 2 | 5 | 7));
@@ -430,6 +451,43 @@ pub(crate) async fn run_shell_producer_fixture(
                     .keys()
                     .any(|key| key.starts_with("diagnostic_"))
             );
+        }
+        drop(outbox);
+        if let Some(veto_results) = veto_results {
+            let turn = "witness_turn_fixture";
+            // Use the same operation registration and completion as the app.
+            for (flag, vetoed, attributed) in veto_results {
+                for (denied, key, expected_key, expected_name) in [
+                    (true, vetoed, "shell", "bash"),
+                    (false, attributed, "feishu", "feishu"),
+                ] {
+                    let call = format!("veto_{flag}_{denied}");
+                    let metadata = serde_json::json!({ (flag): denied });
+                    events::start_tool_call(&telemetry, &session, turn, &call, "bash");
+                    events::complete_tool_call(
+                        &telemetry,
+                        &session,
+                        turn,
+                        &call,
+                        success,
+                        (!success).then_some("tool_error"),
+                        (!success).then_some(error.as_str()),
+                        Some(&metadata),
+                        || key,
+                    );
+                    let outbox = telemetry.outbox.lock().unwrap();
+                    let events = &outbox.records[outbox.records.len() - 2..];
+                    let started = &events[0].event;
+                    let completed = &events[1].event;
+                    assert_eq!(started["event_name"], "tool_call_started");
+                    assert_eq!(completed["event_name"], "tool_call_completed");
+                    assert_eq!(started["operation_id"], completed["operation_id"]);
+                    assert_eq!(completed["success"], success);
+                    assert_eq!(completed["tool_key"], expected_key, "flag {flag}={denied}");
+                    assert_eq!(completed["tool_name"], expected_name);
+                    assert_eq!(completed["tool_type"], "cli");
+                }
+            }
         }
     }
 }

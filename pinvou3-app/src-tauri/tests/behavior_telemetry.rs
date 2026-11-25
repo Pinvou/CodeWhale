@@ -202,14 +202,24 @@ fn launcher_attribution_requires_an_explicit_installed_path() {
     ));
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_shell_launch_errors_are_ambiguous() {
+fn shell_launch_ambiguity_preserves_platform_exit_rules() {
     use platform::connector_lock::connector_failure_exit_is_ambiguous;
 
-    assert!(connector_failure_exit_is_ambiguous(1));
-    assert!(connector_failure_exit_is_ambiguous(9009));
-    assert!(!connector_failure_exit_is_ambiguous(7));
+    for (exit_code, ambiguous) in [
+        (0, true),
+        (1, cfg!(windows)),
+        (7, false),
+        (126, true),
+        (127, true),
+        (9009, true),
+    ] {
+        assert_eq!(
+            connector_failure_exit_is_ambiguous(exit_code),
+            ambiguous,
+            "exit code {exit_code}"
+        );
+    }
 }
 
 #[test]

@@ -227,5 +227,30 @@ mod tests {
             terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _| true),
             None
         );
+
+        let mut failed = job();
+        failed.command = "./managed/lark-cli list".into();
+        for (exit_code, expected) in [
+            (0, None),
+            (1, (std::env::consts::OS != "windows").then_some("feishu")),
+            (7, Some("feishu")),
+            (126, None),
+            (127, None),
+            (9009, None),
+        ] {
+            failed.exit_code = Some(exit_code);
+            assert_eq!(
+                terminal_connector_key(
+                    std::slice::from_ref(&failed),
+                    "session",
+                    "turn",
+                    "call",
+                    false,
+                    |_, _, _| true,
+                ),
+                expected,
+                "exit code {exit_code}"
+            );
+        }
     }
 }
