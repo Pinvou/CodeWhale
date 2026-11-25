@@ -1,5 +1,11 @@
 # CodeWhale Fork 修改清单
 
+## T1：临时模型沿用宿主 HTTP 策略
+
+- [Pinvou/CodeWhale#151](https://github.com/Pinvou/CodeWhale/pull/151) 提供内存专用的宿主策略。PR #2472 使用冻结路线的 `Config.model_http_policy`，主模型、HTTP/1 回退和独立视觉都继承同一策略。视觉模型配置保留原有三个字段。
+- 临时模型公网分类、DNS 工作预算、地址快照及代理、重定向限制留在 App。详见[临时模型的推理出口](remote-control-model-egress.md)。
+
+
 ## 已集成底座契约与宿主接入：终态错误来源（T1，2026-11-11）
 
 - 同一 `TurnComplete.error` 可来自模型请求/流，也可来自本地 REPL、预算或 panic；宿主不能从采集点、路由、advisory 错误或文字还原来源。最小来源契约已由 CodeWhale [Pinvou/CodeWhale#142](https://github.com/Pinvou/CodeWhale/pull/142) 并入公开维护分支；本 PR 在现有 `TurnErrorSource` 契约上接入宿主诊断，不替换真实模型 client 或改变预检/路由生命周期。

@@ -686,12 +686,89 @@ pub fn connect(
 
 // ---------------------------------------------------------------- 表单
 
+/// 表单里"从机管理 IP"的占位示例。取 RFC 5737 专门留给文档示例的网段——它永远不会
+/// 是某台真实机器的地址（此前填的是一台测试机的地址，客户照着它填会连不上）。
+const WORKER_HOST_PLACEHOLDER: &str = "192.0.2.10";
+
+/// 表单"从机登录用户名"的预填值——当前登录账号。
+///
+/// 两台机器用同一个账号是最常见的部署形态，所以默认带上本机账号，用户只在两台
+/// 不同名时才改。按可靠程度依次取：
+/// 1. 提权后运行时先还原成真实用户（pkexec 会注入 `PKEXEC_UID`=发起操作的人；
+///    与 lifecycle 里 OLLAMA 卸载脚本的 `TARGET_UID` 同一做法）——此刻的 euid 与
+///    `$USER` 都是 root，照搬等于默认让人用 root 登录从机；
+/// 2. 口令库里该 uid 的名字：不依赖环境变量。`$USER` 在某些拉起方式下是空的，
+///    字段就跟着空了，两台同名的用户得白敲一遍；
+/// 3. `$USER` 兜底：接了目录服务的机器，本机口令库未必查得到。
+///
+/// 解析不出来、或解析出来是 root，就留空：从机用 root 登录不是支持的形态，
+/// 空着让人填也比预填一个错的强。
+fn default_worker_user() -> String {
+    let uid = std::env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|s| s.trim().parse::<libc::uid_t>().ok())
+        // SAFETY: geteuid 不接收指针、没有副作用，任何线程任何时刻都可调用。
+        .unwrap_or_else(|| unsafe { libc::geteuid() });
+    pick_default_user(uid, passwd_name, std::env::var("USER").ok().as_deref())
+}
+
+/// [`default_worker_user`] 的判定本体。查名字的动作由调用方传入，测试不必依赖
+/// 本机的口令库与环境。
+fn pick_default_user(
+    uid: libc::uid_t,
+    passwd_name: impl FnOnce(libc::uid_t) -> Option<String>,
+    env_user: Option<&str>,
+) -> String {
+    let resolved = passwd_name(uid)
+        .or_else(|| {
+            env_user
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    if resolved.is_empty() || resolved == "root" {
+        String::new()
+    } else {
+        resolved
+    }
+}
+
+/// 口令库里 `uid` 的登录名；查不到返回 `None`。与 lifecycle/versions.rs 的
+/// `passwd_home` 同一写法（可重入版，结果落在调用方给的缓冲里）。
+fn passwd_name(uid: libc::uid_t) -> Option<String> {
+    // SAFETY: libc::passwd 是纯 C 结构（整数与裸指针），全零即 getpwuid_r 要求的
+    // 输入态。
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0u8; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwuid_r 只写传入的记录、缓冲与结果指针，三者都存活到调用结束。
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut passwd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: 成功时 glibc 令 `result` 指向 `passwd`，其 `pw_name` 是 `buffer`
+    // 内以 NUL 结尾的串。
+    let name = unsafe { std::ffi::CStr::from_ptr(passwd.pw_name) }
+        .to_str()
+        .ok()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 fn access_form(
     prev: Option<&WorkerAccess>,
     message: Option<&str>,
     has_pending_password: bool,
 ) -> String {
-    let default_user = std::env::var("USER").unwrap_or_default();
+    let default_user = default_worker_user();
     let pw_hint = if has_pending_password {
         "留空则沿用刚才填的密码"
     } else {
@@ -702,7 +779,7 @@ fn access_form(
         "fields": [
             {"id": "worker_host", "label": "从机管理 IP", "kind": "text",
              "value": prev.map(|a| a.host.clone()).unwrap_or_default(),
-             "placeholder": "192.168.10.42",
+             "placeholder": WORKER_HOST_PLACEHOLDER,
              "hint": "从机的 WiFi 或普通有线网地址，不是直连线的地址——直连线要靠这一步才配得起来"},
             {"id": "worker_user", "label": "从机登录用户名", "kind": "text",
              "value": prev.map(|a| a.user.clone()).unwrap_or(default_user)},
@@ -1633,6 +1710,54 @@ mod tests {
         let spec: serde_json::Value =
             serde_json::from_str(&access_form(Some(&prev), None, true)).unwrap();
         assert_eq!(spec["fields"][2]["required"], false);
+    }
+
+    /// 占位地址只是示例，绝不能是某台真实/测试机器的地址：固定在 RFC 5737 留给
+    /// 文档示例的网段里。没保存过从机时地址字段也不预填。
+    #[test]
+    fn form_placeholder_is_a_documentation_address_and_host_is_never_prefilled() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&access_form(None, None, false)).unwrap();
+        let placeholder = spec["fields"][0]["placeholder"].as_str().unwrap();
+        assert!(
+            placeholder.starts_with("192.0.2."),
+            "从机地址占位必须是文档示例网段，实际: {placeholder}"
+        );
+        assert_eq!(spec["fields"][0]["value"], "");
+    }
+
+    /// 用户名预填=当前登录账号（两台同名的常见场景免敲）；查不到、是 root 都留空。
+    #[test]
+    fn default_user_is_the_login_account_and_never_root() {
+        assert_eq!(
+            pick_default_user(1000, |_| Some("alice".into()), None),
+            "alice"
+        );
+        // 口令库查不到 → 退回 $USER（顺手去掉首尾空白）
+        assert_eq!(pick_default_user(1000, |_| None, Some(" bob ")), "bob");
+        // 两处都没有 / 都是空白 → 留空，不预填
+        assert_eq!(pick_default_user(1000, |_| None, Some("  ")), "");
+        assert_eq!(pick_default_user(1000, |_| Some(String::new()), None), "");
+        // 提权后运行的进程解析出来是 root：不预填（哪怕 $USER 也写着 root）
+        assert_eq!(
+            pick_default_user(0, |_| Some("root".into()), Some("root")),
+            ""
+        );
+    }
+
+    /// 真实环境里的落点：预填的就是本进程有效 uid 的登录名；root 下运行则留空。
+    #[test]
+    fn default_worker_user_matches_the_effective_uid() {
+        // SAFETY: geteuid 不接收指针、没有副作用。
+        let euid = unsafe { libc::geteuid() };
+        let got = default_worker_user();
+        if euid == 0 {
+            assert_eq!(got, "", "root 下不预填用户名");
+        } else if let Some(name) = passwd_name(euid) {
+            assert_eq!(got, name, "非 root 下应预填本进程 uid 的登录名");
+        } else {
+            assert_eq!(got, std::env::var("USER").unwrap_or_default().trim());
+        }
     }
 
     #[test]
