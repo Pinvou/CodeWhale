@@ -114,7 +114,11 @@ function assertDurableAdmission(task, journal) {
   assertBefore(install, 'register_remote_execution_with_lease(', '.claim_for_admission(');
   assertBefore(install, 'register_remote_execution_with_lease(', '.install(package,');
   assertBefore(install, 'register_remote_execution_with_lease(', 'authorizations.authorize(');
-  assert(dispatch.includes('.prepare_bound_admission(lease, validated, now_b, expected_remote_ref, install)'));
+  assert.match(
+    dispatch,
+    /\.prepare_bound_admission_with_preflight\(\s*lease,\s*validated,\s*now_b,\s*expected_remote_ref,\s*model_preflight,\s*install,?\s*\)/,
+    'durable admission must receive the model preflight result and install closure',
+  );
   assert(!/\bregister_remote_execution(?:_with_lease)?\(/.test(journal), 'late admission publication cannot mint a new consent lease');
 }
 
@@ -153,6 +157,9 @@ test('admission and turn contracts reject missing registration or binding callsi
   const withoutRegistration = task.replace('register_remote_execution_with_lease(', 'removed_registration(');
   assert.notEqual(withoutRegistration, task);
   assert.throws(() => assertDurableAdmission(withoutRegistration, journal), /missing contract callsite: register_remote_execution_with_lease/);
+  const bypassingPreflight = task.replace(/(expected_remote_ref,\s*)model_preflight,/, '$1Ok(()),');
+  assert.notEqual(bypassingPreflight, task);
+  assert.throws(() => assertDurableAdmission(bypassingPreflight, journal), /durable admission must receive the model preflight result/);
   const sources = bindingSources();
   for (const [file, needle] of [
     ['engine', 'reservation.bind_remote_submission(submission_id.as_deref())?'],
