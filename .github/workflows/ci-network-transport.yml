@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   storage-roundtrip:
@@ -66,16 +67,58 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload authenticated transport probe
+        id: upload_probe
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          name: ci-network-canary-${{ runner.os }}
+          name: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}
           path: ${{ steps.probe.outputs.artifact }}/probe.json
           if-no-files-found: error
           retention-days: 1
+      - name: Require the current transport probe artifact ID
+        if: ${{ steps.upload_probe.outputs.artifact-id == '' }}
+        run: node -e "throw new Error('Transport probe upload did not return an artifact ID')"
+      - name: Wait for the current transport probe to be listed
+        timeout-minutes: 2
+        uses: actions/github-script@v8
+        env:
+          PROBE_ARTIFACT_ID: ${{ steps.upload_probe.outputs.artifact-id }}
+          PROBE_ARTIFACT_NAME: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}
+        with:
+          retries: 0
+          script: |
+            const artifactId = process.env.PROBE_ARTIFACT_ID;
+            const name = process.env.PROBE_ARTIFACT_NAME;
+            if (!/^[1-9]\d*$/.test(artifactId || '') || !name) {
+              throw new Error('Invalid transport probe artifact identity');
+            }
+            const findArtifact = async signal => {
+              for (let page = 1; ; page += 1) {
+                const { data, headers } = await github.rest.actions.listWorkflowRunArtifacts({
+                  ...context.repo, run_id: context.runId, per_page: 100, page,
+                  request: { signal },
+                });
+                const artifact = data.artifacts.find(item => String(item.id) === artifactId);
+                if (artifact || !/<[^>]+>;\s*rel="next"/.test(headers.link || '')) return artifact;
+              }
+            };
+            const deadline = performance.now() + 60000;
+            for (let remaining = Math.ceil(deadline - performance.now()); remaining > 0;
+                 remaining = Math.ceil(deadline - performance.now())) {
+              const artifact = await findArtifact(AbortSignal.timeout(Math.min(5000, remaining)));
+              if (artifact) {
+                if (performance.now() >= deadline || artifact.expired !== false || artifact.name !== name) {
+                  throw new Error('Listed transport probe artifact does not match the current upload');
+                }
+                return;
+              }
+              const delay = Math.min(3000, Math.floor(deadline - performance.now()));
+              if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            throw new Error('Current transport probe artifact was not listed within 60 seconds');
       - name: Prepare CI transfer runtime (4)
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
@@ -87,7 +130,11 @@ jobs:
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          name: ci-network-canary-${{ runner.os }}
+          artifact-ids: ${{ steps.upload_probe.outputs.artifact-id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
           path: ${{ steps.probe.outputs.downloaded }}
+          digest-mismatch: error
       - name: Verify tested commit and exact bytes for both transports
         run: node scripts/ci-network-probe.cjs verify
