@@ -54,6 +54,91 @@ func TestPublicMobileAuthRejectsMalformedJSONWithStructuredErrors(t *testing.T) 
 	}
 }
 
+func TestPublicSMSChallengeBindsSignupConsentToLogin(t *testing.T) {
+	const consentV1 = "mobile-signup-v1"
+	for _, tc := range []struct {
+		name       string
+		purpose    SMSPurpose
+		consent    string
+		wantStatus int
+		wantSend   bool
+	}{
+		{"unknown consent version", SMSPurposeLogin, "unsupported", http.StatusBadRequest, false},
+		{"consent on registration", SMSPurposeRegister, consentV1, http.StatusBadRequest, false},
+		{"unregistered login without consent field", SMSPurposeLogin, "", http.StatusAccepted, false},
+		{"valid consent on unregistered login", SMSPurposeLogin, consentV1, http.StatusAccepted, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repository := &mobileAuthRepositoryFake{deliveryDone: make(chan struct{})}
+			provider := &smsProviderFake{}
+			auth := newMobileAuthForTest(t, repository, provider, &identityProvisionerFake{})
+			handler := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456").Handler(nil)
+			fields := map[string]any{
+				"mobile": "13800138000", "purpose": tc.purpose,
+				"captcha_id": uuid.New(), "captcha_offset": 128,
+			}
+			if tc.consent != "" {
+				fields["signup_consent_version"] = tc.consent
+			}
+			payload, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/auth/sms/challenges", strings.NewReader(string(payload)))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, tc.wantStatus, response.Body)
+			}
+			if tc.wantStatus == http.StatusBadRequest {
+				var failure struct {
+					Code string `json:"code"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure.Code != "SIGNUP_CONSENT_INVALID" {
+					t.Fatalf("invalid consent lacks structured error: %v body=%s", err, response.Body)
+				}
+				if _, calls := provider.deliveryState(); calls != 0 || repository.challengeCreateCalls != 0 ||
+					repository.operation.ID != uuid.Nil || repository.publicAdmissionCalls != 0 || repository.captchaConsumed {
+					t.Fatal("invalid consent reached quota, CAPTCHA, challenge creation, or SMS delivery")
+				}
+				return
+			}
+
+			var challenge struct {
+				ID uuid.UUID `json:"challenge_id"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &challenge); err != nil || challenge.ID == uuid.Nil {
+				t.Fatalf("expected a public challenge ID: err=%v body=%s", err, response.Body)
+			}
+			stored := repository.challenge
+			if repository.challengeCreateCalls != 1 || !repository.captchaConsumed ||
+				stored.ID != challenge.ID || stored.Purpose != SMSPurposeLogin || stored.Mobile != "+8613800138000" ||
+				stored.SignupConsentVersion != tc.consent || stored.SignupIssuer != auth.issuer {
+				t.Fatal("public challenge was not stored once with the requested consent and login identity")
+			}
+			if !tc.wantSend {
+				// The empty stored opt-in is the invariant for existing HTTP callers.
+				return
+			}
+
+			repository.waitForDelivery(t)
+			repository.deliveryMu.Lock()
+			sent, failed, deliveredID := repository.challengeSent, repository.challengeFailed, repository.deliveryChallenge
+			repository.deliveryMu.Unlock()
+			provider.deliveryMu.Lock()
+			providerID, calls, recipient, purpose := provider.sentChallenge, provider.sendCalls, provider.sentMobile, provider.sentPurpose
+			provider.deliveryMu.Unlock()
+			if providerID != challenge.ID || deliveredID != challenge.ID || calls != 1 ||
+				recipient != stored.Mobile || purpose != SMSPurposeLogin || !sent || failed {
+				t.Fatal("accepted consent did not deliver and mark the same login challenge exactly once")
+			}
+		})
+	}
+}
+
 func TestSMSRateLimitReturnsRemainingCooldown(t *testing.T) {
 	now := time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC)
 	last := now.Add(-17 * time.Second)
@@ -86,8 +171,10 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 type mobileAuthRepositoryFake struct {
 	publicAdmissionErr    error
 	publicAdmissionSource string
+	publicAdmissionCalls  int
 	deliveryMu            sync.Mutex
 	deliveryDone          chan struct{}
+	deliveryChallenge     uuid.UUID
 	deliveryOnce          sync.Once
 	mobileExists          bool
 	securityAllowed       bool
@@ -96,6 +183,7 @@ type mobileAuthRepositoryFake struct {
 	identityErr           error
 	usernameExists        bool
 	challenge             SMSChallenge
+	challengeCreateCalls  int
 	challengeSent         bool
 	challengeFailed       bool
 	readyErr              error
@@ -109,6 +197,7 @@ type mobileAuthRepositoryFake struct {
 }
 
 func (f *mobileAuthRepositoryFake) AdmitPublicMobileRequest(_ context.Context, _, _, source string) error {
+	f.publicAdmissionCalls++
 	f.publicAdmissionSource = source
 	return f.publicAdmissionErr
 }
@@ -143,6 +232,7 @@ func (f *mobileAuthRepositoryFake) ConsumeSliderCaptcha(context.Context, uuid.UU
 }
 
 func (f *mobileAuthRepositoryFake) CreateSMSChallenge(_ context.Context, challenge SMSChallenge) error {
+	f.challengeCreateCalls++
 	f.challenge = challenge
 	return nil
 }
@@ -152,9 +242,10 @@ func (f *mobileAuthRepositoryFake) CreateRegistrationOperation(_ context.Context
 	return nil
 }
 
-func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, _ uuid.UUID, _ string, _ []byte) error {
+func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, challengeID uuid.UUID, _ string, _ []byte) error {
 	f.deliveryMu.Lock()
 	f.challengeSent = true
+	f.deliveryChallenge = challengeID
 	f.deliveryMu.Unlock()
 	f.notifyDeliveryDone()
 	return nil
@@ -273,6 +364,8 @@ type smsProviderFake struct {
 	deliveryMu      sync.Mutex
 	sendCalls       int
 	sentChallenge   uuid.UUID
+	sentMobile      string
+	sentPurpose     SMSPurpose
 	verifyChallenge uuid.UUID
 	sendErr         error
 	verifyCalls     int
@@ -296,10 +389,12 @@ func (*smsProviderFake) PrepareVerification(uuid.UUID) ([]byte, error) {
 	return []byte("verification"), nil
 }
 
-func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
+func (f *smsProviderFake) SendCode(_ context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
 	f.deliveryMu.Lock()
 	defer f.deliveryMu.Unlock()
 	f.sentChallenge = challengeID
+	f.sentMobile = mobile
+	f.sentPurpose = purpose
 	f.sendCalls++
 	return SMSDelivery{MessageID: "provider-message", VerificationData: []byte("verification")}, f.sendErr
 }
