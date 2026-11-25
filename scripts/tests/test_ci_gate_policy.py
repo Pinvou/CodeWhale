@@ -1498,21 +1498,76 @@ python3() { fixture_mock python3 "$@"; }
         job = _without_inline_comments(_extract_job_block(workflow, "storage-roundtrip"))
         upload = _step_named(job, "Upload authenticated transport probe")
         require_id = _step_named(job, "Require the current transport probe artifact ID")
+        wait = _step_named(job, "Wait for the current transport probe to be listed")
         download = _step_named(job, "Download authenticated transport probe")
         verify = _step_named(job, "Verify tested commit and exact bytes for both transports")
+        guarded = r"""(?m)^        ['"]?(?:if|continue-on-error)['"]?:"""
         self.assertRegex(upload, r"(?m)^        id: upload_probe$")
         self.assertIn("          name: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}", upload)
         self.assertIn("        if: ${{ steps.upload_probe.outputs.artifact-id == '' }}", require_id)
         self.assertRegex(require_id, r'(?m)^        run: node -e "throw new Error\(.+\)"$')
-        self.assertNotRegex(require_id, r"(?m)^        continue-on-error:")
-        self.assertNotRegex(download, r"(?m)^        (?:if|continue-on-error):")
+        self.assertNotRegex(require_id, r"""(?m)^        ['"]?continue-on-error['"]?:""")
+        self.assertRegex(upload, r"(?m)^          retention-days: 1$")
+        self.assertRegex(wait, r"(?m)^        timeout-minutes: 2$")
+        self.assertRegex(wait, r"(?m)^        uses: actions/github-script@v8$")
+        self.assertRegex(wait, r"(?m)^          retries: 0$")
+        self.assertNotRegex(wait, guarded)
+        self.assertRegex(wait, r"(?m)^          PROBE_ARTIFACT_ID: \$\{\{ steps\.upload_probe\.outputs\.artifact-id \}\}$")
+        self.assertIn("          PROBE_ARTIFACT_NAME: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}", wait)
+        self.assertRegex(wait, r"(?m)^            const deadline = performance\.now\(\) \+ 60000;$")
+        self.assertIn("github.rest.actions.listWorkflowRunArtifacts({", wait)
+        self.assertIn("...context.repo, run_id: context.runId, per_page: 100, page,", wait)
+        self.assertIn("request: { signal },", wait)
+        self.assertIn("findArtifact(AbortSignal.timeout(Math.min(5000, remaining)))", wait)
+        self.assertEqual(1, job.lower().count("actions/download-artifact@"))
+        self.assertNotRegex(download, guarded)
+        self.assertRegex(download, r"(?m)^        uses: actions/download-artifact@v8$")
+        self.assertIn("          github-token: ${{ github.token }}", download)
+        self.assertIn("          repository: ${{ github.repository }}", download)
+        self.assertIn("          run-id: ${{ github.run_id }}", download)
+        self.assertRegex(download, r"(?m)^          digest-mismatch: error$")
         self.assertRegex(download, r"(?m)^          artifact-ids: \$\{\{ steps\.upload_probe\.outputs\.artifact-id \}\}$")
         self.assertNotRegex(download, r"(?m)^          (?:name|pattern):")
-        self.assertIn("run: node scripts/ci-network-probe.cjs verify", verify)
-        self.assertNotRegex(verify, r"(?m)^        (?:if|continue-on-error):")
+        self.assertEqual(["node scripts/ci-network-probe.cjs verify"], _step_run_lines(verify))
+        self.assertNotRegex(verify, guarded)
         self.assertLess(job.index(upload), job.index(require_id))
-        self.assertLess(job.index(require_id), job.index(download))
+        self.assertLess(job.index(require_id), job.index(wait))
+        self.assertLess(job.index(wait), job.index(download))
         self.assertLess(job.index(download), job.index(verify))
+
+    def test_network_transport_polls_until_exact_upload_is_listed(self):
+        workflow = (ROOT / ".github/workflows/ci-network-transport.yml").read_text(encoding="utf-8")
+        job = _extract_job_block(workflow, "storage-roundtrip")
+        wait = _step_named(job, "Wait for the current transport probe to be listed")
+        script = textwrap.dedent(wait.split("          script: |\n", 1)[1])
+        harness = r"""
+const assert = require('node:assert/strict');
+const source = require('node:fs').readFileSync(0, 'utf8');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const wait = new AsyncFunction('github', 'context', 'process', 'setTimeout', source);
+const name = 'ci-network-canary-Linux-2';
+const repo = {owner: 'Pinvou', repo: 'pinvou3'};
+const context = {repo, runId: 123};
+const env = {PROBE_ARTIFACT_ID: '721', PROBE_ARTIFACT_NAME: name};
+let calls = 0;
+const github = {rest: {actions: {
+  async listWorkflowRunArtifacts({owner, repo: repository, run_id, request}) {
+    assert.deepEqual({owner, repo: repository}, repo);
+    assert.equal(run_id, context.runId);
+    assert.ok(request.signal instanceof AbortSignal);
+    const id = ++calls === 1 ? 720 : 721;
+    return {data: {artifacts: [{id, name, expired: false}]}, headers: {}};
+  },
+}}};
+wait(github, context, {env}, resolve => queueMicrotask(resolve))
+  .then(() => assert.equal(calls, 2))
+  .catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(
+            ["node", "-e", harness], input=script, text=True,
+            capture_output=True, timeout=10, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_deployment_contract_artifacts_are_attempt_scoped(self):
         job = _without_inline_comments(
