@@ -466,6 +466,11 @@ pub enum Op {
         heartbeat_timeout_secs: u64,
     },
 
+    /// Update tool schema projection for subsequent turns.
+    SetToolSchemaPolicy {
+        policy: crate::config::ToolSchemaPolicy,
+    },
+
     /// Update the web-search backend for subsequent tool calls.
     SetSearchProvider {
         provider: crate::config::SearchProvider,

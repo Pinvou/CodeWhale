@@ -919,6 +919,89 @@ fn custom_route_config_reload_rebuilds_client_when_identity_is_unchanged() {
 }
 
 #[test]
+fn set_tool_schema_policy_invalidates_only_on_change_and_preserves_first_reason() {
+    for (initial_reason, policy, expected_reason) in [
+        (None, crate::config::ToolSchemaPolicy::Auto, None),
+        (
+            None,
+            crate::config::ToolSchemaPolicy::Relaxed,
+            Some("tool_surface"),
+        ),
+        (
+            Some("resume"),
+            crate::config::ToolSchemaPolicy::Relaxed,
+            Some("resume"),
+        ),
+    ] {
+        let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+        engine.session.pending_prefix_change_reason = initial_reason.map(str::to_string);
+
+        engine.apply_tool_schema_policy(policy);
+
+        assert_eq!(engine.config.tool_schema_policy, policy);
+        assert_eq!(
+            engine.session.pending_prefix_change_reason.as_deref(),
+            expected_reason
+        );
+    }
+}
+
+#[test]
+fn host_explicit_relaxed_policy_survives_validated_route_install() {
+    let config = goal_custom_route_config();
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            tool_schema_policy: crate::config::ToolSchemaPolicy::Relaxed,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    let mut route_config = config;
+    route_config.tool_schema_policy = Some(crate::config::ToolSchemaPolicy::Auto);
+    let route = resolve_runtime_route(&route_config, ApiProvider::Custom, Some("local-model"))
+        .expect("resolve route")
+        .validate()
+        .expect("preflight route");
+
+    engine.install_validated_runtime_route(route);
+
+    assert_eq!(
+        engine.config.tool_schema_policy,
+        crate::config::ToolSchemaPolicy::Relaxed
+    );
+}
+
+#[test]
+fn host_explicit_relaxed_policy_survives_injected_route_install() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let config = goal_custom_route_config();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        EngineConfig {
+            tool_schema_policy: crate::config::ToolSchemaPolicy::Relaxed,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let mut route_config = config;
+    route_config.tool_schema_policy = Some(crate::config::ToolSchemaPolicy::Auto);
+    let route = resolve_runtime_route(&route_config, ApiProvider::Custom, Some("local-model"))
+        .expect("resolve route");
+
+    engine
+        .install_resolved_runtime_route(route)
+        .expect("install injected route");
+
+    assert_eq!(
+        engine.config.tool_schema_policy,
+        crate::config::ToolSchemaPolicy::Relaxed
+    );
+}
+
+#[test]
 fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
     let mut custom = HashMap::new();
     custom.insert(
@@ -5896,6 +5979,7 @@ fn policy_for_catalog(
         &HashSet::new(),
         &[],
         false,
+        crate::config::ToolSchemaPolicy::Auto,
         allowed_tools,
         disallowed_tools,
         None,
@@ -7634,6 +7718,7 @@ fn test_tool_surface(
         &engine.config.tools_always_load,
         &[],
         engine.config.strict_tool_mode,
+        engine.config.tool_schema_policy,
         engine.config.allowed_tools.clone(),
         engine.config.disallowed_tools.clone(),
         engine.config.max_tool_calls,
@@ -7840,6 +7925,66 @@ async fn snapshot_for_catalog(
         .expect("request snapshot")
 }
 
+#[test]
+fn tool_schema_policy_controls_strict_projection_without_changing_tool_choice() {
+    let mut catalog = vec![
+        catalog_tool("incoming_unset"),
+        catalog_tool("incoming_strict"),
+        catalog_tool("incoming_relaxed"),
+    ];
+    catalog[0].input_schema = json!({
+        "anyOf": [
+            {"type": "object", "properties": {"outline": {"type": "string"}}},
+            {"type": "object", "properties": {"content": {"type": "string"}}}
+        ],
+        "dependentSchemas": {"kind": {"required": ["outline"]}}
+    });
+    catalog[1].strict = Some(true);
+    catalog[1].input_schema = json!({
+        "type": "object",
+        "properties": {"mode": {"const": "fast"}, "query": {"type": "string"}}
+    });
+    catalog[2].strict = Some(false);
+    let active = catalog
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<HashSet<_>>();
+
+    let automatic = active_tools_for_request(
+        &catalog,
+        &active,
+        false,
+        crate::config::ToolSchemaPolicy::Auto,
+    )
+    .expect("automatic tool selection");
+    for (selected, incoming) in automatic.iter().zip(&catalog) {
+        assert_eq!(selected.strict, incoming.strict);
+        assert_eq!(selected.input_schema, incoming.input_schema);
+    }
+
+    let relaxed = active_tools_for_request(
+        &catalog,
+        &active,
+        true,
+        crate::config::ToolSchemaPolicy::Relaxed,
+    )
+    .expect("relaxed tool selection");
+    for (selected, incoming) in relaxed.iter().zip(&catalog) {
+        assert_eq!(selected.strict, Some(false));
+        assert_eq!(selected.input_schema, incoming.input_schema);
+    }
+
+    let relaxed = Some(relaxed);
+    assert_eq!(
+        tool_choice_for_request(&relaxed, true),
+        Some(json!("required"))
+    );
+    assert_eq!(
+        tool_choice_for_request(&relaxed, false),
+        Some(json!({"type": "auto"}))
+    );
+}
+
 #[tokio::test]
 async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() {
     let workspace = tempdir().expect("tempdir");
@@ -7855,7 +8000,12 @@ async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() 
         strict: None,
         cache_control: None,
     };
-    let selected = active_tools_for_request(&[deferred_only], &HashSet::new(), false);
+    let selected = active_tools_for_request(
+        &[deferred_only],
+        &HashSet::new(),
+        false,
+        crate::config::ToolSchemaPolicy::Auto,
+    );
     let present_empty = crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
         "turn",
         0,
@@ -24581,6 +24731,7 @@ fn forkguard_plan_retained_output_is_discoverable_and_session_bound() {
             &HashSet::new(),
             &[],
             false,
+            crate::config::ToolSchemaPolicy::Auto,
             Some(vec!["retrieve_tool_result".into(), "tool_search".into()]),
             None,
             None,
@@ -33170,6 +33321,7 @@ async fn user_input_human_wait_is_excluded_from_the_turn_wall_clock() {
         &HashSet::new(),
         &[REQUEST_USER_INPUT_NAME],
         engine.config.strict_tool_mode,
+        engine.config.tool_schema_policy,
         engine.config.allowed_tools.clone(),
         engine.config.disallowed_tools.clone(),
         engine.config.max_tool_calls,
@@ -37936,8 +38088,13 @@ fn active_tools_for_request_strict_mode_swap_restore_preserves_relaxed_lane() {
     ];
     let active: HashSet<String> = catalog.iter().map(|tool| tool.name.clone()).collect();
 
-    let selected = active_tools_for_request(&catalog, &active, true)
-        .expect("a non-empty catalog yields a request tool list");
+    let selected = active_tools_for_request(
+        &catalog,
+        &active,
+        true,
+        crate::config::ToolSchemaPolicy::Auto,
+    )
+    .expect("a non-empty catalog yields a request tool list");
 
     let relaxed = selected
         .iter()

@@ -3440,6 +3440,7 @@ impl RuntimeThreadManager {
 
         let settings = crate::settings::Settings::load().unwrap_or_default();
         let stream_chunk_timeout_secs = self.read_config().stream_chunk_timeout_secs();
+        let tool_schema_policy = self.read_config().tool_schema_policy.unwrap_or_default();
         for (thread_id, engine, route, active_turn_id) in validated {
             let provider = route.identity.provider;
             let route_limits = known_route_limits(route.candidate.limits());
@@ -3453,6 +3454,11 @@ impl RuntimeThreadManager {
             );
             engine_compaction.runtime_cost_owner = active_turn_id;
             let route_config = route.config;
+            let _ = engine
+                .send(Op::SetToolSchemaPolicy {
+                    policy: tool_schema_policy,
+                })
+                .await;
             let _ = engine
                 .send(Op::SetCompaction {
                     config: engine_compaction,
@@ -8409,6 +8415,7 @@ impl RuntimeThreadManager {
                     .then(|| cfg.vision_model_config())
                     .flatten(),
                 strict_tool_mode: cfg.strict_tool_mode.unwrap_or(false),
+                tool_schema_policy: cfg.tool_schema_policy.unwrap_or_default(),
                 goal_objective,
                 goal_token_budget,
                 goal_status,

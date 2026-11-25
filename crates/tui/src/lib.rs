@@ -4748,6 +4748,10 @@ async fn run_doctor(
             crate::doctor::structural_url_authority(recommended)
         );
     }
+    println!(
+        "  · tool_schema_policy: {}",
+        config.tool_schema_policy.unwrap_or_default().as_str()
+    );
     let capability = crate::config::provider_capability(config.api_provider(), &api_target.model);
     if let Some(alias) = capability.alias_deprecation.as_ref() {
         println!(
@@ -7081,6 +7085,7 @@ fn run_doctor_json(
         },
         "route": doctor_route_report(config),
         "strict_tool_mode": doctor_strict_tool_mode_report_json(&strict_tool_mode),
+        "tool_schema_policy": config.tool_schema_policy.unwrap_or_default().as_str(),
         "tls": {
             "certificate_verification": tls_status.certificate_verification,
             "insecure_skip_tls_verify": tls_status.insecure_skip_tls_verify,
@@ -7526,6 +7531,16 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             status: "disabled",
             function_strict_sent: false,
             message: "disabled".to_string(),
+            recommended_base_url: None,
+        };
+    }
+    if config.tool_schema_policy.unwrap_or_default() == crate::config::ToolSchemaPolicy::Relaxed {
+        return DoctorStrictToolModeStatus {
+            enabled: true,
+            status: "schema_relaxed",
+            function_strict_sent: false,
+            message: "enabled for required tool choice; relaxed sets engine Tool.strict = Some(false) without additional strict-schema preparation"
+                .to_string(),
             recommended_base_url: None,
         };
     }
@@ -12308,6 +12323,7 @@ async fn build_direct_workflow_tool(
     )
     .with_role_models(role_models)
     .with_api_config(config.clone())
+    .with_tool_schema_policy(config.tool_schema_policy.unwrap_or_default())
     .with_auto_model(route.auto_model)
     .with_reasoning_effort(reasoning_effort, reasoning_effort_auto)
     .with_agent_tool_surface_options(surface)
@@ -14036,6 +14052,38 @@ mod doctor_endpoint_tests {
         assert!(status.function_strict_sent);
         assert!(status.message.contains("beta endpoint"));
         assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn relaxed_schema_policy_doctor_does_not_claim_strict_schemas_are_sent() {
+        let config = Config {
+            strict_tool_mode: Some(true),
+            tool_schema_policy: Some(crate::config::ToolSchemaPolicy::Relaxed),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert!(status.enabled);
+        assert_eq!(status.status, "schema_relaxed");
+        assert!(!status.function_strict_sent);
+        assert!(status.recommended_base_url.is_none());
+        assert!(status.message.contains("required tool choice"));
+        assert!(status.message.contains("Tool.strict = Some(false)"));
+        assert!(
+            status
+                .message
+                .contains("without additional strict-schema preparation")
+        );
+        assert!(!status.message.contains("sends function.strict"));
+        assert_eq!(
+            doctor_strict_tool_mode_report_json(&status)["function_strict_sent"],
+            false
+        );
+        assert_eq!(
+            config.tool_schema_policy.unwrap_or_default().as_str(),
+            "relaxed"
+        );
     }
 
     #[test]

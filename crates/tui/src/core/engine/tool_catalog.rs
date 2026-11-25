@@ -719,6 +719,7 @@ pub(super) struct ToolSurfacePolicy {
     pub(super) active: Option<Vec<Tool>>,
     pub(super) mode: AppMode,
     pub(super) strict_tool_mode: bool,
+    pub(super) tool_schema_policy: crate::config::ToolSchemaPolicy,
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
     /// Hard per-turn cap on admitted tool calls (#4415). The turn loop copies
@@ -737,6 +738,7 @@ impl ToolSurfacePolicy {
         always_load: &HashSet<String>,
         dynamic_active_tools: &[&'static str],
         strict_tool_mode: bool,
+        tool_schema_policy: crate::config::ToolSchemaPolicy,
         allowed_tools: Option<Vec<String>>,
         disallowed_tools: Option<Vec<String>>,
         max_tool_calls: Option<u32>,
@@ -763,7 +765,12 @@ impl ToolSurfacePolicy {
         let mut active_names = initial_active_tools(&catalog);
         active_names.extend(dynamic_active_tools.iter().map(|name| (*name).to_string()));
         active_names.retain(|name| catalog.iter().any(|tool| tool.name == *name));
-        let active = active_tools_for_request(&catalog, &active_names, strict_tool_mode);
+        let active = active_tools_for_request(
+            &catalog,
+            &active_names,
+            strict_tool_mode,
+            tool_schema_policy,
+        );
 
         Self {
             registry,
@@ -772,6 +779,7 @@ impl ToolSurfacePolicy {
             active,
             mode,
             strict_tool_mode,
+            tool_schema_policy,
             allowed_tools,
             disallowed_tools,
             max_tool_calls,
@@ -884,28 +892,51 @@ pub(crate) fn active_tools_for_request(
     catalog: &[Tool],
     active: &HashSet<String>,
     strict_tool_mode: bool,
+    tool_schema_policy: crate::config::ToolSchemaPolicy,
 ) -> Option<Vec<Tool>> {
     if catalog.is_empty() {
         return None;
     }
     let mut tools = active_tools_for_step(catalog, active);
-    if strict_tool_mode {
-        let explicit_non_strict: Vec<Option<Value>> = tools
-            .iter_mut()
-            .map(|tool| {
-                (tool.strict == Some(false))
-                    .then(|| std::mem::replace(&mut tool.input_schema, json!({"type": "object"})))
-            })
-            .collect();
-        crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools);
-        for (tool, original) in tools.iter_mut().zip(explicit_non_strict) {
-            if let Some(schema) = original {
-                tool.input_schema = schema;
+    match tool_schema_policy {
+        crate::config::ToolSchemaPolicy::Relaxed => {
+            for tool in &mut tools {
                 tool.strict = Some(false);
             }
         }
+        crate::config::ToolSchemaPolicy::Auto if strict_tool_mode => {
+            let explicit_non_strict: Vec<Option<Value>> = tools
+                .iter_mut()
+                .map(|tool| {
+                    (tool.strict == Some(false)).then(|| {
+                        std::mem::replace(&mut tool.input_schema, json!({"type": "object"}))
+                    })
+                })
+                .collect();
+            crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools);
+            for (tool, original) in tools.iter_mut().zip(explicit_non_strict) {
+                if let Some(schema) = original {
+                    tool.input_schema = schema;
+                    tool.strict = Some(false);
+                }
+            }
+        }
+        crate::config::ToolSchemaPolicy::Auto => {}
     }
     Some(tools)
+}
+
+pub(super) fn tool_choice_for_request(
+    active_tools: &Option<Vec<Tool>>,
+    strict_tool_mode: bool,
+) -> Option<Value> {
+    active_tools.as_ref().map(|_| {
+        if strict_tool_mode {
+            json!("required")
+        } else {
+            json!({ "type": "auto" })
+        }
+    })
 }
 
 fn tool_search_haystack(tool: &Tool) -> String {

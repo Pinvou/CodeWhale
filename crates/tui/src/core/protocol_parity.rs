@@ -1098,6 +1098,9 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             api_timeout_secs: *api_timeout_secs,
             heartbeat_timeout_secs: *heartbeat_timeout_secs,
         },
+        Op::SetToolSchemaPolicy { policy } => wire_op::Op::SetToolSchemaPolicy {
+            policy: policy.as_str().to_string(),
+        },
         Op::SetSearchProvider { provider } => wire_op::Op::SetSearchProvider {
             provider: provider.as_str().to_string(),
         },
@@ -1440,6 +1443,9 @@ mod tests {
                 api_timeout_secs: 60,
                 heartbeat_timeout_secs: 10,
             },
+            Op::SetToolSchemaPolicy {
+                policy: crate::config::ToolSchemaPolicy::Relaxed,
+            },
             Op::CancelCompaction { id: "cmp".into() },
             Op::GetSessionSnapshot {
                 tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1485,7 +1491,7 @@ mod tests {
             json!({"kind": "set_goal_status", "status": "paused", "clear": false})
         );
         assert_eq!(
-            serde_json::to_value(ops[8].to_protocol()).unwrap(),
+            serde_json::to_value(ops[9].to_protocol()).unwrap(),
             json!({"kind": "get_session_snapshot"}),
             "reply channels must not leak onto the wire"
         );

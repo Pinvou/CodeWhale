@@ -338,6 +338,7 @@ pub(crate) async fn run_exec_agent(
         speech_output_dir: execution_config.speech_output_dir(),
         vision_config: execution_config.vision_model_config(),
         strict_tool_mode: execution_config.strict_tool_mode.unwrap_or(false),
+        tool_schema_policy: execution_config.tool_schema_policy.unwrap_or_default(),
         goal_objective: None,
         goal_token_budget: None,
         goal_status: crate::tools::goal::GoalStatus::Active,

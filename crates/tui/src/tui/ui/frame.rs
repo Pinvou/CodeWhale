@@ -805,6 +805,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         speech_output_dir: config.speech_output_dir(),
         vision_config: config.vision_model_config(),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
+        tool_schema_policy: config.tool_schema_policy.unwrap_or_default(),
         goal_objective: app.goal.objective.clone(),
         goal_token_budget: app.goal.token_budget,
         goal_status: app.goal.status,

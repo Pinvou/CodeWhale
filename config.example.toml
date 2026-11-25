@@ -29,6 +29,9 @@
 provider = "deepseek" # deepseek | deepseek-cn | deepseek-anthropic | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | orcarouter | xiaomi-mimo | novita | fireworks | siliconflow | siliconflow-CN | arcee | moonshot | zai | stepfun | minimax | sglang | vllm | ollama | huggingface | together | qianfan | openai-codex | anthropic | openmodel | deepinfra | sakana | longcat | opencode-go | opencode-zen | meta | xai | modelstudio-token-plan | modelstudio-coding-plan
 api_key = "YOUR_DEEPSEEK_API_KEY" # must be non-empty
 base_url = "https://api.deepseek.com/beta"
+# Relaxed sets engine Tool.strict=Some(false) and skips additional strict-schema preparation.
+# Provider-specific wire normalization and strict-flag stripping still apply.
+# tool_schema_policy = "auto" # auto | relaxed
 # provider = "deepseek-cn"                       # legacy alias (official host is still https://api.deepseek.com)
 # base_url = "https://api.deepseek.com"         # opt out of DeepSeek beta features
 # Optional custom model request headers for OpenAI-compatible gateways.

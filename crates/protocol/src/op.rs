@@ -335,6 +335,12 @@ pub enum Op {
         heartbeat_timeout_secs: u64,
     },
 
+    /// `ToolSchemaPolicy` in snake_case.
+    SetToolSchemaPolicy {
+        #[serde(default = "default_tool_schema_policy")]
+        policy: String,
+    },
+
     /// `SearchProvider` in snake_case.
     SetSearchProvider {
         provider: String,
@@ -410,6 +416,10 @@ fn default_mode() -> String {
     "agent".to_string()
 }
 
+fn default_tool_schema_policy() -> String {
+    "auto".to_string()
+}
+
 fn default_provenance() -> String {
     "external_user".to_string()
 }
@@ -444,6 +454,7 @@ pub const OP_KINDS: &[&str] = &[
     "set_permission_ruleset",
     "set_stream_chunk_timeout",
     "set_subagent_runtime_config",
+    "set_tool_schema_policy",
     "set_search_provider",
     "set_fleet_roster",
     "sync_session",
@@ -488,6 +499,7 @@ impl Op {
             Self::SetPermissionRuleset { .. } => "set_permission_ruleset",
             Self::SetStreamChunkTimeout { .. } => "set_stream_chunk_timeout",
             Self::SetSubagentRuntimeConfig { .. } => "set_subagent_runtime_config",
+            Self::SetToolSchemaPolicy { .. } => "set_tool_schema_policy",
             Self::SetSearchProvider { .. } => "set_search_provider",
             Self::SetFleetRoster { .. } => "set_fleet_roster",
             Self::SyncSession { .. } => "sync_session",
@@ -649,6 +661,9 @@ mod tests {
                 max_spawn_depth: 1,
                 api_timeout_secs: 60,
                 heartbeat_timeout_secs: 10,
+            },
+            Op::SetToolSchemaPolicy {
+                policy: "relaxed".into(),
             },
             Op::SetSearchProvider {
                 provider: "brave".into(),
@@ -816,6 +831,18 @@ mod tests {
         assert!(
             unarmed.get("ask_on_guardrail").is_none(),
             "an unarmed op must keep the arming key off the wire: {unarmed}"
+        );
+    }
+
+    #[test]
+    fn tool_schema_policy_defaults_to_auto_for_legacy_payloads() {
+        let op: Op = serde_json::from_value(json!({"kind": "set_tool_schema_policy"}))
+            .expect("legacy policy payload must parse");
+        assert_eq!(
+            op,
+            Op::SetToolSchemaPolicy {
+                policy: "auto".into()
+            }
         );
     }
 
