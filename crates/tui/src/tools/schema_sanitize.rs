@@ -17557,6 +17557,7 @@ mod strict_fixwave_r26 {
 /// pin was shown red on the unfixed tree by the round-27 review probes (or,
 /// for the contract-change pin, by the mutation run against the restored
 /// arm) before the fix was trusted.
+#[cfg(test)]
 mod strict_fixwave_r27 {
     use super::*;
     use serde_json::json;
