@@ -66,16 +66,20 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload authenticated transport probe
+        id: upload_probe
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          name: ci-network-canary-${{ runner.os }}
+          name: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}
           path: ${{ steps.probe.outputs.artifact }}/probe.json
           if-no-files-found: error
           retention-days: 1
+      - name: Require the current transport probe artifact ID
+        if: ${{ steps.upload_probe.outputs.artifact-id == '' }}
+        run: node -e "throw new Error('Transport probe upload did not return an artifact ID')"
       - name: Prepare CI transfer runtime (4)
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
@@ -87,7 +91,7 @@ jobs:
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          name: ci-network-canary-${{ runner.os }}
+          artifact-ids: ${{ steps.upload_probe.outputs.artifact-id }}
           path: ${{ steps.probe.outputs.downloaded }}
       - name: Verify tested commit and exact bytes for both transports
         run: node scripts/ci-network-probe.cjs verify

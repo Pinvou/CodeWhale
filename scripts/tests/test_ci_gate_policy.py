@@ -1493,6 +1493,27 @@ python3() { fixture_mock python3 "$@"; }
                     self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
                     self.assertEqual(len(result.stdout.splitlines()), failure or 2, result.stdout)
 
+    def test_network_transport_download_uses_current_upload_id(self):
+        workflow = (ROOT / ".github/workflows/ci-network-transport.yml").read_text(encoding="utf-8")
+        job = _without_inline_comments(_extract_job_block(workflow, "storage-roundtrip"))
+        upload = _step_named(job, "Upload authenticated transport probe")
+        require_id = _step_named(job, "Require the current transport probe artifact ID")
+        download = _step_named(job, "Download authenticated transport probe")
+        verify = _step_named(job, "Verify tested commit and exact bytes for both transports")
+        self.assertRegex(upload, r"(?m)^        id: upload_probe$")
+        self.assertIn("          name: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}", upload)
+        self.assertIn("        if: ${{ steps.upload_probe.outputs.artifact-id == '' }}", require_id)
+        self.assertRegex(require_id, r'(?m)^        run: node -e "throw new Error\(.+\)"$')
+        self.assertNotRegex(require_id, r"(?m)^        continue-on-error:")
+        self.assertNotRegex(download, r"(?m)^        (?:if|continue-on-error):")
+        self.assertRegex(download, r"(?m)^          artifact-ids: \$\{\{ steps\.upload_probe\.outputs\.artifact-id \}\}$")
+        self.assertNotRegex(download, r"(?m)^          (?:name|pattern):")
+        self.assertIn("run: node scripts/ci-network-probe.cjs verify", verify)
+        self.assertNotRegex(verify, r"(?m)^        (?:if|continue-on-error):")
+        self.assertLess(job.index(upload), job.index(require_id))
+        self.assertLess(job.index(require_id), job.index(download))
+        self.assertLess(job.index(download), job.index(verify))
+
     def test_deployment_contract_artifacts_are_attempt_scoped(self):
         job = _without_inline_comments(
             _extract_job_block(self.pr_workflow, "account-platform-test")
