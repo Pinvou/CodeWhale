@@ -4433,13 +4433,21 @@ function persistPinvouReviews() { return pinvouSharedweb().persistPinvouReviews(
       userBuffer.deferredRemoteUserEvent = e;
       return false;
     }
-    var content = String(payload.content || "");
-    var hideInternalRuntimeMessage = isInternalRuntimeUserMessage(content);
-    var operation = String(payload.operation || "append");
-    var action = String(payload.action || "");
-    var actionPlanId = String(payload.plan_id || payload.planId || "").trim();
-    var baseRevision = String(payload.base_transcript_revision || "");
-    var admissionKey = baseRevision
+    const content = String(payload.content || "");
+    const hideInternalRuntimeMessage = isInternalRuntimeUserMessage(content);
+    // 准入事件只带送模全文：场景路由载荷须还原成用户原文上屏（与历史重放同一
+    // 解析，见 features/chat/scene-payload.js 发布的 window 全局），否则别的设备
+    // 发来的场景消息在这里带着整段路由提示词。事件没有场景 sidecar 记录，只走
+    // 逐字节精确那一级。content 本身仍用于快照比对，不受影响。
+    const scenePayload = window.__PINVOU_SCENE_PAYLOAD__;
+    const splitScenePayload = scenePayload && scenePayload.splitScenePayload;
+    const sceneSplit = !hideInternalRuntimeMessage && splitScenePayload
+      ? splitScenePayload(content, "") : null;
+    const operation = String(payload.operation || "append");
+    const action = String(payload.action || "");
+    const actionPlanId = String(payload.plan_id || payload.planId || "").trim();
+    const baseRevision = String(payload.base_transcript_revision || "");
+    const admissionKey = baseRevision
       ? operation + ":" + baseRevision
       : (e && e.id ? "event:" + e.id : "");
     if (admissionKey && userBuffer.remoteAdmissionKeys.indexOf(admissionKey) >= 0) return false;
@@ -4491,7 +4499,10 @@ function persistPinvouReviews() { return pinvouSharedweb().persistPinvouReviews(
           flushPendingStreamRender();
           resetPendingAssistant();
         }
-        addChatItem({ type: "user", text: content, time: timeStr() });
+        const userItem = { type: "user", text: sceneSplit ? sceneSplit.text : content, time: timeStr() };
+        // 仅展示层，不进 messages/LLM（与本地发送的 uitem.pinvouScene 同一约定）。
+        if (sceneSplit) userItem.pinvouScene = sceneSplit.scene;
+        addChatItem(userItem);
       }
       state.busy = true;
       if (!state.thinking.active) startThinking();
