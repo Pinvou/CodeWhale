@@ -1,7 +1,7 @@
 import { checkHelmBillingApprovalArtifacts, checkComposeBillingApprovalArtifacts } from './account-platform-billing-approval-artifacts-check.mjs';
 import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 import { isMainModule } from './account-platform-cli-entry.mjs';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { approvedRender, bytesDigest, gateCLI, mountedSource, physicalSourcePath, readSourceFile, requireGate as check, stableJSON } from './account-platform-production-render.mjs';
 import { checkBusinessMigrations, checkRuntimeDatabases } from './account-platform-business-migrations-check.mjs';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
@@ -10,6 +10,8 @@ import { verifyRenderedKeycloak } from './account-platform-keycloak-helm-check.m
 const overlap = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 const same = (a, b) => stableJSON(a) === stableJSON(b);
 const privateTarget = /\/(?:bootstrap|database|kms|nats|provisioner|handoff|workload)(?:\/|$)/;
+const smsGatewayState = '/var/lib/sms-gateway';
+const smsGatewaySecrets = '/run/sms-gateway';
 function absolutePath(value) {
   check(typeof value === 'string' && /^\/(?!\/)/.test(value) && value !== '/'
     && !value.includes('\\') && !value.includes('//') && !value.split('/').some(v => ['.', '..'].includes(v)), 'mount_path');
@@ -192,6 +194,43 @@ function checkEnvironment(workload, inventory, render) {
     }
   }
 }
+function checkEnterpriseSMS(workload, render) {
+  const { service, mounts, environment: env } = workload;
+  const state = mounts.find(v => v.target === smsGatewayState);
+  check(same(Object.keys(service.networks || {}), ['backend']) && same(service.expose, ['8443'])
+    && same(mounts.map(v => v.target).sort(), [smsGatewaySecrets, smsGatewayState])
+    && state && state.read_only !== true
+    && same(service.healthcheck?.test, ['CMD', '/healthcheck'])
+    && env.HEALTHCHECK_URL === 'https://enterprise-sms-gateway:8443/health/ready'
+    && env.SMS_GATEWAY_STATE_DIR === smsGatewayState, 'sms_gateway');
+  const stateInfo = lstatSync(physicalSourcePath(state.source));
+  check(stateInfo.isDirectory() && (process.platform === 'win32' || (stateInfo.mode & 0o777) === 0o700), 'sms_gateway_state');
+  check(env.SMS_GATEWAY_SIGN_NAME?.trim() === env.SMS_GATEWAY_SIGN_NAME
+    && Buffer.byteLength(env.SMS_GATEWAY_SIGN_NAME || '') > 0
+    && Buffer.byteLength(env.SMS_GATEWAY_SIGN_NAME) <= 100
+    && ['REGISTER', 'LOGIN', 'PROFILE_MOBILE', 'PASSWORD_RESET'].every(purpose =>
+      /^SMS_[0-9]+$/.test(env[`SMS_GATEWAY_${purpose}_TEMPLATE`] || '')), 'sms_gateway_template');
+  for (const [key, file] of Object.entries({
+    SSL_CERT_FILE: 'ca-bundle.pem', SMS_GATEWAY_TLS_CERT_FILE: 'tls.crt', SMS_GATEWAY_TLS_KEY_FILE: 'tls.key',
+    SMS_GATEWAY_ACCESS_KEY_ID_FILE: 'access-key-id', SMS_GATEWAY_ACCESS_KEY_SECRET_FILE: 'access-key-secret',
+    SMS_GATEWAY_BEARER_TOKEN_FILE: 'bearer-token',
+  })) {
+    check(env[key] === `${smsGatewaySecrets}/${file}`, 'sms_gateway_file');
+    const source = mountedSource(workload, env[key]);
+    readSourceFile(source);
+    if (process.platform !== 'win32' && file !== 'tls.crt' && file !== 'ca-bundle.pem') {
+      const info = lstatSync(physicalSourcePath(source));
+      check((info.mode & 0o077) === 0, 'sms_gateway_file_mode');
+    }
+  }
+  const token = readSourceFile(mountedSource(workload, env.SMS_GATEWAY_BEARER_TOKEN_FILE)).trim();
+  const account = render.config.services['account-service'].environment;
+  check(account.SMS_PROVIDER === 'aliyun-managed'
+    && account.SMS_HTTP_ENDPOINT === 'https://enterprise-sms-gateway:8443/v1/sms/send'
+    && token.length >= 32 && token.length <= 512 && !/\s/.test(token)
+    && account.SMS_HTTP_BEARER_TOKEN === token, 'sms_gateway_account');
+}
+
 function checkCompose(all, render, inventory) {
   check(render.config.name === 'pinvou-personal' && !render.config.volumes && !render.config.secrets && !render.config.configs, 'composition');
   const networks = Object.values(render.config.networks || {});
@@ -234,11 +273,13 @@ function checkCompose(all, render, inventory) {
         const writer = workload.id.endsWith('-workload-agent') && target === '/run/projected';
         const receipt = workload.id === 'approval-resources'
           && ['/run/pinvou/approval-receipt', '/run/pinvou/token-consumer-receipt'].includes(target);
-        check(writer || receipt, 'writable_mount');
+        const smsState = workload.id === 'enterprise-sms-gateway' && target === smsGatewayState;
+        check(writer || receipt || smsState, 'writable_mount');
       }
       mounts.push({ source, target, workload: workload.id, readOnly: volume.read_only === true });
     }
     checkEnvironment(workload, inventory, render);
+    if (workload.id === 'enterprise-sms-gateway') checkEnterpriseSMS(workload, render);
     if (workload.id.endsWith('-workload-agent')) {
       const configMount = workload.mounts.find(v => v.target === '/run/config');
       check(configMount, 'agent_config');

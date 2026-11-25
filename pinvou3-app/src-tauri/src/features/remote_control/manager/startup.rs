@@ -202,7 +202,6 @@ impl RemoteControlManager {
         let url = public_url(&config);
         let (sender, receiver) = relay_client::spawn(config.clone());
         let owner = sender.clone();
-        inner.idle_error = None;
         inner.idle_status = WebAccessStatusKind::Idle;
         inner.rpc_ledger = rpc_ledger;
         inner.rpc_cache.clear();
