@@ -32,7 +32,7 @@ import {
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
 import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
-import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview } from "./remote-telemetry.js";
+import { projectRemoteTasks, remoteTaskGroups, buildRemoteOverview, remoteOverviewForAnalyst } from "./remote-telemetry.js";
 import { prepareBehaviorEventView, isBehaviorEventView, namedBehaviorEvents, windowedBehaviorEvents } from "./behavior-event-view.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -390,7 +390,11 @@ function buildHourlyUsageTrend(devices, taskEvents, now) {
   const todayHour = (statsDay(now) * DAY_MS - STATS_TIMEZONE_OFFSET_MS) / HOUR_MS;
   const startHour = todayHour - 24;
   const endHour = todayHour + 23;
+  const weekAgoHour = todayHour - 7 * 24;
   const rows = new Map();
+  for (let hour = weekAgoHour; hour < weekAgoHour + 24; hour += 1) {
+    rows.set(hour, { hour: hour * HOUR_MS, device_ids: new Set(), new_devices: 0, turns: 0 });
+  }
   for (let hour = startHour; hour <= endHour; hour += 1) {
     rows.set(hour, { hour: hour * HOUR_MS, device_ids: new Set(), new_devices: 0, turns: 0 });
   }
@@ -414,10 +418,11 @@ function buildHourlyUsageTrend(devices, taskEvents, now) {
   const hourly = [...rows.values()].map(({ device_ids, ...row }) => ({ ...row, active_devices: device_ids.size }));
   return {
     current: hourly.filter(row => row.hour >= (currentHour - 23) * HOUR_MS && row.hour <= currentHour * HOUR_MS),
-    today: hourly.slice(24).map(row => row.hour > now
+    today: hourly.slice(48).map(row => row.hour > now
       ? { hour: row.hour, active_devices: null, new_devices: null, turns: null }
       : row),
-    previous: hourly.slice(0, 24),
+    previous: hourly.slice(24, 48),
+    weekAgo: hourly.slice(0, 24),
   };
 }
 
@@ -523,6 +528,7 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
     usage_trend_hourly: hourlyTrend.current,
     usage_trend_hourly_today: hourlyTrend.today,
     usage_trend_hourly_previous: hourlyTrend.previous,
+    usage_trend_hourly_week_ago: hourlyTrend.weekAgo,
     active_versions: versionRows(versionMap),
     active_versions_by_platform: Object.fromEntries(Object.entries(platformVersionMaps)
       .map(([platform, versions]) => [platform, versionRows(versions)])),
@@ -3137,15 +3143,16 @@ export function createTelemetryService(options = {}) {
         json(res, session ? 200 : 401, session ? { role: session.role } : { error: "unauthorized" });
         return true;
       }
+      let statsSession;
       if (routePath.startsWith(`${STATS_PREFIX}/api/`)) {
-        const session = adminAuthorized(req);
-        if (!session) {
+        statsSession = adminAuthorized(req);
+        if (!statsSession) {
           json(res, 401, { error: "unauthorized" });
           return true;
         }
         const behaviorRoute = routePath.startsWith(`${STATS_PREFIX}/api/behavior/`)
           || routePath === `${STATS_PREFIX}/api/commercial/overview`;
-        if (session.role === "behavior_analyst" && !behaviorRoute) {
+        if (statsSession.role === "behavior_analyst" && !behaviorRoute) {
           json(res, 403, { error: "forbidden" });
           return true;
         }
@@ -3202,7 +3209,11 @@ export function createTelemetryService(options = {}) {
         return true;
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/overview`) {
-        json(res, 200, store.behaviorOverview(new URL(req.url, "http://localhost").searchParams.get("range")));
+        const report = store.behaviorOverview(new URL(req.url, "http://localhost").searchParams.get("range"));
+        const remoteControl = statsSession.role === "behavior_analyst"
+          ? remoteOverviewForAnalyst(report.remote_control)
+          : report.remote_control;
+        json(res, 200, { ...report, remote_control: remoteControl });
         return true;
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/tools`) {
