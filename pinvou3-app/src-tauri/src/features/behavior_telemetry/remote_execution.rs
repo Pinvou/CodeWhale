@@ -358,23 +358,20 @@ pub(crate) fn capture_remote_model_failure(
     app: &tauri::AppHandle,
     session: &str,
     turn: &str,
-    error: &str,
+    failure: RemoteModelFailure,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
-    capture_model_failure(&telemetry, session, turn, error);
+    capture_model_failure(&telemetry, session, turn, failure);
 }
 
 pub(super) fn capture_model_failure(
     telemetry: &BehaviorTelemetry,
     session: &str,
     turn: &str,
-    error: &str,
+    failure: RemoteModelFailure,
 ) {
-    let Some(failure) = RemoteModelFailure::from_engine_terminal(error) else {
-        return;
-    };
     if let Ok(mut contexts) = telemetry.remote_executions.lock()
         && let Some(execution) = contexts.executions.get_mut(session)
         && execution.turn_id.as_deref() == Some(turn)
@@ -522,7 +519,8 @@ pub(super) fn observe_execution(
 mod tests {
     use super::*;
     const _: fn(&tauri::AppHandle, &str, &str, &str) = super::super::bind_remote_execution_turn;
-    const _: fn(&tauri::AppHandle, &str, &str, &str) = super::super::capture_remote_model_failure;
+    const _: fn(&tauri::AppHandle, &str, &str, RemoteModelFailure) =
+        super::super::capture_remote_model_failure;
     const _: fn(&tauri::AppHandle) -> Option<RemoteExecutionLease> =
         super::super::capture_remote_execution_lease;
     const _: fn(&tauri::AppHandle, &str, &str, &str, &RemoteExecutionLease) =

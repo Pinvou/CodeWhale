@@ -1860,8 +1860,8 @@ pub(crate) use remote_execution::{
 
 pub use events::*;
 pub(crate) use remote_control::{
-    RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemotePermissionStep, RemoteReason,
-    RemoteStage, track_remote_control, track_remote_transfer,
+    RemoteControlEvent, RemoteModelFailureEvidence, RemoteModelSource, RemoteOutcome,
+    RemotePermissionStep, RemoteReason, RemoteStage, track_remote_control, track_remote_transfer,
 };
 
 #[cfg(all(test, feature = "behavior-telemetry-test"))]

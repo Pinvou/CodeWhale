@@ -122,52 +122,55 @@ fn size_bucket(bytes: u64) -> RemoteSizeBucket {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RemoteModelFailure {
+pub(crate) enum RemoteModelFailure {
     Network,
-    Dns,
-    Tls,
     Timeout,
     Authentication,
+    Authorization,
 }
 
 impl RemoteModelFailure {
-    /// The host calls this only for the exact Engine terminal tagged Model.
-    /// Match the producer's LlmError display prefixes, not arbitrary content
-    /// in provider responses, URLs or names. The original error stays local.
-    pub(super) fn from_engine_terminal(error: &str) -> Option<Self> {
-        if let Some(detail) = error.strip_prefix("Network error: ") {
-            let detail = detail
-                .strip_prefix("Connection failed: ")
-                .or_else(|| detail.strip_prefix("Request failed: "))
-                .unwrap_or(detail);
-            if detail.starts_with("dns error: ") {
-                Some(Self::Dns)
-            } else if detail.starts_with("invalid peer certificate: ")
-                || detail.starts_with("tls handshake failed: ")
-            {
-                Some(Self::Tls)
-            } else {
-                Some(Self::Network)
-            }
-        } else if error.starts_with("Request timed out after ") {
-            Some(Self::Timeout)
-        } else if error.starts_with("Authentication failed: ")
-            || error.starts_with("Authorization failed: ")
-        {
-            Some(Self::Authentication)
-        } else {
-            None
-        }
-    }
-
     fn diagnostic_code(self) -> &'static str {
         match self {
             Self::Network => "network_unavailable",
-            Self::Dns => "dns_failed",
-            Self::Tls => "tls_failed",
             Self::Timeout => "request_timeout",
             Self::Authentication => "authentication_failed",
+            Self::Authorization => "permission_denied",
         }
+    }
+}
+
+/// Matches the Engine's typed error envelope to its selected terminal. The
+/// message is a bounded, in-memory equality witness for one turn only.
+#[derive(Default)]
+pub(crate) struct RemoteModelFailureEvidence(Option<(String, RemoteModelFailure)>);
+
+impl RemoteModelFailureEvidence {
+    pub(crate) fn observe_error(&mut self, code: &str, message: &str) {
+        let failure = match code {
+            "llm_network_error"
+                if message.starts_with(
+                    "Network error: SSE stream request did not receive response headers after ",
+                ) =>
+            {
+                RemoteModelFailure::Timeout
+            }
+            "llm_network_error" => RemoteModelFailure::Network,
+            "llm_timeout" => RemoteModelFailure::Timeout,
+            "llm_auth_error" => RemoteModelFailure::Authentication,
+            "llm_authorization_error" => RemoteModelFailure::Authorization,
+            _ => {
+                // A generic envelope supersedes an earlier retry advisory.
+                self.0 = None;
+                return;
+            }
+        };
+        self.0 = (message.len() <= 8192).then(|| (message.to_owned(), failure));
+    }
+
+    pub(crate) fn selected_failure(self, error: Option<&str>) -> Option<RemoteModelFailure> {
+        let (message, failure) = self.0?;
+        (error == Some(message.as_str())).then_some(failure)
     }
 }
 
@@ -681,32 +684,58 @@ mod tests {
     const _: fn(&tauri::AppHandle, RemoteControlEvent, &str) = super::super::track_remote_transfer;
 
     #[test]
-    fn remote_model_failure_requires_an_engine_transport_or_auth_prefix() {
-        use super::RemoteModelFailure as Failure;
+    fn model_failure_requires_the_selected_typed_envelope() {
+        use super::{RemoteModelFailure as Failure, RemoteModelFailureEvidence as Evidence};
 
-        for (error, expected) in [
+        for (code, message, expected) in [
             (
-                "Network error: Connection failed: dns error: lookup failed",
-                Some(Failure::Dns),
-            ),
-            (
-                "Network error: Connection failed: invalid peer certificate: UnknownIssuer",
-                Some(Failure::Tls),
-            ),
-            (
-                "Network error: Connection failed: https://dns-error.invalid/certificate",
+                "llm_network_error",
+                "Responses API request failed",
                 Some(Failure::Network),
             ),
-            ("Request timed out after 30s", Some(Failure::Timeout)),
             (
+                "llm_network_error",
+                "Network error: SSE stream request did not receive response headers after 30s",
+                Some(Failure::Timeout),
+            ),
+            (
+                "llm_timeout",
+                "Request timed out after 30s",
+                Some(Failure::Timeout),
+            ),
+            (
+                "llm_auth_error",
                 "Authentication failed: invalid credential",
                 Some(Failure::Authentication),
             ),
-            ("Invalid request (400): DNS connection failed", None),
-            ("LLM error: Network error: connection refused", None),
+            (
+                "llm_authorization_error",
+                "Authorization failed: access denied",
+                Some(Failure::Authorization),
+            ),
+            (
+                "network",
+                "Network error: Connection failed: provider text",
+                None,
+            ),
         ] {
-            assert_eq!(Failure::from_engine_terminal(error), expected, "{error}");
+            let mut evidence = Evidence::default();
+            evidence.observe_error(code, message);
+            assert_eq!(evidence.selected_failure(Some(message)), expected);
         }
+
+        let mut evidence = Evidence::default();
+        evidence.observe_error("llm_network_error", "Earlier failed request");
+        assert_eq!(
+            evidence.selected_failure(Some("Different terminal error")),
+            None
+        );
+
+        let mut evidence = Evidence::default();
+        let message = "Network error: Connection failed: provider text";
+        evidence.observe_error("llm_network_error", message);
+        evidence.observe_error("network", message);
+        assert_eq!(evidence.selected_failure(Some(message)), None);
     }
 
     #[test]

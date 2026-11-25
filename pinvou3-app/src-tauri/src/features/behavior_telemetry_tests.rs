@@ -2160,42 +2160,10 @@ async fn admitted_installation_failure_reports_one_terminal_without_rejection() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn controlled_terminal_distinguishes_proxy_connection_and_preflight_failures() {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+async fn controlled_terminal_distinguishes_model_network_and_preflight_failures() {
+    use super::remote_control::RemoteModelFailure;
 
     let _home = TestHome::new();
-    let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let address = proxy.local_addr().unwrap();
-    let proxy = tokio::spawn(async move {
-        let (stream, _) = proxy.accept().await.unwrap();
-        let mut stream = BufReader::new(stream);
-        let mut line = String::new();
-        stream.read_line(&mut line).await.unwrap();
-        assert!(line.starts_with("CONNECT diagnostic-proxy-test.invalid:443 "));
-        stream
-            .get_mut()
-            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-            .await
-            .unwrap();
-    });
-    let error = reqwest::Client::builder()
-        .no_proxy()
-        .proxy(reqwest::Proxy::https(format!("http://{address}")).unwrap())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap()
-        .get("https://diagnostic-proxy-test.invalid/")
-        .send()
-        .await
-        .unwrap_err();
-    tokio::time::timeout(Duration::from_secs(5), proxy)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(error.is_connect());
-    // This is the pinned engine's rendering of a reqwest connection error.
-    let model_error = format!("Network error: Connection failed: {error}");
-
     let runtime = test_runtime("http://127.0.0.1:1");
     let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
     let adapter = super::remote_execution::capture_execution_lease(&telemetry).unwrap();
@@ -2206,7 +2174,7 @@ async fn controlled_terminal_distinguishes_proxy_connection_and_preflight_failur
     ] {
         super::remote_execution::register_execution(&telemetry, session, task, "chat", &adapter);
         super::remote_execution::bind_execution_turn(&telemetry, session, task, "owned-turn");
-        super::remote_execution::capture_model_failure(&telemetry, session, capture_turn, &model_error);
+        super::remote_execution::capture_model_failure(&telemetry, session, capture_turn, RemoteModelFailure::Network);
         let terminal = RemoteControlEvent::from_result::<()>(
             RemoteStage::TaskTerminal,
             &Err(reason.into()),
@@ -2220,7 +2188,7 @@ async fn controlled_terminal_distinguishes_proxy_connection_and_preflight_failur
         let event = &outbox.records.last().unwrap().event;
         assert_eq!(event["remote_task_status"], "failed");
         assert_eq!(event["diagnostic_code"], code);
-        assert!(!event.to_string().contains("diagnostic-proxy-test.invalid"));
+        assert!(event.get("error").is_none());
     }
 }
 

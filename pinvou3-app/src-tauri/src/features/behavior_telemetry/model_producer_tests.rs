@@ -1,5 +1,7 @@
 //! Controlled model transports, real Engine terminal selection and telemetry.
 //! No live provider is called. REPL uses the real local Python kernel.
+use super::super::RemoteModelFailureEvidence;
+use super::super::remote_control::RemoteModelFailure;
 use super::*;
 use deepseek_tui::core::engine::{Engine, EngineConfig};
 use deepseek_tui::core::events::{Event, TurnErrorSource, TurnOutcomeStatus};
@@ -38,10 +40,15 @@ impl ModelClient for ModelFixture {
                         anyhow::anyhow!("unexpected EOF while reading response"),
                     )])));
                 }
-                "frame" => {
+                "frame" | "spoof" => {
+                    let message = if self.kind == "spoof" {
+                        "Network error: Connection failed: provider message"
+                    } else {
+                        "unexpected end of response"
+                    };
                     return Ok(Box::pin(futures_util::stream::iter([Ok(
                         StreamEvent::Error {
-                            error: json!({"message":"unexpected end of response"}),
+                            error: json!({"message":message}),
                         },
                     )])));
                 }
@@ -74,18 +81,37 @@ impl ModelClient for ModelFixture {
 
 async fn terminal(
     handle: &deepseek_tui::core::engine::EngineHandle,
-) -> (TurnOutcomeStatus, Option<String>, Option<TurnErrorSource>) {
+) -> (
+    TurnOutcomeStatus,
+    Option<String>,
+    Option<TurnErrorSource>,
+    Option<RemoteModelFailure>,
+) {
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         let mut rx = handle.rx_event.write().await;
+        let mut evidence = RemoteModelFailureEvidence::default();
         while let Some(event) = rx.recv().await {
-            if let Event::TurnComplete {
-                status,
-                error,
-                error_source,
-                ..
-            } = event
-            {
-                return (status, error, error_source);
+            match event {
+                Event::TurnStarted { .. } => evidence = RemoteModelFailureEvidence::default(),
+                Event::Error { envelope, .. } => {
+                    evidence.observe_error(&envelope.code, &envelope.message);
+                }
+                Event::TurnComplete {
+                    status,
+                    error,
+                    error_source,
+                    ..
+                } => {
+                    let failure = if status == TurnOutcomeStatus::Failed
+                        && error_source == Some(TurnErrorSource::Model)
+                    {
+                        evidence.selected_failure(error.as_deref())
+                    } else {
+                        None
+                    };
+                    return (status, error, error_source, failure);
+                }
+                _ => {}
             }
         }
         panic!("engine ended without a terminal")
@@ -94,28 +120,84 @@ async fn terminal(
     .expect("fixture turn timed out")
 }
 
+struct RestoreHome(Option<OsString>);
+impl Drop for RestoreHome {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(value) = &self.0 {
+                std::env::set_var("CODEWHALE_HOME", value);
+            } else {
+                std::env::remove_var("CODEWHALE_HOME");
+            }
+        }
+    }
+}
+
+fn set_fixture_engine_home(path: &std::path::Path) -> RestoreHome {
+    let previous = std::env::var_os("CODEWHALE_HOME");
+    unsafe {
+        std::env::set_var("CODEWHALE_HOME", path);
+    }
+    RestoreHome(previous)
+}
+
+fn fixture_engine_config(folder: &std::path::Path, kind: &str) -> EngineConfig {
+    EngineConfig {
+        workspace: folder.to_path_buf(),
+        session_id: Some(format!("diagnostic_{kind}")),
+        notes_path: folder.join("notes.md"),
+        mcp_config_path: folder.join("mcp.json"),
+        skills_dir: folder.join("skills"),
+        explicit_skills_root_only: true,
+        subagent_state_root: Some(folder.join("agents")),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        terminal_chrome_enabled: false,
+        max_steps: 8,
+        ..EngineConfig::default()
+    }
+}
+
+fn fixture_message(api: &deepseek_tui::config::Config) -> Op {
+    Op::SendMessage {
+        content: "run controlled fixture".into(),
+        mode: deepseek_tui::AppMode::Agent,
+        route: Box::new(
+            deepseek_tui::route_runtime::resolve_runtime_route(
+                api,
+                api.api_provider(),
+                Some("deepseek-chat"),
+            )
+            .unwrap(),
+        ),
+        compaction: Box::new(deepseek_tui::compaction::CompactionConfig::default()),
+        goal_objective: None,
+        goal_token_budget: None,
+        goal_status: deepseek_tui::tools::goal::GoalStatus::Paused,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+        auto_model: false,
+        allow_shell: false,
+        trust_mode: true,
+        auto_approve: true,
+        approval_mode: deepseek_tui::ApprovalMode::Auto,
+        translation_enabled: false,
+        allowed_tools: None,
+        dynamic_tools: vec![],
+        hook_executor: None,
+        verbosity: None,
+        provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
+        submission_id: None,
+    }
+}
+
 #[tokio::test]
 async fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers() {
     let _home = TestHome::new();
     let work = tempfile::tempdir().unwrap();
-    let previous = std::env::var_os("CODEWHALE_HOME");
-    struct RestoreHome(Option<OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            unsafe {
-                if let Some(value) = &self.0 {
-                    std::env::set_var("CODEWHALE_HOME", value);
-                } else {
-                    std::env::remove_var("CODEWHALE_HOME");
-                }
-            }
-        }
-    }
-    let _restore = RestoreHome(previous);
-    unsafe {
-        std::env::set_var("CODEWHALE_HOME", work.path().join("runtime"));
-    }
-    for kind in ["request", "read", "frame", "repl"] {
+    let _restore = set_fixture_engine_home(&work.path().join("runtime"));
+    for kind in ["request", "read", "frame", "repl", "spoof"] {
         let folder = work.path().join(kind);
         std::fs::create_dir_all(&folder).unwrap();
         let model = Arc::new(ModelFixture {
@@ -124,53 +206,10 @@ async fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers() {
             recovered: AtomicBool::new(false),
         });
         let api = deepseek_tui::config::Config::default();
-        let config = EngineConfig {
-            workspace: folder.clone(),
-            session_id: Some(format!("eof_{kind}")),
-            notes_path: folder.join("notes.md"),
-            mcp_config_path: folder.join("mcp.json"),
-            skills_dir: folder.join("skills"),
-            explicit_skills_root_only: true,
-            subagent_state_root: Some(folder.join("agents")),
-            snapshots_enabled: false,
-            subagents_enabled: false,
-            terminal_chrome_enabled: false,
-            max_steps: 8,
-            ..EngineConfig::default()
-        };
+        let config = fixture_engine_config(&folder, kind);
         let (engine, handle) = Engine::new_with_model_client(config, &api, model.clone());
         let running = tokio::spawn(engine.run());
-        let send = || Op::SendMessage {
-            content: "run controlled fixture".into(),
-            mode: deepseek_tui::AppMode::Agent,
-            route: Box::new(
-                deepseek_tui::route_runtime::resolve_runtime_route(
-                    &api,
-                    api.api_provider(),
-                    Some("deepseek-chat"),
-                )
-                .unwrap(),
-            ),
-            compaction: Box::new(deepseek_tui::compaction::CompactionConfig::default()),
-            goal_objective: None,
-            goal_token_budget: None,
-            goal_status: deepseek_tui::tools::goal::GoalStatus::Paused,
-            reasoning_effort: None,
-            reasoning_effort_auto: false,
-            auto_model: false,
-            allow_shell: false,
-            trust_mode: true,
-            auto_approve: true,
-            approval_mode: deepseek_tui::ApprovalMode::Auto,
-            translation_enabled: false,
-            allowed_tools: None,
-            dynamic_tools: vec![],
-            hook_executor: None,
-            verbosity: None,
-            provenance: UserInputProvenance::ExternalUser,
-            turn_tool_security: None,
-            submission_id: None,
-        };
+        let send = || fixture_message(&api);
         handle.send(send()).await.unwrap();
         let first = terminal(&handle).await;
         model.recovered.store(true, Ordering::SeqCst);
@@ -183,6 +222,13 @@ async fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers() {
             .unwrap();
         assert_eq!(first.0, TurnOutcomeStatus::Failed, "{kind}: {first:?}");
         let error = first.1.as_deref().unwrap();
+        assert_eq!(first.3, None, "{kind}: untyped failures must stay unknown");
+        if kind == "spoof" {
+            assert_eq!(first.2, Some(TurnErrorSource::Model));
+            assert_eq!(error, "Network error: Connection failed: provider message");
+            assert_eq!(second.0, TurnOutcomeStatus::Completed);
+            continue;
+        }
         let source = if kind == "repl" {
             assert!(
                 error.contains("REPL context refresh failed")
@@ -224,4 +270,69 @@ async fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers() {
             "old source must not leak: {second:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn remote_model_diagnostic_uses_typed_engine_failure_from_rejected_proxy_connect() {
+    use deepseek_tui::config::{Config, ModelHttpPolicy};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[derive(Debug)]
+    struct Proxy(reqwest::Proxy);
+    impl ModelHttpPolicy for Proxy {
+        fn configure(
+            &self,
+            builder: reqwest::ClientBuilder,
+            _: &str,
+        ) -> Result<reqwest::ClientBuilder> {
+            Ok(builder.no_proxy().proxy(self.0.clone()))
+        }
+    }
+
+    let _home = TestHome::new();
+    let work = tempfile::tempdir().unwrap();
+    let _restore = set_fixture_engine_home(&work.path().join("runtime"));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&requests);
+    let proxy = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("CONNECT diagnostic-proxy-test.invalid:443 "));
+            observed.fetch_add(1, Ordering::SeqCst);
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        }
+    });
+    let mut api = Config::default();
+    api.provider = Some("deepseek".into());
+    api.api_key = Some("local-fixture-key".into());
+    api.base_url = Some("https://diagnostic-proxy-test.invalid/".into());
+    api.model_http_policy = Some(Arc::new(Proxy(
+        reqwest::Proxy::https(format!("http://{address}")).unwrap(),
+    )));
+    let (engine, handle) = Engine::new(fixture_engine_config(work.path(), "proxy"), &api);
+    let running = tokio::spawn(engine.run());
+    handle.send(fixture_message(&api)).await.unwrap();
+    let result = terminal(&handle).await;
+    handle.send(Op::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .unwrap()
+        .unwrap();
+    proxy.abort();
+
+    assert!(requests.load(Ordering::SeqCst) > 0);
+    assert_eq!(result.0, TurnOutcomeStatus::Failed);
+    assert_eq!(result.2, Some(TurnErrorSource::Model));
+    assert_eq!(result.3, Some(RemoteModelFailure::Network), "{result:?}");
 }
