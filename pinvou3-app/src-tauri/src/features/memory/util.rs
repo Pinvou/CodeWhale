@@ -211,7 +211,11 @@ pub(super) fn read_text_recovering_unlocked_with(
     validate: &dyn Fn(&str) -> bool,
     promote: &dyn Fn(&Path, &Path, &[u8]) -> io::Result<()>,
 ) -> io::Result<String> {
-    let current_error = match fs::read_to_string(path) {
+    // Round-11 复审 minor:读经共享的有界私态原语(常规文件门 + 16 MiB
+    // 上限)——写侧压实让合法存储远小于该界,超界即坏档/外部种植,走恢复
+    // 分支自愈,而不是无界读入后整包序列化进 web 载荷。Round-14 复审
+    // 更正并补齐:memory 存储车道内的裸读至此全部收口。
+    let current_error = match crate::platform::filesystem::read_private_data_file(path) {
         Ok(raw) if validate(&raw) => return Ok(raw),
         Ok(_) => io::Error::new(
             io::ErrorKind::InvalidData,
@@ -274,14 +278,14 @@ pub(super) fn read_text_recovering_unlocked_with(
     });
     candidates.reverse();
     for (_, candidate) in candidates {
-        let Ok(raw) = fs::read_to_string(&candidate) else {
+        let Ok(raw) = crate::platform::filesystem::read_private_data_file(&candidate) else {
             continue;
         };
         if !validate(&raw) {
             continue;
         }
         promote(&candidate, path, raw.as_bytes())?;
-        let restored = fs::read_to_string(path)?;
+        let restored = crate::platform::filesystem::read_private_data_file(path)?;
         if validate(&restored) {
             cleanup_recovery_candidates(path);
             return Ok(restored);
