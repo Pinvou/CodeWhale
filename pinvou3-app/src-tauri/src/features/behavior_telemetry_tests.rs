@@ -2161,8 +2161,6 @@ async fn admitted_installation_failure_reports_one_terminal_without_rejection() 
 
 #[tokio::test(flavor = "current_thread")]
 async fn controlled_terminal_distinguishes_model_network_and_preflight_failures() {
-    use super::remote_control::RemoteModelFailure;
-
     let _home = TestHome::new();
     let runtime = test_runtime("http://127.0.0.1:1");
     let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
@@ -2174,7 +2172,12 @@ async fn controlled_terminal_distinguishes_model_network_and_preflight_failures(
     ] {
         super::remote_execution::register_execution(&telemetry, session, task, "chat", &adapter);
         super::remote_execution::bind_execution_turn(&telemetry, session, task, "owned-turn");
-        super::remote_execution::capture_model_failure(&telemetry, session, capture_turn, RemoteModelFailure::Network);
+        super::remote_execution::observe_model_error(
+            &telemetry, session, capture_turn, "llm_network_error", "fixture connection error",
+        );
+        super::remote_execution::capture_model_failure(
+            &telemetry, session, "owned-turn", Some("fixture connection error"),
+        );
         let terminal = RemoteControlEvent::from_result::<()>(
             RemoteStage::TaskTerminal,
             &Err(reason.into()),

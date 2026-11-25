@@ -122,7 +122,7 @@ fn size_bucket(bytes: u64) -> RemoteSizeBucket {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemoteModelFailure {
+pub(super) enum RemoteModelFailure {
     Network,
     Timeout,
     Authentication,
@@ -140,13 +140,13 @@ impl RemoteModelFailure {
     }
 }
 
-/// Matches the Engine's typed error envelope to its selected terminal. The
-/// message is a bounded, in-memory equality witness for one turn only.
-#[derive(Default)]
-pub(crate) struct RemoteModelFailureEvidence(Option<(String, RemoteModelFailure)>);
+/// A bounded equality witness for the Engine's selected terminal. It lives
+/// only in the in-memory execution context and never enters telemetry.
+#[derive(Clone, Default)]
+pub(super) struct RemoteModelFailureEvidence(Option<([u8; 32], RemoteModelFailure)>);
 
 impl RemoteModelFailureEvidence {
-    pub(crate) fn observe_error(&mut self, code: &str, message: &str) {
+    pub(super) fn observe_error(&mut self, code: &str, message: &str) {
         let failure = match code {
             "llm_network_error"
                 if message.starts_with(
@@ -165,12 +165,17 @@ impl RemoteModelFailureEvidence {
                 return;
             }
         };
-        self.0 = (message.len() <= 8192).then(|| (message.to_owned(), failure));
+        self.0 = Self::fingerprint(message).map(|fingerprint| (fingerprint, failure));
     }
 
-    pub(crate) fn selected_failure(self, error: Option<&str>) -> Option<RemoteModelFailure> {
-        let (message, failure) = self.0?;
-        (error == Some(message.as_str())).then_some(failure)
+    pub(super) fn selected_failure(self, error: Option<&str>) -> Option<RemoteModelFailure> {
+        let (fingerprint, failure) = self.0?;
+        (error.and_then(Self::fingerprint) == Some(fingerprint)).then_some(failure)
+    }
+
+    fn fingerprint(message: &str) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        (message.len() <= 8192).then(|| Sha256::digest(message.as_bytes()).into())
     }
 }
 

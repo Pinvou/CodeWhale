@@ -1853,15 +1853,15 @@ mod remote_control;
 mod remote_execution;
 pub(crate) use remote_execution::{
     bind_remote_execution_turn, capture_remote_execution_lease, capture_remote_model_failure,
-    register_remote_execution_with_lease, register_remote_origin, track_remote_execution_event,
-    track_remote_origin_event, track_remote_result_received, track_remote_task_output,
-    unregister_remote_execution,
+    observe_remote_model_error, register_remote_execution_with_lease, register_remote_origin,
+    track_remote_execution_event, track_remote_origin_event, track_remote_result_received,
+    track_remote_task_output, unregister_remote_execution,
 };
 
 pub use events::*;
 pub(crate) use remote_control::{
-    RemoteControlEvent, RemoteModelFailureEvidence, RemoteModelSource, RemoteOutcome,
-    RemotePermissionStep, RemoteReason, RemoteStage, track_remote_control, track_remote_transfer,
+    RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemotePermissionStep, RemoteReason,
+    RemoteStage, track_remote_control, track_remote_transfer,
 };
 
 #[cfg(all(test, feature = "behavior-telemetry-test"))]

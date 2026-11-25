@@ -1,7 +1,7 @@
 //! Narrow adapter from engine observers to the authoritative remote task.
 //! The remote ledger owns terminal status; generic turn observers own model
 //! selection and first output. Collection leases never cross installations.
-use super::remote_control::RemoteModelFailure;
+use super::remote_control::{RemoteModelFailure, RemoteModelFailureEvidence};
 use super::*;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -11,6 +11,8 @@ pub(super) struct RemoteExecution {
     started_at: u64,
     turn_id: Option<String>,
     // Evidence applies to a live terminal. Recovery uses the ledger reason.
+    #[serde(skip)]
+    model_evidence: RemoteModelFailureEvidence,
     #[serde(skip)]
     model_failure: Option<RemoteModelFailure>,
     first_output: bool,
@@ -294,6 +296,7 @@ pub(super) fn register_execution(
                 mode: mode.to_owned(),
                 started_at: now_ms(),
                 turn_id: None,
+                model_evidence: RemoteModelFailureEvidence::default(),
                 model_failure: None,
                 first_output: false,
                 lease: token.lease.clone(),
@@ -354,30 +357,67 @@ pub(super) fn bind_execution_turn(
     }
 }
 
-pub(crate) fn capture_remote_model_failure(
+pub(crate) fn observe_remote_model_error(
     app: &tauri::AppHandle,
     session: &str,
     turn: &str,
-    failure: RemoteModelFailure,
+    code: &str,
+    message: &str,
 ) {
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
-    capture_model_failure(&telemetry, session, turn, failure);
+    observe_model_error(&telemetry, session, turn, code, message);
+}
+
+pub(super) fn observe_model_error(
+    telemetry: &BehaviorTelemetry,
+    session: &str,
+    turn: &str,
+    code: &str,
+    message: &str,
+) {
+    with_current_execution(telemetry, session, turn, |execution| {
+        execution.model_evidence.observe_error(code, message);
+    });
+}
+
+pub(crate) fn capture_remote_model_failure(
+    app: &tauri::AppHandle,
+    session: &str,
+    turn: &str,
+    error: Option<&str>,
+) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    capture_model_failure(&telemetry, session, turn, error);
 }
 
 pub(super) fn capture_model_failure(
     telemetry: &BehaviorTelemetry,
     session: &str,
     turn: &str,
-    failure: RemoteModelFailure,
+    error: Option<&str>,
+) {
+    with_current_execution(telemetry, session, turn, |execution| {
+        let evidence = std::mem::take(&mut execution.model_evidence);
+        execution.model_failure = evidence.selected_failure(error);
+    });
+}
+
+fn with_current_execution(
+    telemetry: &BehaviorTelemetry,
+    session: &str,
+    turn: &str,
+    update: impl FnOnce(&mut RemoteExecution),
 ) {
     if let Ok(mut contexts) = telemetry.remote_executions.lock()
         && let Some(execution) = contexts.executions.get_mut(session)
         && execution.turn_id.as_deref() == Some(turn)
         && telemetry.lease_is_current(&execution.lease)
     {
-        execution.model_failure = Some(failure);
+        update(execution);
     }
 }
 
@@ -519,7 +559,9 @@ pub(super) fn observe_execution(
 mod tests {
     use super::*;
     const _: fn(&tauri::AppHandle, &str, &str, &str) = super::super::bind_remote_execution_turn;
-    const _: fn(&tauri::AppHandle, &str, &str, RemoteModelFailure) =
+    const _: fn(&tauri::AppHandle, &str, &str, &str, &str) =
+        super::super::observe_remote_model_error;
+    const _: fn(&tauri::AppHandle, &str, &str, Option<&str>) =
         super::super::capture_remote_model_failure;
     const _: fn(&tauri::AppHandle) -> Option<RemoteExecutionLease> =
         super::super::capture_remote_execution_lease;
@@ -601,6 +643,7 @@ mod tests {
                 mode: "assistant".into(),
                 started_at: now,
                 turn_id: Some("owned-turn".into()),
+                model_evidence: RemoteModelFailureEvidence::default(),
                 model_failure: None,
                 first_output: false,
                 lease,
@@ -635,6 +678,7 @@ mod tests {
                 mode: "code".into(),
                 started_at: now_ms(),
                 turn_id: Some("original-turn".into()),
+                model_evidence: RemoteModelFailureEvidence::default(),
                 model_failure: None,
                 first_output: true,
                 lease: lease.clone(),

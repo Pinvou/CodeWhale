@@ -404,7 +404,6 @@ pub(crate) fn spawn_event_forwarder(
             String,
             std::time::Instant,
         > = std::collections::HashMap::new();
-        let mut remote_model_evidence = None;
         let mut rx = handle.rx_event.write().await;
         while let Some(event) = rx.recv().await {
             match event {
@@ -496,7 +495,6 @@ pub(crate) fn spawn_event_forwarder(
                     active_operation_rejected = false;
                     chat_persistence_error = None;
                     current_turn_id = Some(turn_id.clone());
-                    remote_model_evidence = None;
                     if let Some(task_id) =
                         turn_lifecycle.take_remote_task_for_submission(submission_id.as_deref())
                     {
@@ -505,9 +503,6 @@ pub(crate) fn spawn_event_forwarder(
                             &task_id,
                             turn_lifecycle.current_turn_generation().unwrap_or(0),
                             &turn_id,
-                        );
-                        remote_model_evidence = Some(
-                            crate::features::behavior_telemetry::RemoteModelFailureEvidence::default(),
                         );
                         crate::features::behavior_telemetry::bind_remote_execution_turn(
                             &app,
@@ -1295,19 +1290,16 @@ pub(crate) fn spawn_event_forwarder(
                     let operation_rejected = std::mem::take(&mut active_operation_rejected);
                     let mut shell_cleanup_failed = false;
                     let mut terminal_status = status;
-                    let remote_model_evidence = remote_model_evidence.take();
                     if status == TurnOutcomeStatus::Failed
                         && error_source == Some(deepseek_tui::core::events::TurnErrorSource::Model)
                         && let Some(turn_id) = completed_turn_id.as_deref()
                         && current_turn_id.as_deref() == Some(turn_id)
-                        && let Some(failure) = remote_model_evidence
-                            .and_then(|evidence| evidence.selected_failure(error.as_deref()))
                     {
                         crate::features::behavior_telemetry::capture_remote_model_failure(
                             &app,
                             &session_id,
                             turn_id,
-                            failure,
+                            error.as_deref(),
                         );
                     }
                     // The chat:done error text goes through the same Rust
@@ -1895,8 +1887,14 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::Error { envelope, .. } => {
-                    if let Some(evidence) = remote_model_evidence.as_mut() {
-                        evidence.observe_error(&envelope.code, &envelope.message);
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::observe_remote_model_error(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &envelope.code,
+                            &envelope.message,
+                        );
                     }
                     // Edit preflight failures are non-terminal advisories until
                     // the paired TurnComplete, but their typed code tells the

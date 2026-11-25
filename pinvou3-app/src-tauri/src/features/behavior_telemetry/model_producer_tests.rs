@@ -1,7 +1,6 @@
 //! Controlled model transports, real Engine terminal selection and telemetry.
 //! No live provider is called. REPL uses the real local Python kernel.
-use super::super::RemoteModelFailureEvidence;
-use super::super::remote_control::RemoteModelFailure;
+use super::super::remote_control::{RemoteModelFailure, RemoteModelFailureEvidence};
 use super::*;
 use deepseek_tui::core::engine::{Engine, EngineConfig};
 use deepseek_tui::core::events::{Event, TurnErrorSource, TurnOutcomeStatus};
