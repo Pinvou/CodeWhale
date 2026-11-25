@@ -529,7 +529,14 @@ pub fn build_purge_tool() -> Tool {
         allowed_callers: None,
         defer_loading: None,
         input_examples: None,
-        strict: Some(true),
+        // No `strict` flag here: purge builds its own request outside the gated
+        // pipeline, and the flag would reach non-DeepSeek providers where the
+        // strict contract does not exist — while on an official beta route a
+        // strict tool schema must carry every property in `required`, which
+        // purge's optional refinement parameters (`block`, `pattern`,
+        // `with`) deliberately do not. The flag stays off; the schema ships
+        // as authored on every provider.
+        strict: None,
         cache_control: None,
     }
 }
@@ -991,4 +998,13 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("Purge API error"));
     }
+}
+
+#[test]
+fn purge_tool_ships_without_a_strict_flag_on_any_provider() {
+    let tool = build_purge_tool();
+    assert_eq!(
+        tool.strict, None,
+        "the ungated strict flag reached every provider"
+    );
 }

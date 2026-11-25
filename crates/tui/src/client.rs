@@ -1103,15 +1103,21 @@ async fn bounded_error_text_until(
 
 fn validate_base_url_security(base_url: &str) -> Result<()> {
     let display_base_url = redact_url_for_display(base_url);
-    if base_url.starts_with("https://")
-        || base_url.starts_with("http://localhost")
-        || base_url.starts_with("http://127.0.0.1")
-        || base_url.starts_with("http://[::1]")
+    // Scheme spellings compare case-insensitively (RFC 3986 §3.1: schemes
+    // are case-normalized): the route gate lowercases before it judges, so
+    // an uppercase-scheme URL was admitted by the gate and then refused
+    // here — a session that can never start while the doctor reported the
+    // route ready (round 23).
+    let scheme_normalized = base_url.to_ascii_lowercase();
+    if scheme_normalized.starts_with("https://")
+        || scheme_normalized.starts_with("http://localhost")
+        || scheme_normalized.starts_with("http://127.0.0.1")
+        || scheme_normalized.starts_with("http://[::1]")
     {
         return Ok(());
     }
 
-    if base_url.starts_with("http://")
+    if scheme_normalized.starts_with("http://")
         && std::env::var(ALLOW_INSECURE_HTTP_ENV)
             .or_else(|_| std::env::var(LEGACY_ALLOW_INSECURE_HTTP_ENV))
             .ok()
@@ -1233,16 +1239,13 @@ pub(crate) fn api_url(base_url: &str, path: &str) -> String {
 
 fn responses_api_url(base_url: &str, provider: ApiProvider) -> String {
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    // The same canonical URL sets the strict strip, the beta routing, and
+    // the doctor's classifier read (`config::DEEPSEEK_CANONICAL_*`), so this
+    // fourth official-deepseek check cannot drift from them when the sets
+    // change.
     let official_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        && matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com"
-                | "https://api.deepseek.com/v1"
-                | "https://api.deepseek.com/beta"
-                | "https://api.deepseeki.com"
-                | "https://api.deepseeki.com/v1"
-                | "https://api.deepseeki.com/beta"
-        );
+        && (crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&normalized.as_str())
+            || crate::config::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(&normalized.as_str()));
     if official_deepseek {
         format!("{}/responses", unversioned_base_url(base_url))
     } else {
@@ -1303,10 +1306,8 @@ fn chat_completions_url(
 }
 
 fn is_official_deepseek_beta_base_url(base_url: &str) -> bool {
-    matches!(
-        base_url.trim_end_matches('/').to_ascii_lowercase().as_str(),
-        "https://api.deepseek.com/beta" | "https://api.deepseeki.com/beta"
-    )
+    let trimmed = base_url.trim_end_matches('/').to_ascii_lowercase();
+    crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&trimmed.as_str())
 }
 
 fn body_uses_strict_tools(body: &Value) -> bool {
@@ -1484,26 +1485,60 @@ pub(crate) fn with_model_transport_environment(
     builder
 }
 
+/// The provider whose chat dialect a route's payload actually speaks for
+/// `model`: DS4 is configured as a named custom route so its endpoint and
+/// billing identity remain exact, but its chat payload deliberately speaks
+/// the first-party DeepSeek reasoning/tool dialect that DS4 implements —
+/// so the shape, not the route's provider typing alone, decides the chat
+/// body and the `tool_choice` suppression
+/// (`should_send_tool_choice_for_chat`). Free-standing so the strict-mode
+/// doctor can quote the same predicate the wire applies to the resolved
+/// route (the client method feeds from the identical config accessors).
+pub(crate) fn chat_shape_provider_for(
+    api_provider: ApiProvider,
+    provider_identity: &str,
+    base_url: &str,
+    model: &str,
+) -> ApiProvider {
+    if api_provider == ApiProvider::Custom
+        && provider_identity.eq_ignore_ascii_case("ds4")
+        && crate::config::base_url_uses_local_host(base_url)
+        && matches!(
+            model.trim().to_ascii_lowercase().as_str(),
+            "deepseek-v4-flash" | "deepseek-v4-pro"
+        )
+    {
+        ApiProvider::Deepseek
+    } else {
+        api_provider
+    }
+}
+
 impl DeepSeekClient {
     fn is_local_ds4_model(&self, model: &str) -> bool {
+        // Delegate to the same predicate the wire and the doctor use
+        // (`chat_shape_provider_for`), so the DS4 model list lives in one
+        // place; the `Custom` guard keeps a natively-configured Deepseek
+        // provider from counting as the local-DS4 shape.
         self.api_provider == ApiProvider::Custom
-            && self.provider_identity.eq_ignore_ascii_case("ds4")
-            && crate::config::base_url_uses_local_host(&self.base_url)
-            && matches!(
-                model.trim().to_ascii_lowercase().as_str(),
-                "deepseek-v4-flash" | "deepseek-v4-pro"
-            )
+            && chat_shape_provider_for(
+                self.api_provider,
+                &self.provider_identity,
+                &self.base_url,
+                model,
+            ) == ApiProvider::Deepseek
     }
 
     /// DS4 is configured as a named custom route so its endpoint and billing
     /// identity remain exact, but its chat payload deliberately speaks the
     /// first-party DeepSeek reasoning/tool dialect that DS4 implements.
     fn chat_shape_provider(&self, model: &str) -> ApiProvider {
-        if self.is_local_ds4_model(model) {
-            ApiProvider::Deepseek
-        } else {
-            self.api_provider
-        }
+        chat_shape_provider_for(
+            self.api_provider,
+            &self.provider_identity,
+            &self.base_url,
+            model,
+        )
     }
 
     /// Create a DeepSeek client from CLI configuration.
@@ -2382,8 +2417,18 @@ fn provider_default_wire_format(api_provider: ApiProvider) -> WireFormat {
 /// Legacy dialect kinds (`*Anthropic`) still force Messages. Custom providers
 /// honor `wire = "responses" | "anthropic" | "chat"` per-config (see
 /// `crates/config/src/provider.rs:Custom`). Everyone else keeps the descriptor's
-/// fixed policy (or Chat Completions).
-fn provider_wire_format_for_config(
+/// fixed policy (or Chat Completions). Round 23: the per-config `wire` key no
+/// longer reaches FAMILY (built-in, model-aware) tables — the route resolver
+/// builds a wire override for `ApiProvider::Custom` only
+/// (`route_runtime.rs::custom_wire_override`), so a `wire = "anthropic"` on
+/// `[providers.deepseek]` was honored HERE while every live dispatch path kept
+/// speaking chat: the doctor's round-22 wire-keyed verdict quoted a dialect no
+/// live client spoke (probed: the flag stripped on the chat wire while the
+/// doctor claimed the Messages wire forwarded it). Keying the function on what
+/// dispatch actually resolves keeps every consumer — client construction, the
+/// doctor verdicts, the capability report — on the dialect the session really
+/// speaks; the Custom half of the override is unchanged and honored.
+pub(crate) fn provider_wire_format_for_config(
     api_provider: ApiProvider,
     config: Option<&crate::config::Config>,
 ) -> WireFormat {
@@ -2395,7 +2440,7 @@ fn provider_wire_format_for_config(
             | ApiProvider::MinimaxAnthropic
             | ApiProvider::ModelstudioTokenPlanAnthropic
             | ApiProvider::ModelstudioCodingPlanAnthropic
-    ) || wire_dialect_prefers_anthropic(wire);
+    );
 
     if prefers_anthropic
         && matches!(

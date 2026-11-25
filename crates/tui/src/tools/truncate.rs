@@ -418,9 +418,10 @@ pub(crate) fn spillover_recovery_instruction(
 ) -> String {
     match retrieval_ref {
         Some(reference) => format!(
-            "{SPILLOVER_RECOVERY_HINT} call retrieve_tool_result with ref=\"{reference}\" \
-             (mode=\"tail\" for the end, mode=\"lines\" with lines=\"120-160\" for a range, \
-             mode=\"query\" with query=\"…\" to search it). \
+            "{SPILLOVER_RECOVERY_HINT} call retrieve_tool_result with ref=\"{reference}\"; \
+             that tool's own description lists the retrieval modes available on this \
+             session (on unrestricted sessions: mode=\"tail\" for the end, mode=\"lines\" \
+             with lines=\"120-160\" for a range, mode=\"query\" with query=\"…\" to search it). \
              If retrieve_tool_result is absent, activate it via tool_search first; if neither \
              route is available, use a narrower rerun"
         ),
