@@ -130,10 +130,17 @@ func TestAliyunSMSTransportErrorsOmitRequestInputs(t *testing.T) {
 	provider.client = server.Client()
 	server.Close()
 	challenge := uuid.New()
-	_, sendErr := provider.SendCode(context.Background(), "+8613800138000", SMSPurposeLogin, challenge)
+	const callerRequestID = "fixture-caller-request"
+	const callerTraceID = "11111111222222223333333344444444"
+	ctx := observability.ContextForTrace(context.Background(), callerRequestID, callerTraceID)
+	_, sendErr := provider.SendCode(ctx, "+8613800138000", SMSPurposeLogin, challenge)
 	var rejected *SMSDeliveryRejectedError
 	if sendErr == nil || errors.As(sendErr, &rejected) {
 		t.Fatal("send transport failure must leave delivery outcome unknown")
+	}
+	if !strings.Contains(logs.String(), `"event":"aliyun_sms_send_failed"`) ||
+		!strings.Contains(logs.String(), `"stage":"transport"`) {
+		t.Fatal("send transport failure was not recorded")
 	}
 	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", challenge,
 		SMSVerificationData{Provider: provider.Descriptor()}, "903489")
@@ -142,7 +149,7 @@ func TestAliyunSMSTransportErrorsOmitRequestInputs(t *testing.T) {
 		t.Fatal("verification transport failure was not recorded")
 	}
 	for _, diagnostic := range []string{sendErr.Error(), err.Error(), logs.String()} {
-		for _, sensitive := range []string{"13800138000", "903489", challenge.String(), server.URL, "fixture-id"} {
+		for _, sensitive := range []string{"13800138000", "903489", challenge.String(), server.URL, "fixture-id", callerRequestID, callerTraceID} {
 			if strings.Contains(diagnostic, sensitive) {
 				t.Fatal("transport diagnostics contain request data")
 			}
@@ -150,7 +157,7 @@ func TestAliyunSMSTransportErrorsOmitRequestInputs(t *testing.T) {
 	}
 }
 
-func TestAliyunSMSVerificationDiagnosticRetainsOnlySafeProviderContext(t *testing.T) {
+func TestAliyunSMSDiagnosticRetainsOnlySafeProviderContext(t *testing.T) {
 	var logs bytes.Buffer
 	previousLogger := slog.Default()
 	slog.SetDefault(observability.NewLogger(&logs, observability.Config{Service: "account-service", Environment: "test"}))
@@ -168,25 +175,35 @@ func TestAliyunSMSVerificationDiagnosticRetainsOnlySafeProviderContext(t *testin
 		t.Fatal(err)
 	}
 	provider.client = server.Client()
-	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", uuid.New(),
+	challenge := uuid.New()
+	assertDiagnostic := func(event, stage string) {
+		t.Helper()
+		var diagnostic struct {
+			Event  string `json:"event"`
+			Stage  string `json:"stage"`
+			Status int    `json:"status"`
+		}
+		if err := json.Unmarshal(logs.Bytes(), &diagnostic); err != nil || diagnostic.Event != event ||
+			diagnostic.Stage != stage || diagnostic.Status != http.StatusServiceUnavailable {
+			t.Fatal("provider diagnostic did not preserve the bounded event, stage and status", err)
+		}
+		for _, sensitive := range []string{"fixture-upstream-code", "fixture-upstream-message", "13800138000", "903489", challenge.String(), "fixture-id", server.URL} {
+			if strings.Contains(logs.String(), sensitive) {
+				t.Fatal("provider diagnostic included provider or request data")
+			}
+		}
+	}
+	if _, err := provider.SendCode(context.Background(), "+8613800138000", SMSPurposeLogin, challenge); err == nil {
+		t.Fatal("provider outage was accepted as successful delivery")
+	}
+	assertDiagnostic("aliyun_sms_send_failed", "http_status")
+	logs.Reset()
+	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", challenge,
 		SMSVerificationData{Provider: provider.Descriptor()}, "903489")
 	if verified || err == nil {
 		t.Fatal("provider outage was accepted as successful verification")
 	}
-	var diagnostic struct {
-		Event  string `json:"event"`
-		Stage  string `json:"stage"`
-		Status int    `json:"status"`
-	}
-	if err := json.Unmarshal(logs.Bytes(), &diagnostic); err != nil || diagnostic.Event != "aliyun_sms_verification_failed" ||
-		diagnostic.Stage != "provider_rejected" || diagnostic.Status != http.StatusServiceUnavailable {
-		t.Fatal("provider diagnostic did not preserve the bounded event, stage and status", err)
-	}
-	for _, sensitive := range []string{"fixture-upstream-code", "fixture-upstream-message", "13800138000", "903489", server.URL} {
-		if strings.Contains(logs.String(), sensitive) {
-			t.Fatal("verification diagnostic included provider or request data")
-		}
-	}
+	assertDiagnostic("aliyun_sms_verification_failed", "provider_rejected")
 }
 
 func TestAliyunSMSProviderRequiresHTTPS(t *testing.T) {

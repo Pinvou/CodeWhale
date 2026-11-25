@@ -2,7 +2,9 @@ package account
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -520,13 +524,40 @@ func TestMobileSignupRetriesPersistingKnownNoDispatchProof(t *testing.T) {
 	}
 }
 
+type smsLogRecords chan string
+
+func (logs smsLogRecords) Write(record []byte) (int, error) {
+	logs <- string(record)
+	return len(record), nil
+}
+
 func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{mobileExists: true, deliveryDone: make(chan struct{})}
 	sms := &smsProviderFake{sendErr: errors.New("provider unavailable")}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposeLogin, uuid.New(), 128, "192.0.2.1", "device-1")
-	if err != nil || challenge.ID == uuid.Nil {
-		t.Fatalf("known account response must not expose provider state: challenge=%#v err=%v", challenge, err)
+	handler := httpserver.CorrelationHandler(NewService(nil, nil).WithMobileAuth(service, "internal-service-token-for-tests-123456").Handler(nil))
+	logs := make(smsLogRecords, 16)
+	previous := slog.Default()
+	slog.SetDefault(observability.NewLogger(logs, observability.Config{Service: "account-service", Environment: "test"}))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	const callerRequestID = "fixture-caller-request"
+	const callerTraceID = "11111111222222223333333344444444"
+	const mobile = "13800138000"
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/sms/challenges",
+		strings.NewReader(`{"mobile":"13800138000","purpose":"LOGIN","captcha_id":"aaaa1111-bbbb-4ccc-8ddd-eeee22223333","captcha_offset":128}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Device-ID", "device-1")
+	request.Header.Set("X-Request-ID", callerRequestID)
+	request.Header.Set("traceparent", "00-"+callerTraceID+"-1234567812345678-01")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var challenge struct {
+		ID uuid.UUID `json:"challenge_id"`
+	}
+	if response.Code != http.StatusAccepted || response.Header().Get("X-Trace-ID") != callerTraceID ||
+		json.Unmarshal(response.Body.Bytes(), &challenge) != nil || challenge.ID == uuid.Nil {
+		t.Fatalf("known account response must not expose provider state: status=%d", response.Code)
 	}
 	repository.waitForDelivery(t)
 	sent, failed := repository.deliveryState()
@@ -535,6 +566,19 @@ func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T
 	}
 	if providerChallenge, calls := sms.deliveryState(); providerChallenge != challenge.ID || calls != 1 {
 		t.Fatal("asynchronous provider failure must correspond to exactly one delivery attempt")
+	}
+	select {
+	case record := <-logs:
+		if !strings.Contains(record, `"event":"sms_asynchronous_delivery_failed"`) {
+			t.Fatal("async failure diagnostic was not recorded")
+		}
+		for _, private := range []string{callerRequestID, callerTraceID, mobile, challenge.ID.String(), sms.sendErr.Error()} {
+			if strings.Contains(record, private) {
+				t.Fatal("async failure diagnostic contained caller or provider data")
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async failure diagnostic was not recorded")
 	}
 }
 

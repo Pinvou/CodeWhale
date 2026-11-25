@@ -1,4 +1,7 @@
-LOCK TABLE registration_operations, sms_challenges IN ACCESS EXCLUSIVE MODE;
+SET LOCAL lock_timeout = '2s';
+SET LOCAL statement_timeout = '2s';
+
+LOCK TABLE sms_challenges, registration_operations IN ACCESS EXCLUSIVE MODE NOWAIT;
 
 DO $$
 BEGIN

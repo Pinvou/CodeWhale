@@ -281,14 +281,22 @@ func lockRegistrationMobile(ctx context.Context, tx pgx.Tx, mobile string) error
 // Keep tentative Identity updates and current Account mappings ordered exactly
 // as ordinary SMS sign-in. The consented flow also binds the challenge to the
 // observed profile generation, including the unbound state.
-const smsLoginBindingFrom = `
-FROM users u JOIN identities i ON i.user_id=u.id
-WHERE u.status<>'DELETED' AND i.issuer=$2
-  AND (u.mobile_e164=$1 OR EXISTS(
-    SELECT 1 FROM profile_change_requests p WHERE p.user_id=u.id AND p.identity_issuer=i.issuer
-      AND p.identity_subject=i.subject AND p.field='MOBILE' AND p.new_value=$1 AND p.identity_updated_at IS NOT NULL
-      AND p.status IN ('IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED')))
-ORDER BY (u.mobile_e164=$1) DESC,i.last_seen_at DESC LIMIT 1`
+const smsLoginBindingQuery = `
+SELECT subject,id,identity_security_version,COALESCE(is_current,FALSE) AS current_mobile
+FROM (
+  SELECT i.subject,u.id,u.identity_security_version,TRUE AS is_current,i.last_seen_at
+  FROM users u JOIN identities i ON i.user_id=u.id AND i.issuer=$2
+  WHERE u.mobile_e164=$1 AND u.status<>'DELETED'
+  UNION ALL
+  SELECT i.subject,u.id,u.identity_security_version,u.mobile_e164=$1,i.last_seen_at
+  FROM profile_change_requests p
+  JOIN users u ON u.id=p.user_id
+  JOIN identities i ON i.issuer=p.identity_issuer AND i.subject=p.identity_subject AND i.user_id=u.id
+  WHERE p.field='MOBILE' AND p.new_value=$1 AND p.identity_updated_at IS NOT NULL
+    AND p.status IN ('IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED')
+    AND p.identity_issuer=$2 AND u.status<>'DELETED' AND u.mobile_e164 IS DISTINCT FROM $1
+) candidates
+ORDER BY candidates.is_current DESC NULLS FIRST,last_seen_at DESC LIMIT 1`
 
 type smsLoginSnapshot struct {
 	subject       string
@@ -304,9 +312,7 @@ func readSMSLoginSnapshot(ctx context.Context, tx pgx.Tx, issuer, mobile string,
 	var current bool
 	// Registration completion can change the subject and consume the
 	// reservation in one commit. Read them in the same SQL snapshot.
-	err := tx.QueryRow(ctx, `WITH binding AS (
-  SELECT i.subject,u.id,u.identity_security_version,COALESCE(u.mobile_e164=$1,FALSE) AS current_mobile`+smsLoginBindingFrom+`
-)
+	err := tx.QueryRow(ctx, `WITH binding AS (`+smsLoginBindingQuery+`)
 SELECT COALESCE(b.subject,''),COALESCE(b.id,'00000000-0000-0000-0000-000000000000'::uuid),
        COALESCE(b.identity_security_version,0),COALESCE(b.current_mobile,FALSE),
        EXISTS (SELECT 1 FROM users WHERE mobile_e164=$1 AND status<>'DELETED') OR

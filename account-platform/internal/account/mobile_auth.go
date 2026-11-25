@@ -309,7 +309,12 @@ func (s *MobileAuthService) send(ctx context.Context, rawUsername, rawMobile, pa
 	// bucket even when the provider is slow or unavailable.
 	if purpose == SMSPurposeLogin || purpose == SMSPurposePasswordReset {
 		if signupConsent != "" || exists && (purpose == SMSPurposeLogin || passwordResetAllowed) {
-			go s.deliverSMS(context.WithoutCancel(ctx), challenge)
+			go func(deliveryCtx context.Context) {
+				if err := s.deliverSMS(deliveryCtx, challenge); err != nil {
+					// Caller-supplied correlation IDs can be present in deliveryCtx.
+					slog.Warn("SMS asynchronous delivery failed")
+				}
+			}(context.WithoutCancel(ctx))
 		}
 		if err := waitForResponseFloor(ctx, startedAt, s.loginResponseFloor); err != nil {
 			return SMSChallenge{}, err
@@ -758,7 +763,7 @@ func (r *PostgresRepository) MobileExists(ctx context.Context, mobile string) (b
 
 func (r *PostgresRepository) MobileIdentitySubject(ctx context.Context, issuer, mobile string) (string, error) {
 	var subject string
-	err := r.pool.QueryRow(ctx, `SELECT i.subject`+smsLoginBindingFrom, mobile, issuer).Scan(&subject)
+	err := r.pool.QueryRow(ctx, `SELECT subject FROM (`+smsLoginBindingQuery+`) binding`, mobile, issuer).Scan(&subject)
 	return subject, err
 }
 
