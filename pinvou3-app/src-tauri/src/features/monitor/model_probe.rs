@@ -3566,11 +3566,7 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             // safe default (plans that include 1M declare context_window
             // explicitly), so the probe infers the base-verified figure.
             (ModelPreset::OpenaiCompatible, "k3.1-pro", 262_144),
-            (
-                ModelPreset::OpenaiCompatible,
-                "k3.1-pro-highspeed",
-                262_144,
-            ),
+            (ModelPreset::OpenaiCompatible, "k3.1-pro-highspeed", 262_144),
             (ModelPreset::OpenaiCompatible, "k3.1-pro[1m]", 1_048_576),
             (
                 ModelPreset::OpenaiCompatible,
