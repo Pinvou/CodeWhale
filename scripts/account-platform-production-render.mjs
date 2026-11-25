@@ -73,7 +73,7 @@ const base = ['personal', 'personal-workload'];
 const model = [...base, 'finance', 'reconciliation', 'models'];
 export const composeCompositions = Object.freeze({ personal: base, models: model });
 const extraOverlays = new Set(['finance', 'reconciliation', 'signup', 'organizations', 'invocation', 'closure', 'approval-recovery',
-  'receivable-write-off', 'payment-financial-repair', 'ledger-repair', 'entitlement-correction', 'audit-export', 'token-events']);
+  'receivable-write-off', 'payment-financial-repair', 'ledger-repair', 'entitlement-correction', 'audit-export', 'token-events', 'enterprise-sms']);
 
 function runRenderer(binary, args, root, environment) {
   const rendered = spawnSync(binary, args, { cwd: root, env: environment, encoding: 'buffer',

@@ -62,7 +62,24 @@ test('network boundary denies HTTP and permits only explicit client and supplier
 })
 
 test('existing Docker CLI and static probes are delivered with current files', () => {
-  assert.match(read('account-platform/Dockerfile'), /token-command-executor\|newapi-tls\)/)
+  const stages = read('account-platform/Dockerfile').replace(/\\\r?\n/g, ' ').split(/^FROM[ \t]+/m)
+  const copies = [...stages.at(-1).matchAll(/^COPY[ \t]+--from=([\w-]+)[ \t]+\/out\/service[ \t]+\/service[ \t]*\r?$/gm)]
+  assert.equal(copies.length, 1, 'Dockerfile final stage must copy the selected service from one build stage')
+  const builders = stages.filter((stage) => stage.split(/\r?\n/, 1)[0].trimEnd().endsWith(` AS ${copies[0][1]}`))
+  assert.equal(builders.length, 1, 'Dockerfile must declare the stage that supplies /service')
+
+  const compileService = /^(?:[A-Z_][A-Z0-9_]*=\S+\s+)*go\s+build\b.*\s-o\s+(?:"\/out\/service"|\/out\/service)\s+"\.\/cmd\/\$\{SERVICE\}"\s*$/
+  const builds = builders[0].split(/\r?\n/)
+    .filter((line) => /^RUN\s/.test(line))
+    .map((line) => line.split(/\s*&&\s*/))
+    .filter(([, compile]) => compileService.test(compile ?? ''))
+  assert.equal(builds.length, 1, 'Dockerfile build stage must compile the selected service in one guarded RUN')
+  const allowlist = builds[0][0].match(/^RUN(?:\s+--\S+)*\s+case\s+"\$SERVICE"\s+in\s+\(?\s*([a-z0-9-]+(?:\s*\|\s*[a-z0-9-]+)*)\s*\)\s*;;\s*\(?\s*\*\s*\)\s*exit\s+1\s*;;\s*esac\s*$/)
+  assert.ok(allowlist, 'Dockerfile must check the SERVICE allowlist before building')
+  const services = allowlist[1].split('|').map((name) => name.trim())
+  for (const name of ['token-command-executor', 'newapi-tls']) {
+    assert.ok(services.includes(name), `Dockerfile must allow the ${name} service`)
+  }
   assert.match(read('account-platform/cmd/newapi-tls/main.go'), /NEWAPI_TLS_CERT_FILE/)
   assert.match(read('account-platform/cmd/newapi-tls/main.go'), /NEWAPI_TLS_KEY_FILE/)
   for (const [name, path] of [['readinessProbe', '/health/ready'], ['livenessProbe', '/health/live']]) {

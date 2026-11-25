@@ -1843,6 +1843,11 @@
       "strategy": "workload.http-host"
     },
     {
+      "name": "enterprise-sms-gateway",
+      "source": "account-platform/cmd/enterprise-sms-gateway/main.go",
+      "strategy": "workload.bearer-authenticated-sms-gateway"
+    },
+    {
       "name": "migrate",
       "source": "account-platform/cmd/migrate/main.go",
       "strategy": "workload.deployment-migration-identity"
