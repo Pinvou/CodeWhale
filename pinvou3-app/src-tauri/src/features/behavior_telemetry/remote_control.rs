@@ -121,6 +121,56 @@ fn size_bucket(bytes: u64) -> RemoteSizeBucket {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteModelFailure {
+    Network,
+    Dns,
+    Tls,
+    Timeout,
+    Authentication,
+}
+
+impl RemoteModelFailure {
+    /// The host calls this only for the exact Engine terminal tagged Model.
+    /// Match the producer's LlmError display prefixes, not arbitrary content
+    /// in provider responses, URLs or names. The original error stays local.
+    pub(super) fn from_engine_terminal(error: &str) -> Option<Self> {
+        if let Some(detail) = error.strip_prefix("Network error: ") {
+            let detail = detail
+                .strip_prefix("Connection failed: ")
+                .or_else(|| detail.strip_prefix("Request failed: "))
+                .unwrap_or(detail);
+            if detail.starts_with("dns error: ") {
+                Some(Self::Dns)
+            } else if detail.starts_with("invalid peer certificate: ")
+                || detail.starts_with("tls handshake failed: ")
+            {
+                Some(Self::Tls)
+            } else {
+                Some(Self::Network)
+            }
+        } else if error.starts_with("Request timed out after ") {
+            Some(Self::Timeout)
+        } else if error.starts_with("Authentication failed: ")
+            || error.starts_with("Authorization failed: ")
+        {
+            Some(Self::Authentication)
+        } else {
+            None
+        }
+    }
+
+    fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::Network => "network_unavailable",
+            Self::Dns => "dns_failed",
+            Self::Tls => "tls_failed",
+            Self::Timeout => "request_timeout",
+            Self::Authentication => "authentication_failed",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteControlEvent {
     stage: RemoteStage,
@@ -132,6 +182,7 @@ pub(crate) struct RemoteControlEvent {
     permission_step: Option<RemotePermissionStep>,
     diagnostic_task: Option<([u8; 32], bool)>,
     diagnostic_code: Option<(&'static str, Option<u16>)>,
+    use_model_failure: bool,
     diagnostic_cancelled: bool,
     task_key: Option<String>,
     role: Option<&'static str>,
@@ -167,6 +218,7 @@ impl RemoteControlEvent {
             permission_step: None,
             diagnostic_task: None,
             diagnostic_code: None,
+            use_model_failure: false,
             diagnostic_cancelled: false,
             task_key: None,
             role: None,
@@ -291,9 +343,37 @@ impl RemoteControlEvent {
             .reason(reason)
             .latency_ms(latency_ms);
         if let Err(error) = result {
-            event.diagnostic_code = Some(super::diagnostics::classify(error, false));
+            event.diagnostic_code = Some(
+                (stage == RemoteStage::TaskTerminal)
+                    .then(|| terminal_diagnostic(error))
+                    .flatten()
+                    .map_or_else(
+                        || super::diagnostics::classify(error, false),
+                        |code| (code, None),
+                    ),
+            );
+            event.use_model_failure =
+                stage == RemoteStage::TaskTerminal && error == "task_turn_failed";
         }
         event
+    }
+
+    pub(super) fn with_model_failure(mut self, failure: Option<RemoteModelFailure>) -> Self {
+        if self.use_model_failure
+            && self.role == Some("controlled")
+            && self.status == Some("failed")
+            && !self.diagnostic_cancelled
+            && self.diagnostic_code == Some(("unknown", None))
+            && let Some(failure) = failure
+        {
+            self.diagnostic_code = Some((failure.diagnostic_code(), None));
+            self.reason = RemoteReason::ModelUnavailable;
+            if failure == RemoteModelFailure::Timeout {
+                self.outcome = RemoteOutcome::Timeout;
+                self.reason = RemoteReason::TaskTimeout;
+            }
+        }
+        self
     }
 
     fn diagnostic_site(&self) -> &'static str {
@@ -371,6 +451,24 @@ impl RemoteControlEvent {
         }
         event
     }
+}
+
+fn terminal_diagnostic(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "task_attachments_invalid"
+        | "task_request_invalid"
+        | "task_input_invalid"
+        | "task_generation_stale"
+        | "model_runtime_invalid"
+        | "model_endpoint_invalid"
+        | "model_endpoint_insecure"
+        | "model_endpoint_private" => "validation_failed",
+        "model_endpoint_unresolved" => "dns_failed",
+        "model_package_missing" | "model_credential_unavailable" => "configuration_missing",
+        "task_engine_unavailable" | "executor_unavailable" => "internal_error",
+        "task_turn_timeout" => "request_timeout",
+        _ => return None,
+    })
 }
 
 fn classify_error(error: &str) -> (RemoteOutcome, RemoteReason) {
@@ -581,6 +679,35 @@ mod tests {
     const _: fn(&tauri::AppHandle, RemoteControlEvent) = track_remote_control;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, String) = track_remote_control_with_event_id;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, &str) = super::super::track_remote_transfer;
+
+    #[test]
+    fn remote_model_failure_requires_an_engine_transport_or_auth_prefix() {
+        use super::RemoteModelFailure as Failure;
+
+        for (error, expected) in [
+            (
+                "Network error: Connection failed: dns error: lookup failed",
+                Some(Failure::Dns),
+            ),
+            (
+                "Network error: Connection failed: invalid peer certificate: UnknownIssuer",
+                Some(Failure::Tls),
+            ),
+            (
+                "Network error: Connection failed: https://dns-error.invalid/certificate",
+                Some(Failure::Network),
+            ),
+            ("Request timed out after 30s", Some(Failure::Timeout)),
+            (
+                "Authentication failed: invalid credential",
+                Some(Failure::Authentication),
+            ),
+            ("Invalid request (400): DNS connection failed", None),
+            ("LLM error: Network error: connection refused", None),
+        ] {
+            assert_eq!(Failure::from_engine_terminal(error), expected, "{error}");
+        }
+    }
 
     #[test]
     fn diagnostic_remote_eof_requires_model_error_provenance() {

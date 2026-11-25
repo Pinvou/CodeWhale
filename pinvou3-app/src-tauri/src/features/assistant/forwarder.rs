@@ -1261,7 +1261,7 @@ pub(crate) fn spawn_event_forwarder(
                     error,
                     error_source,
                     tool_catalog,
-                    turn_id: _,
+                    turn_id: completed_turn_id,
                     submission_id: _,
                     compaction_id: _,
                     base_url: _,
@@ -1302,6 +1302,17 @@ pub(crate) fn spawn_event_forwarder(
                             == Some(deepseek_tui::core::events::TurnErrorSource::Model))
                     .then(|| terminal_error.clone())
                     .flatten();
+                    if let (Some(turn_id), Some(error)) = (
+                        completed_turn_id.as_deref(),
+                        model_diagnostic_error.as_deref(),
+                    ) {
+                        crate::features::behavior_telemetry::capture_remote_model_failure(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            error,
+                        );
+                    }
                     if let Some(base_total_tokens) = scheduled_base_total_tokens {
                         scheduled_engine_total_tokens = scheduled_engine_total_tokens
                             .saturating_add(u64::from(usage.input_tokens))
