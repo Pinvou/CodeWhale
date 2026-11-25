@@ -2895,6 +2895,31 @@ mod tests {
     }
 
     #[test]
+    fn sms_token_errors_preserve_registration_and_service_outcomes() {
+        for (description, expected) in [
+            (
+                Some("REGISTRATION_RECOVERING"),
+                "mobile_auth_failed: REGISTRATION_RECOVERING",
+            ),
+            (
+                Some("REGISTRATION_MANUAL_REVIEW_REQUIRED"),
+                "mobile_auth_failed: REGISTRATION_MANUAL_REVIEW_REQUIRED",
+            ),
+            (None, "mobile_auth_failed: SMS_UNAVAILABLE"),
+        ] {
+            assert_eq!(
+                classify_token_error(
+                    TokenFlow::Sms,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some("temporarily_unavailable"),
+                    description,
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn public_account_diagnostics_use_fixed_non_sensitive_operation_names() {
         assert_eq!(
             account_public_operation("v1/auth/sms/challenges"),
