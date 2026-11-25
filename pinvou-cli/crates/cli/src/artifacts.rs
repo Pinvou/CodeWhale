@@ -43,6 +43,10 @@ use pinvou3_lib::features::sessions::SessionStore;
 /// Same cap as the GUI artifact editor (`MAX_EDITABLE_MARKDOWN_BYTES`).
 const MAX_EDITABLE_MARKDOWN_BYTES: usize = 10 * 1024 * 1024;
 
+/// Stable refusal code for the sensitive-component gate (round-16 review
+/// NIT: a single named definition point; contract pins assert this exact
+/// spelling, so gate deletion or code drift turns red).
+const ARTIFACT_CROSSES_SENSITIVE_COMPONENT: &str = "artifact_crosses_sensitive_component";
 /// The credential-component blocklist, IMPORTED from
 /// `platform::path_policy::BLOCKED_COMPONENTS` (the module was widened from
 /// `pub(crate)` for exactly this consumer): the lists can no longer drift.
@@ -52,6 +56,11 @@ const MAX_EDITABLE_MARKDOWN_BYTES: usize = 10 * 1024 * 1024;
 /// `validate_browsable_path`) stayed closed; that failure class is gone now
 /// that both surfaces read one constant.
 use pinvou3_lib::platform::path_policy::BLOCKED_COMPONENTS as SENSITIVE_PATH_COMPONENTS;
+
+/// The component-prefix blocklist, imported from
+/// `platform::path_policy::BLOCKED_COMPONENT_PREFIXES` for the same
+/// one-constant reason as the two lists above.
+use pinvou3_lib::platform::path_policy::BLOCKED_COMPONENT_PREFIXES as SENSITIVE_PATH_COMPONENT_PREFIXES;
 
 /// The system-prefix blocklist, imported from
 /// `platform::path_policy::BLOCKED_PREFIXES` for the same reason.
@@ -73,20 +82,62 @@ use pinvou3_lib::platform::path_policy::BLOCKED_PREFIXES as SENSITIVE_PATH_PREFI
 /// case-insensitive on Windows — a case-sensitive compare there would let
 /// `ID_RSA` through on a filesystem that treats it as the same file).
 fn crosses_sensitive_component(canonical: &Path) -> Option<&'static str> {
-    SENSITIVE_PATH_COMPONENTS.iter().copied().find(|blocked| {
-        canonical.components().any(|component| {
-            pinvou3_lib::platform::path_component_eq(component.as_os_str(), blocked)
+    SENSITIVE_PATH_COMPONENTS
+        .iter()
+        .copied()
+        .find(|blocked| {
+            canonical.components().any(|component| {
+                pinvou3_lib::platform::path_component_eq(component.as_os_str(), blocked)
+            })
         })
-    })
+        .or_else(|| {
+            // 回流形态适配：上游 lib 的 `check_sensitive_components` 早有
+            // `BLOCKED_COMPONENT_PREFIXES`（`.env.` 系环境变体命名）一腿，本镜像
+            // 此前滞后缺腿；按 lib 同形状补齐，比对复用平台感知的
+            // `path_component_prefix`（macOS/Windows 大小写折叠，与
+            // `path_component_eq` 同语义）。
+            SENSITIVE_PATH_COMPONENT_PREFIXES
+                .iter()
+                .copied()
+                .find(|prefix| {
+                    canonical.components().any(|component| {
+                        pinvou3_lib::platform::path_component_prefix(component.as_os_str(), prefix)
+                    })
+                })
+        })
 }
 
 /// Mirror of the whole `path_policy::check_sensitive_components` predicate
 /// (components *and* system prefixes), for user-named paths that are not
-/// confined to session storage.
+/// confined to session storage. The system-prefix half delegates to the
+/// upstream composed predicate (`canonical_system_prefix_hit`, which wraps
+/// `BLOCKED_PREFIXES` with the macOS `/private/{etc,var,tmp}` alias expansion,
+/// published for exactly this consumer in the Round-6 review): hand-looping
+/// the prefix list here silently missed the macOS `/private/{etc,var,tmp}`
+/// alias expansion that `check_sensitive_components` gained — canonicalized
+/// spellings on macOS resolve `/etc/...` to `/private/etc/...`, which matches
+/// no list entry, so the GUI refused paths this mirror shipped. (Round-17
+/// review correction: the disclosed session-artifact asymmetry lives on the
+/// `resolve_session_artifact` gate below, not on this fn — this one does
+/// apply the system-prefix leg; see the comment at that gate.)
 pub(crate) fn check_sensitive_path(canonical: &Path) -> Result<(), String> {
     if let Some(blocked) = crosses_sensitive_component(canonical) {
         return Err(format!(
             "{} crosses the credential path component `{blocked}`",
+            canonical.display()
+        ));
+    }
+    // Round-6 review M2 (payload port): macOS canonicalizes /etc/... into
+    // /private/etc/... spellings, which the raw byte-prefix loop below
+    // misses wholesale; the upstream composed predicate strips the
+    // /private/{etc,var,tmp} alias before matching so the aliased system
+    // areas stay refused through this mirror too.
+    if pinvou3_lib::platform::path_policy::canonical_system_prefix_hit(
+        canonical,
+        cfg!(target_os = "macos"),
+    ) {
+        return Err(format!(
+            "{} is in the system-sensitive area",
             canonical.display()
         ));
     }
@@ -327,7 +378,7 @@ fn resolve_session_artifact(
     // model context, which is the read direction.
     if let Some(blocked) = crosses_sensitive_component(&canonical) {
         return Err(CliError::failed(format!(
-            "artifact_crosses_sensitive_component: {} crosses `{blocked}`; credential paths are \
+            "{ARTIFACT_CROSSES_SENSITIVE_COMPONENT}: {} crosses `{blocked}`; credential paths are \
              never read or written through this command",
             canonical.display()
         )));
@@ -602,6 +653,28 @@ fn write(
 
 #[cfg(test)]
 mod tests {
+    /// Round-15 review F1: the production-wired alias flag
+    /// (`cfg!(target_os = "macos")`) itself has no pin — all existing alias
+    /// pins drive the explicit-parameter helper, so if the flag regresses to
+    /// `false`, macOS's `/private/etc/*` lane reopens while every test stays
+    /// green (the round-6 M2 hole). The macOS-gated behavior pin drives the
+    /// real flag through the real production entry point; on other platforms
+    /// that entry point's behavior is covered by the explicit-parameter
+    /// pins.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn system_prefix_hits_run_through_the_production_alias_flag() {
+        // The first two assertions discriminate the flag mutation (with
+        // flag→false the alias expansion disappears and `/private/…` matches
+        // no raw list entry, so the path passes); the third is the control:
+        // the raw spelling `/etc/shadow` hits even without alias expansion,
+        // pinning that the raw half of the "raw OR alias" pair is not
+        // accidentally removed.
+        assert!(super::check_sensitive_path(Path::new("/private/etc/shadow")).is_err());
+        assert!(super::check_sensitive_path(Path::new("/private/var/root/x")).is_err());
+        assert!(super::check_sensitive_path(Path::new("/etc/shadow")).is_err());
+    }
+
     use super::*;
 
     fn parse(arguments: &[&str]) -> Result<ArtifactsCommand, CliError> {

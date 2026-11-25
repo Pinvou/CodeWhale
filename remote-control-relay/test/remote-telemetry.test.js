@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRemoteOverview, projectRemoteTasks } from "../remote-telemetry.js";
+import { buildRemoteOverview, projectRemoteTasks, remoteOverviewForAnalyst } from "../remote-telemetry.js";
 import { buildBehaviorOverview, buildStatsOverview, buildDeviceList, buildBehaviorModelRanking, buildBehaviorToolRanking, TelemetryStore } from "../telemetry-service.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -132,6 +132,26 @@ test("passive B success cannot become first-day activation or technical value", 
   assert.equal(report.metrics.first_technical_value_24h_installations, 0);
   assert.equal(report.metrics.wsta_installations, 0);
   assert.equal(report.funnels.activation.task_succeeded_installations, 0);
+});
+
+test("remote event groups use earliest observed order and keep their counts", () => {
+  const rows = [
+    event("controller", "attachment", { event_id: "late_attachment", occurred_at: now - 1000 }),
+    event("controller", "connection", { event_id: "initial_connection", occurred_at: now - 5000 }),
+    event("controller", "attachment", { event_id: "first_attachment", occurred_at: now - 3000 }),
+    event("controller", "claim", { event_id: "last_claim", occurred_at: now - 2000 }),
+  ];
+  const report = buildBehaviorOverview(devices, [], rows, "today", now);
+  assert.deepEqual(report.remote_control.rows.map(({ stage, sequence, count }) => [sequence, stage, count]), [
+    [1, "connection", 1], [2, "attachment", 2], [3, "claim", 1],
+  ]);
+  const reversed = rows.map(row => ({ ...row, occurred_at: 2 * (now - 5000) - row.occurred_at }));
+  const other = buildBehaviorOverview(devices, [], reversed, "today", now);
+  assert.notDeepEqual(other.remote_control.rows, report.remote_control.rows);
+  assert.deepEqual(remoteOverviewForAnalyst(report.remote_control).rows,
+    remoteOverviewForAnalyst(other.remote_control).rows);
+  assert.deepEqual(remoteOverviewForAnalyst(report.remote_control).rows.map(row => row.stage),
+    ["attachment", "claim", "connection"]);
 });
 
 test("B-only admission rejection reports its reason without an invocation or origin activity", () => {
@@ -435,15 +455,17 @@ test("resolved receipts supersede unknown snapshots while B remains authoritativ
   }
 });
 
-test("dashboard sections reuse the remote join and refresh after ingestion, retention and installation changes", () => {
+test("dashboard sections reuse the remote join and refresh after ingestion, retention and installation changes", t => {
+  t.mock.method(Date, "now", () => now);
   const directory = mkdtempSync(join(tmpdir(), "pinvou-remote-projection-"));
   const store = new TelemetryStore(directory, "remote-projection-test-pepper-at-least-24-chars");
   try {
     for (const device of devices) store.devices.set(device.device_id, { ...device });
+    const capturedAt = Date.now();
     let stageReads = 0;
     store.behaviorEvents = invocation().map(row => {
       const stage = row.remote_stage;
-      return { ...row, occurred_at: Date.now() - 10000,
+      return { ...row, occurred_at: capturedAt - 10000, received_at: capturedAt,
         get remote_stage() { stageReads++; return stage; } };
     });
     // Avoid unrelated due-compaction replacing the source between section reads.
@@ -459,7 +481,7 @@ test("dashboard sections reuse the remote join and refresh after ingestion, rete
     store.overview(); store.deviceList();
     assert.equal(stageReads, 0, "adjacent section requests must not regroup remote tasks");
     const second = invocation().map(row => ({ ...row, remote_task_key: "b".repeat(64),
-      event_id: `second_${row.event_id}`, occurred_at: Date.now() - 5000 }));
+      event_id: `second_${row.event_id}`, occurred_at: capturedAt - 5000, received_at: capturedAt }));
     store.behaviorEvents.push(...second);
     assert.equal(store.behaviorOverview("today").remote_control.task_count, 2);
     // Device identity upgrades can change eligibility without changing events.

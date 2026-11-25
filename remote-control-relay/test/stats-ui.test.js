@@ -346,7 +346,7 @@ test("usage trend exposes exact values on hover and after a range rerender", asy
       turns: index === 7 ? 12 : index + 2,
     })),
     usage_trend_hourly_today: [{ hour: seenAt, active_devices: 3, new_devices: 1, turns: 4 }],
-    usage_trend_hourly_previous: [{ hour: seenAt - 86_400_000, active_devices: 2, new_devices: 1, turns: 3 }],
+    usage_trend_hourly_week_ago: [{ hour: seenAt - 7 * 86_400_000, active_devices: 2, new_devices: 1, turns: 3 }],
   };
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
@@ -540,7 +540,7 @@ test("hourly and daily charts coexist with independent pointers, keyboard naviga
   } finally { dom.window.close(); }
 });
 
-test("hourly comparison shares scales, styles yesterday separately and does not draw future zeros", async () => {
+test("hourly comparison shares scales, styles the same weekday last week separately and does not draw future zeros", async () => {
   const today = Date.parse("2026-10-19T00:00:00+08:00");
   let report = {
     ...overview,
@@ -548,8 +548,8 @@ test("hourly comparison shares scales, styles yesterday separately and does not 
       hour: today + index * 3_600_000, active_devices: index === 0 ? 1 : null,
       new_devices: index === 0 ? 0 : null, turns: index === 0 ? 10 : null,
     })),
-    usage_trend_hourly_previous: Array.from({ length: 24 }, (_, index) => ({
-      hour: today - 86_400_000 + index * 3_600_000, active_devices: 2, new_devices: 1, turns: 20,
+    usage_trend_hourly_week_ago: Array.from({ length: 24 }, (_, index) => ({
+      hour: today - 7 * 86_400_000 + index * 3_600_000, active_devices: 2, new_devices: 1, turns: 20,
     })).reverse(), // Match timestamps, never rely on transport ordering.
   };
   const dom = new JSDOM(statsHtml, {
@@ -578,10 +578,10 @@ test("hourly comparison shares scales, styles yesterday separately and does not 
     const tooltip = doc.querySelector("#hourlyTrendTooltip");
     hit.dispatchEvent(new dom.window.Event("focus"));
     assert.equal(hit.getAttribute("aria-valuenow"), "0");
-    assert.match(tooltip.textContent, /今日.*对话次数10 次.*昨日 2026-10-18 00:00.*对话次数20 次/);
+    assert.match(tooltip.textContent, /今日.*对话次数10 次.*上周同一天 2026-10-12 00:00.*对话次数20 次/);
     hit.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
-    assert.match(tooltip.textContent, /今日尚未到达.*昨日 2026-10-18 23:00.*对话次数20 次/);
-    assert.match(hit.getAttribute("aria-valuetext"), /尚未到达.*昨日.*对话次数 20 次/);
+    assert.match(tooltip.textContent, /今日尚未到达.*上周同一天 2026-10-12 23:00.*对话次数20 次/);
+    assert.match(hit.getAttribute("aria-valuetext"), /尚未到达.*上周同一天.*对话次数 20 次/);
     assert.equal(doc.querySelector("#hourlyTrendDotTurns").style.display, "none");
     hit.dispatchEvent(new dom.window.MouseEvent("pointerleave"));
     assert.equal(tooltip.hidden, true);
@@ -629,13 +629,13 @@ test("hourly comparison shares scales, styles yesterday separately and does not 
     controls.forEach(input => input.click());
     assert.equal(svg.querySelectorAll('path.previous-day').length, 3);
     assert.equal(svg.querySelectorAll('circle.current-point').length, 3);
-    report = { ...report, usage_trend_hourly_previous: [] };
+    report = { ...report, usage_trend_hourly_week_ago: [] };
     doc.querySelector("#refreshButton").click();
     await wait();
     assert.equal(svg.querySelectorAll("path.previous-day").length, 0);
     hit = doc.querySelector("#hourlyTrendHitArea");
     hit.dispatchEvent(new dom.window.Event("focus"));
-    assert.match(tooltip.textContent, /昨日.*暂无数据/);
+    assert.match(tooltip.textContent, /上周同一天.*暂无数据/);
   } finally { dom.window.close(); }
 });
 
@@ -955,4 +955,84 @@ test('retention labels follow known API semantics and behavior timestamps explic
       assert.doesNotMatch(sample(), /首次成功起算|实时更新|private-unrecognized/);
     }
   } finally { dom.window.close(); }
+});
+
+test("role changes discard previously authorized remote rows and delayed responses", async () => {
+  let role = "operations_admin";
+  let releaseOldOverview, releaseOldSession, releaseLogout;
+  let holdSession = false;
+  let sessionCalls = 0;
+  let failOverview = false;
+  const oldResponse = new Promise(resolve => { releaseOldOverview = resolve; });
+  const oldSession = new Promise(resolve => { releaseOldSession = resolve; });
+  const logoutResponse = new Promise(resolve => { releaseLogout = resolve; });
+  const adminRows = [
+    { sequence: 1, stage: "connection", outcome: "ok", reason: "none", count: 1 },
+    { sequence: 2, stage: "attachment", outcome: "ok", reason: "none", count: 1 },
+  ];
+  const ok = value => ({ ok: true, status: 200, json: async () => value });
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async url => {
+        const path = new URL(String(url), "https://www.pinvou.com");
+        const range = path.searchParams.get("range") || "30";
+        if (path.pathname.endsWith("/session")) {
+          sessionCalls++;
+          if (holdSession) await oldSession;
+          return ok({ role });
+        }
+        if (path.pathname.endsWith("/logout")) { await logoutResponse; return ok({}); }
+        if (path.pathname.endsWith("/login")) { role = "behavior_analyst"; return ok({ role }); }
+        if (path.pathname.endsWith("/behavior/overview")) {
+          if (role === "operations_admin" && range === "7") await oldResponse;
+          if (role === "behavior_analyst" && failOverview) return { ok: false, status: 503, json: async () => ({}) };
+          const rows = role === "operations_admin" || range === "7" ? adminRows
+            : adminRows.toReversed().map((row, index) => ({ ...row, sequence: index + 1 }));
+          return ok({ range, remote_control: { task_count: 0, rows } });
+        }
+        return ok({ range, devices: [], rows: [], funnel_rows: [] });
+      };
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+  try {
+    const { document, Event } = dom.window;
+    const tick = () => new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    const stages = () => Array.from(document.querySelectorAll("#remoteEventRows tr td:nth-child(2)"), cell => cell.textContent);
+    await tick();
+    document.querySelector('[data-view="remote"]').click();
+    assert.deepEqual(stages(), ["连接", "附件传输"]);
+    document.querySelector('[data-behavior-section="remote"] [data-range="7"]').click();
+    await tick();
+    holdSession = true;
+    document.querySelector("#refreshButton").click();
+    await tick();
+    const requestsBeforeLogout = sessionCalls;
+    document.querySelector("#logout").click();
+    await tick();
+    releaseOldSession();
+    document.querySelector("#refreshButton").click();
+    await tick();
+    assert.deepEqual(stages(), []);
+    assert.equal(sessionCalls, requestsBeforeLogout);
+    releaseLogout();
+    await tick();
+    failOverview = true;
+    document.querySelector("#loginForm").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await tick();
+    assert.equal(document.querySelector("#loginLayer").classList.contains("hidden"), true);
+    assert.deepEqual(stages(), []);
+    failOverview = false;
+    releaseOldOverview();
+    await tick();
+    assert.deepEqual(stages(), []);
+    document.querySelector("#refreshButton").click();
+    await tick();
+    assert.deepEqual(stages(), ["附件传输", "连接"]);
+  } finally {
+    dom.window.close();
+  }
 });
