@@ -2031,3 +2031,132 @@ fn keyword_named_property_literal_survives_the_registry_pipeline() {
         tool.input_schema
     );
 }
+
+#[test]
+fn every_builtin_schema_survives_the_moonshot_projection_or_declares_relaxed() {
+    // P1 pin (review 6061318874): the Moonshot wire drops any tool whose
+    // schema fails `sanitize_for_kimi_parameters` (bounds and composition
+    // are hard-rejected by the MFJS validator). A built-in that cannot pass
+    // that projection must DECLARE `strict: false` on its `ToolSpec` so it
+    // ships through the explicit relaxed lane (object-root proof + budgets)
+    // instead of silently vanishing from the request. This test walks a
+    // broad built-in catalog so the failure mode can never ship invisibly
+    // again: a schema change that breaks MFJS compatibility fails HERE
+    // until the tool opts into the relaxed lane.
+    let tmp = tempdir().expect("tempdir");
+    let runtime = {
+        let client_config = crate::config::Config {
+            api_key: Some("test-key".to_string()),
+            ..crate::config::Config::default()
+        };
+        let client =
+            crate::client::DeepSeekClient::new(&client_config).expect("stub client constructs");
+        let manager = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::tools::subagent::SubAgentManager::new(tmp.path().to_path_buf(), 4),
+        ));
+        let runtime_context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        crate::tools::subagent::SubAgentRuntime::new(
+            client,
+            "kimi-k3".to_string(),
+            runtime_context,
+            false,
+            None,
+            manager,
+        )
+    };
+    let registry = ToolRegistryBuilder::new()
+        .with_file_tools()
+        .with_shell_tools()
+        .with_terminal_tools()
+        .with_search_tools()
+        .with_git_tools()
+        .with_git_history_tools()
+        .with_web_tools()
+        .with_finance_tool()
+        .with_patch_tools()
+        .with_revert_turn_tool()
+        .with_user_input_tool()
+        .with_tool_result_retrieval_tool()
+        .with_handle_tools()
+        .with_lsp_tool()
+        .with_native_memory_tools()
+        .with_note_tool()
+        .with_remember_tool()
+        .with_todo_tool(std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::tools::todo::TodoList::new(),
+        )))
+        .with_plan_tool(std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::tools::plan::PlanState::default(),
+        )))
+        .with_goal_tools(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::goal::GoalState::default(),
+        )))
+        .with_runtime_task_tools()
+        .with_runtime_task_shell_tools()
+        .with_diagnostics_tool()
+        .with_validation_tools()
+        .with_test_runner_tool()
+        .with_project_tools()
+        .with_skill_tools()
+        .with_pandoc_tools()
+        .with_read_media_tool()
+        .with_harness_tool()
+        .with_notify_tool()
+        .with_rlm_tool(None, "kimi-k3".to_string())
+        .with_verify_tool(None, "kimi-k3".to_string())
+        .with_review_tool(None, "kimi-k3".to_string())
+        .with_fim_tool(None, "kimi-k3".to_string())
+        .with_subagent_tools(runtime.manager.clone(), runtime)
+        .build(crate::tools::spec::ToolContext::new(
+            tmp.path().to_path_buf(),
+        ));
+
+    let tools = registry.to_api_tools();
+    assert!(
+        tools.len() >= 40,
+        "the assembled catalog must stay broad, found {}",
+        tools.len()
+    );
+    let relaxed = tools
+        .iter()
+        .filter(|tool| tool.strict == Some(false))
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    let mut dropped: Vec<String> = Vec::new();
+    for tool in &tools {
+        if tool.strict == Some(false) {
+            continue;
+        }
+        let mut schema = tool.input_schema.clone();
+        if let Err(error) = crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut schema)
+        {
+            dropped.push(format!("  {}: {error}", tool.name));
+        }
+    }
+    assert!(
+        dropped.is_empty(),
+        "built-ins the Moonshot projection drops (declare `strict: false` on the ToolSpec or make the schema MFJS-compatible):\n{}",
+        dropped.join("\n")
+    );
+    assert!(
+        relaxed.len() >= 15,
+        "the relaxed set must cover the known MFJS-incompatible built-ins, found: {}",
+        relaxed.join(", ")
+    );
+    for required in [
+        "apply_patch",
+        "agent",
+        "web.run",
+        "Web",
+        "tasks",
+        "terminal/run",
+        "request_user_input",
+        "finance",
+        "workflow",
+    ] {
+        assert!(
+            relaxed.contains(&required),
+            "{required} must stay on the Moonshot wire via the relaxed lane"
+        );
+    }
+}

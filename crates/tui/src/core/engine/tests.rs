@@ -37375,3 +37375,268 @@ fn run_completion_real_factories_observe_shutdown_and_direct_handles_do_not() {
         );
     });
 }
+
+// Review 6061318874: `strict: Some(false)` is an explicit relaxed-lane
+// declaration. The strict request build must swap such a tool's schema out
+// before the strict sanitizer runs and restore the ORIGINAL schema verbatim
+// behind `strict: false`, while `strict: None` tools keep the normal strict
+// decision — sanitize + `strict: true` when supported, `strict: None` when
+// the schema is unsupported. The pipeline never auto-relaxes an undeclared
+// tool to `strict: false`.
+#[test]
+fn active_tools_for_request_strict_mode_swap_restore_preserves_relaxed_lane() {
+    let relaxed_union = crate::models::Tool {
+        tool_type: Some("function".to_string()),
+        name: "relaxed_union".to_string(),
+        description: "Relaxed union fixture".to_string(),
+        input_schema: json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "integer"}},
+                    "required": ["b"]
+                }
+            ]
+        }),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: Some(false),
+        cache_control: None,
+    };
+    let plain_object = crate::models::Tool {
+        tool_type: Some("function".to_string()),
+        name: "plain_object".to_string(),
+        description: "Plain object fixture".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        }),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    };
+    let bounded_string = crate::models::Tool {
+        tool_type: Some("function".to_string()),
+        name: "bounded_string".to_string(),
+        description: "Bounded string fixture".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"query": {"type": "string", "maxLength": 64}},
+            "required": ["query"]
+        }),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    };
+    let nested_composition = crate::models::Tool {
+        tool_type: Some("function".to_string()),
+        name: "nested_composition".to_string(),
+        description: "Nested composition fixture".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "integer"}
+                    ]
+                }
+            }
+        }),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    };
+    let original_relaxed_schema = relaxed_union.input_schema.clone();
+    let catalog = vec![
+        relaxed_union,
+        plain_object,
+        bounded_string,
+        nested_composition,
+    ];
+    let active: HashSet<String> = catalog.iter().map(|tool| tool.name.clone()).collect();
+
+    let selected = active_tools_for_request(&catalog, &active, true)
+        .expect("a non-empty catalog yields a request tool list");
+
+    let relaxed = selected
+        .iter()
+        .find(|tool| tool.name == "relaxed_union")
+        .expect("the relaxed tool stays on the request");
+    assert_eq!(relaxed.strict, Some(false));
+    assert_eq!(
+        relaxed.input_schema, original_relaxed_schema,
+        "the relaxed lane must ship the original schema verbatim"
+    );
+
+    let plain = selected
+        .iter()
+        .find(|tool| tool.name == "plain_object")
+        .expect("the plain tool stays on the request");
+    assert_eq!(plain.strict, Some(true));
+    assert_eq!(plain.input_schema["additionalProperties"], json!(false));
+    assert_eq!(plain.input_schema["required"], json!(["path"]));
+
+    // Bounds are strict-ELIGIBLE on this lane: `sanitize_for_strict` strips
+    // them and the tool is marked `strict: true`. The pipeline only ever
+    // outputs `Some(true)` or `None` for a `strict: None` tool — it never
+    // auto-relaxes one to `Some(false)`.
+    let bounded = selected
+        .iter()
+        .find(|tool| tool.name == "bounded_string")
+        .expect("the bounded tool stays on the request");
+    assert_eq!(bounded.strict, Some(true));
+    assert!(
+        bounded.input_schema["properties"]["query"]
+            .get("maxLength")
+            .is_none(),
+        "strict sanitization strips unsupported bounds: {bounded:?}"
+    );
+
+    // A schema the strict pipeline cannot support keeps `strict: None` —
+    // the undeclared tool is never auto-relaxed to `Some(false)`.
+    let unsupported = selected
+        .iter()
+        .find(|tool| tool.name == "nested_composition")
+        .expect("the nested-composition tool stays on the request");
+    assert_eq!(
+        unsupported.strict, None,
+        "an unsupported schema stays strict:None — never auto-relaxed"
+    );
+    assert!(
+        unsupported.input_schema["properties"]["value"]
+            .get("oneOf")
+            .is_some(),
+        "an unsupported schema is passed through unmodified: {unsupported:?}"
+    );
+}
+
+// Review 6061318874: one Moonshot response can carry TWO parallel tool_calls
+// where only the first has malformed arguments JSON. Per-tool finalization
+// must keep the siblings independent: the malformed call surfaces its own
+// `input_parse_error` receipt while the valid sibling still executes, and
+// the turn itself completes instead of failing closed on the shared stream.
+#[tokio::test]
+async fn streaming_malformed_sibling_does_not_discard_the_valid_sibling() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let sibling_turn = vec![
+        canned::message_start("moonshot-siblings"),
+        canned::tool_use_block_start(0, "call-malformed", "File"),
+        canned::tool_input_delta(0, "{"),
+        canned::block_stop(0),
+        canned::tool_use_block_start(1, "call-valid", "tool_search"),
+        canned::tool_input_delta(1, r#"{"query":"read"}"#),
+        canned::block_stop(1),
+        canned::message_delta("tool_use", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        sibling_turn,
+        canned::simple_text_turn("Recovered after malformed sibling."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config {
+        provider: Some("moonshot".to_string()),
+        default_text_model: Some("kimi-k3".to_string()),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Run the valid sibling despite the malformed sibling.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send sibling trajectory");
+
+    let mut malformed_error = None;
+    let mut valid_sibling_ran = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for sibling completion")
+    {
+        match event {
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the valid sibling must actually execute: {result:?}"
+                );
+                valid_sibling_ran = true;
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
+                malformed_error = Some(match result {
+                    Ok(result) => result.content,
+                    Err(error) => error.to_string(),
+                });
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(
+        valid_sibling_ran,
+        "the valid sibling must have executed alongside the malformed one"
+    );
+    let error = malformed_error.expect("the malformed sibling surfaces a per-tool error");
+    assert!(
+        error
+            .to_ascii_lowercase()
+            .contains("malformed tool arguments"),
+        "{error}"
+    );
+
+    // The next request replays BOTH outcomes: the malformed call through the
+    // `raw_arguments` sentinel and the valid sibling with its real result, so
+    // the model can recover without losing the successful call.
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 2);
+    let replayed_blocks = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        replayed_blocks.iter().any(|block| matches!(
+            block,
+            crate::models::ContentBlock::ToolUse { input, .. }
+                if input.get("raw_arguments").is_some()
+        )),
+        "the malformed sibling must replay through the raw_arguments sentinel"
+    );
+    assert!(
+        replayed_blocks.iter().any(|block| matches!(
+            block,
+            crate::models::ContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_id == "call-valid"
+        )),
+        "the valid sibling's tool result must survive into the replay"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}

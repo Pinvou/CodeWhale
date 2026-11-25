@@ -184,6 +184,15 @@ impl Default for FinanceTool {
 
 #[async_trait]
 impl ToolSpec for FinanceTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     fn name(&self) -> &'static str {
         "finance"
     }

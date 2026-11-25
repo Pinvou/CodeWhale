@@ -7,7 +7,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::dispatch::{normalize_schema_json_containers, parse_completed_tool_input_for_provider};
+use super::dispatch::{
+    bounded_raw_arguments_excerpt, malformed_tool_arguments_error,
+    normalize_schema_json_containers, parse_completed_tool_input_for_provider,
+};
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
 use crate::core::events::TOOL_CALL_CANCELLED_METADATA_KEY;
@@ -2576,6 +2579,7 @@ impl Engine {
                 ),
             )
             .await;
+            let stream_error_present = stream_error.is_some();
             turn_error = turn_error.or(stream_error);
             // Dispatch claims minted response spellings only through the
             // ownership the request that is being answered actually
@@ -2633,9 +2637,12 @@ impl Engine {
 
             if is_incomplete_stop_reason(stop_reason.as_deref()) {
                 let reason = stop_reason_detail(stop_reason.as_deref());
-                if is_output_limit_stop_reason(stop_reason.as_deref())
-                    && stream_errors == 0
-                    && !frame_error_seen
+                if !stream_error_present
+                    && is_clean_output_limit_shape(
+                        stop_reason.as_deref(),
+                        stream_errors,
+                        frame_error_seen,
+                    )
                 {
                     // Degrade, don't kill the turn — but only when the stream
                     // finished cleanly. A `max_tokens` stop followed by a
@@ -6661,15 +6668,19 @@ impl Engine {
         // termination, and a tool whose block already closed still finalized
         // valid arguments — without this invalidation its call executes
         // before the saved turn error is ever consulted (review 4689524046).
+        // The clean-shape core is the same predicate the ladder uses (see
+        // `is_clean_output_limit_shape`), so the two sites cannot drift.
         let closed_tools_stay_valid = stream_completed
             || (stream_error.is_none()
                 && !rate_limit_interrupted
                 && pending_resume.is_none()
                 && !self.cancel_token.is_cancelled()
                 && is_incomplete_stop_reason(stop_reason.as_deref())
-                && is_output_limit_stop_reason(stop_reason.as_deref())
-                && stream_errors == 0
-                && !frame_error_seen);
+                && is_clean_output_limit_shape(
+                    stop_reason.as_deref(),
+                    stream_errors,
+                    frame_error_seen,
+                ));
         if !closed_tools_stay_valid {
             let open_tool_indices: std::collections::HashSet<usize> =
                 current_tool_indices.values().copied().collect();
@@ -7910,6 +7921,20 @@ fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
     )
 }
 
+/// The clean-shape core shared by the truncated-response ladder and the
+/// closed-tool invalidation: an output-limit stop (narrow spelling set, per
+/// models) that arrived with no counted stream error, no saved stream error,
+/// and no provider error frame. Both call sites must agree on what "clean"
+/// means or the acceptance and the tool-validity decisions drift apart
+/// (review 6061318874).
+fn is_clean_output_limit_shape(
+    stop_reason: Option<&str>,
+    stream_errors: u32,
+    frame_error_seen: bool,
+) -> bool {
+    is_output_limit_stop_reason(stop_reason) && stream_errors == 0 && !frame_error_seen
+}
+
 fn stream_stop_reason_allows_tool_execution(stop_reason: Option<&str>) -> bool {
     if stop_reason_is_output_limit(stop_reason) || is_incomplete_stop_reason(stop_reason) {
         return false;
@@ -8096,10 +8121,11 @@ fn incomplete_stream_missing_field(
 fn finalize_stream_tool_arguments(provider: ApiProvider, tool_state: &mut ToolUseState) {
     if tool_state.input_buffer.trim().is_empty() {
         if provider == ApiProvider::Moonshot {
-            tool_state.input_parse_error = Some(
-                parse_completed_tool_input_for_provider(provider, &tool_state.input_buffer)
-                    .expect_err("empty Moonshot arguments must be malformed"),
-            );
+            // An empty buffer is structurally malformed for Moonshot's
+            // object gate; construct the error directly instead of asserting
+            // the parser's behavior with an unreachable `expect_err`.
+            tool_state.input_parse_error =
+                Some(malformed_tool_arguments_error(&tool_state.input_buffer));
             tool_state.input = malformed_tool_arguments_input(&tool_state.input_buffer);
         }
         return;
@@ -8124,7 +8150,7 @@ fn reject_non_object_moonshot_tool_inputs(provider: ApiProvider, tool_uses: &mut
         if tool.input_parse_error.is_none() && !tool.input.is_object() {
             tool.input_parse_error = Some(format!(
                 "malformed tool arguments from model: expected a JSON object, got {}",
-                tool.input
+                bounded_raw_arguments_excerpt(&tool.input.to_string())
             ));
             tool.input = malformed_tool_arguments_input(&tool.input.to_string());
         }

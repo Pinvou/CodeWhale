@@ -275,7 +275,8 @@ impl ToolRegistry {
                 if evidence_only {
                     project_readonly_evidence_schema(tool.name(), &mut schema);
                 }
-                if tool.strict() != Some(false) && schema_within_shared_normalization_depth(&schema)
+                if tool.strict() != Some(false)
+                    && crate::tools::schema_sanitize::schema_within_structural_depth_limit(&schema)
                 {
                     schema_sanitize::sanitize(&mut schema);
                     schema_canonicalize::canonicalize_schema(&mut schema);
@@ -1618,24 +1619,6 @@ pub(crate) fn mcp_result_to_bounded_rich_tool_result(result: Value) -> RichToolR
 #[cfg(test)]
 pub(super) fn mcp_tool_adapter_for_test(name: &str) -> Arc<dyn ToolSpec> {
     mcp_tool_adapter_with_schema_for_test(name, serde_json::json!({"type": "object"}))
-}
-
-fn schema_within_shared_normalization_depth(schema: &Value) -> bool {
-    const MAX_DEPTH: usize = 64;
-    let mut pending = vec![(schema, 0usize)];
-    while let Some((value, depth)) = pending.pop() {
-        if depth > MAX_DEPTH {
-            return false;
-        }
-        match value {
-            Value::Object(object) => {
-                pending.extend(object.values().map(|value| (value, depth + 1)))
-            }
-            Value::Array(items) => pending.extend(items.iter().map(|value| (value, depth + 1))),
-            _ => {}
-        }
-    }
-    true
 }
 
 #[cfg(test)]

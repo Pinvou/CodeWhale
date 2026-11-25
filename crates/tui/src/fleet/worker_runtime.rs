@@ -340,7 +340,9 @@ fn validate_fleet_reasoning_effort(
     };
     let provider = ApiProvider::parse(&route.provider_kind).unwrap_or(ApiProvider::Custom);
     let capability = crate::config::provider_capability(provider, &route.wire_model_id);
-    if capability.thinking_supported {
+    if capability.thinking_supported
+        || fleet_route_is_exact_k3_series_membership(task, agent_profiles, session_model, config)
+    {
         return Ok(());
     }
     bail!(
@@ -349,6 +351,58 @@ fn validate_fleet_reasoning_effort(
         route.provider_id,
         route.wire_model_id,
     );
+}
+
+/// Whether the task's resolved route is an exact Kimi Code K3-series
+/// membership route whose models are always-thinking at the vendor.
+///
+/// `provider_capability` keys on `model_supports_reasoning`, which stays
+/// deliberately bare-id-blind so custom gateways serving a literal `k3`
+/// never inherit the vendor dialect (models.rs); the picker and the doctor
+/// promote the exact membership routes at their own boundaries
+/// (model_inventory), and Fleet's thinking-tier validation was the one
+/// consumer left blind — it hard-failed a thinking tier on exactly the
+/// routes whose vendor contract rejects *disabled* thinking (review
+/// 6061318874). Resolution mirrors the config branch of
+/// [`resolve_fleet_route_with_config`] so both paths answer for the same
+/// route.
+fn fleet_route_is_exact_k3_series_membership(
+    task: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
+    config: Option<&Config>,
+) -> bool {
+    let Some(config) = config else {
+        return false;
+    };
+    let agent_profile = resolve_task_agent_profile(task, agent_profiles)
+        .ok()
+        .flatten();
+    let agent_profile = agent_profile.as_deref();
+    let (model_selector, _) =
+        fleet_route_model_selector_with_source(task.worker.as_ref(), agent_profile, session_model);
+    let model_selector = model_selector.as_deref();
+    let identity = match explicit_fleet_provider_id(agent_profile).as_deref() {
+        Some(provider_id) => config.resolve_provider_identity(provider_id).ok(),
+        None => config
+            .resolve_provider_identity(&config.provider_identity_for(config.api_provider()))
+            .ok(),
+    };
+    let Some(identity) = identity else {
+        return false;
+    };
+    let mut scoped = config.clone();
+    scoped.scope_to_provider_identity(&identity);
+    let Some(route) = resolve_runtime_route(&scoped, identity.provider, model_selector)
+        .ok()
+        .and_then(|route| route.validate().ok())
+    else {
+        return false;
+    };
+    let base_url = route.candidate.endpoint().base_url.clone();
+    let wire_model = route.candidate.wire_model_id().as_str().to_string();
+    crate::config::is_exact_kimi_code_k3_route(identity.provider, &base_url, &wire_model)
+        || crate::config::is_kimi_code_k31_route(identity.provider, &base_url, &wire_model)
 }
 
 /// Build a sub-agent worker spec after resolving workspace Fleet profile input.

@@ -712,6 +712,15 @@ macro_rules! terminal_tool_common {
 pub struct TerminalRunTool;
 #[async_trait]
 impl ToolSpec for TerminalRunTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     terminal_tool_common!(
         "terminal/run",
         "Run a command in a persistent PTY shell session. cd, exports, shell functions, and activated environments persist across calls in this process. Identity and a non-secret last-known summary persist across restarts; prior shells are surfaced as stale/lost and are never reattached. On timeout the wait is abandoned but the command keeps running in the session (use terminal/wait or cancel). (Unix only)"
@@ -759,6 +768,15 @@ impl ToolSpec for TerminalRunTool {
 pub struct TerminalSendTool;
 #[async_trait]
 impl ToolSpec for TerminalSendTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     terminal_tool_common!(
         "terminal/send",
         "Send raw input to a live persistent terminal session. To interrupt the running foreground command use terminal/cancel — raw ETX typed here can flush the queued completion sentinel and leave the session reporting a command that never finishes. A prior-process shell is reported as stale/lost rather than reattached. (Unix only)"
@@ -802,6 +820,15 @@ impl ToolSpec for TerminalSendTool {
 pub struct TerminalWaitTool;
 #[async_trait]
 impl ToolSpec for TerminalWaitTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     terminal_tool_common!(
         "terminal/wait",
         "Wait for the current foreground command in a live persistent terminal session and return the output produced since the previous call — at most 12KiB per call; if more was produced the middle is omitted in-band and cannot be re-fetched, so poll promptly for chatty commands. A prior-process shell is reported as stale/lost rather than reattached. The session buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"

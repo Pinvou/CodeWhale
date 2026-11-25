@@ -2213,6 +2213,13 @@ fn collapse_nullable_unions(schema: &mut Value) {
             // A concrete parent type already excludes the null branch. The
             // exact intersection is therefore just the non-null schema.
             if !parent_has_type {
+                if outer.get("nullable") == Some(&Value::Bool(false)) {
+                    // The parent explicitly forbids null while a null branch
+                    // survives the merge: the intersection is unsatisfiable,
+                    // so decline instead of widening the parent back to
+                    // nullable (review 6061318874).
+                    continue;
+                }
                 merged.insert("nullable".into(), Value::Bool(true));
             }
             *obj = merged;
@@ -2220,12 +2227,30 @@ fn collapse_nullable_unions(schema: &mut Value) {
     }
 }
 
+/// Work ceiling for one merge: comparisons counted across the whole
+/// recursion. The enum intersection is O(outer × inner) per collision, and
+/// hostile or merely oversized schemas (uncapped on the shared registry
+/// lane) could previously spend unbounded time here on every request build.
+/// Exceeding the ceiling declines the merge — the original composition is
+/// preserved, which is the merge's own fail-closed contract (review
+/// 6061318874).
+const MFJS_MAX_MERGE_WORK: usize = 100_000;
+
 /// Merge two schemas that constrain the same instance. Disjoint keywords
 /// combine directly; collisions need a real intersection or the merge is
 /// declined. Returning `None` leaves the original composition untouched.
 fn merge_schema_intersection(
     outer: &Map<String, Value>,
     inner: &Map<String, Value>,
+) -> Option<Map<String, Value>> {
+    let mut work = 0usize;
+    merge_schema_intersection_bounded(outer, inner, &mut work)
+}
+
+fn merge_schema_intersection_bounded(
+    outer: &Map<String, Value>,
+    inner: &Map<String, Value>,
+    work: &mut usize,
 ) -> Option<Map<String, Value>> {
     // Declaring a new named property changes the domain of a constraining
     // additionalProperties keyword on either side. Merging different property
@@ -2267,6 +2292,10 @@ fn merge_schema_intersection(
                 for candidate in outer_values {
                     let mut matched = false;
                     for value in inner_values {
+                        *work = work.saturating_add(1);
+                        if *work > MFJS_MAX_MERGE_WORK {
+                            return None;
+                        }
                         if schema_value_comparison(value, candidate)? {
                             matched = true;
                             break;
@@ -2307,9 +2336,9 @@ fn merge_schema_intersection(
                             inner_schema.clone()
                         } else {
                             match (outer_schema.as_object(), inner_schema.as_object()) {
-                                (Some(outer), Some(inner)) => {
-                                    Value::Object(merge_schema_intersection(outer, inner)?)
-                                }
+                                (Some(outer), Some(inner)) => Value::Object(
+                                    merge_schema_intersection_bounded(outer, inner, work)?,
+                                ),
                                 _ => return None,
                             }
                         };
@@ -7855,22 +7884,22 @@ pub enum KimiParameterSchemaError {
 /// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md>
 pub fn sanitize_for_kimi_parameters(
     parameters: &mut Value,
-) -> Result<Option<String>, KimiParameterSchemaError> {
+) -> Result<(), KimiParameterSchemaError> {
     if !schema_within_mfjs_local_budgets(parameters) {
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
     // Work on a clone so a rejected schema remains byte-for-byte unchanged for
     // callers that retain the catalog and retry against another provider.
     let mut candidate = parameters.clone();
-    let constraint_note = sanitize_kimi_parameters_candidate(&mut candidate)?;
+    sanitize_kimi_parameters_candidate(&mut candidate)?;
     validate_mfjs_parameters(&candidate)?;
     *parameters = candidate;
-    Ok(constraint_note)
+    Ok(())
 }
 
 fn sanitize_kimi_parameters_candidate(
     parameters: &mut Value,
-) -> Result<Option<String>, KimiParameterSchemaError> {
+) -> Result<(), KimiParameterSchemaError> {
     if contains_dependent_keywords(parameters) {
         return Err(KimiParameterSchemaError::UnsupportedKeyword);
     }
@@ -7912,7 +7941,7 @@ fn sanitize_kimi_parameters_candidate(
     root.entry("properties")
         .or_insert_with(|| Value::Object(Map::new()));
 
-    Ok(None)
+    Ok(())
 }
 
 fn contains_dependent_keywords(schema: &Value) -> bool {
@@ -8412,8 +8441,11 @@ impl<'a> MfjsValidationState<'a> {
         // source's `SupportedKeywords` additionally contains `title`, `$id`,
         // and the min/max bound keywords, but the published specification
         // does not list them; the document governs, so they sit outside this
-        // set (the sanitizer strips them upstream, so only a direct
-        // unsanitized call can reach this rejection).
+        // set. The Kimi candidate pipeline keeps bounds deliberately (only
+        // annotations are stripped upstream), so a bounds-carrying schema
+        // reaches and fails THIS rejection — which is exactly why tools
+        // carrying such keywords must opt into the explicit strict:false
+        // relaxed lane at their ToolSpec boundary (review 6061318874).
         const ALLOWED_KEYWORDS: &[&str] = &[
             "$ref",
             "$defs",
@@ -11242,12 +11274,7 @@ mod kimi_tests {
             "required": ["path"]
         });
 
-        let note = sanitize_for_kimi_parameters(&mut schema).expect("plain schema");
-
-        assert_eq!(
-            note, None,
-            "a schema that lost nothing must not gain a note"
-        );
+        sanitize_for_kimi_parameters(&mut schema).expect("plain schema");
         assert_eq!(schema["required"], json!(["path"]));
     }
 
@@ -11422,12 +11449,8 @@ mod kimi_tests {
         }
 
         let mut parameters = shipped.clone();
-        let note = sanitize_for_kimi_parameters(&mut parameters)
+        sanitize_for_kimi_parameters(&mut parameters)
             .expect("the shipped make_pptx schema must pass Moonshot normalization");
-        assert_eq!(
-            note, None,
-            "the shipped schema drops no composition, so it must stay unannotated"
-        );
         validate_mfjs_parameters(&parameters)
             .expect("the normalized schema must satisfy the MFJS validator");
 
@@ -11524,6 +11547,54 @@ mod kimi_tests {
                 .iter()
                 .all(|keyword| supported.contains(&keyword.as_str())),
             "only specification-supported keywords may reach the wire: {wire_keywords:?}"
+        );
+    }
+}
+// NOTE: appended inside the file's existing test module boundary is not
+// possible from a script; these two tests live in their own module that
+// reaches the private walkers through the public `sanitize` seam.
+
+#[cfg(test)]
+mod review_wave_tests {
+    use serde_json::{Value, json};
+
+    #[test]
+    fn nullable_false_parent_declines_the_null_branch_collapse() {
+        // Review 6061318874: an explicit `nullable: false` parent intersected
+        // with a surviving null branch is unsatisfiable — the collapse must
+        // decline (keep the original) instead of widening the parent back to
+        // nullable.
+        let schema = json!({
+            "nullable": false,
+            "anyOf": [{"type": "string"}, {"type": "null"}]
+        });
+        let original = schema.clone();
+        let mut worked = schema;
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, original,
+            "an explicit nullable:false must decline the collapse, not widen"
+        );
+    }
+
+    #[test]
+    fn enum_intersection_work_is_capped_and_declines_instead_of_hanging() {
+        // Review 6061318874: the enum intersection is O(outer × inner) per
+        // collision. Beyond MFJS_MAX_MERGE_WORK comparisons the merge must
+        // decline (preserving the union) in bounded time rather than spin.
+        let build_enum = |start: u64, count: u64| -> Value {
+            Value::Array((start..start + count).map(Value::from).collect())
+        };
+        let schema = json!({
+            "type": "integer",
+            "enum": build_enum(0, 30_000),
+            "anyOf": [{"type": "integer", "enum": build_enum(30_000, 30_000)}]
+        });
+        let mut worked = schema.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, schema,
+            "the over-budget merge must decline, preserving the original union"
         );
     }
 }

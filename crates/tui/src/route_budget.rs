@@ -549,11 +549,6 @@ mod tests {
         let _env_lock = crate::test_support::lock_test_env();
         let _removed_legacy =
             crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
-        assert_eq!(
-            crate::models::KIMI_K31_MAX_OUTPUT_TOKENS,
-            crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS,
-            "the public K3.1 compatibility constant keeps its published value"
-        );
         // Static rows stay conservative, while exact direct-route facts carry
         // the documented 1M maximum. The resolved-route cap here plus the
         // prepared-request pin in the client tests cover the chain end to end.

@@ -1101,3 +1101,57 @@ fn codewhale_live_catalog_beats_models_dev_on_the_same_wire() {
             if revision == "2026-08-31.1"
     ));
 }
+
+#[test]
+fn bundled_asset_coverage_note_matches_the_actual_rows() {
+    // Review 6061318874: the `_meta.coverage` sentence is a hand-maintained
+    // count, and the K2.6/K2.7 output-limit drift this PR fixes sat silently
+    // at base exactly because nothing cross-checked asset facts. Pin the
+    // row count and the note's numbers so the note can drift into a lie
+    // only by failing here.
+    let raw: serde_json::Value =
+        serde_json::from_str(BUNDLED_MODELS_DEV_JSON).expect("bundled JSON");
+    let providers = raw
+        .get("providers")
+        .and_then(|p| p.as_object())
+        .expect("providers object");
+    let model_rows: usize = providers
+        .values()
+        .filter_map(|provider| provider.get("models"))
+        .filter_map(|models| models.as_object())
+        .map(|models| models.len())
+        .sum();
+    let coverage = raw
+        .get("_meta")
+        .and_then(|m| m.get("coverage"))
+        .and_then(|c| c.as_str())
+        .expect("coverage note");
+    let providers_note = providers.len();
+    assert!(
+        coverage.contains(&format!("{providers_note} providers")),
+        "coverage note must state the real provider count ({providers_note}): {coverage}"
+    );
+    assert!(
+        coverage.contains(&format!("{model_rows} model rows")),
+        "coverage note must state the real model-row count ({model_rows}): {coverage}"
+    );
+    // The Moonshot roster this PR curates stays present and complete.
+    let moonshot_models = providers
+        .get("moonshot")
+        .and_then(|m| m.get("models"))
+        .and_then(|models| models.as_object())
+        .expect("moonshot provider rows");
+    for id in [
+        "kimi-k3",
+        "kimi-k3.1-pro",
+        "kimi-k3.1-pro-highspeed",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+        "kimi-k2.6",
+    ] {
+        assert!(
+            moonshot_models.contains_key(id),
+            "bundled moonshot catalog must carry {id}"
+        );
+    }
+}

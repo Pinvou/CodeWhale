@@ -141,6 +141,15 @@ impl TasksTool {
 
 #[async_trait]
 impl ToolSpec for TasksTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }
@@ -756,6 +765,15 @@ impl TasksTool {
 
 #[async_trait]
 impl ToolSpec for TaskShellStartTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     fn name(&self) -> &'static str {
         "task_shell_start"
     }
@@ -822,6 +840,15 @@ impl ToolSpec for TaskShellStartTool {
 
 #[async_trait]
 impl ToolSpec for TaskShellWaitTool {
+    // The schema uses MFJS-unsupported keywords (bounds / nested or root
+    // composition), so the strict projection would drop this tool from
+    // every Moonshot request. Opt into the explicit strict:false relaxed
+    // lane: the original schema ships verbatim behind the object-root
+    // proof and local resource budgets (same escape as apply_patch).
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     fn name(&self) -> &'static str {
         "task_shell_wait"
     }

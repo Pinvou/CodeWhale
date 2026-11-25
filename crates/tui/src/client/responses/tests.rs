@@ -2799,3 +2799,71 @@ async fn forkguard_capture_replay_drops_across_a_base_url_edit() {
         "{body}"
     );
 }
+
+// Review 6061318874: a Responses SSE stream that ends after output events
+// but before any terminal `response.completed`/`response.incomplete` (or
+// `[DONE]`) marker is a truncated transport failure, not a completion. The
+// stream must yield `Err` instead of synthesizing a clean `MessageStop`, so
+// the engine's incomplete-stream ladder sees the failure rather than
+// treating a dead connection as a finished turn.
+#[tokio::test]
+async fn responses_premature_stream_close_fails_instead_of_completing() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path(CODEX_RESPONSES_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _codex_token =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+        let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+    };
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .expect("premature-close stream opens");
+
+    let mut premature_error = None;
+    let mut saw_stop = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::MessageStop) => saw_stop = true,
+                Err(error) => {
+                    premature_error = Some(error);
+                    break;
+                }
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("prematurely closed stream terminates");
+    assert!(
+        !saw_stop,
+        "a stream with no terminal event must not complete as MessageStop"
+    );
+    let error = premature_error.expect("premature close must surface an error");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("closed before a terminal response"),
+        "{message}"
+    );
+}

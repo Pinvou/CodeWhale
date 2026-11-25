@@ -29,10 +29,6 @@ pub const KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS: u32 = 131_072;
 ///
 /// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
 pub const DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
-/// Compatibility alias for the K3.1 family's documented maximum generation
-/// size. Static model rows retain the conservative 131,072 default; this
-/// maximum applies only when the resolved route reports it.
-pub const KIMI_K31_MAX_OUTPUT_TOKENS: u32 = DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 /// Last-resort compaction trigger when [`context_window_for_model`] returns
 /// `None` (an unrecognised model id). v0.8.11 raised this from `50_000` to
 /// `102_400` (80% of [`LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS`]) so unknown

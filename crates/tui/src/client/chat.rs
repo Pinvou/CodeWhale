@@ -1440,21 +1440,7 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
             return true;
         };
         match crate::tools::schema_sanitize::sanitize_for_kimi_parameters(parameters) {
-            Ok(note) => {
-                if let Some(note) = note {
-                    let description = function
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let description = if description.is_empty() {
-                        note
-                    } else {
-                        format!("{description} {note}")
-                    };
-                    function.insert("description".to_string(), json!(description));
-                }
-                true
-            }
+            Ok(()) => true,
             Err(error) => {
                 let name = function
                     .get("name")
@@ -1513,7 +1499,7 @@ fn prefix_digit_led_tool_names_for_moonshot(
     chat_tools: &mut Vec<Value>,
     registry_names: &[String],
 ) -> (Vec<String>, std::collections::HashMap<String, String>) {
-    let wire_names: Vec<String> = chat_tools
+    let wire_names: std::collections::HashSet<String> = chat_tools
         .iter()
         .filter_map(|tool| {
             tool.get("function")
@@ -1521,6 +1507,12 @@ fn prefix_digit_led_tool_names_for_moonshot(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
+        .collect();
+    // Encode each registry spelling once instead of re-encoding it for every
+    // digit-led comparison (review 6061318874).
+    let encoded_registry_names: std::collections::HashSet<String> = registry_names
+        .iter()
+        .map(|existing| to_api_tool_name(existing))
         .collect();
     let mut dropped = Vec::new();
     let mut minted_names = std::collections::HashMap::new();
@@ -1556,10 +1548,8 @@ fn prefix_digit_led_tool_names_for_moonshot(
             return false;
         }
         if digit_led
-            && (wire_names.iter().any(|existing| existing == &final_name)
-                || registry_names
-                    .iter()
-                    .any(|existing| to_api_tool_name(existing) == final_name))
+            && (wire_names.contains(&final_name)
+                || encoded_registry_names.contains(&final_name))
         {
             tracing::warn!(
                 tool = %name,
@@ -1637,6 +1627,16 @@ fn apply_moonshot_history_tool_call_identities(
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return Ok(());
     };
+    // History tool-call names that this request cannot resolve to an owner
+    // are inert context: the provider accepts replayed names outside the
+    // offered set (the pre-canonical releases replayed every history name
+    // untouched), and dispatch keys on RESPONSE spellings, never on replayed
+    // history. Failing the whole request build here used to wedge the
+    // session permanently whenever the tool set changed between turns — an
+    // MCP disconnect, a new collision, or a schema drop would leave every
+    // later request unbuildable until history was cleared by hand (review
+    // 6061318874). Pass unownable names through untouched and say so once.
+    let mut passed_through = 0usize;
     for message in messages {
         let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
             continue;
@@ -1650,7 +1650,10 @@ fn apply_moonshot_history_tool_call_identities(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .context("Moonshot replayed tool call is missing its name")?;
-            let decoded = try_from_api_tool_name(&name)?;
+            let Ok(decoded) = try_from_api_tool_name(&name) else {
+                passed_through += 1;
+                continue;
+            };
             let digit_led = decoded.as_bytes().first().is_some_and(u8::is_ascii_digit);
             if !digit_led && !moonshot_wire_name_is_valid(&name) {
                 bail!("Moonshot replayed tool name '{name}' violates the final wire-name pattern");
@@ -1659,16 +1662,15 @@ fn apply_moonshot_history_tool_call_identities(
                 && decoded.starts_with('_')
                 && decoded.as_bytes()[1].is_ascii_digit();
             let final_decoded = if digit_led {
-                mint_owners.get(&decoded).cloned().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Moonshot cannot replay digit-led tool '{decoded}': this request has no mint owner for it"
-                    )
-                })?
+                let Some(owner) = mint_owners.get(&decoded) else {
+                    passed_through += 1;
+                    continue;
+                };
+                owner.clone()
             } else {
                 if mint_shaped && !response_owners.contains_key(&decoded) {
-                    bail!(
-                        "Moonshot cannot replay ambiguous prefixed tool '{decoded}' without a request owner"
-                    );
+                    passed_through += 1;
+                    continue;
                 }
                 decoded
             };
@@ -1678,6 +1680,11 @@ fn apply_moonshot_history_tool_call_identities(
             }
             function.insert("name".into(), json!(final_wire));
         }
+    }
+    if passed_through > 0 {
+        crate::logging::warn(format!(
+            "Moonshot replay: {passed_through} history tool-call name(s) have no owner in this request; left untouched"
+        ));
     }
     Ok(())
 }
@@ -9372,7 +9379,7 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn moonshot_replay_requires_the_request_owned_identity() {
+    fn moonshot_replay_rewrites_owned_and_passes_through_unowned_identities() {
         use crate::models::{ContentBlock, Message, Role};
 
         let request_for = |name: &str, tools: Vec<crate::models::Tool>| {
@@ -9426,7 +9433,7 @@ mod alias_thinking_detection_tests {
             json!("_3d_render")
         );
 
-        let error = crate::client::chat::build_chat_wire_body(
+        let wedged = crate::client::chat::build_chat_wire_body(
             &request_for(
                 "3d_render",
                 vec![
@@ -9438,9 +9445,23 @@ mod alias_thinking_detection_tests {
             crate::config::DEFAULT_MOONSHOT_BASE_URL,
             false,
         )
-        .err()
-        .expect("a current collision must not rebind the old call to the raw twin");
-        assert!(error.to_string().contains("no mint owner"), "{error}");
+        .expect("an unownable history name must not wedge the request build (review 6061318874)");
+        // The `3d_render` history call has no mint owner (its mint collides
+        // with the raw `_3d_render` sibling and the digit-led spelling lost),
+        // so it passes through untouched: it is inert replay context, and
+        // rewriting it would be impossible without an owner.
+        assert_eq!(
+            wedged.body["messages"][0]["tool_calls"][0]["function"]["name"],
+            json!("3d_render")
+        );
+
+        // Note on the canonical-decode failure branch: the outbound builder
+        // canonical-encodes history tool-call names before identity
+        // application, so a decode failure is not reachable through this
+        // seam (an earlier draft of this test tried `foo.bar` and the wire
+        // carried its canonical `foo-x00002E-bar` spelling). The pass-through
+        // branch stays as defense for any future name source that is not
+        // pre-encoded.
     }
 
     #[test]

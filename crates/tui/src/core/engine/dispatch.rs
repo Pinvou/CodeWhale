@@ -403,10 +403,30 @@ pub(super) fn parse_completed_tool_input_for_provider(
     };
     if provider == crate::config::ApiProvider::Moonshot && !value.is_object() {
         return Err(format!(
-            "malformed tool arguments from model: expected a JSON object, got {buffer:?}"
+            "malformed tool arguments from model: expected a JSON object, got {}",
+            bounded_raw_arguments_excerpt(buffer)
         ));
     }
     Ok(value)
+}
+
+/// Bound the raw-arguments excerpt carried in error text.
+///
+/// The `raw_arguments` sentinel keeps the full payload for replay, but the
+/// human- and model-facing error message must not: a hostile or broken
+/// multi-megabyte argument stream would otherwise double its memory in the
+/// error string and flood the model's context on every subsequent turn
+/// (review 6061318874).
+pub(crate) fn bounded_raw_arguments_excerpt(buffer: &str) -> String {
+    const MAX_EXCERPT_BYTES: usize = 512;
+    if buffer.len() <= MAX_EXCERPT_BYTES {
+        return format!("{buffer:?}");
+    }
+    let mut end = MAX_EXCERPT_BYTES;
+    while !buffer.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{:?}… ({} bytes total)", &buffer[..end], buffer.len())
 }
 
 pub(super) fn parse_tool_input(buffer: &str) -> Option<serde_json::Value> {
@@ -509,7 +529,10 @@ pub(crate) fn malformed_tool_arguments_input(buffer: &str) -> serde_json::Value 
 }
 
 pub(super) fn malformed_tool_arguments_error(buffer: &str) -> String {
-    format!("malformed tool arguments from model: expected valid JSON, got {buffer:?}")
+    format!(
+        "malformed tool arguments from model: expected valid JSON, got {}",
+        bounded_raw_arguments_excerpt(buffer)
+    )
 }
 
 fn strip_code_fences(text: &str) -> Option<String> {
