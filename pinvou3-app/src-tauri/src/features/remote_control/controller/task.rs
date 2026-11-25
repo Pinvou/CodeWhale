@@ -915,6 +915,16 @@ impl RemoteTaskLedger {
         request: &RemoteTaskRequest,
         now_b: u64,
     ) -> Result<AdmissionOutcome> {
+        self.admit_with_preflight(live, request, now_b, Ok(()))
+    }
+
+    fn admit_with_preflight(
+        &self,
+        live: &LeaseContext,
+        request: &RemoteTaskRequest,
+        now_b: u64,
+        preflight: std::result::Result<(), &'static str>,
+    ) -> Result<AdmissionOutcome> {
         let resource_gate = self.resource_gate(&request.task_id);
         // The caller may hold B's lifecycle gate. Never wait here for cleanup
         // that publishes through that gate in the opposite direction.
@@ -958,6 +968,9 @@ impl RemoteTaskLedger {
             .sequence
             .checked_add(1)
             .ok_or_else(|| error("task_ledger_capacity"))?;
+        // An already accepted request replays its durable result above.
+        // Apply the caller's pure preflight only to this new admission.
+        preflight.map_err(error)?;
         let record = RemoteTaskRecord {
             sequence: candidate.sequence,
             transition_sequence: 1,
@@ -2746,6 +2759,25 @@ impl RemoteTaskService {
         expected_remote_ref: Option<&str>,
         install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
     ) -> Result<PreparedTaskAdmission> {
+        self.prepare_bound_admission_with_preflight(
+            live,
+            payload,
+            now_b,
+            expected_remote_ref,
+            Ok(()),
+            install,
+        )
+    }
+
+    pub(crate) fn prepare_bound_admission_with_preflight(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+        expected_remote_ref: Option<&str>,
+        preflight: std::result::Result<(), &'static str>,
+        install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
+    ) -> Result<PreparedTaskAdmission> {
         if let Some(remote_ref) = expected_remote_ref {
             validate_identifier(remote_ref)?;
         }
@@ -2772,7 +2804,9 @@ impl RemoteTaskService {
         if binding.1 != requested_lane {
             return Err(error("task_session_lane_mismatch"));
         }
-        let outcome = self.ledger.admit(live, &request, now_b)?;
+        let outcome = self
+            .ledger
+            .admit_with_preflight(live, &request, now_b, preflight)?;
         if let AdmissionOutcome::Admitted(ticket) = &outcome {
             // The owner lock is still held here: convert only installation
             // panics into the existing callback-free durable failure, then

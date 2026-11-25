@@ -48,8 +48,11 @@ use crate::features::remote_control::controller::task::{
     )
 )]
 use crate::features::remote_control::{
-    controller::temporary_model::{
-        SharedTemporaryModelStore, TemporaryModelPackageV1, TemporaryModelStore,
+    controller::{
+        runtime_egress::RuntimeEgress,
+        temporary_model::{
+            SharedTemporaryModelStore, TemporaryModelPackageV1, TemporaryModelStore,
+        },
     },
     task_permissions::{for_session, initialize_new_session},
 };
@@ -57,6 +60,16 @@ use crate::features::sessions::SessionStore;
 
 use super::engine::TurnReservation;
 use super::engine_pool::{EnginePool, RemoteRuntimeModelBundle};
+
+impl deepseek_tui::config::ModelHttpPolicy for RuntimeEgress {
+    fn configure(
+        &self,
+        builder: reqwest::ClientBuilder,
+        base_url: &str,
+    ) -> anyhow::Result<reqwest::ClientBuilder> {
+        Self::configure(self, builder, base_url).map_err(anyhow::Error::msg)
+    }
+}
 
 pub(crate) struct RemoteChatReservation {
     turn: Option<TurnReservation>,
@@ -568,8 +581,12 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                     .await
                     .map_err(|error| error.code.to_owned())?;
                 Some(
-                    RemoteRuntimeModelBundle::new(models.primary, models.vision)
-                        .map_err(|_| "model_runtime_invalid".to_owned())?,
+                    RemoteRuntimeModelBundle::new_with_http_policy(
+                        models.primary,
+                        models.vision,
+                        models.egress,
+                    )
+                    .map_err(|_| "model_runtime_invalid".to_owned())?,
                 )
             }
             _ => return Err("task_model_source_invalid".to_owned()),
@@ -645,8 +662,12 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                     .await
                     .map_err(|error| error.code.to_owned())?;
                 Some(
-                    RemoteRuntimeModelBundle::new(models.primary, models.vision)
-                        .map_err(|_| "model_runtime_invalid".to_owned())?,
+                    RemoteRuntimeModelBundle::new_with_http_policy(
+                        models.primary,
+                        models.vision,
+                        models.egress,
+                    )
+                    .map_err(|_| "model_runtime_invalid".to_owned())?,
                 )
             }
             _ => return Err("task_model_source_invalid".to_owned()),
