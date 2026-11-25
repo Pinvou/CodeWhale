@@ -258,22 +258,12 @@ const PINVOU_KNOWN: &[(&str, u32)] = &[
     // "1M token context window" ("100 万 token 上下文窗口"); the base kimi
     // rows stop at k3/k2.x exact ids that cannot cover the k3.1 wire id.
     ("kimi-k3.1-pro", 1_048_576),
-    // Kimi Code group spelling of the same model (the bare rows left the
-    // kimi_coding_plan catalog group in the round-5 deferral — the pinned
-    // child's replay gate does not yet recognize K3.1, see that group's
-    // deferral comment — but ACP datalist / stored / custom configs still
-    // carry them). model_name_matches has no
-    // vendor-prefix tolerance, so the kimi-k3.1-pro row above cannot carry
-    // it, and the base kimi-code arms are exact "k3" / "k3-256k" only —
-    // without this row the bare spelling resolves None → the engine falls
-    // to 128K while the FE row documents 1M. The -highspeed suffix rides
-    // the tolerance of this row: platform.kimi.com/docs/api/models-overview
-    // states both K3.1 spellings carry kimi-k3's constraints verbatim
-    // ("参数约束也与 `kimi-k3` 完全一致" — the same 1M window; note that the
-    // "同一模型、参数约束完全一致（仅输出速度不同）" wording on the same page
-    // belongs to the kimi-k2.7-code/-highspeed family, not to K3.1), so the
-    // highspeed variant is the same 1M window — re-checked 2026-11-03.
-    ("k3.1-pro", 1_048_576),
+    // The bare Kimi Code spellings (k3.1-pro / k3.1-pro-highspeed) used to
+    // ride this table (round-5 deferral gap); CodeWhale cc2adf8 (#137) now
+    // catalogues them directly at the 262,144 Kimi-Code safe default, so a
+    // supplemental row would contradict the verified base figure and is
+    // deliberately absent — plans that include 1M declare context_window
+    // explicitly (KIMI_CODE_CLAUDE_ALIAS_GUIDANCE precedent).
     // muse-spark-1.3 (Meta group headline row, 2026-11-03 refresh):
     // officially 1,048,576 context per the dev.meta.ai quickstart, fetched
     // live 2026-11-04 ("Limits: context 1048576" in the coding-agent setup
@@ -408,26 +398,14 @@ const PINVOU_DOCUMENTED_OUTPUT: &[(&str, u32)] = &[
     // flashx wire id, so it resolves None. The dot spelling cannot
     // suffix-inherit the dash rows under model_name_matches either.
     ("glm-5.3-flashx", 131_072),
-    // Kimi K3.1 Pro (2026-10-23 flagship, all four K3.1 spellings — the
-    // settings catalog now rides the prefixed/bracket forms after the
-    // round-5 bare-row deferral, the bare forms stay reachable through the
-    // ACP datalist and custom entry): the
-    // official API docs document max_completion_tokens "默认为 131072，最大
-    // 可设置为 1048576" for the whole K3 series incl. the highspeed variant
-    // (platform.kimi.com/docs/api/chat, re-checked 2026-11-03). The hard
-    // cap is registered; the engine still intersects with its 64K
-    // automatic-request default, so without these rows the K2-sunset
-    // migration target fail-closes to the 8192 uncatalogued guess — an 8×
-    // regression against the 64K automatic-request cap kimi-k3 rides (its
-    // catalogued figure is 131,072; the engine's 64K request cap is what
-    // the 8× arithmetic compares against). The bare Kimi Code
-    // spelling needs its own row (no vendor-prefix tolerance); both
-    // -highspeed spellings ride the suffix tolerance of their rows (the
-    // models-overview page states both K3.1 spellings carry kimi-k3's
-    // constraints verbatim — see the PINVOU_KNOWN comment).
-    ("kimi-k3.1-pro", 1_048_576),
-    ("k3.1-pro", 1_048_576),
-    // The [1m] bracket declarations of the same models (the ACP datalists'
+    // The four plain K3.1 spellings (kimi-k3.1-pro[-highspeed] and the bare
+    // Kimi Code k3.1-pro[-highspeed]) used to anchor here (2026-10-23
+    // flagship, round-5 bare-row deferral); CodeWhale cc2adf8 (#137) now
+    // catalogues all four on its output chain at KIMI_K31_MAX_OUTPUT_TOKENS
+    // (1,048,576 — the documented "最大可设置为 1048576" hard cap), so the
+    // fill-gap guard yields to the base's Documented path for every one of
+    // them and rows here would be unreachable. The [1m] bracket declarations
+    // of the same models (the ACP datalists'
     // models1m suggestions carry k3.1-pro[1m] on the Kimi Code preset and
     // kimi-k3[1m] on the moonshot preset; kimi-k3.1-pro[1m] has no datalist
     // entry — it is the prefixed-platform composite of the same model, no
@@ -602,12 +580,12 @@ mod tests {
             // suffix tolerance of the GA row above.
             ("minimax-m3.1-flash-preview", 1_000_000),
             ("kimi-k3.1-pro", 1_048_576),
-            // The Kimi Code spelling is a separate wire id (no vendor-prefix
-            // tolerance) with its own row; the highspeed suffix rides the
-            // tolerance of both K3.1 rows (same model per the
-            // models-overview page, re-checked 2026-11-03).
-            ("k3.1-pro", 1_048_576),
-            ("k3.1-pro-highspeed", 1_048_576),
+            // The bare Kimi Code spellings resolve through the base since
+            // cc2adf8 (#137) at its 262,144 safe default (no supplemental
+            // row on purpose); the prefixed highspeed spelling keeps the
+            // 1M window the platform documents for the whole K3.1 family.
+            ("k3.1-pro", 262_144),
+            ("k3.1-pro-highspeed", 262_144),
             ("kimi-k3.1-pro-highspeed", 1_048_576),
             // Meta group headline row: no base chain row exists (the base
             // default is muse-spark-1.2), so the supplemental row keeps the
@@ -786,18 +764,17 @@ mod tests {
             Some(384_000)
         );
         assert_eq!(resolved_output_limit("glm-5.3-flashx"), Some(131_072));
-        // K3.1 Pro (2026-11-03 fix wave): the documented hard cap keeps the
-        // K2-sunset migration target off the 8192 uncatalogued fail-close.
-        // All four spellings must resolve — the bare Kimi Code id carries
-        // no vendor prefix, and the highspeed variants are the same model
-        // (models-overview page), so they ride the suffix tolerance.
-        assert_eq!(resolved_output_limit("kimi-k3.1-pro"), Some(1_048_576));
-        assert_eq!(
-            resolved_output_limit("kimi-k3.1-pro-highspeed"),
-            Some(1_048_576)
-        );
-        assert_eq!(resolved_output_limit("k3.1-pro"), Some(1_048_576));
-        assert_eq!(resolved_output_limit("k3.1-pro-highspeed"), Some(1_048_576));
+        // The four plain K3.1 spellings were anchored here (2026-11-03 fix
+        // wave) until CodeWhale cc2adf8 (#137) catalogued the family on its
+        // output chain at KIMI_K31_MAX_OUTPUT_TOKENS — the yield-to-base
+        // guard now returns None for every one of them, which is the
+        // desired shape: the base's Documented path stands (1,048,576 hard
+        // cap) and an anchor row here could only wrongly tighten a fresher
+        // base row.
+        assert_eq!(resolved_output_limit("kimi-k3.1-pro"), None);
+        assert_eq!(resolved_output_limit("kimi-k3.1-pro-highspeed"), None);
+        assert_eq!(resolved_output_limit("k3.1-pro"), None);
+        assert_eq!(resolved_output_limit("k3.1-pro-highspeed"), None);
         // The [1m] bracket declarations miss every dash-tolerant row (the
         // remainder does not start with '-'), so they carry their own rows
         // (2026-11-04 fix pass); k3[1m] stays unanchored (base fail-closes
