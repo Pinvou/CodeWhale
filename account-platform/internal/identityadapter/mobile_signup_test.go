@@ -95,6 +95,7 @@ func TestSMSOnlyIdentityHTTPDispatchContract(t *testing.T) {
 	for _, tc := range []struct {
 		name, route, mode                          string
 		first, failToken, cancelWarm, rebindMobile bool
+		usernameConflict                           bool
 		correlatedSubject                          string
 		status                                     int
 		code, subject                              string
@@ -131,6 +132,11 @@ func TestSMSOnlyIdentityHTTPDispatchContract(t *testing.T) {
 			first: true, status: http.StatusCreated, subject: "new-sms-user", tokens: 1, creates: 1,
 		},
 		{
+			name: "directory username conflict remains a conflict", route: smsRoute, mode: smsMode,
+			first: true, usernameConflict: true, status: http.StatusConflict,
+			code: "USERNAME_ALREADY_REGISTERED", tokens: 1, creates: 1,
+		},
+		{
 			name: "existing dispatch cannot bind another mobile", route: smsRoute, mode: smsMode,
 			first: true, rebindMobile: true, status: http.StatusConflict,
 			code: "PASSWORD_REFERENCE_CONFLICT", tokens: 1, creates: 1,
@@ -163,6 +169,10 @@ func TestSMSOnlyIdentityHTTPDispatchContract(t *testing.T) {
 					}})
 				case r.URL.Path == usersPath && r.Method == http.MethodPost:
 					creates.Add(1)
+					if tc.usernameConflict {
+						w.WriteHeader(http.StatusConflict)
+						return
+					}
 					w.Header().Set("Location", usersPath+"/new-sms-user")
 					w.WriteHeader(http.StatusCreated)
 				default:
