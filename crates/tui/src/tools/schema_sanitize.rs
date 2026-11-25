@@ -643,8 +643,8 @@ fn count_strict_map_narrowings(schema: &Value, ships: bool) -> usize {
 pub fn sanitize_for_strict(schema: &mut Value) -> Vec<String> {
     sanitize(schema);
     let mut removed_optionals = Vec::new();
-    let mut widened_consts = 0;
-    enforce_strict_subset(schema, &mut removed_optionals, &mut widened_consts);
+    let mut widened_consts = 0usize;
+    enforce_strict_subset(schema, "", &mut removed_optionals, &mut widened_consts);
     removed_optionals.sort();
     removed_optionals.dedup();
     removed_optionals
@@ -2123,7 +2123,12 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>, usize)
     // property still does.
     let mut removed_optionals = Vec::new();
     let mut widened_consts = 0;
-    enforce_strict_subset(&mut normalized, &mut removed_optionals, &mut widened_consts);
+    enforce_strict_subset(
+        &mut normalized,
+        "",
+        &mut removed_optionals,
+        &mut widened_consts,
+    );
     // The strict server resolves `$ref` against the schema it receives; a
     // dangling reference — or an external one it cannot fetch, or a
     // malformed non-string value — turns every call into the documented
@@ -2243,13 +2248,20 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
     }
     // `items` is documented beside a typed array only: beside any other
     // declared type the keyword is the same misplaced-keyword dead letter,
-    // and it fails closed on the same line.
+    // and it fails closed on the same line. A typeless properties-bearing
+    // node will CARRY `type: "object"` after the enforce pass injects it
+    // (round 25 — the declared-type arm ran before the injection existed
+    // and missed exactly that shape, shipping `items` beside the injected
+    // type); a typeless node without properties dies at the shapeless arm
+    // below, and one carrying `additionalProperties` dies at that arm
+    // above.
     if ships
-        && obj
+        && obj.contains_key("items")
+        && (obj
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|schema_type| schema_type != "array")
-        && obj.contains_key("items")
+            || (obj.get("type").is_none() && is_object_schema(obj)))
     {
         return true;
     }
@@ -2916,6 +2928,18 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
                 // by the composition arm before this walk runs.
                 "anyOf" => {
                     if let Some(branches) = value.as_array()
+                        && branches.is_empty()
+                    {
+                        // A union with no branch matches no value at all
+                        // (round 25): the malformed-value arm above only
+                        // rejects non-array forms, the shapeless check
+                        // exempts `anyOf`-carrying maps, and both collapse
+                        // passes need one or two branches — a bare empty
+                        // array in property or definition position shipped
+                        // `strict: true` callable by nothing.
+                        return true;
+                    }
+                    if let Some(branches) = value.as_array()
                         && !branches.is_empty()
                     {
                         // Null-family carriers are UNREPRESENTABLE, not
@@ -3460,9 +3484,14 @@ fn branch_carries_null_family(branch: &Value) -> bool {
 /// Canonical byte encoding of one pinned value, exact under the
 /// JSON-Schema number rule: integral values (either storage spelling)
 /// render as their exact i128, so `2` and `2.0` hash identically the way
-/// [`pinned_values_equal`] compares them; genuinely fractional numbers
-/// render as their f64 bits. Injective w.r.t. that equality, which is
-/// what makes the hash-set membership oracle below sound.
+/// [`pinned_values_equal`] compares them; genuinely fractional numbers —
+/// and integral floats past the 2^127 `bounds_number` bound (round 25) —
+/// render as their f64 bits, which stay pairwise-distinct there. Object
+/// members hash in sorted key order: serde runs `preserve_order`, so
+/// insertion-order iteration made `{"a":1,"b":2}` and `{"b":2,"a":1}`
+/// hash differently and read a genuinely shared union member as disjoint
+/// (round 25). Injective w.r.t. [`pinned_values_equal`], which is what
+/// makes the hash-set membership oracle below sound.
 fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
     match value {
         Value::Number(_) => match bounds_number(value) {
@@ -3491,7 +3520,9 @@ fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
         }
         Value::Object(map) => {
             out.push(b'{');
-            for (key, item) in map {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (key, item) in entries {
                 out.extend(key.as_bytes());
                 out.push(0);
                 pinned_canonical_bytes(item, out);
@@ -4490,6 +4521,11 @@ fn numeric_forcing_of_definition(definition: &Value, root: &Value, depth: usize)
 /// `9007199254740992.0` beside an integer pin one above it) compare
 /// exactly too (round 23). Genuinely fractional values stay `None` and
 /// keep the f64 comparison, which is exact below 2^53 where they live.
+/// So do integral floats at and above 2^127 (round 25): the `as i128`
+/// cast saturates there — `1e300` and `2e300` both landed on `i128::MAX`,
+/// reading a disjoint `const`/`enum` pair as contained and a crossed
+/// window as uncrossed — while every caller's f64 fallback compares those
+/// values with exact f64 ordering, so `None` hands them the honest order.
 fn bounds_number(value: &Value) -> Option<i128> {
     value
         .as_i64()
@@ -4497,7 +4533,10 @@ fn bounds_number(value: &Value) -> Option<i128> {
         .or_else(|| value.as_u64().map(i128::from))
         .or_else(|| {
             let float = value.as_f64()?;
-            (float.is_finite() && float.fract() == 0.0).then_some(float as i128)
+            // `i128::MAX as f64` is exactly 2^127; below it the cast is
+            // exact for every integral f64.
+            (float.is_finite() && float.fract() == 0.0 && float.abs() < i128::MAX as f64)
+                .then_some(float as i128)
         })
 }
 
@@ -4507,16 +4546,18 @@ fn numeric_bounds_contradiction(obj: &Map<String, Value>) -> bool {
     // carry exact integers (either storage spelling; `bounds_number`
     // normalizes float-spelled integral values too) the i128 values
     // decide, and the f64 projection only fills pairs with a genuinely
-    // fractional bound. The old shape computed the crossing from the f64
-    // projections FIRST and used the exact path only as an additional
-    // override: at u64 edges the projection rounds the two bounds onto
-    // one value (`exclusiveMinimum: 2^60 - 1` projects onto
-    // `maximum: 2^60`), so the f64 arm fired `excl_min >= max` on a live
-    // window and the exact path — which reads it uncrossed — never got to
-    // speak (a satisfiable dual-spelling union failed closed). The f64
-    // fallback stays monotonicity-safe for the exact spellings it still
-    // sees (x < y implies f64(x) <= f64(y), so a projected crossing is a
-    // true crossing).
+    // fractional bound or an integral bound past the 2^127 `bounds_number`
+    // bound (round 25), where the f64 ordering is exact. The old shape
+    // computed the crossing from the f64 projections FIRST and used the
+    // exact path only as an additional override: at u64 edges the
+    // projection rounds the two bounds onto one value
+    // (`exclusiveMinimum: 2^60 - 1` projects onto `maximum: 2^60`), so
+    // the f64 arm fired `excl_min >= max` on a live window and the exact
+    // path — which reads it uncrossed — never got to speak (a satisfiable
+    // dual-spelling union failed closed). The f64 fallback stays
+    // monotonicity-safe for the exact spellings it still sees (x < y
+    // implies f64(x) <= f64(y), so a projected crossing is a true
+    // crossing).
     let pair_crosses =
         |lower: Option<&Value>, upper: Option<&Value>, equal_crosses: bool| -> bool {
             match (lower.and_then(bounds_number), upper.and_then(bounds_number)) {
@@ -5164,6 +5205,7 @@ fn collapse_single_element_unions(schema: &mut Value) {
 
 fn enforce_strict_subset(
     schema: &mut Value,
+    site_path: &str,
     removed_optionals: &mut Vec<String>,
     widened_consts: &mut usize,
 ) {
@@ -5206,7 +5248,18 @@ fn enforce_strict_subset(
                 if originally_required.contains(name.as_str()) {
                     true
                 } else {
-                    removed_here.push(name.clone());
+                    // Qualify by the property chain that led here (round
+                    // 25): a flat bare-name list let a nested optional `id`
+                    // forbid the top-level REQUIRED `id` in the same tool —
+                    // the note said "must not be sent" about a property the
+                    // shipped schema requires, and a model obeying the note
+                    // failed every call. Top-level names stay bare; deeper
+                    // ones render as `meta.id`.
+                    removed_here.push(if site_path.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{site_path}.{name}")
+                    });
                     false
                 }
             });
@@ -5243,18 +5296,40 @@ fn enforce_strict_subset(
                 // schema.
                 key if STRICT_NAME_MAP_KEYS.contains(&key) => {
                     if let Some(named_schemas) = value.as_object_mut() {
-                        for named_schema in named_schemas.values_mut() {
-                            enforce_strict_subset(named_schema, removed_optionals, widened_consts);
+                        for (name, named_schema) in named_schemas.iter_mut() {
+                            // The removal note names schemas by their wire
+                            // chain: properties nest as `meta.id`, while a
+                            // definition carries its map key (`$defs.meta`)
+                            // so a removal inside it cannot shadow a sibling
+                            // property of the same name.
+                            let join = |rest: &str| -> String {
+                                if site_path.is_empty() {
+                                    rest.to_string()
+                                } else {
+                                    format!("{site_path}.{rest}")
+                                }
+                            };
+                            let child_path = if key == "properties" {
+                                join(name)
+                            } else {
+                                join(&format!("{key}.{name}"))
+                            };
+                            enforce_strict_subset(
+                                named_schema,
+                                &child_path,
+                                removed_optionals,
+                                widened_consts,
+                            );
                         }
                     }
                 }
                 key if STRICT_LITERAL_KEYS.contains(&key) => {}
-                _ => enforce_strict_subset(value, removed_optionals, widened_consts),
+                _ => enforce_strict_subset(value, site_path, removed_optionals, widened_consts),
             }
         }
     } else if let Some(arr) = schema.as_array_mut() {
         for value in arr {
-            enforce_strict_subset(value, removed_optionals, widened_consts);
+            enforce_strict_subset(value, site_path, removed_optionals, widened_consts);
         }
     }
 }
@@ -6869,7 +6944,7 @@ mod strict_fixwave_r21 {
         let mut schema = json!({"enum": ["a", "b"], "const": "a"});
         let mut removed = Vec::new();
         let mut widened = 0usize;
-        enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+        enforce_strict_subset(&mut schema, "", &mut removed, &mut widened);
         assert_eq!(widened, 0, "a contained const is not a disagreement");
         assert_eq!(schema, json!({"enum": ["a"]}));
         // A genuinely disagreeing const still counts (the round-19 pin's
@@ -6877,7 +6952,7 @@ mod strict_fixwave_r21 {
         let mut schema = json!({"enum": ["a", "b"], "const": "z"});
         let mut removed = Vec::new();
         let mut widened = 0usize;
-        enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+        enforce_strict_subset(&mut schema, "", &mut removed, &mut widened);
         assert_eq!(widened, 1);
     }
 
@@ -7224,7 +7299,10 @@ mod tests {
 
         let removed = sanitize_for_strict(&mut schema);
 
-        assert_eq!(removed, vec!["max_lines", "start_line", "trim"]);
+        // Nested removals carry their property chain (round 25): `trim`
+        // lives under `options`, so the note names `options.trim` and the
+        // top-level names stay bare.
+        assert_eq!(removed, vec!["max_lines", "options.trim", "start_line"]);
         assert_eq!(schema["required"], json!(["options", "path"]));
         assert!(schema["properties"].get("start_line").is_none());
         assert!(schema["properties"].get("max_lines").is_none());
@@ -9094,7 +9172,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_mode_fails_closed_on_required_nullable_unions() {
+    fn strict_mode_fails_closed_on_required_nullable_keyword() {
         // `nullable` is outside the documented strict subset (the supported
         // type list has no null and the documents never mention the keyword),
         // and `sanitize` collapses the common `X | null` union into
@@ -9102,7 +9180,9 @@ mod tests {
         // that collapse — i.e. a required nullable — cannot be represented
         // faithfully under a strict flag, so the tool ships unchanged and
         // non-strict instead of inviting the server 400 the pipeline exists
-        // to prevent.
+        // to prevent. One encoding per tool (round 25): the old fixture
+        // bundled this shape with a null-branch union below, so deleting
+        // either gate arm left the pin green through the sibling encoding.
         let mut tools = vec![Tool {
             tool_type: None,
             name: "search".to_string(),
@@ -9111,16 +9191,9 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "mode": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "limit": {
-                        "anyOf": [
-                            {"type": "integer"},
-                            {"type": "string"},
-                            {"type": "null"}
-                        ]
-                    }
+                    "mode": {"anyOf": [{"type": "string"}, {"type": "null"}]}
                 },
-                "required": ["query", "mode", "limit"]
+                "required": ["query", "mode"]
             }),
             allowed_callers: None,
             defer_loading: None,
@@ -9136,18 +9209,63 @@ mod tests {
             tools[0].input_schema["properties"]["mode"]["anyOf"],
             json!([{"type": "string"}, {"type": "null"}])
         );
+        assert_eq!(tools[0].input_schema["required"], json!(["query", "mode"]));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_required_unrepresentable_branch() {
+        // The documented subset's `anyOf` branches are typed schemas; a
+        // branch that is not a schema at all — a literal JSON `null`, a
+        // draft boolean schema, an array, or a map that declares no shape
+        // (`{}`, an annotation-only map) — is a form the documents never
+        // describe and ships an unrepresentable construct under a strict
+        // flag, so it fails closed. The fixture uses a boolean-schema
+        // branch deliberately (round 25): a null-typed branch is caught by
+        // BOTH this arm and the null-family poison line, so only a
+        // non-null unrepresentable branch reddens when THIS arm's shape
+        // half alone is deleted (a null-typed union is separately pinned
+        // by the null-branch poison pins; the `is_null_type` half here is
+        // defense-in-depth with that poison line, and neither half can go
+        // red alone for a null branch). Separate tool from the
+        // nullable-keyword encoding so each gate arm has exactly one pin
+        // that reddens when IT is deleted.
+        let mut tools = vec![Tool {
+            tool_type: None,
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {
+                        "anyOf": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                            true
+                        ]
+                    }
+                },
+                "required": ["query", "limit"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].description, "Search");
         assert_eq!(
             tools[0].input_schema["properties"]["limit"]["anyOf"],
             json!([
                 {"type": "integer"},
                 {"type": "string"},
-                {"type": "null"}
+                true
             ])
         );
-        assert_eq!(
-            tools[0].input_schema["required"],
-            json!(["query", "mode", "limit"])
-        );
+        assert_eq!(tools[0].input_schema["required"], json!(["query", "limit"]));
     }
 
     #[test]
@@ -9436,8 +9554,12 @@ mod tests {
     }
 
     #[test]
-    fn strict_sanitize_dedupes_optionals_shared_across_levels() {
-        // The same optional name at two levels is reported once.
+    fn strict_sanitize_reports_optional_sites_per_level() {
+        // The same optional name at two levels is TWO properties, and both
+        // sites are reported: the top-level one bare, the nested one
+        // qualified by its chain (round 25 — merging them into one bare
+        // entry let a nested removal forbid the top-level REQUIRED
+        // property of the same name in the note).
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -9456,7 +9578,7 @@ mod tests {
 
         let removed = sanitize_for_strict(&mut schema);
 
-        assert_eq!(removed, vec!["trim".to_string()]);
+        assert_eq!(removed, vec!["outer.trim".to_string(), "trim".to_string()]);
     }
 
     #[test]
@@ -16684,7 +16806,7 @@ mod kimi_tests {
             let mut schema = json!({"type": "integer", "enum": [9007199254740992u64], "const": 9007199254740993u64});
             let mut removed = Vec::new();
             let mut widened = 0usize;
-            enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+            enforce_strict_subset(&mut schema, "", &mut removed, &mut widened);
             assert_eq!(
                 widened, 1,
                 "a disjoint big-int const is a real disagreement"
@@ -16701,7 +16823,7 @@ mod kimi_tests {
             let mut schema = json!({"type": "integer", "enum": [9007199254740992u64], "const": 9007199254740992u64});
             let mut removed = Vec::new();
             let mut widened = 0usize;
-            enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+            enforce_strict_subset(&mut schema, "", &mut removed, &mut widened);
             assert_eq!(widened, 0);
             assert_eq!(schema["const"], json!(9007199254740992u64));
         }
@@ -16763,7 +16885,7 @@ mod kimi_tests {
             let mut schema = json!({"enum": ["a", "b"], "const": "a"});
             let mut removed = Vec::new();
             let mut widened = 0usize;
-            enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+            enforce_strict_subset(&mut schema, "", &mut removed, &mut widened);
             assert_eq!(widened, 0);
             assert_eq!(schema, json!({"enum": ["a"]}));
         }
