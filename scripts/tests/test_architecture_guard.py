@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
+from copy import deepcopy
+from functools import cache
 from pathlib import Path
 
 
@@ -24,6 +26,15 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.guard = load_guard_module()
+        cls._scan_migration_fixture.cache_clear()
+
+    @classmethod
+    @cache
+    def _scan_migration_fixture(cls, reference):
+        # Both calibration tests use the same immutable Git snapshots.
+        return cls.guard.migration_semantic_states_from_git(
+            REPO_ROOT, cls.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR, reference
+        )
 
     def _migration_fixture_reference(self):
         # Immutable integration target used for this migration calibration.
@@ -437,8 +448,8 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         )
         anchor = self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR
         self.assertTrue(self.guard.migration_anchor_is_ancestor(REPO_ROOT, anchor))
-        merge_state, anchor_state, target_state = (
-            self.guard.migration_semantic_states_from_git(REPO_ROOT, anchor, reference)
+        merge_state, anchor_state, target_state = deepcopy(
+            self._scan_migration_fixture(reference)
         )
         migration_limits, migration_cycles = self.guard.merged_migration_limits(
             merge_state, anchor_state, target_state
@@ -550,10 +561,8 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         unmarked_empty["generated_from"] = "future-main-unrelated-commit"
         unmarked_empty["rules"]["common_platform_binaries"] = {"old": 1}
         self.assertTrue(self.guard.compare_baseline_ratchet(current, unmarked_empty))
-        merge_state, anchor_state, target_state = (
-            self.guard.migration_semantic_states_from_git(
-                REPO_ROOT, self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR, reference
-            )
+        merge_state, anchor_state, target_state = deepcopy(
+            self._scan_migration_fixture(reference)
         )
         self.assertTrue(self.guard.compare_baseline_ratchet(
             current, unmarked_empty, merge_state
