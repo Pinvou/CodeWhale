@@ -248,3 +248,59 @@ func TestSMSOnlyIdentityHTTPDispatchContract(t *testing.T) {
 		})
 	}
 }
+
+func TestPasswordIdentityCreateDoesNotIssueSMSDispatchProof(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		canceled bool
+	}{
+		{name: "provisioner token unavailable"},
+		{name: "canceled request with cached token", canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var tokens, creates atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/token":
+					tokens.Add(1)
+					if !tc.canceled {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					_, _ = w.Write([]byte(`{"access_token":"fixture-only","expires_in":300}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/admin/realms/fixture/users":
+					creates.Add(1)
+					w.WriteHeader(http.StatusCreated)
+				default:
+					t.Errorf("unexpected upstream request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer upstream.Close()
+
+			directory, err := NewKeycloakDirectory(upstream.URL, upstream.URL+"/token", "fixture", "fixture", "fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if tc.canceled {
+				if err := directory.Ping(ctx); err != nil {
+					t.Fatalf("prime the provisioner token cache: %v", err)
+				}
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = canceled
+			}
+			subject, err := directory.CreateMobileUser(ctx, uuid.New(), "controlled", "+8613800138000", "Controlled2026")
+			if subject != "" || err == nil || errors.Is(err, ErrCreateNotDispatched) {
+				t.Fatalf("password-based creation = %q, %v; want the original error without SMS dispatch proof", subject, err)
+			}
+			if tc.canceled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("password-based cancellation lost its context error: %v", err)
+			}
+			if tokens.Load() != 1 || creates.Load() != 0 {
+				t.Fatalf("upstream calls = token %d, create %d; want 1/0", tokens.Load(), creates.Load())
+			}
+		})
+	}
+}
