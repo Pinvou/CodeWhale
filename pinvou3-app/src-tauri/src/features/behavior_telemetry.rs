@@ -599,29 +599,45 @@ impl Drop for ToolInstallGuard {
     }
 }
 
+pub(crate) enum TaskSubmissionRejection {
+    ValidationFailed,
+    Timeout,
+    InternalError,
+}
+
+impl TaskSubmissionRejection {
+    fn category(self) -> &'static str {
+        match self {
+            Self::ValidationFailed => "validation_failed",
+            Self::Timeout => "timeout",
+            Self::InternalError => "internal_error",
+        }
+    }
+}
+
 pub struct TaskSubmissionGuard {
     app: tauri::AppHandle,
     session_id: String,
     attempt_id: String,
-    reject_on_drop: bool,
+    rejection: Option<TaskSubmissionRejection>,
 }
 
 impl TaskSubmissionGuard {
     pub fn sent(mut self) {
-        self.reject_on_drop = false;
+        self.rejection = None;
+    }
+
+    pub(crate) fn set_rejection_reason(&mut self, reason: TaskSubmissionRejection) {
+        self.rejection = Some(reason);
     }
 }
 
 impl Drop for TaskSubmissionGuard {
     fn drop(&mut self) {
-        if self.reject_on_drop {
-            reject_task_submission(
-                &self.app,
-                &self.session_id,
-                &self.attempt_id,
-                "validation_failed",
-                "submission",
-            );
+        if let Some(reason) = self.rejection.take()
+            && let Some(telemetry) = self.app.try_state::<BehaviorTelemetry>()
+        {
+            events::reject_task_submission(&telemetry, &self.session_id, &self.attempt_id, reason);
         }
     }
 }

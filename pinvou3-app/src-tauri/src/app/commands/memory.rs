@@ -1133,6 +1133,11 @@ pub async fn edit_last_turn(
         // desktop's own diagnostics lose the raw detail here too; that is the
         // strictly-safer direction and the round-27 wording above no longer
         // claims otherwise.)
+        // Telemetry only uploads the fixed rejection category, so classification
+        // runs on the raw error before the fold (same caliber as chat/codex arms).
+        if let Some(submission) = telemetry_submission.as_mut() {
+            submission.set_rejection_reason(submission_send_rejection(&error));
+        }
         let folded = crate::platform::paths::redact_storage_prefix(&format!("{error:#}"));
         crate::features::assistant::timing::finish_turn(&sid, "send_error", Some(&folded));
         return Err(format!("edit_last_turn: {folded}"));
