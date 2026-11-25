@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 
+use super::prelude::submission_send_rejection;
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::codex_acp::reader_window::{self, ReaderOpenRequest};
 use crate::features::codex_acp::workspace::{
@@ -318,7 +319,12 @@ pub(crate) async fn codex_acp_prompt_with_attachments(
     acp_pool
         .send_message(&session_id, message, attachments, workspace_references)
         .await
-        .map_err(|error| format!("ACP Agent send failed: {error:#}"))?;
+        .map_err(|error| {
+            if let Some(submission) = telemetry_submission.as_mut() {
+                submission.set_rejection_reason(submission_send_rejection(&error));
+            }
+            format!("ACP Agent send failed: {error:#}")
+        })?;
     if let Some(submission) = telemetry_submission.take() {
         submission.sent();
     }

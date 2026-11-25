@@ -2073,6 +2073,81 @@
   }
 
   // web+tauriChat 共享
+  function sessionMentionSplitter() {
+    return (typeof window !== "undefined") && window.__PINVOU_SESSION_MENTION__ &&
+      window.__PINVOU_SESSION_MENTION__.splitSessionMentionBlock;
+  }
+
+  // web+tauriMain 共享
+  // Scene routing wraps the user's words in model-facing boilerplate (the
+  // send path keeps the bubble on the raw text via meta.pinvouPayloadText),
+  // and the persisted transcript holds only that payload — so replay recovers
+  // the user's own text through the inverse that features/chat/scene-payload.js
+  // publishes on the window global (classic-script bridges do not import
+  // features back; same pattern as the session-mention splitter, read lazily
+  // at call time because features publish after the bridges load). Null when
+  // no publisher is loaded: the caller then keeps the persisted text as-is.
+  function scenePayloadSplitter() {
+    return (typeof window !== "undefined") && window.__PINVOU_SCENE_PAYLOAD__ &&
+      window.__PINVOU_SCENE_PAYLOAD__.splitScenePayload;
+  }
+
+  // Shared by web + tauriChat. Composer restores (steer-failure, session-switch
+  // mid-send, materialize abort) hand text back to the user: the
+  // session-mention injection block is a machine contract and the chips were
+  // consumed by the send attempt, so the block is stripped on restore instead
+  // of leaking raw JSON into the input. One shared implementation for both
+  // platform lanes (round-8 minor 10 — the strip-on-restore rule used to live
+  // as two verbatim lane copies behind the window global); the splitter is
+  // still read lazily at call time because features publish it after the
+  // bridge scripts boot.
+  function stripMentionBlockForComposerRestore(text) {
+    const raw = String(text || "");
+    const splitMention = sessionMentionSplitter();
+    if (typeof splitMention !== "function") return raw;
+    const split = splitMention(raw);
+    // Gate on `matched`, not refs.length: a structurally valid block that
+    // parses to zero refs is still a block (the Rust titler and the bubble
+    // strip both treat it as one) — the restores must not hand the raw JSON
+    // contract back for it.
+    return split && split.matched ? split.text.trim() : raw;
+  }
+
+  // Shared by web + tauriChat. Block-aware part of queuedPayloadEnvelope: splits
+  // <block><body> user text against a payload that really carries the block
+  // at its head. Returns null when the shape does not apply (no parser,
+  // no refs, refs-only text, prefixed payload, ambiguous body anchor).
+  function blockAwarePayloadEnvelope(user, payload) {
+    const splitMention = sessionMentionSplitter();
+    if (typeof splitMention !== "function") return null;
+    const split = splitMention(user);
+    if (!split || !split.refs.length || !split.text) return null;
+    const blockText = user.slice(0, user.length - split.text.length);
+    // The block-aware shape only exists when the queued payload really
+    // carries the block at its head: a guide/scaffold-prefixed payload
+    // anchors the block later, and slicing from blockText.length then
+    // cuts into the middle of the original block's JSON (round-8 M2).
+    // The body anchor is the TRIMMED body — interior leading whitespace
+    // in the stored body survives the whole-string trim, so the
+    // untrimmed form never matched the payload's embed and made the
+    // queued edit deterministically impossible. Anything else falls
+    // back to the legacy refusal instead of a corrupt envelope.
+    const body = split.text.trim();
+    if (!body || !payload.startsWith(blockText)) return null;
+    // Anchor on the FIRST occurrence after the block, and only when it
+    // is unique — the legacy exact-match path refused ambiguous
+    // payloads, and a body string that also occurs inside the template
+    // scaffold would silently land the edit at the boilerplate spot.
+    const bodyIndex = payload.indexOf(body, blockText.length);
+    if (bodyIndex < blockText.length || payload.includes(body, bodyIndex + 1)) return null;
+    return {
+      blockPrefix: blockText,
+      before: payload.slice(blockText.length, bodyIndex),
+      after: payload.slice(bodyIndex + body.length),
+      blockAware: true,
+    };
+  }
+
   function queuedPayloadEnvelope(userText, payloadText, meta) {
     const user = String(userText || "");
     const payload = String(payloadText == null ? user : payloadText);
@@ -5549,17 +5624,39 @@
     // 会话 buffer，composer 下一气泡据此下发——否则重启后的会话序号整体
     // 少计（forkTurnEntries.js 注释）。
     let runtimeContextUpdatesPending = 0;
+    // CodeWhale 在压缩时把摘要作为 role="user" 的检查点提交进历史（模型读作
+    // 上下文，不是用户输入；判定口径见 bridge-messages.js 的检查点族）。只认带
+    // 出处戳的载体：无戳的裸形态与用户粘贴的摘要头无法区分，照旧上屏。
+    const isCompactionCheckpoint = window.PinvouBridgeMessages?.isGeneratedCompactionCheckpointBlocks || null;
+    // 场景路由载荷的还原规则归 features/chat/scene-payload.js（发布在
+    // window.__PINVOU_SCENE_PAYLOAD__，见 scenePayloadSplitter）；features 未装载时
+    // 为 null，落盘文本照旧。
+    const splitScenePayload = scenePayloadSplitter();
     for (let mi = 0; mi < state.messages.length; mi++) {
       lane.emitPersonaAt(mi, false); // 该消息之前发生的卡牌事件先插
       const m = state.messages[mi];
       const blocks = Array.isArray(m.content) ? m.content : [];
       if (m.role === "user") {
+        // 压缩检查点：落一条与实时「压缩完成」同款的系统提示占位，绝不上屏
+        // 为用户气泡。检查点只含文本块，没有 tool_result 需要回填。
+        // compactionCheckpoint 仅是历史标记（当前无渲染消费者，测试钉它）；
+        // 与实时压缩对账的隔离靠 compactId/compactPhase 缺省——对账只认 start。
+        if (isCompactionCheckpoint && isCompactionCheckpoint(blocks)) {
+          addChatItem({ type: "system", text: bt("compactDone"), time: "", compactionCheckpoint: true });
+          continue;
+        }
         // Always strip exact internal envelopes: sessions saved before the
         // persistence alignment still carry the engine-baked <turn_meta>
         // block on mid-turn steered messages, and without the filter the
         // hydrated bubble rendered the raw envelope after a restart.
         const utext = lane.userMessageDisplayText(blocks, true);
-        if (utext) {
+        // 场景路由载荷只给模型看：发送时气泡显示用户原文，落盘的却是
+        // 路由包装后的全文，重放须还原成原文，否则重开会话后气泡里带着
+        // 整段场景提示词（载荷互逆解析见 scenePayloadSplitter）。
+        const sidecarScene = pinvouSceneForMessagePos(mi);
+        const sceneSplit = utext && splitScenePayload ? splitScenePayload(utext, sidecarScene) : null;
+        const userText = sceneSplit ? sceneSplit.text : utext;
+        if (userText) {
           // pinvouTransfer 是展示层标记、不在 messages → rerender 从转交固定措辞还原品/悟样式
           // 引擎 <context_update> 运行时消息（pinned 上下文漂移）按底座 era
           // 口径计 turn 边界而投影层不产生 turn：落下的每个都计入待消费
@@ -5567,14 +5664,19 @@
           // fork/rewind 入口表据此前移序号（forkTurnEntries.js 注释）。
           const uitem2 = {
             type: "user",
-            text: utext,
+            text: userText,
             time: "",
             messageIndex: mi,
             runtimeContextUpdatesBefore: runtimeContextUpdatesPending,
           };
           runtimeContextUpdatesPending = 0;
+          // steer 标记与品/悟转交识别仍看未剥离的全文，行为与剥离前逐字一致：
+          // steer 通道不承载场景载荷（载荷与原文不同的发送走普通准入），
+          // 转交固定措辞也不出现在路由包装里。
           lane.markSteered(uitem2, mi, utext, blocks);
-          const scene = pinvouSceneForMessagePos(mi);
+          // 路由包装本身携带场景身份：命中时以它为准（场景事件 sidecar 按发送
+          // 时的客户端消息下标记账，引擎在其前插入运行时消息后会漂移）。
+          const scene = (sceneSplit && sceneSplit.scene) || sidecarScene;
           if (scene) uitem2.pinvouScene = scene;
           if (textMatchesBtKey(utext, "reviewFillHeader")) uitem2.pinvouTransfer = "悟";
           else if (textMatchesBtKey(utext, "reviewFixHeader") || textMatchesBtKey(utext, "reviewAdoptHeader") || textMatchesBtKey(utext, "reviewAskHeader")) uitem2.pinvouTransfer = "品";

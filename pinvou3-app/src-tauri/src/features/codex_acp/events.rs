@@ -1135,7 +1135,7 @@ impl EventBridge {
                 &self.pinvou_session_id,
                 turn_id,
                 &id,
-                &call.title,
+                telemetry_tool_title(&call),
             );
         }
         let terminal = is_terminal(call.status);
@@ -1173,7 +1173,7 @@ impl EventBridge {
                         &self.pinvou_session_id,
                         turn_id,
                         &id,
-                        &call.title,
+                        telemetry_tool_title(&call),
                     );
                 }
                 if is_terminal(call.status) {
@@ -1346,6 +1346,36 @@ impl EventBridge {
         // this boundary stops future old-bridge writes, not a fsync guarantee.
         self.flush_journal();
     }
+}
+
+fn telemetry_tool_title(call: &ToolCall) -> &str {
+    if call
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("is_mcp_tool_call"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && let Some(input) = call.raw_input.as_ref()
+        && input
+            .get("tool")
+            .and_then(Value::as_str)
+            .is_some_and(|tool| !tool.is_empty())
+        && let Some(server @ ("hdm" | "iwencai")) = input.get("server").and_then(Value::as_str)
+    {
+        return server;
+    }
+    // ACP display titles alone do not establish the registered MCP server.
+    if matches!(
+        crate::features::behavior_telemetry::tool_registry_key(&call.title),
+        "hdm" | "iwencai"
+    ) {
+        return if call.title.starts_with("mcp_") {
+            "mcp_custom"
+        } else {
+            "unknown"
+        };
+    }
+    &call.title
 }
 
 fn is_terminal(status: ToolCallStatus) -> bool {
@@ -1955,6 +1985,21 @@ fn with_owned_turn<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_mcp_identity_uses_structured_acp_fields() {
+        let mut call = ToolCall::new("call-1", "mcp.hdm.search");
+        call.raw_input = Some(json!({"server":"hdm","tool":"search","arguments":{}}));
+        assert_eq!(telemetry_tool_title(&call), "mcp.hdm.search");
+        call.meta = json!({"is_mcp_tool_call":true}).as_object().cloned();
+        assert_eq!(telemetry_tool_title(&call), "hdm");
+        call.raw_input = Some(json!({"command":"lark-cli base list"}));
+        assert_eq!(telemetry_tool_title(&call), "mcp.hdm.search");
+        call.title = "mcp__hdm__search".into();
+        assert_eq!(telemetry_tool_title(&call), "mcp_custom");
+        call.title = "hdm".into();
+        assert_eq!(telemetry_tool_title(&call), "unknown");
+    }
 
     #[test]
     fn exact_turn_action_holds_the_real_guard_and_cannot_cancel_a_successor() {

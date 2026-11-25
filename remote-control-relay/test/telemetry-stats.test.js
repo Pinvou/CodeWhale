@@ -1863,6 +1863,31 @@ test("tool adoption funnel joins stages by stable identity and prefers the call-
   assert.equal(result.funnel_rows[0].configuration_to_call_p50_ms, 60_000);
 });
 
+test("new connector terminals join the storefront and old shell terminals stay generic", () => {
+  const now = at("2026-08-12T12:00:00");
+  const records = [
+    ["tool_install_completed", "feishu", "cli", true],
+    ["tool_configuration_finished", "wecom", "cli", true],
+    ["tool_call_completed", "shell", "cli", true],
+    ["tool_call_completed", "feishu", "cli", true],
+    ["tool_call_completed", "wecom", "cli", false],
+    ["tool_call_completed", "wecom", "cli", true],
+    ["tool_install_completed", "hdm", "mcp", true],
+    ["tool_call_completed", "hdm", "mcp", true],
+  ].map(([event_name, tool_key, tool_type, success], index) => ({
+    event_id: `connector_fixture_${index}`, operation_id: `connector_operation_${index}`, identity_id: "dev_a",
+    occurred_at: now - (10 - index) * 1000, event_name, tool_key, tool_type, success,
+  }));
+  const { funnel_rows: rows } = buildBehaviorToolRanking(installationDevicesFor(records), [], records, "today", "install", now, { minimumGroupSubjects: 0 });
+  const byKey = Object.fromEntries(rows.map(row => [row.tool_key, row]));
+  assert.equal(byKey.feishu.install_succeeded_count, 1);
+  assert.equal(byKey.feishu.call_succeeded_count, 1);
+  assert.equal(byKey.wecom.call_succeeded_count, 1);
+  assert.equal(byKey.wecom.failed_count, 1);
+  assert.equal(byKey.hdm.call_succeeded_count, 1);
+  assert.equal(byKey.shell.call_succeeded_count, 1);
+});
+
 test("behavior rankings include small groups and clip per-subject daily contributions", () => {
   const now = at("2026-08-12T12:00:00");
   const events = Array.from({ length: 101 }, (_, index) => ({

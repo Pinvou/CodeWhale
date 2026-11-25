@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, symlinkSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -226,6 +226,38 @@ test('actual current models Compose keeps migrator credentials out of runtime mo
     f.updateEnv('TOKEN_MIGRATION_DATABASE_DIRECTORY', alias.replaceAll('\\', '/')); f.rerender();
     rejected(f, undefined, /production_render_source_symlink/);
   });
+});
+
+test('optional enterprise SMS overlay uses the current production preflight', compose, async t => {
+  for (const profile of ['personal', 'models']) {
+    await fixtureCase(t, 'compose', profile, 'bound private gateway and Account keep the existing migration contract', f => {
+      assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
+      assert.equal(checkBusinessMigrations(f.render, f.inventory).domains_checked, profile === 'personal' ? 2 : 3);
+      assert.equal(f.render.config.services['account-service'].environment.SMS_PROVIDER, 'aliyun-managed');
+      assert.equal(f.render.config.services['enterprise-sms-gateway'].ports, undefined);
+      const state = `${f.directory}/not-a-state-directory`;
+      writeFileSync(state, 'configuration fixture');
+      const stateDirectory = f.env.ENTERPRISE_SMS_STATE_DIRECTORY;
+      f.updateEnv('ENTERPRISE_SMS_STATE_DIRECTORY', state);
+      f.rerender(); rejected(f, undefined, /production_render_sms_gateway_state/);
+      f.updateEnv('ENTERPRISE_SMS_STATE_DIRECTORY', stateDirectory);
+      f.rerender();
+      if (process.platform !== 'win32') {
+        const key = `${f.env.ENTERPRISE_SMS_SECRET_DIRECTORY}/tls.key`;
+        chmodSync(key, 0o644);
+        rejected(f, undefined, /production_render_sms_gateway_file_mode/);
+        chmodSync(key, 0o600);
+      }
+      f.updateEnv('ENTERPRISE_SMS_PASSWORD_RESET_TEMPLATE', 'invalid');
+      f.rerender(); rejected(f, undefined, /production_render_sms_gateway_template/);
+      f.updateEnv('ENTERPRISE_SMS_PASSWORD_RESET_TEMPLATE', 'SMS_102');
+      f.updatePrivate('ACCOUNT_SERVICE_PRIVATE_ENV_FILE', 'SMS_PROVIDER', 'http-generated');
+      f.rerender(); rejected(f, undefined, /production_render_sms_gateway_account/);
+      f.updatePrivate('ACCOUNT_SERVICE_PRIVATE_ENV_FILE', 'SMS_PROVIDER', 'aliyun-managed');
+      f.updatePrivate('ACCOUNT_SERVICE_PRIVATE_ENV_FILE', 'SMS_HTTP_BEARER_TOKEN', 'public-fixture-mismatched-bearer-token');
+      f.rerender(); rejected(f, undefined, /production_render_sms_gateway_account/);
+    }, { enterpriseSMS: true });
+  }
 });
 
 test('optional Token overlay uses current models render and independent runtime files', compose, () => {

@@ -15,7 +15,8 @@ test('assistant and ACP tool calls emit correlated start and terminal events', (
   assert(forwarder.includes('track_tool_call_completed_with_metadata('));
   const completion = forwarder.slice(forwarder.indexOf('Event::ToolCallComplete {'), forwarder.indexOf('let background_task_id ='));
   assert.match(completion, /tool_completion_metadata\(\s*&shell_manager,\s*&session_id,\s*turn_id,\s*&id,\s*&name,\s*success,\s*metadata\.as_ref\(\),\s*\)/);
-  assert.match(completion, /track_tool_call_completed_with_metadata\([\s\S]*?diagnostic_metadata\.as_ref\(\),\s*\);/);
+  assert.match(completion, /foreground_connector_key\([\s\S]*?metadata\.as_ref\(\),\s*\)/);
+  assert.match(completion, /track_tool_call_completed_with_metadata\([\s\S]*?diagnostic_metadata\.as_ref\(\),\s*\|\|\s*\{/);
   assert(acp.includes('track_tool_call_started('));
   assert(acp.includes('track_tool_call_completed('));
   assert(telemetry.includes('calls.remove(&tool_operation_key(session_id, call_id))'));
@@ -24,7 +25,7 @@ test('assistant and ACP tool calls emit correlated start and terminal events', (
 
 test('tool names are reduced to the controlled registry', () => {
   assert(telemetry.includes('pub fn tool_registry_key'));
-  assert(telemetry.includes('=> "mcp_custom"'));
+  assert.match(telemetry, /managed_mcp_key\(name\)\.unwrap_or\("mcp_custom"\)/);
   assert.match(telemetry, /_ => "custom"/);
 });
 

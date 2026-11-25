@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -118,30 +119,37 @@ func TestAuditDownloadProgressContract(t *testing.T) {
 		})
 	}
 	t.Run("repeated positive low-rate reads renew budget without total cap", func(t *testing.T) {
-		w := &auditTestWriter{ResponseRecorder: httptest.NewRecorder()}
-		stream, err := newAuditDownloadStream(w, httptest.NewRequest("GET", "/", nil), 80*time.Millisecond)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer stream.Close()
-		reader, writer := io.Pipe()
-		defer writer.Close()
-		go func() {
-			defer writer.Close()
-			for range 12 {
-				time.Sleep(20 * time.Millisecond)
-				if _, err := writer.Write([]byte("p")); err != nil {
-					return
-				}
+		synctest.Test(t, func(t *testing.T) {
+			w := &auditTestWriter{ResponseRecorder: httptest.NewRecorder()}
+			stream, err := newAuditDownloadStream(w, httptest.NewRequest("GET", "/", nil), 80*time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}()
-		started := time.Now()
-		if err = stream.CopyFrom(reader); err != nil {
-			t.Fatal(err)
-		}
-		if time.Since(started) < 200*time.Millisecond || w.Body.String() != "pppppppppppp" {
-			t.Fatal("did not traverse multiple idle budgets")
-		}
+			defer stream.Close()
+			reader, writer := io.Pipe()
+			done := make(chan struct{})
+			defer func() {
+				_ = writer.Close()
+				<-done
+			}()
+			go func() {
+				defer close(done)
+				defer writer.Close()
+				for range 12 {
+					time.Sleep(20 * time.Millisecond)
+					if _, err := writer.Write([]byte("p")); err != nil {
+						return
+					}
+				}
+			}()
+			started := time.Now()
+			if err = stream.CopyFrom(reader); err != nil {
+				t.Fatal(err)
+			}
+			if time.Since(started) < 200*time.Millisecond || w.Body.String() != "pppppppppppp" {
+				t.Fatal("did not traverse multiple idle budgets")
+			}
+		})
 	})
 }
 
@@ -190,18 +198,20 @@ func TestAuditDownloadWriteProgressIsPositiveBytes(t *testing.T) {
 		}
 	})
 	t.Run("partial positive writes renew without a total timer", func(t *testing.T) {
-		writer := &auditPartialWriter{&auditTestWriter{ResponseRecorder: httptest.NewRecorder()}}
-		stream, err := newAuditDownloadStream(writer, httptest.NewRequest("GET", "/", nil), 40*time.Millisecond)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer stream.Close()
-		payload := []byte("public-bytes")
-		start := time.Now()
-		err = stream.CopyFrom(io.NopCloser(bytes.NewReader(payload)))
-		if err != nil || !bytes.Equal(writer.Body.Bytes(), payload) || time.Since(start) < 100*time.Millisecond {
-			t.Fatalf("continuous partial writes failed: %v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			writer := &auditPartialWriter{&auditTestWriter{ResponseRecorder: httptest.NewRecorder()}}
+			stream, err := newAuditDownloadStream(writer, httptest.NewRequest("GET", "/", nil), 40*time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			payload := []byte("public-bytes")
+			start := time.Now()
+			err = stream.CopyFrom(io.NopCloser(bytes.NewReader(payload)))
+			if err != nil || !bytes.Equal(writer.Body.Bytes(), payload) || time.Since(start) < 100*time.Millisecond {
+				t.Fatalf("continuous partial writes failed: %v", err)
+			}
+		})
 	})
 }
 

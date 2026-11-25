@@ -75,6 +75,7 @@ const CONTROLLED_TOOL_KEYS: &[&str] = &[
     "dingtalk",
     "tmeet",
     "weather",
+    "hdm",
     "iwencai",
     "ima",
     "tencent_docs",
@@ -598,29 +599,45 @@ impl Drop for ToolInstallGuard {
     }
 }
 
+pub(crate) enum TaskSubmissionRejection {
+    ValidationFailed,
+    Timeout,
+    InternalError,
+}
+
+impl TaskSubmissionRejection {
+    fn category(self) -> &'static str {
+        match self {
+            Self::ValidationFailed => "validation_failed",
+            Self::Timeout => "timeout",
+            Self::InternalError => "internal_error",
+        }
+    }
+}
+
 pub struct TaskSubmissionGuard {
     app: tauri::AppHandle,
     session_id: String,
     attempt_id: String,
-    reject_on_drop: bool,
+    rejection: Option<TaskSubmissionRejection>,
 }
 
 impl TaskSubmissionGuard {
     pub fn sent(mut self) {
-        self.reject_on_drop = false;
+        self.rejection = None;
+    }
+
+    pub(crate) fn set_rejection_reason(&mut self, reason: TaskSubmissionRejection) {
+        self.rejection = Some(reason);
     }
 }
 
 impl Drop for TaskSubmissionGuard {
     fn drop(&mut self) {
-        if self.reject_on_drop {
-            reject_task_submission(
-                &self.app,
-                &self.session_id,
-                &self.attempt_id,
-                "validation_failed",
-                "submission",
-            );
+        if let Some(reason) = self.rejection.take()
+            && let Some(telemetry) = self.app.try_state::<BehaviorTelemetry>()
+        {
+            events::reject_task_submission(&telemetry, &self.session_id, &self.attempt_id, reason);
         }
     }
 }
@@ -1834,6 +1851,9 @@ fn nonempty(value: String) -> Option<String> {
 
 #[path = "behavior_telemetry/events.rs"]
 mod events;
+#[path = "behavior_telemetry/tool_identity.rs"]
+mod tool_identity;
+pub(crate) use tool_identity::connector_cli_key;
 
 #[path = "behavior_telemetry/diagnostic_redaction.rs"]
 mod diagnostic_redaction;
@@ -1852,10 +1872,10 @@ mod remote_control;
 #[path = "behavior_telemetry/remote_execution.rs"]
 mod remote_execution;
 pub(crate) use remote_execution::{
-    bind_remote_execution_turn, capture_remote_execution_lease,
-    register_remote_execution_with_lease, register_remote_origin, track_remote_execution_event,
-    track_remote_origin_event, track_remote_result_received, track_remote_task_output,
-    unregister_remote_execution,
+    bind_remote_execution_turn, capture_remote_execution_lease, capture_remote_model_failure,
+    observe_remote_model_error, register_remote_execution_with_lease, register_remote_origin,
+    track_remote_execution_event, track_remote_origin_event, track_remote_result_received,
+    track_remote_task_output, unregister_remote_execution,
 };
 
 pub use events::*;

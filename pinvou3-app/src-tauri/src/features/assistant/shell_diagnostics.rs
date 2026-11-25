@@ -2,6 +2,7 @@
 //! This observer never executes, consumes or reassigns a job/completion receipt.
 use deepseek_tui::tools::shell::{SharedShellManager, ShellJobSnapshot, ShellStatus};
 use serde_json::{Value, json};
+use std::path::Path;
 
 pub(crate) fn is_shell_execution_tool(name: &str) -> bool {
     matches!(name, "bash" | "exec_shell" | "task_shell_start" | "Bash")
@@ -41,6 +42,24 @@ fn select_failed_shell_metadata(
     turn: &str,
     call: &str,
 ) -> Option<Value> {
+    let job = unique_shell_job(jobs, session, turn, call)?;
+    if job.status != ShellStatus::Failed {
+        return None;
+    }
+    let exit = job
+        .exit_code
+        .filter(|exit| *exit != 0 && (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(exit))?;
+    // Killed is not proof of a timeout. Snapshot has no sandbox-denial fact.
+    // Never project command, paths, output tails or correlation identities.
+    Some(json!({"status":"Failed", "exit_code":exit}))
+}
+
+fn unique_shell_job<'a>(
+    jobs: &'a [ShellJobSnapshot],
+    session: &str,
+    turn: &str,
+    call: &str,
+) -> Option<&'a ShellJobSnapshot> {
     if [session, turn, call].iter().any(|id| id.trim().is_empty()) {
         return None;
     }
@@ -52,15 +71,59 @@ fn select_failed_shell_metadata(
     });
     let job = matches.next()?;
     // Check uniqueness before filtering status, including running/stale rows.
-    if matches.next().is_some() || job.stale || job.status != ShellStatus::Failed {
+    if matches.next().is_some() || job.stale {
         return None;
     }
-    let exit = job
-        .exit_code
-        .filter(|exit| *exit != 0 && (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(exit))?;
-    // Killed is not proof of a timeout. Snapshot has no sandbox-denial fact.
-    // Never project command, paths, output tails or correlation identities.
-    Some(json!({"status":"Failed", "exit_code":exit}))
+    Some(job)
+}
+
+pub(crate) fn foreground_connector_key(
+    manager: &SharedShellManager,
+    session: &str,
+    turn: &str,
+    call: &str,
+    success: bool,
+    metadata: Option<&Value>,
+) -> Option<&'static str> {
+    if metadata.is_some_and(|value| {
+        ["sandbox_denied", "blocked", "backgrounded", "canceled"]
+            .iter()
+            .any(|key| value.get(key).and_then(Value::as_bool) == Some(true))
+    }) {
+        return None;
+    }
+    let jobs = manager.lock().ok()?.list_jobs_for_session(session);
+    terminal_connector_key(
+        &jobs,
+        session,
+        turn,
+        call,
+        success,
+        crate::platform::connector_lock::registered_telemetry_cli,
+    )
+}
+
+fn terminal_connector_key(
+    jobs: &[ShellJobSnapshot],
+    session: &str,
+    turn: &str,
+    call: &str,
+    success: bool,
+    is_installed: impl FnOnce(&str, &str, &Path) -> bool,
+) -> Option<&'static str> {
+    let job = unique_shell_job(jobs, session, turn, call)?;
+    match (success, &job.status, job.exit_code) {
+        (true, ShellStatus::Completed, Some(0)) => {}
+        (false, ShellStatus::Failed, Some(code))
+            if !crate::platform::connector_lock::connector_failure_exit_is_ambiguous(code) => {}
+        _ => return None,
+    }
+    // An unsupported call operator can exit before the verified launcher runs.
+    if !success && job.command.trim_start().starts_with('&') {
+        return None;
+    }
+    // The job stores the command actually executed after any input rewrite.
+    crate::features::behavior_telemetry::connector_cli_key(&job.command, &job.cwd, is_installed)
 }
 
 #[cfg(test)]
@@ -130,5 +193,64 @@ mod tests {
         let value = select_failed_shell_metadata(&[job()], "session", "turn", "call").unwrap();
         assert!(!value.to_string().contains("PRIVATE"));
         assert_eq!(value.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn connector_attribution_requires_the_exact_job_and_uses_the_executed_command() {
+        let mut rejected = job();
+        rejected.command = "& \"./managed/lark-cli.exe\"".into();
+        rejected.exit_code = Some(2);
+        assert_eq!(
+            terminal_connector_key(&[rejected], "session", "turn", "call", false, |_, _, _| {
+                true
+            }),
+            None
+        );
+        let mut terminal = job();
+        terminal.command = "wecom-cli list".into();
+        terminal.status = ShellStatus::Completed;
+        terminal.exit_code = Some(0);
+        let jobs = [terminal];
+        assert_eq!(
+            terminal_connector_key(&jobs, "session", "turn", "call", true, |_, _, _| true),
+            Some("wecom")
+        );
+        assert_eq!(
+            terminal_connector_key(&jobs, "session", "turn", "denied", false, |_, _, _| true),
+            None
+        );
+        assert_eq!(
+            terminal_connector_key(&jobs, "session", "turn", "call", false, |_, _, _| true),
+            None
+        );
+        assert_eq!(
+            terminal_connector_key(&[], "session", "turn", "call", false, |_, _, _| true),
+            None
+        );
+
+        let mut failed = job();
+        failed.command = "./managed/lark-cli list".into();
+        for (exit_code, expected) in [
+            (0, None),
+            (1, (std::env::consts::OS != "windows").then_some("feishu")),
+            (7, Some("feishu")),
+            (126, None),
+            (127, None),
+            (9009, None),
+        ] {
+            failed.exit_code = Some(exit_code);
+            assert_eq!(
+                terminal_connector_key(
+                    std::slice::from_ref(&failed),
+                    "session",
+                    "turn",
+                    "call",
+                    false,
+                    |_, _, _| true,
+                ),
+                expected,
+                "exit code {exit_code}"
+            );
+        }
     }
 }

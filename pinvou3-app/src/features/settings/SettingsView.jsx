@@ -236,6 +236,15 @@ function hasStoredCredential(record) {
         ? remoteCopy.registerHints?.[webAccess.last_error_code]
         : null;
       const webAccessErrorText = registerHint || webAccess.last_error || null;
+      // Review P2 (#876): a queue-full revocation must surface as a
+      // persistent localized warning (the local stop completed, but the old
+      // credentials' revocation intent landed nowhere and is not replayed
+      // after restart) — local completion and remote revocation stay two
+      // distinct outcomes; the warning lives outside the status field so a
+      // status refresh cannot wipe it.
+      const revocationHint = webAccess.revocation_warning
+        ? remoteCopy.revocationHints?.[webAccess.revocation_warning] || null
+        : null;
       const statusMeta = statusCopy
         ? { label: statusCopy[0], detail: statusKey === 'error' ? (webAccessErrorText || statusCopy[1]) : statusCopy[1], color: statusColors[statusKey] }
         : { label: String(statusKey), detail: remoteCopy.updated, color: '#8A9097' };
@@ -256,7 +265,13 @@ function hasStoredCredential(record) {
         if (!bridge.available) return;
         setActionBusy(true);
         try {
-          await bridge.remoteControl.stopRemoteControl();
+          const outcome = await bridge.remoteControl.stopRemoteControl();
+          // Review P2 (#876 fix-delta follow-up): a queue-full stop is an
+          // INCOMPLETE remote revocation — dismissing the dialog here would
+          // hide the persistent warning surface. Keep the dialog open so
+          // the banner states the incompleteness; the user closes it
+          // explicitly once informed.
+          if (outcome && outcome.revocation === "deferred_full_queue") return;
           onClose();
         } catch { /* stop failure surfaced by the banner */ } finally {
           setActionBusy(false);
@@ -345,6 +360,11 @@ function hasStoredCredential(record) {
               </div>
             )}
             {webAccessErrorText && <div className="mt-3 text-[12px] text-[#EA4335] break-all">{webAccessErrorText}</div>}
+            {revocationHint && (
+              <div data-testid="web-access-revocation-warning" className="mt-3 text-[12px] leading-relaxed text-[#B06000] break-words bg-[#FDF3E1] dark:text-[#F9AB00] dark:bg-[#F9AB00]/10 rounded-lg px-3 py-2">
+                {revocationHint}
+              </div>
+            )}
             {webAccessActive && hostWorkspaceAuthorized && (
               // 授权状态 affirmative 可见 + 可单独撤销:旧版本「开启访问」顺带
               // 写下的 allow_host_workspace 不再只能靠 Stop 整体清除。
@@ -1310,8 +1330,7 @@ function hasStoredCredential(record) {
       const formSectionTitle = `px-1 mb-1.5 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`;
       const formGroup = `overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`;
       const formDivider = 'border-black/[0.10] dark:border-white/[0.10]';
-      // 「获取模型列表」与「测试连接」共用同一颗蓝色胶囊按钮(样式去重,主入口
-      // chunk 有启动预算红线)。
+      // 「获取模型列表」与「测试连接」共用同一颗蓝色胶囊按钮(样式去重)。
       const actionPillClass = 'shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-45 bg-[#007AFF]/10 text-[#007AFF] hover:bg-[#007AFF]/[0.16] dark:bg-[#0A84FF]/20 dark:text-[#0A84FF] dark:hover:bg-[#0A84FF]/[0.28]';
       // Custom-entry description for the provider model picker and the catalog
       // picker: both key off the same group fields (key/providerKind/preset).

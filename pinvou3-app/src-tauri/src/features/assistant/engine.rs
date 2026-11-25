@@ -1858,6 +1858,20 @@ async fn finish_reclaimed_lifecycle_turn(
 /// evict/delete/reclaim. A timed-out send was never enqueued (tokio's
 /// bounded `reserve`/`send` is cancel-safe), so the turn verifiably never
 /// started and the surfaced failure is truthful.
+#[derive(Debug)]
+pub(crate) struct TurnSubmissionTimeout;
+
+impl std::fmt::Display for TurnSubmissionTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the engine did not accept the submitted turn within {TURN_GATE_AWAIT_TIMEOUT:?}; the turn was not started, please retry"
+        )
+    }
+}
+
+impl std::error::Error for TurnSubmissionTimeout {}
+
 async fn bounded_reserved_submit_send<Fut>(send: Fut) -> Result<()>
 where
     Fut: Future<Output = Result<()>>,
@@ -1868,9 +1882,7 @@ where
             eprintln!(
                 "[pinvou3-app] reserved turn submit did not settle within {TURN_GATE_AWAIT_TIMEOUT:?}; the engine may be wedged - failing the turn instead of holding the gate (issue #525)"
             );
-            anyhow::bail!(
-                "the engine did not accept the submitted turn within {TURN_GATE_AWAIT_TIMEOUT:?}; the turn was not started, please retry"
-            );
+            Err(TurnSubmissionTimeout.into())
         }
     }
 }
@@ -4988,6 +5000,7 @@ mod submit_gate_bound_tests {
             "the submit must wait the full budget"
         );
         let error = result.expect_err("a wedged engine must fail the reserved submit cleanly");
+        assert!(error.is::<super::TurnSubmissionTimeout>());
         assert!(
             error.to_string().contains("the turn was not started"),
             "the failure must state that the turn never started: {error:#}"

@@ -121,6 +121,64 @@ fn size_bucket(bytes: u64) -> RemoteSizeBucket {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RemoteModelFailure {
+    Network,
+    Timeout,
+    Authentication,
+    Authorization,
+}
+
+impl RemoteModelFailure {
+    fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::Network => "network_unavailable",
+            Self::Timeout => "request_timeout",
+            Self::Authentication => "authentication_failed",
+            Self::Authorization => "permission_denied",
+        }
+    }
+}
+
+/// A bounded equality witness for the Engine's selected terminal. It lives
+/// only in the in-memory execution context and never enters telemetry.
+#[derive(Clone, Default)]
+pub(super) struct RemoteModelFailureEvidence(Option<([u8; 32], RemoteModelFailure)>);
+
+impl RemoteModelFailureEvidence {
+    pub(super) fn observe_error(&mut self, code: &str, message: &str) {
+        let failure = match code {
+            "llm_network_error"
+                if message.starts_with(
+                    "Network error: SSE stream request did not receive response headers after ",
+                ) =>
+            {
+                RemoteModelFailure::Timeout
+            }
+            "llm_network_error" => RemoteModelFailure::Network,
+            "llm_timeout" => RemoteModelFailure::Timeout,
+            "llm_auth_error" => RemoteModelFailure::Authentication,
+            "llm_authorization_error" => RemoteModelFailure::Authorization,
+            _ => {
+                // A generic envelope supersedes an earlier retry advisory.
+                self.0 = None;
+                return;
+            }
+        };
+        self.0 = Self::fingerprint(message).map(|fingerprint| (fingerprint, failure));
+    }
+
+    pub(super) fn selected_failure(self, error: Option<&str>) -> Option<RemoteModelFailure> {
+        let (fingerprint, failure) = self.0?;
+        (error.and_then(Self::fingerprint) == Some(fingerprint)).then_some(failure)
+    }
+
+    fn fingerprint(message: &str) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        (message.len() <= 8192).then(|| Sha256::digest(message.as_bytes()).into())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteControlEvent {
     stage: RemoteStage,
@@ -132,6 +190,7 @@ pub(crate) struct RemoteControlEvent {
     permission_step: Option<RemotePermissionStep>,
     diagnostic_task: Option<([u8; 32], bool)>,
     diagnostic_code: Option<(&'static str, Option<u16>)>,
+    use_model_failure: bool,
     diagnostic_cancelled: bool,
     task_key: Option<String>,
     role: Option<&'static str>,
@@ -167,6 +226,7 @@ impl RemoteControlEvent {
             permission_step: None,
             diagnostic_task: None,
             diagnostic_code: None,
+            use_model_failure: false,
             diagnostic_cancelled: false,
             task_key: None,
             role: None,
@@ -291,9 +351,37 @@ impl RemoteControlEvent {
             .reason(reason)
             .latency_ms(latency_ms);
         if let Err(error) = result {
-            event.diagnostic_code = Some(super::diagnostics::classify(error, false));
+            event.diagnostic_code = Some(
+                (stage == RemoteStage::TaskTerminal)
+                    .then(|| terminal_diagnostic(error))
+                    .flatten()
+                    .map_or_else(
+                        || super::diagnostics::classify(error, false),
+                        |code| (code, None),
+                    ),
+            );
+            event.use_model_failure =
+                stage == RemoteStage::TaskTerminal && error == "task_turn_failed";
         }
         event
+    }
+
+    pub(super) fn with_model_failure(mut self, failure: Option<RemoteModelFailure>) -> Self {
+        if self.use_model_failure
+            && self.role == Some("controlled")
+            && self.status == Some("failed")
+            && !self.diagnostic_cancelled
+            && self.diagnostic_code == Some(("unknown", None))
+            && let Some(failure) = failure
+        {
+            self.diagnostic_code = Some((failure.diagnostic_code(), None));
+            self.reason = RemoteReason::ModelUnavailable;
+            if failure == RemoteModelFailure::Timeout {
+                self.outcome = RemoteOutcome::Timeout;
+                self.reason = RemoteReason::TaskTimeout;
+            }
+        }
+        self
     }
 
     fn diagnostic_site(&self) -> &'static str {
@@ -371,6 +459,24 @@ impl RemoteControlEvent {
         }
         event
     }
+}
+
+fn terminal_diagnostic(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "task_attachments_invalid"
+        | "task_request_invalid"
+        | "task_input_invalid"
+        | "task_generation_stale"
+        | "model_runtime_invalid"
+        | "model_endpoint_invalid"
+        | "model_endpoint_insecure"
+        | "model_endpoint_private" => "validation_failed",
+        "model_endpoint_unresolved" => "dns_failed",
+        "model_package_missing" | "model_credential_unavailable" => "configuration_missing",
+        "task_engine_unavailable" | "executor_unavailable" => "internal_error",
+        "task_turn_timeout" => "request_timeout",
+        _ => return None,
+    })
 }
 
 fn classify_error(error: &str) -> (RemoteOutcome, RemoteReason) {
@@ -581,6 +687,61 @@ mod tests {
     const _: fn(&tauri::AppHandle, RemoteControlEvent) = track_remote_control;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, String) = track_remote_control_with_event_id;
     const _: fn(&tauri::AppHandle, RemoteControlEvent, &str) = super::super::track_remote_transfer;
+
+    #[test]
+    fn model_failure_requires_the_selected_typed_envelope() {
+        use super::{RemoteModelFailure as Failure, RemoteModelFailureEvidence as Evidence};
+
+        for (code, message, expected) in [
+            (
+                "llm_network_error",
+                "Responses API request failed",
+                Some(Failure::Network),
+            ),
+            (
+                "llm_network_error",
+                "Network error: SSE stream request did not receive response headers after 30s",
+                Some(Failure::Timeout),
+            ),
+            (
+                "llm_timeout",
+                "Request timed out after 30s",
+                Some(Failure::Timeout),
+            ),
+            (
+                "llm_auth_error",
+                "Authentication failed: invalid credential",
+                Some(Failure::Authentication),
+            ),
+            (
+                "llm_authorization_error",
+                "Authorization failed: access denied",
+                Some(Failure::Authorization),
+            ),
+            (
+                "network",
+                "Network error: Connection failed: provider text",
+                None,
+            ),
+        ] {
+            let mut evidence = Evidence::default();
+            evidence.observe_error(code, message);
+            assert_eq!(evidence.selected_failure(Some(message)), expected);
+        }
+
+        let mut evidence = Evidence::default();
+        evidence.observe_error("llm_network_error", "Earlier failed request");
+        assert_eq!(
+            evidence.selected_failure(Some("Different terminal error")),
+            None
+        );
+
+        let mut evidence = Evidence::default();
+        let message = "Network error: Connection failed: provider text";
+        evidence.observe_error("llm_network_error", message);
+        evidence.observe_error("network", message);
+        assert_eq!(evidence.selected_failure(Some(message)), None);
+    }
 
     #[test]
     fn diagnostic_remote_eof_requires_model_error_provenance() {

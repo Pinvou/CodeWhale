@@ -201,6 +201,9 @@ pub(crate) async fn chat_with_reservation(
             "[pinvou3][chat] image input rejected sid={} (capability={capability:?})",
             sid
         );
+        if let Some(submission) = telemetry_submission.as_mut() {
+            submission.set_rejection_reason(TaskSubmissionRejection::ValidationFailed);
+        }
         return Err(match capability {
             EffectiveImageCapability::Unknown => IMAGE_INPUT_UNKNOWN_ERROR.to_string(),
             _ => IMAGE_INPUT_UNSUPPORTED_ERROR.to_string(),
@@ -468,6 +471,9 @@ pub(crate) async fn chat_with_reservation(
             Ok(())
         }
         Err(e) => {
+            if let Some(submission) = telemetry_submission.as_mut() {
+                submission.set_rejection_reason(submission_send_rejection(&e));
+            }
             crate::features::assistant::timing::finish_turn(
                 &sid,
                 "send_error",

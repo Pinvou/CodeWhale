@@ -973,6 +973,16 @@ function assertFiniteAuditPGSetup(job) {
     "          npm --prefix account-platform run test:existing-broker",
   ].join("\n"));
   outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
+  const historyTools = namedStep(text, "Prepare native history export tools");
+  assert.equal(historyTools.trimEnd(), [
+    "      - name: Prepare native history export tools",
+    "        timeout-minutes: 8",
+    "        shell: bash",
+    "        run: |",
+    "          set -euo pipefail",
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/history-export-key-process.json" -- python3 scripts/tests/test_account_history_key.py',
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/history-export-tools-process.json" -- bash scripts/account-platform-history-export-tools.sh',
+  ].join("\n"));
   // Admit precisely the bounded readonly export consumer of the verified audit
   // service; commands, identities and no-skip evidence cannot be broadened.
   const historyPG = namedStep(text, historyPGStepName);
@@ -989,7 +999,7 @@ function assertFiniteAuditPGSetup(job) {
     "          set -euo pipefail",
     "          test -x \"$PINVOU_HISTORY_EXPORT_TEST_PWSH\"",
     "          test -x \"$PINVOU_HISTORY_EXPORT_TEST_PGTOOLS/pg_dump\"",
-    "          python3 scripts/ci-fixture-process.py --receipt \"$RUNNER_TEMP/history-export-process.json\" -- go -C account-platform test -race -json -tags=nomsgpack -mod=readonly -count=1 -timeout 4m -run '^TestHistoryExportPublicDomainsPostgres$' ./internal/billingschema | tee \"$RUNNER_TEMP/history-export.jsonl\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/history-export-process.json\" -- go -C account-platform test -race -json -tags=nomsgpack -mod=readonly -count=1 -timeout 4m -run '^TestHistoryExportPublicDomainsPostgres$' ./internal/billingschema | tee \"$RUNNER_TEMP/history-export.jsonl\"",
     "          python3 - \"$RUNNER_TEMP/history-export.jsonl\" <<'PY'",
     "          import json, pathlib, sys",
     "          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]",

@@ -190,6 +190,10 @@ through mounted files/JVM options; the SPI does not disable certificate or
 hostname verification. Browser request headers cannot select a service token
 or redirect its destination.
 
+Responses are limited to 64 KiB, except for successful slider CAPTCHA creation
+responses, which are limited to 256 KiB to fit both base64 PNG images. Both
+limits apply while streaming the body within the same eight-second deadline.
+
 SMS and registration risk source is the Keycloak server's resolved client
 connection address, never an arbitrary browser `X-Forwarded-For` or
 `X-Pinvou-Client-Source`. Behind a proxy, use Keycloak's

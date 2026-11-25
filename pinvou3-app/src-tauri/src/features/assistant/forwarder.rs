@@ -669,6 +669,13 @@ pub(crate) fn spawn_event_forwarder(
                     }
                     // 携带 metadata 让前端识别 careful hook 拦截 (safety_level=="dangerous")
                     let (output, success, metadata) = tool_call_result_parts(result);
+                    let shell_still_running =
+                        crate::features::assistant::shell_output::is_shell_execution_tool(&name)
+                            && metadata
+                                .as_ref()
+                                .and_then(|value| value.get("status"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some("Running");
                     if let Some(turn_id) = current_turn_id.as_deref() {
                         // The default lowercase bash error has no ToolResult
                         // metadata. Observe only its exact Engine-owned job;
@@ -695,6 +702,16 @@ pub(crate) fn spawn_event_forwarder(
                             }),
                             (!success).then_some(output.as_str()),
                             diagnostic_metadata.as_ref(),
+                            || {
+                                if shell_still_running
+                                    || !matches!(name.as_str(), "Bash" | "bash" | "exec_shell")
+                                {
+                                    return None;
+                                }
+                                crate::features::assistant::shell_diagnostics::foreground_connector_key(
+                                    &shell_manager, &session_id, turn_id, &id, success, metadata.as_ref(),
+                                )
+                            },
                         );
                     }
                     #[cfg(feature = "benchmark-hooks")]
@@ -705,22 +722,15 @@ pub(crate) fn spawn_event_forwarder(
                             success,
                         );
                     }
-                    let background_task_id =
-                        if crate::features::assistant::shell_output::is_shell_execution_tool(&name)
-                            && metadata
-                                .as_ref()
-                                .and_then(|value| value.get("status"))
-                                .and_then(serde_json::Value::as_str)
-                                == Some("Running")
-                        {
-                            metadata
-                                .as_ref()
-                                .and_then(|value| value.get("task_id"))
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
-                        } else {
-                            None
-                        };
+                    let background_task_id = if shell_still_running {
+                        metadata
+                            .as_ref()
+                            .and_then(|value| value.get("task_id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    } else {
+                        None
+                    };
                     if let (Some(turn_id), Some(task_id)) =
                         (current_turn_id.as_deref(), background_task_id.as_deref())
                     {
@@ -1261,7 +1271,7 @@ pub(crate) fn spawn_event_forwarder(
                     error,
                     error_source,
                     tool_catalog,
-                    turn_id: _,
+                    turn_id: completed_turn_id,
                     submission_id: _,
                     compaction_id: _,
                     base_url: _,
@@ -1290,6 +1300,18 @@ pub(crate) fn spawn_event_forwarder(
                     let operation_rejected = std::mem::take(&mut active_operation_rejected);
                     let mut shell_cleanup_failed = false;
                     let mut terminal_status = status;
+                    if status == TurnOutcomeStatus::Failed
+                        && error_source == Some(deepseek_tui::core::events::TurnErrorSource::Model)
+                        && let Some(turn_id) = completed_turn_id.as_deref()
+                        && current_turn_id.as_deref() == Some(turn_id)
+                    {
+                        crate::features::behavior_telemetry::capture_remote_model_failure(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            error.as_deref(),
+                        );
+                    }
                     // The chat:done error text goes through the same Rust
                     // redaction layer (one line of defense shared with the
                     // Error event's transient/fatal paths).
@@ -1875,6 +1897,15 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::Error { envelope, .. } => {
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::observe_remote_model_error(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &envelope.code,
+                            &envelope.message,
+                        );
+                    }
                     // Edit preflight failures are non-terminal advisories until
                     // the paired TurnComplete, but their typed code tells the
                     // terminal path not to persist the optimistic fallback.

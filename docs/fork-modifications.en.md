@@ -1,5 +1,11 @@
 # CodeWhale Fork Modification Register
 
+## T1: host HTTP policy for temporary models
+
+- [Pinvou/CodeWhale#151](https://github.com/Pinvou/CodeWhale/pull/151) provides an in-memory host policy. PR #2472 sets `Config.model_http_policy` for the frozen route. Primary, HTTP/1 fallback, and independent vision clients inherit that policy. The vision model configuration retains its original three fields.
+- The app owns public-address classification, bounded DNS work, per-turn snapshots, and proxy and redirect restrictions. See the [temporary model egress contract](remote-control-model-egress.md).
+
+
 ## Merged into the maintenance branch: compaction checkpoint role compatibility
 
 - T7: insert the typed Agent topology checkpoint after the latest real user input and before its assistant/tool chain, including when a compaction summary trails that chain. For Chat Completions, place a structurally recognized current-format summary ahead of its retained round on the wire and merge that summary plus the topology checkpoint into the same user wire message. Quoting the summary marker inside an ordinary user prompt does not trigger reordering. The fix covers only the trailing `tool -> user` that compaction itself creates; the reported provider text was `SSE stream request failed: HTTP 400 Bad Request: response_role: "user"` (SSE lane). Saved history and tool-call/result IDs stay untouched, and the session-pinned system prefix is unchanged.
