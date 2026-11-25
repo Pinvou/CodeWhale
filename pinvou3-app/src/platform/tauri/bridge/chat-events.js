@@ -588,6 +588,13 @@ function pinvouSharedtauriChatEvents() {
         };
         // 仅展示层，不进 messages/LLM（与本地发送的 uitem.pinvouScene 同一约定）。
         if (sceneSplit) userItem.pinvouScene = sceneSplit.scene;
+        // 受控任务准入身份（main 既有语义）：即使场景还原改变了上屏文本，
+        // 身份匹配仍按送模原文 content 计，保证投影合并能认领这条用户气泡。
+        var remoteLogic = window.__PINVOU_REMOTE_CONTROL_STATE__;
+        var controlledIdentity = remoteLogic && remoteLogic.controlledTaskAdmissionIdentity
+          ? remoteLogic.controlledTaskAdmissionIdentity(state.controlledTasks, sid, content)
+          : null;
+        if (controlledIdentity) Object.assign(userItem, controlledIdentity);
         addChatItem(userItem);
         userBuffer.runtimeContextUpdatesPending = 0;
       }
