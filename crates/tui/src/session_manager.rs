@@ -966,6 +966,16 @@ pub struct SessionManager {
     /// [`JANITOR_MIN_INTERVAL_SECS`]. Direct
     /// [`SessionManager::cleanup_old_sessions`] calls are never throttled.
     janitor_last_run_secs: std::sync::atomic::AtomicI64,
+    /// Serializes archive persistence against retention deletion
+    /// (reviews 6051224372 / 6051443775 on #154): the janitor's
+    /// candidate selection and its deletes run inside this gate, and so
+    /// does `set_session_archived`'s load-persist-receipt sequence, so an
+    /// archive that reported success can never be deleted by a cleanup
+    /// whose list snapshot predates it — and an archive racing a cleanup
+    /// either lands before the selection (the snapshot then excludes the
+    /// record) or after the deletes (the exact-id load then misses and
+    /// reports a real error instead of a phantom success).
+    retention_gate: parking_lot::Mutex<()>,
     /// Test-only count of retention-janitor executions (throttled and
     /// direct), so tests can observe the throttle without timing races.
     #[cfg(test)]
@@ -1134,6 +1144,7 @@ impl SessionManager {
         Ok(Self {
             sessions_dir,
             janitor_last_run_secs: std::sync::atomic::AtomicI64::new(0),
+            retention_gate: parking_lot::Mutex::new(()),
             #[cfg(test)]
             janitor_runs: std::sync::atomic::AtomicU32::new(0),
         })
@@ -1711,6 +1722,15 @@ impl SessionManager {
         // process-local and the External mutator's only lane (the runtime
         // HTTP server) never coexists with an interactive surface in a
         // shipped topology, so the check could never engage.
+        // The gate covers LOAD THROUGH PERSIST-AND-RECEIPT (reviews
+        // 6051224372 / 6051443775 on #154): with the janitor's
+        // selection-and-delete pass inside the same gate, an archive that
+        // returned success here can never be deleted by a cleanup whose
+        // selection predates it — the cleanup either selected before this
+        // load (then it already deleted, and the load below misses with a
+        // real error) or runs after this receipt (its snapshot then sees
+        // `archived = true` and exempts the record).
+        let _retention_gate = self.retention_gate.lock();
         let mut session = self.load_session(id)?;
         if session.metadata.archived == archived {
             return Ok(session.metadata);
@@ -1979,6 +1999,15 @@ impl SessionManager {
         #[cfg(test)]
         self.janitor_runs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The gate covers SELECTION THROUGH DELETION (reviews 6051224372 /
+        // 6051443775 on #154): a snapshot taken outside it would let
+        // `/sessions archive <exact-id>` persist `archived = true` and
+        // report success while this loop deletes the just-archived record
+        // with its stale candidate metadata. Holding the gate across the
+        // whole pass makes the archive either land before the selection
+        // (the snapshot then excludes the record) or after the deletes
+        // (its exact-id load then misses and reports a real error).
+        let _retention_gate = self.retention_gate.lock();
         let sessions = self.list_sessions()?;
 
         // Cap only the non-archived history: archived records are exempt (see
@@ -3405,6 +3434,109 @@ mod tests {
     /// Archiving is the user putting a session away on purpose. The retention
     /// janitor must never delete an archived record, even when it is old
     /// enough to fall outside `MAX_SESSIONS`.
+    /// (reviews 6051224372 / 6051443775 on #154: archive success vs stale
+    /// retention deletion) The retention gate serializes
+    /// `set_session_archived`'s load-persist-receipt sequence against the
+    /// janitor's selection-and-delete pass. While the gate is held, BOTH
+    /// operations block; each completes after release; and whatever order
+    /// they land in, an archive that returned success is never deleted by
+    /// the cleanup — its snapshot either predates the receipt (impossible:
+    /// the gate orders them) or follows it and exempts the record.
+    #[test]
+    fn retention_gate_serializes_archive_receipt_against_cleanup_deletion() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp = tempdir().expect("tempdir");
+        let manager = Arc::new(SessionManager::new(tmp.path().join("sessions")).expect("manager"));
+        let workspace = tmp.path().join("ws");
+        let extra = 5usize;
+
+        // A stale candidate beyond the cap plus enough active records to
+        // fill it — the exact janitor shape the reviews describe.
+        write_session_record(
+            &manager,
+            "stale-candidate",
+            &workspace,
+            Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra + 1) as i64),
+            false,
+        );
+        for i in 0..MAX_SESSIONS + extra - 1 {
+            let id = format!("active-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
+                false,
+            );
+        }
+
+        // The archive side holds the gate first: the janitor must block
+        // until the receipt is durable — it must never delete the record
+        // with a snapshot taken before the archive persisted.
+        let gate = manager.retention_gate.lock();
+        let archiver_manager = Arc::clone(&manager);
+        let archiver = std::thread::spawn(move || {
+            archiver_manager
+                .set_session_archived("stale-candidate", true, SessionMutator::External)
+                .expect("archive the stale candidate")
+        });
+        for _ in 0..30 {
+            assert!(
+                !archiver.is_finished(),
+                "the archive must block while the janitor side holds the gate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(gate);
+        let metadata = archiver.join().expect("archive joins");
+        assert!(metadata.archived, "the archive receipt reports success");
+
+        // The janitor now runs inside the same gate: its snapshot sees the
+        // persisted `archived = true` and exempts the record. The
+        // acknowledged archive — document and artifact directory — survives.
+        let artifact_dir = manager
+            .sessions_dir()
+            .join("stale-candidate")
+            .join("artifacts");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        fs::write(artifact_dir.join("art.txt"), "evidence").expect("artifact file");
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        let remaining = manager.list_sessions().expect("list");
+        assert!(
+            remaining.iter().any(|s| s.id == "stale-candidate"),
+            "an archive that returned success must survive the retention pass"
+        );
+        assert!(
+            artifact_dir.join("art.txt").exists(),
+            "the archived record's artifacts must survive too"
+        );
+
+        // The janitor side also holds the gate: a concurrent archive must
+        // block until the selection-and-delete pass completes, then either
+        // land on the surviving record or miss it with a real error — never
+        // report success for a document the cleanup deleted.
+        let gate = manager.retention_gate.lock();
+        let janitor_manager = Arc::clone(&manager);
+        let janitor = std::thread::spawn(move || {
+            janitor_manager
+                .cleanup_old_sessions()
+                .expect("cleanup joins")
+        });
+        for _ in 0..30 {
+            assert!(
+                !janitor.is_finished(),
+                "the cleanup must block while the archive side holds the gate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(gate);
+        janitor.join().expect("cleanup joins");
+    }
+
     #[test]
     fn cleanup_never_deletes_archived_sessions_even_beyond_the_cap() {
         let tmp = tempdir().expect("tempdir");
