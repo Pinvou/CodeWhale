@@ -738,6 +738,64 @@ official GitHub API endpoint. If a configured `update_uri` cannot be fetched or
 parsed and a release mirror env var is set, the TUI falls back to that mirror
 instead of failing startup.
 
+### DeepSeek strict tool schema mode (`strict_tool_mode`)
+
+```toml
+strict_tool_mode = true
+```
+
+Off by default. When enabled, requests routed to an **official DeepSeek-family
+route** (provider-typed DeepSeek — the `deepseek` and legacy `deepseek-cn`
+typings — on `api.deepseek.com`, including the legacy `api.deepseeki.com`
+alias and the Anthropic-compatible Messages route) also set
+`tool_choice: "required"` and reshape every active tool schema to DeepSeek's
+strict contract: optional parameters are removed from the schema (each removal
+is reported in the tool description), non-numeric `const` values land on
+`enum`, and conditional-requirement tables (`dependentRequired`) are stripped.
+Two carve-outs: on thinking-enabled chat requests to the DeepSeek dialect the
+`tool_choice` key is omitted entirely (the wire rejects the combination), and
+on routes whose model resolves to the Responses endpoint the wire hardcodes
+`strict: false` per tool and sends `tool_choice: "auto"` (the doctor's
+`responses_dialect` verdict reports this). `required` applies to every other
+request on the route.
+
+Tools whose schema cannot be represented faithfully under the strict subset —
+root alternatives, required nullables, or tools whose runtime demands
+schema-optional parameters (`update_goal`, `send_later`, `agents/message`,
+`agents/followup`, `Web`) — fail closed per tool: they keep their original
+schema and ship without the strict flag, so they stay callable non-strict.
+`tool_choice` follows the route gate, not per-tool outcomes: it stays
+`required` on an in-scope route even when some tools fail closed. The child
+sub-agent surface requests with `auto` regardless.
+
+Tools that stay strict but lose per-action parameters carry a note naming
+what stopped working. Eleven tools carry such a note — among them:
+`todo_write` writes every item pending (the item `status` is removed),
+`start_registry_mcp_server` cannot start a registry whose servers declare
+required launch arguments (`arguments` is removed), `bash` loses the
+sandbox-escalation retry (its `sandbox_permissions`/`justification` pair is
+removed), `git` loses the `show`/`blame` actions (`rev`/`path` are
+removed), `remember` loses the workspace `scope` (revisions target the
+global memory), `lsp` loses the position-taking actions (`line` is
+removed), `task_shell_wait` loses explicit waits and gate-evidence
+recording (`wait`/`timeout_ms`/`gate`/`command` are removed),
+`retrieve_tool_result` keeps only the summary mode,
+`pandoc_convert` requires `output_path` so binary targets are gone,
+`run`/`Run` loses background and custom-gate forms, and `read_media`
+loses region cropping and the detail preference. The sentence in each
+tool's note is authoritative for that tool.
+
+The setting is inert on every other route (third-party gateways, OpenAI
+wires, non-official hosts): their schemas ship unchanged, because the
+reshaping follows DeepSeek's documents and would strip keywords other
+providers document. Two schema tightenings apply on every route (including
+strict-off ones) because the strict contract needs them: the shared schema
+sanitizer no longer corrupts literal values or keyword-named properties, and
+the `remember` tool's schema marks `note` required (its runtime already
+rejects a missing `note` for append and revise, and an all-optional schema
+would leave strict mode nothing to keep). `run_doctor`'s strict-mode verdict
+reports whether the current route is in scope.
+
 ## Workshop output budgets
 
 `[workshop]` still routes oversized tool results through the synthesis
@@ -1798,7 +1856,7 @@ and every K3 and K3.1 cross-endpoint pairing fails closed with guidance.
 - `context_window` (integer, optional provider-table key): override the total context window for the active `[providers.<name>]` route when an OpenAI-compatible gateway, hosted model alias, or self-hosted runtime has a different limit than Codewhale's static model table. For example, `[providers.openai] context_window = 1000000` lets an OpenAI-compatible DashScope/Qwen route budget against a 1M-token window instead of the conservative fallback. For Kimi Code K3, keep `model = "k3"` and set `[providers.moonshot] context_window = 1048576` only when the membership plan includes 1M access; otherwise omit it to retain the 262,144-token safe baseline. The value must be greater than 0 and affects prompt context notes, compaction thresholds, context-pressure checks, and request output caps. Full resolution order, and how to see which rung produced the current window: [Context length (context window)](#context-length-context-window).
 - `path_suffix` (string, optional provider-table key): override the chat-completions path for OpenAI-compatible gateways that do not serve `/v1/chat/completions`. For example, `[providers.openai] path_suffix = "/chat/completions"` sends chat requests to the unversioned base URL plus `/chat/completions`; `models` and `beta/*` requests keep their normal routing.
 - `reasoning_stream_style` (string, optional provider-table key): override how streaming reasoning is separated from answer text for the active provider route. Use `separate_field` for `reasoning_content` / `reasoning` deltas, `inline_tags` for gateways that stream `<think>...</think>` inside `delta.content`, or `none` to render incoming content exactly as answer text.
-- `wire` (string, optional provider-table key): select the wire protocol the active route speaks. On a named custom-provider table (`[providers.<name>] kind = "openai-compatible"` selected with `provider = "<name>"`), `wire = "responses"` (aliases `responses-api`, `openai-responses`, `openai-responses-api`, `response-api`, `responses-compat`, ...) switches the route to the OpenAI Responses API at `{base}/responses`, and `wire = "anthropic"` (aliases `messages`, `claude`, `anthropic-messages`, `anthropic-compatible`, `anthropic-compat`) switches it to the Anthropic Messages API at `{base}/messages`; `wire = "chat"` / `wire = "openai"` or omitting the key keeps the default OpenAI Chat Completions contract. The dialect is the route's wire everywhere — the per-turn client binding, receipts, preflight, the `/provider` row, encrypted-reasoning capture, and prompt-suggestion eligibility (suggestions only speak Chat Completions and stay off on a non-chat custom route) — and the built-in OpenAI-compatible `/v1/chat/completions` pass-through rejects a non-chat custom table with `provider_wire_format_unsupported` instead of forwarding it a chat body. An unrecognized value (a typo such as `respones`) degrades to the default Chat policy with a warning naming the table: fix the spelling rather than assuming the endpoint is served. Dual-protocol built-in vendors (DeepSeek, MiniMax, Model Studio) accept the same key for their narrower `openai` / `anthropic` dialect space and degrade silently on anything else.
+- `wire` (string, optional provider-table key): select the wire protocol the active route speaks. On a named custom-provider table (`[providers.<name>] kind = "openai-compatible"` selected with `provider = "<name>"`), `wire = "responses"` (aliases `responses-api`, `openai-responses`, `openai-responses-api`, `response-api`, `responses-compat`, ...) switches the route to the OpenAI Responses API at `{base}/responses`, and `wire = "anthropic"` (aliases `messages`, `claude`, `anthropic-messages`, `anthropic-compatible`, `anthropic-compat`) switches it to the Anthropic Messages API at `{base}/messages`; `wire = "chat"` / `wire = "openai"` or omitting the key keeps the default OpenAI Chat Completions contract. The dialect is the route's wire everywhere — the per-turn client binding, receipts, preflight, the `/provider` row, encrypted-reasoning capture, and prompt-suggestion eligibility (suggestions only speak Chat Completions and stay off on a non-chat custom route) — and the built-in OpenAI-compatible `/v1/chat/completions` pass-through rejects a non-chat custom table with `provider_wire_format_unsupported` instead of forwarding it a chat body. An unrecognized value (a typo such as `respones`) degrades to the default Chat policy with a warning naming the table: fix the spelling rather than assuming the endpoint is served. Dual-protocol built-in vendors (DeepSeek, MiniMax, Model Studio) accept the same key for their narrower `openai` / `anthropic` dialect space and degrade silently on anything else. For the DeepSeek family the key is accepted but inert: the route resolver honors a `wire` override on named custom-provider tables only, so a `wire = "anthropic"` on the built-in DeepSeek tables keeps the chat dispatch (and the strict-doctor verdicts describe that chat dispatch, not the unused key).
 - `[providers.<name>.auth]` (table, optional): provider-scoped auth source metadata. `source = "command"` stores a command argv plus optional `timeout_ms`; `source = "secret"` stores a `secret_id`. This slice lets provider readiness, `/provider`, and doctor JSON report the auth source class without exposing command argv output or secret values; executing commands and resolving external secret material is handled by the follow-up resolver work.
 - `insecure_skip_tls_verify` (bool, optional provider-table key): legacy compatibility key, disabled by default. When true on the active provider table, provider clients reject the configuration instead of skipping TLS certificate verification. Use `SSL_CERT_FILE` for corporate or private CA bundles; `codewhale doctor` reports stale uses of this setting.
 - `default_text_model` (string, optional): defaults to `deepseek-v4-pro` for DeepSeek and `deepseek-anthropic`, `gpt-5.6` for OpenAI, `grok-4.6` for xAI, `deepseek-ai/deepseek-v4-pro` for NVIDIA NIM, `deepseek-ai/deepseek-v4-flash` for AtlasCloud, `deepseek-reasoner` for Wanjie Ark, `DeepSeek-V4-Pro` for Volcengine Ark, `deepseek/deepseek-v4-pro` for OpenRouter and Novita, `mimo-v2.5-pro` for Xiaomi MiMo, `accounts/fireworks/models/deepseek-v4-pro` for Fireworks, `deepseek-ai/DeepSeek-V4-Pro` for SiliconFlow and DeepInfra, `trinity-large-thinking` for Arcee AI, `kimi-k2.7-code` for Moonshot, `MiniMax-M3` for MiniMax, `GLM-5.3` for Z.ai, `step-3.7-flash` for StepFun, `ernie-4.0-turbo-8k` for Qianfan, `fugu` for Sakana AI, `deepseek-ai/DeepSeek-V4-Pro` for SGLang/vLLM, `deepseek-v4-flash` for local Ollama, and `gpt-oss:120b` for Ollama Cloud. Hugging Face and Together AI both default to `deepseek-ai/DeepSeek-V4-Pro`; `openai-codex` defaults to `gpt-5.6`; `anthropic` defaults to `claude-sonnet-4-6`; `openmodel` defaults to `deepseek-v4-flash`. Current public DeepSeek IDs are `deepseek-v4-pro` and `deepseek-v4-flash`, both with 1M context windows, 384K max output, and thinking mode enabled by default. DeepSeek's live pricing/model page now labels the Pro backend `DeepSeek-V4-Pro-0813`; the callable API ID remains `deepseek-v4-pro`, so Codewhale does not send the backend label or the Claude Code-specific `deepseek-v4-pro[1m]` selector. DeepSeek retires `deepseek-chat` and `deepseek-reasoner` on July 24, 2026; direct first-party routes migrate both to `deepseek-v4-flash`, with omitted reasoning settings preserving their former non-thinking (`off`) and thinking (`high`) intent. Explicit `reasoning_effort` wins, and provider-owned ids on Wanjie Ark, aggregators, self-hosted runtimes, and custom endpoints are not globally rewritten. SiliconFlow retains its own mapping: `deepseek-reasoner` and `deepseek-r1` select its Pro model while `deepseek-chat` and `deepseek-v3` select Flash. Provider-specific mappings translate `deepseek-v4-pro` / `deepseek-v4-flash` to each provider's model ID where supported. OpenRouter also recognizes recent large IDs such as `arcee-ai/trinity-large-thinking`, `minimax/minimax-m3`, `minimax/minimax-m2.7`, `xiaomi/mimo-v2.5-pro`, `qwen/qwen3.6-flash`, `qwen/qwen3.6-35b-a3b`, `qwen/qwen3.6-max-preview`, `qwen/qwen3.6-27b`, `qwen/qwen3.6-plus`, `qwen/qwen3.7-max`, `google/gemma-4-31b-it`, `moonshotai/kimi-k2.7-code`, `moonshotai/kimi-k2.6`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, and `nvidia/nemotron-3-ultra-550b-a55b`; direct Arcee uses bare IDs such as `trinity-large-thinking` and `trinity-large-preview`; direct Moonshot recognizes `kimi-k3`, `kimi-k2.7-code`, and `kimi-k2.6`, plus the K3.1 spellings `kimi-k3.1-pro` and `kimi-k3.1-pro-highspeed`. The exact Kimi Code endpoint recognizes bare `k3` for K3 and `kimi-for-coding` for K2.7, plus the K3.1 membership spellings `k3.1-pro` and `k3.1-pro-highspeed`; those membership IDs are distinct from the direct Moonshot IDs and are never rewritten across routes. Direct MiniMax recognizes `MiniMax-M3` and the documented M2.x chat model IDs; direct Z.ai recognizes `GLM-5.3` (the default), `GLM-5.2`, `GLM-5.1`, and `GLM-5-Turbo`, and OpenRouter recognizes the matching `z-ai/glm-5.1`, `z-ai/glm-5.2`, `z-ai/glm-5.3`, and `z-ai/glm-5-turbo` IDs — `GLM-5.3` has been live on the Z.ai Coding Plan since 2026-08-13; it inherits its catalog metadata from `GLM-5.2` until Z.ai publishes distinct 5.3 numbers and carries no price, and an explicit `GLM-5.2` selection keeps its own id; direct Sakana recognizes `fugu` and `fugu-ultra-20260615`; direct Xiaomi MiMo recognizes chat IDs `mimo-v2.5-pro`, `mimo-v2.5-pro-ultraspeed`, and `mimo-v2.5`, while TTS IDs are selected through `codewhale speech` / `tts`. Generic `openai`, `atlascloud`, `wanjie-ark`, `xiaomi-mimo`, `arcee`, `moonshot`, `minimax`, `openmodel`, `zai`, `stepfun`, `qianfan`, `sakana`, local Ollama, and Ollama Cloud model IDs are passed through unchanged after known aliases are normalized. OpenRouter and SiliconFlow provider configs with a custom `base_url` also preserve explicit model values, which lets OpenAI-compatible gateways accept bare model IDs. Use `/models` or `codewhale models` to discover live IDs from your configured endpoint. `CODEWHALE_MODEL` overrides this for a single process; `DEEPSEEK_MODEL` is the legacy alias.
