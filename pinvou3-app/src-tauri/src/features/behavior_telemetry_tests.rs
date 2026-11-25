@@ -2160,6 +2160,42 @@ async fn admitted_installation_failure_reports_one_terminal_without_rejection() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn controlled_terminal_distinguishes_model_network_and_preflight_failures() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://127.0.0.1:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let adapter = super::remote_execution::capture_execution_lease(&telemetry).unwrap();
+    for (session, task, capture_turn, reason, code) in [
+        ("model", "task-model", "owned-turn", "task_turn_failed", "network_unavailable"),
+        ("stale", "task-stale", "other-turn", "task_turn_failed", "unknown"),
+        ("validation", "task-validation", "owned-turn", "task_attachments_invalid", "validation_failed"),
+    ] {
+        super::remote_execution::register_execution(&telemetry, session, task, "chat", &adapter);
+        super::remote_execution::bind_execution_turn(&telemetry, session, task, "owned-turn");
+        super::remote_execution::observe_model_error(
+            &telemetry, session, capture_turn, "llm_network_error", "fixture connection error",
+        );
+        super::remote_execution::capture_model_failure(
+            &telemetry, session, "owned-turn", Some("fixture connection error"),
+        );
+        let terminal = RemoteControlEvent::from_result::<()>(
+            RemoteStage::TaskTerminal,
+            &Err(reason.into()),
+            0,
+        )
+        .model_source(RemoteModelSource::ControllerTemporary)
+        .task(task, true, Some("chat"))
+        .status("failed");
+        super::remote_execution::track_execution_event(&telemetry, session, task, terminal);
+        let outbox = telemetry.outbox.lock().unwrap();
+        let event = &outbox.records.last().unwrap().event;
+        assert_eq!(event["remote_task_status"], "failed");
+        assert_eq!(event["diagnostic_code"], code);
+        assert!(event.get("error").is_none());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn deletion_and_withdrawal_invalidate_pending_admission_and_terminal_contexts() {
     let _home = TestHome::new();
     for action in ["local_delete", "remote_delete", "withdraw"] {
