@@ -229,9 +229,10 @@ notify = "8"
 # 本地知识底座 L0：全系统元数据索引 + 秒搜 + 去重（docs/本地知识底座-产品形态与架构.md）
 # rusqlite bundled —— 自带 SQLite + FTS5（名/路径秒搜），不依赖系统 libsqlite，
 # 对 .deb 离线分发友好（与 file_ingest 二进制依赖降 recommends 的思路一致）。
-# CodeWhale 6f7a3a748 起 rusqlite 0.41（libsqlite3-sys 0.39）；父仓同步升，
-# 避免 0.40/0.41 双版本把 bundled SQLite 编两份。
-rusqlite = { version = "0.41.0", features = ["bundled"] }
+# CodeWhale cc2adf8 起 rusqlite 0.43（libsqlite3-sys 0.40，0.42+0.43 带 4 处
+# UAF soundness 修复）；libsqlite3-sys 声明 links="sqlite3"，全图只允许一份，
+# 父仓必须同窗口跟进，避免双版本把 bundled SQLite 编两份。
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 # 全盘遍历：容错(权限不足跳过)、防 symlink 环。L0 扫描器用。
 walkdir = "2"
 

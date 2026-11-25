@@ -41,7 +41,7 @@ pinvou3 是一个本地算力桌面智能助手：`pinvou3-app/` 提供 Tauri 2.
 	branch = pinvou3-clean
 ```
 
-> 当前主干实际为：`[submodule "CodeWhale"]`（`path = CodeWhale`，无 `branch` 字段）+ `[submodule "private-runtimes/windows"]`（Windows 私有运行时，`update = none`；快照块 `branch` 字段指向内部仓分支（2026-11-20 r23 订正：公开仓 `Pinvou/CodeWhale` 现有同名分支 `pinvou3-clean` 且恰钉现行 gitlink `687358f7efde`，公开可解——「不随本仓库发布」仅指父仓快照原文，勿误读为该分支不可解）；快照块 `url` 字段亦已由内部 fork 地址改写为公开镜像，非快照原文）。
+> 当前主干实际为：`[submodule "CodeWhale"]`（`path = CodeWhale`，无 `branch` 字段）+ `[submodule "private-runtimes/windows"]`（Windows 私有运行时，`update = none`；快照块 `branch` 字段指向内部仓分支（2026-11-20 r23 订正：公开仓 `Pinvou/CodeWhale` 现有同名分支 `pinvou3-clean` 且恰钉现行 gitlink（2026-11-24 对齐批次后为 `cc2adf8ef9`，r23 订正时点为 `687358f7efde`），公开可解——「不随本仓库发布」仅指父仓快照原文，勿误读为该分支不可解）；快照块 `url` 字段亦已由内部 fork 地址改写为公开镜像，非快照原文）。
 
 首次克隆或当前目录为空时先执行：
 
