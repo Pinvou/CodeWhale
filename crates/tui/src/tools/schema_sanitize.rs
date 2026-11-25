@@ -3262,10 +3262,27 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
     // not (the KELVIN SIGN matches `(?i)k` here but not on the wire), and
     // the word-boundary escapes use Rust's Unicode word definition where
     // ECMA-262 is ASCII-only (`\béfoo` judges violating for a value the
-    // wire's `\b` matches). Both decide members differently than the wire,
+    // wire's `\b` matches). Round 26: the shorthand class escapes are the
+    // same drift one family over — `\d`, `\w`, `\s` and their negated
+    // spellings match the Unicode-wide classes here where the wire's
+    // ECMA-262 (no `u` flag) is ASCII-only (Arabic-Indic `١٢٣` matches
+    // Rust's `\d`, not the wire's), and `\p{…}`/`\P{…}` are Unicode
+    // property escapes on this side while non-`u` ECMA-262 degrades them
+    // to literals. All of them decide members differently than the wire,
     // so the judge abstains and lets the pattern bind there alone — the
     // same line the ECMA-only spellings draw.
-    if pattern.contains("(?i") || pattern.contains("\\b") || pattern.contains("\\B") {
+    if pattern.contains("(?i")
+        || pattern.contains("\\b")
+        || pattern.contains("\\B")
+        || pattern.contains("\\d")
+        || pattern.contains("\\D")
+        || pattern.contains("\\w")
+        || pattern.contains("\\W")
+        || pattern.contains("\\s")
+        || pattern.contains("\\S")
+        || pattern.contains("\\p{")
+        || pattern.contains("\\P{")
+    {
         return None;
     }
     // Round 23: a static EXPANSION screen before compiling. The judge's
@@ -3505,8 +3522,14 @@ fn branch_carries_null_family(branch: &Value) -> bool {
 /// members hash in sorted key order: serde runs `preserve_order`, so
 /// insertion-order iteration made `{"a":1,"b":2}` and `{"b":2,"a":1}`
 /// hash differently and read a genuinely shared union member as disjoint
-/// (round 25). Injective w.r.t. [`pinned_values_equal`], which is what
-/// makes the hash-set membership oracle below sound.
+/// (round 25). Strings and object keys are length-prefixed (round 26): a
+/// raw-bytes-plus-`0`-separator encoding was NOT injective — a NUL
+/// inside a key or string byte-collided with a two-entry spelling of the
+/// same stream (`{"x": false, "y": 5}` ≡ `{"x\u0000by": 5}`) and read
+/// genuinely disjoint pins as sharing a member — while a length prefix
+/// self-delimits every string, so the encoding is injective w.r.t.
+/// [`pinned_values_equal`], which is what makes the hash-set membership
+/// oracle below sound.
 fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
     match value {
         Value::Number(_) => match bounds_number(value) {
@@ -3521,6 +3544,7 @@ fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
         },
         Value::String(text) => {
             out.push(b's');
+            out.extend((text.len() as u64).to_le_bytes());
             out.extend(text.as_bytes());
             out.push(0);
         }
@@ -3538,6 +3562,7 @@ fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
             let mut entries: Vec<_> = map.iter().collect();
             entries.sort_by(|left, right| left.0.cmp(right.0));
             for (key, item) in entries {
+                out.extend((key.len() as u64).to_le_bytes());
                 out.extend(key.as_bytes());
                 out.push(0);
                 pinned_canonical_bytes(item, out);
@@ -3639,6 +3664,28 @@ fn value_clears_bounds_with(
     obj: &Map<String, Value>,
     pattern: Option<&regex::Regex>,
 ) -> bool {
+    // Round 26: `items` binds every element of an array pin the way
+    // `properties` binds the members of an object pin — the member judges
+    // read type/bounds/pattern/format but never `items`, so a required
+    // `{"enum":[[1,2]],"items":{"type":"string"}}` shipped strict while
+    // every wire instance violates `items` (the shape the const→enum
+    // landing itself manufactures). An object pin beside `items` is
+    // untouched: `items` constrains arrays only. Nesting recurses through
+    // this same arm — an array element that is itself an array beside a
+    // nested `items` re-enters here — bounded by serde_json's 128-level
+    // parse limit, the same stack-safety line every walk in this module
+    // draws.
+    if let Some(elements) = value.as_array()
+        && let Some(items) = obj.get("items").and_then(Value::as_object)
+    {
+        let item_pattern = compiled_documented_pattern(items);
+        if !elements
+            .iter()
+            .all(|element| value_clears_bounds_with(element, items, item_pattern.as_ref()))
+        {
+            return false;
+        }
+    }
     if let Some(schema_type) = obj.get("type").and_then(Value::as_str)
         && !value_satisfies_declared_type(value, schema_type)
     {
@@ -4950,7 +4997,16 @@ fn ref_chain_terminal_pointer(root: &Value, start: &str) -> Option<String> {
     let mut visited = std::collections::HashSet::new();
     let mut current = start.to_string();
     loop {
-        if !visited.insert(current.clone()) || visited.len() > STRICT_REF_MAX_HOPS {
+        // The same check-before-insert envelope [`ref_chain_target`] draws
+        // (round 26): the old insert-then-check admitted only 16 entries
+        // where the chain resolvers admit 17, so an exactly-17-link chain
+        // resolved everywhere else but stayed invisible to the cycle
+        // graph this walk feeds — the alignment class the round-23 wave
+        // fixed one function over.
+        if visited.len() > STRICT_REF_MAX_HOPS {
+            return None;
+        }
+        if !visited.insert(current.clone()) {
             return None;
         }
         let target = resolve_local_ref(root, &current)?;
@@ -6721,15 +6777,27 @@ mod strict_fixwave_r23 {
         // 130 distinct judged patterns: the counter must stop at a LITERAL
         // 128 — the old pin asserted `<= STRICT_PATTERN_COMPILE_BUDGET`,
         // which read the very constant it claimed to bound and stayed
-        // green under `usize::MAX`.
+        // green under `usize::MAX`. Round 26: ALL 130 properties are
+        // required and every pattern is satisfiable — the old fixture
+        // marked only `p0` required, and the gate strips optional
+        // properties before judging, so exactly one pattern ever compiled
+        // and the pin stayed green even with the budget check deleted
+        // outright (mutation: budget 128 → 4096 reddened zero pins).
         let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
         for i in 0..130 {
+            let name = format!("p{i}");
             properties.insert(
-                format!("p{i}"),
-                json!({"type": "string", "pattern": format!("^qqq{i}$"), "enum": ["no-match"]}),
+                name.clone(),
+                json!({
+                    "type": "string",
+                    "pattern": format!("^qqq{i}$"),
+                    "enum": [format!("qqq{i}")]
+                }),
             );
+            required.push(Value::String(name));
         }
-        let schema = json!({"type": "object", "properties": properties, "required": ["p0"]});
+        let schema = json!({"type": "object", "properties": properties, "required": required});
         let mut tools = vec![probe_tool("probe", schema)];
         let _ = prepare_tools_for_strict_mode(&mut tools);
         let (compiles, _leaked) = pattern_compile_counters_for_test();
@@ -17103,5 +17171,187 @@ mod strict_fixwave_r25 {
             strict, None,
             "2.0 beside multipleOf:3 is unsatisfiable — fails closed"
         );
+    }
+}
+
+/// Round-26 fix-wave pins. Each pins a finding from the round-26 fresh
+/// review; every assert here was shown RED on the unfixed tree by that
+/// round's probes (strict-shape probes through `prepare_tools_for_strict_mode`,
+/// byte-level proof for the canonical encoder) before the fix landed.
+#[cfg(test)]
+mod strict_fixwave_r26 {
+    use super::*;
+    use serde_json::json;
+
+    fn pinned_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn strict_verdict(schema: Value) -> Option<bool> {
+        let mut tools = vec![pinned_tool("probe", schema)];
+        let _ = prepare_tools_for_strict_mode(&mut tools);
+        tools[0].strict
+    }
+
+    #[test]
+    fn unicode_class_pattern_spellings_abstain_like_the_word_boundary_line() {
+        // Round 26 M1: `\d`, `\w`, `\s` and `\p{…}` decide members under
+        // Rust's Unicode classes where the wire's ECMA-262 (no `u` flag)
+        // is ASCII-only — the probe showed `\p{L}{3}` judging `"abc"` a
+        // clearing member (wire: no match) and an anchored spelling would
+        // judge wire-matchable members violating. The abstention covers
+        // the whole family: the pattern still ships and binds on the wire
+        // (the disclosed `\b` line) but the judge stops making verdicts
+        // with the wrong dialect — which an abstained pattern proves by
+        // never compiling.
+        for (name, pattern) in [
+            ("property-class", "\\p{L}{3}"),
+            ("negated-property-class", "\\P{L}{3}"),
+            ("digit-class", "\\d"),
+            ("negated-digit-class", "\\D"),
+            ("word-class", "\\w+"),
+            ("negated-word-class", "\\W"),
+            ("space-class", "\\s"),
+            ("negated-space-class", "\\S"),
+        ] {
+            let mut node = serde_json::Map::new();
+            node.insert("pattern".to_string(), json!(pattern));
+            assert!(
+                compiled_documented_pattern(&node).is_none(),
+                "{name}: the unicode-class family must abstain — no compile, \
+                 no memo entry, the pattern binds on the wire alone"
+            );
+            // And end to end: abstention ships the tool strict with the
+            // pattern unjudged — the same line the ECMA-only spellings draw.
+            let schema = json!({
+                "type": "object",
+                "properties": {
+                    "u": { "type": "string", "pattern": pattern, "enum": ["abc"] }
+                },
+                "required": ["u"],
+                "additionalProperties": false
+            });
+            assert_eq!(
+                strict_verdict(schema),
+                Some(true),
+                "{name}: abstention ships the pattern unjudged"
+            );
+        }
+    }
+
+    #[test]
+    fn ascii_equivalent_pattern_still_judges() {
+        // Control for the abstention above: a dialect-equivalent pattern
+        // keeps being judged — a clearing member ships strict.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "u": { "type": "string", "pattern": "[a-z]{3}", "enum": ["abc"] }
+            },
+            "required": ["u"],
+            "additionalProperties": false
+        });
+        assert_eq!(
+            strict_verdict(schema),
+            Some(true),
+            "control: the ascii-equivalent pattern still admits its member"
+        );
+    }
+
+    #[test]
+    fn array_members_are_judged_against_the_node_items() {
+        // Round 26 M3: no member judge read `items`, so a required
+        // `{"enum":[[1,2]],"items":{"type":"string"}}` shipped strict
+        // while every wire instance (`[1,2]`) violates `items`. The
+        // landed const→enum spelling manufactures the same shape.
+        let direct = json!({
+            "type": "object",
+            "properties": {
+                "u": { "enum": [[1, 2]], "items": { "type": "string" } }
+            },
+            "required": ["u"],
+            "additionalProperties": false
+        });
+        assert_eq!(
+            strict_verdict(direct),
+            None,
+            "array enum members must satisfy the node's items"
+        );
+        let landed = json!({
+            "type": "object",
+            "properties": {
+                "u": { "const": [1, 2], "items": { "type": "string" } }
+            },
+            "required": ["u"],
+            "additionalProperties": false
+        });
+        assert_eq!(
+            strict_verdict(landed),
+            None,
+            "the const→enum landing must meet the same items conjunction"
+        );
+    }
+
+    #[test]
+    fn array_members_satisfying_the_node_items_still_ship() {
+        // Control for the items conjunction: elements the `items` schema
+        // admits keep the tool strict.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "u": { "enum": [["ab", "cd"]], "items": { "type": "string" } }
+            },
+            "required": ["u"],
+            "additionalProperties": false
+        });
+        assert_eq!(
+            strict_verdict(schema),
+            Some(true),
+            "control: items-satisfying array members still ship strict"
+        );
+    }
+
+    #[test]
+    fn canonical_bytes_are_length_prefixed_against_nul_key_forgery() {
+        // Round 26 M2: the raw-bytes-plus-`0`-separator encoding let a NUL
+        // inside one key collide with a two-entry spelling of the same
+        // byte stream — the probe printed identical canonical bytes for
+        // these two values while `pinned_values_equal` is false, violating
+        // the injectivity doc claim. Length prefixes make the stream
+        // self-delimiting.
+        let two_entries = json!({"x": false, "y": 5});
+        let forged_key = json!({"x\u{0000}by": 5});
+        let mut a = Vec::new();
+        pinned_canonical_bytes(&two_entries, &mut a);
+        let mut b = Vec::new();
+        pinned_canonical_bytes(&forged_key, &mut b);
+        assert_ne!(
+            a, b,
+            "distinct pinned values must not share canonical bytes \
+             (NUL-key forgery)"
+        );
+        assert!(
+            !pinned_values_equal(&two_entries, &forged_key),
+            "the values are genuinely unequal; only the encoding was"
+        );
+        // And the original collision family: an array versus a single
+        // string spelled to collide with its element stream.
+        let array = json!(["a", "b"]);
+        let nul_string = json!(["a\u{0000}sb"]);
+        let mut c = Vec::new();
+        pinned_canonical_bytes(&array, &mut c);
+        let mut d = Vec::new();
+        pinned_canonical_bytes(&nul_string, &mut d);
+        assert_ne!(c, d, "array elements are length-prefixed too");
     }
 }

@@ -7298,27 +7298,30 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
     // unconditionally, reporting a dialect no live client spoke).
     let wire_override_present = provider == crate::config::ApiProvider::Custom
         && scoped_config.provider_wire_dialect(provider).is_some();
+    // Round 26: the endpoint-protocol arm is reachable again. The profile
+    // is `Some` exactly when the route is, so mapping the profile first
+    // made the protocol consultation below dead code on every successful
+    // resolution — a deepseek flash route reported the chat matrix while
+    // the client dispatched Responses (the same wrong-dialect shape the
+    // round-23 comment describes, reintroduced one arm over).
     let request_payload_mode = if wire_override_present {
         cap.request_payload_mode
     } else {
-        route_profile
-            .as_ref()
-            .map(|profile| profile.request_payload_mode)
-            .unwrap_or_else(|| {
-                route.as_ref().map_or(cap.request_payload_mode, |route| {
-                    match route.candidate.protocol() {
-                        codewhale_config::provider::WireFormat::Responses => {
-                            crate::config::RequestPayloadMode::Responses
-                        }
-                        codewhale_config::provider::WireFormat::AnthropicMessages => {
-                            crate::config::RequestPayloadMode::AnthropicMessages
-                        }
-                        codewhale_config::provider::WireFormat::ChatCompletions => {
-                            cap.request_payload_mode
-                        }
-                    }
-                })
-            })
+        match route.as_ref().map(|route| route.candidate.protocol()) {
+            Some(codewhale_config::provider::WireFormat::Responses) => {
+                crate::config::RequestPayloadMode::Responses
+            }
+            Some(codewhale_config::provider::WireFormat::AnthropicMessages) => {
+                crate::config::RequestPayloadMode::AnthropicMessages
+            }
+            // A chat-protocol route (or a failed resolution, where no
+            // profile is resolvable either) refines through the catalog
+            // profile and falls back to the compatibility matrix.
+            _ => route_profile
+                .as_ref()
+                .map(|profile| profile.request_payload_mode)
+                .unwrap_or(cap.request_payload_mode),
+        }
     };
     let alias_deprecation = scoped_config.active_deepseek_alias_deprecation();
 
@@ -7384,7 +7387,12 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
         },
         "model": target.model,
         "route_identity": route_identity,
-        "wire_protocol": doctor_effective_wire_protocol(config, provider),
+        // Resolved routes answer from the candidate's own protocol — the
+        // dispatch fact; the static composition is the fallback for a
+        // route that failed to resolve (round 26).
+        "wire_protocol": target
+            .wire_protocol
+            .unwrap_or_else(|| doctor_effective_wire_protocol(config, provider)),
         "base_url": {
             "redacted": redacted_base_url,
             "class": doctor_base_url_class(provider, &target.base_url),
@@ -7446,12 +7454,13 @@ fn doctor_provider_source(config: &Config) -> &'static str {
     }
 }
 
-/// The route report's wire line: the dialect dispatch actually resolves —
-/// the same composition the client construction and the strict verdicts
-/// answer from, read from the identity-scoped config — rather than the
-/// static metadata policy, which answered `chat_completions` for a Custom
-/// identity whose table overrides the wire and keyed the raw root's table
-/// under a settings re-point (round 23).
+/// The route report's wire line FALLBACK: the static wire composition,
+/// used only when no route resolved (an unresolved route has no candidate
+/// to bind, so there is no dispatch fact to report). A resolved route
+/// answers from [`DoctorApiTarget::wire_protocol`] — the same
+/// `candidate.protocol()` binding the client makes — because this
+/// composition reports `chat_completions` for a model-aware provider
+/// whose flash model dispatches Responses (round 26).
 fn doctor_effective_wire_protocol(
     config: &Config,
     provider: crate::config::ApiProvider,
@@ -7459,7 +7468,16 @@ fn doctor_effective_wire_protocol(
     let identity = doctor_launch_identity(config);
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
-    match crate::client::provider_wire_format_for_config(provider, Some(&scoped)) {
+    wire_format_label(crate::client::provider_wire_format_for_config(
+        provider,
+        Some(&scoped),
+    ))
+}
+
+/// The report spelling for one wire format, shared by the resolved-route
+/// answer and the static fallback so the JSON vocabulary cannot drift.
+fn wire_format_label(format: codewhale_config::provider::WireFormat) -> &'static str {
+    match format {
         codewhale_config::provider::WireFormat::ChatCompletions => "chat_completions",
         codewhale_config::provider::WireFormat::Responses => "responses",
         codewhale_config::provider::WireFormat::AnthropicMessages => "anthropic_messages",
@@ -7638,6 +7656,15 @@ struct DoctorApiTarget {
     /// resolve the Responses endpoint, so the two mechanisms never
     /// disagree on a verdict).
     endpoint_key: Option<String>,
+    /// The dialect the resolved route's candidate dispatches (`Some` only
+    /// when `resolution` is `Resolved`), from the same `candidate.protocol()`
+    /// binding the live client makes. Round 26: the route report answered
+    /// this line from the static wire composition instead, which reports
+    /// `chat_completions` for a model-aware provider whose flash model
+    /// dispatches Responses — contradicting the strict section of the same
+    /// run (`responses_dialect`) and the client. Unresolved routes keep
+    /// `None` and the report falls back to the static composition.
+    wire_protocol: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7771,7 +7798,7 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
     // scopes the config to the identity instead, `init.rs`
     // `scope_to_provider_identity`). The identity-keyed resolver is what
     // the launch path and the UI's own validation use.
-    let (model, resolution, endpoint_key, base_url) =
+    let (model, resolution, endpoint_key, wire_protocol, base_url) =
         match crate::route_runtime::resolve_runtime_route_for_identity(
             config,
             &launch_identity,
@@ -7781,6 +7808,13 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
                 route.model.clone(),
                 DoctorModelResolution::Resolved,
                 Some(route.candidate.endpoint().endpoint_key.clone()),
+                // The same protocol binding the live client makes
+                // (`client.rs` → `candidate.protocol()`), so the wire
+                // line names the dialect dispatch actually speaks —
+                // a model-aware provider's flash model dispatches
+                // Responses even where the static wire composition
+                // would answer `chat_completions`.
+                Some(wire_format_label(route.candidate.protocol())),
                 // The prepared route config is what a session actually
                 // serves from: `prepared_route_config` clears a legacy
                 // root `base_url` whose host belongs to another vendor, so
@@ -7794,6 +7828,7 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
                 launch_model,
                 DoctorModelResolution::ConfiguredOnly,
                 None,
+                None,
                 config.deepseek_base_url(),
             ),
         };
@@ -7803,6 +7838,7 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
         model,
         resolution,
         endpoint_key,
+        wire_protocol,
     }
 }
 
@@ -21385,6 +21421,69 @@ mod strict_doctor_fixwave_r22 {
         assert_eq!(
             report["request_payload_mode"], "Responses",
             "the ds4 table's wire override is what dispatch speaks: {}",
+            report
+        );
+    }
+
+    /// A built-in `deepseek` launch whose settings-remembered model is the
+    /// responses-endpoint offering: the model-aware dispatch lane the
+    /// round-26 doctor findings (wire line + payload mode) answer from.
+    /// No Custom table and no wire override — the divergence is between
+    /// the static wire composition and the resolved candidate.
+    fn flash_launch_fixture() -> (
+        tempfile::TempDir,
+        Config,
+        crate::test_support::EnvVarGuard,
+        crate::test_support::TestEnvLock,
+    ) {
+        let env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let codewhale_home = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        let home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_provider = \"deepseek\"\ndefault_model = \"deepseek-v4-flash\"\n",
+        )
+        .expect("plant remembered launch model");
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        (tmp, config, home, env_lock)
+    }
+
+    #[test]
+    fn wire_protocol_answers_from_the_resolved_candidate_on_flash_routes() {
+        // Round 26 (M4): the route report's wire line answered from the
+        // static wire composition, which reports `chat_completions` for a
+        // model-aware provider — while the client binds
+        // `candidate.protocol()` and dispatches Responses for the flash
+        // offering, and the strict section of the same run answers
+        // `responses_dialect`. The line now reads the resolved candidate.
+        let (_tmp, config, _home, _env_lock) = flash_launch_fixture();
+        let report = doctor_route_report(&config);
+        assert_eq!(
+            report["wire_protocol"], "responses",
+            "the dispatch dialect the candidate binds is what the wire \
+             line reports: {}",
+            report
+        );
+    }
+
+    #[test]
+    fn capability_payload_mode_follows_the_endpoint_protocol_on_flash_routes() {
+        // Round 26 (M5): the payload-mode precedence consulted the
+        // endpoint protocol only where no profile resolved — but the
+        // profile is `Some` exactly when the route is, so the arm was dead
+        // and a flash route reported the chat matrix while the client
+        // speaks Responses. The protocol now wins over the profile.
+        let (_tmp, config, _home, _env_lock) = flash_launch_fixture();
+        let report = provider_capability_report(&config);
+        assert_eq!(
+            report["request_payload_mode"], "Responses",
+            "the resolved endpoint's protocol is what dispatch speaks: {}",
             report
         );
     }
