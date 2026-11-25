@@ -81,7 +81,15 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
           SMS_CODE_INVALID: copy.mobileAuthFailed,
           MOBILE_AUTH_FAILED: copy.mobileAuthFailed,
         }));
-        if (Number.isFinite(reason?.retryAfterSeconds) && reason.retryAfterSeconds > 0) setCooldown(Math.ceil(reason.retryAfterSeconds));
+        if (Number.isFinite(reason?.retryAfterSeconds) && reason.retryAfterSeconds > 0) {
+          const retryAfter = Math.ceil(reason.retryAfterSeconds);
+          if (authenticationAttempt && mode === 'sms' && accountPlatformErrorCodes(reason).includes('RATE_LIMITED')) {
+            // A verification throttle must not shorten the existing SMS send cooldown.
+            setCooldown(remaining => Math.max(remaining, retryAfter));
+          } else {
+            setCooldown(retryAfter);
+          }
+        }
       }
     } finally { if (current()) setBusy(false); }
   };

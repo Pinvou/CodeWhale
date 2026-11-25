@@ -1198,13 +1198,25 @@ impl AccountPlatformState {
             .await
             .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
         let status = response.status();
+        let sms_rate_limited =
+            matches!(flow, TokenFlow::Sms) && status == StatusCode::TOO_MANY_REQUESTS;
+        let retry_after_seconds = sms_rate_limited
+            .then(|| response_retry_after_seconds(&response))
+            .flatten();
         let bytes = bounded_response_bytes(response).await?;
         if !status.is_success() {
             let oauth_error = serde_json::from_slice::<OAuthErrorResponse>(&bytes).ok();
+            let code = oauth_error.as_ref().and_then(|body| body.error.as_deref());
+            if sms_rate_limited && code == Some("temporarily_unavailable") {
+                let retry = retry_after_seconds
+                    .map(|seconds| format!(":{seconds}"))
+                    .unwrap_or_default();
+                return Err(format!("mobile_auth_failed: RATE_LIMITED{retry}"));
+            }
             return Err(classify_token_error(
                 flow,
                 status,
-                oauth_error.as_ref().and_then(|body| body.error.as_deref()),
+                code,
                 oauth_error
                     .as_ref()
                     .and_then(|body| body.error_description.as_deref()),
@@ -2131,6 +2143,14 @@ fn parse_retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) ->
     (seconds > 0).then_some(seconds.min(86_400))
 }
 
+fn response_retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get("Retry-After")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after_seconds(value, chrono::Utc::now()))
+}
+
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let balance_response = response.url().path().ends_with("/v1/me/balance")
         || response.url().path().starts_with("/v1/organizations/")
@@ -2142,11 +2162,7 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         || response.url().path().ends_with("/v1/me/usage-requests")
         || response.url().path().ends_with("/v1/me/usage-turns");
     let status = response.status().as_u16();
-    let retry_after_seconds = response
-        .headers()
-        .get("Retry-After")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_retry_after_seconds(value, chrono::Utc::now()));
+    let retry_after_seconds = response_retry_after_seconds(&response);
     let context_version = response
         .headers()
         .get("X-Context-Version")
@@ -2477,6 +2493,44 @@ mod tests {
                 .unwrap_err();
             server.join().unwrap();
             assert_eq!(error, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn sms_token_verification_retains_retry_after_for_proxy_rate_limit() {
+        for (flow, header, expected) in [
+            (
+                TokenFlow::Sms,
+                "Retry-After: 45\r\n",
+                "mobile_auth_failed: RATE_LIMITED:45",
+            ),
+            (
+                TokenFlow::Sms,
+                "Retry-After: invalid\r\n",
+                "mobile_auth_failed: RATE_LIMITED",
+            ),
+            (
+                TokenFlow::Password,
+                "Retry-After: 45\r\n",
+                "oidc_token_exchange_failed: token endpoint returned 429",
+            ),
+        ] {
+            let is_sms = matches!(flow, TokenFlow::Sms);
+            let (base, server) = spawn_portal_fixture_with_headers(1, move |request| {
+                assert!(request.starts_with("POST /token "));
+                assert_eq!(request.contains("sms_code=123456"), is_sms);
+                (429, r#"{"error":"temporarily_unavailable"}"#, header)
+            });
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let mut config = config();
+            config.token_url = base.join("token").unwrap();
+            let mut form = vec![("grant_type", "password")];
+            if is_sms {
+                form.extend([("sms_challenge_id", "fixture-id"), ("sms_code", "123456")]);
+            }
+            let result = state.token_request(&config, &form, flow).await;
+            server.join().unwrap();
+            assert_eq!(result.err().as_deref(), Some(expected));
         }
     }
 

@@ -183,6 +183,44 @@ try {
     await waitText(await page.evaluate(() => globalThis.f01.copy().account.smsRateLimited));
     assert(await page.evaluate(() => [...document.querySelectorAll('.ap-login button')].some(button => button.disabled && /1\d\d/.test(button.textContent))), 'SMS rate limit did not disable its resend button');
   });
+  await caseRun('desktop SMS verification rate limit preserves or extends resend cooldown', async () => {
+    await desktopGuest();
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    await page.evaluate(() => { globalThis.f01.smsRetryAfter = 60; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode));
+    await page.waitForSelector('[role=dialog]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && !document.querySelector('.ap-auth-submit')?.disabled);
+    await page.type('input[autocomplete=one-time-code]', '000000');
+
+    const resend = () => page.$eval('.ap-auth-code button', button => ({
+      disabled: button.disabled,
+      seconds: Number(button.textContent.match(/\d+/)?.[0]),
+    }));
+    const verifyWithThrottle = async (seconds, callCount) => {
+      await page.evaluate(value => {
+        globalThis.f01.smsLoginError = Object.assign(new Error('mobile_auth_failed: RATE_LIMITED'), {
+          code: 'RATE_LIMITED',
+          retryAfterSeconds: value,
+        });
+      }, seconds);
+      await page.click('.ap-auth-submit');
+      await page.waitForFunction(count => {
+        const { nativeCalls, copy } = globalThis.f01;
+        return nativeCalls.filter(([name]) => name === 'sms-login').length === count
+          && document.querySelector('.ap-login [role=alert]')?.textContent === copy().account.authRequestRateLimited
+          && !document.querySelector('.ap-auth-submit')?.disabled;
+      }, {}, callCount);
+      return resend();
+    };
+
+    const initial = await resend();
+    assert(initial.disabled && initial.seconds > 30 && initial.seconds <= 60, 'send did not establish the resend cooldown');
+    const shorter = await verifyWithThrottle(5, 1);
+    assert(shorter.disabled && shorter.seconds > 30 && shorter.seconds <= initial.seconds, 'shorter verification throttle shortened the send cooldown');
+    const longer = await verifyWithThrottle(120, 2);
+    assert(longer.disabled && longer.seconds > 60 && longer.seconds <= 120, 'longer verification throttle did not extend the send cooldown');
+  });
   await caseRun('changing the SMS signup choice retires the original challenge and sends consent on the new one', async () => {
     await desktopGuest();
     await page.type('input[autocomplete=tel-national]', '13800000000');
