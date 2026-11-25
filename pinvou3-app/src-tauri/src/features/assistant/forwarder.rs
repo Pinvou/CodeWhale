@@ -1271,7 +1271,7 @@ pub(crate) fn spawn_event_forwarder(
                     error,
                     error_source,
                     tool_catalog,
-                    turn_id: _,
+                    turn_id: completed_turn_id,
                     submission_id: _,
                     compaction_id: _,
                     base_url: _,
@@ -1300,6 +1300,18 @@ pub(crate) fn spawn_event_forwarder(
                     let operation_rejected = std::mem::take(&mut active_operation_rejected);
                     let mut shell_cleanup_failed = false;
                     let mut terminal_status = status;
+                    if status == TurnOutcomeStatus::Failed
+                        && error_source == Some(deepseek_tui::core::events::TurnErrorSource::Model)
+                        && let Some(turn_id) = completed_turn_id.as_deref()
+                        && current_turn_id.as_deref() == Some(turn_id)
+                    {
+                        crate::features::behavior_telemetry::capture_remote_model_failure(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            error.as_deref(),
+                        );
+                    }
                     // The chat:done error text goes through the same Rust
                     // redaction layer (one line of defense shared with the
                     // Error event's transient/fatal paths).
@@ -1885,6 +1897,15 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::Error { envelope, .. } => {
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::observe_remote_model_error(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &envelope.code,
+                            &envelope.message,
+                        );
+                    }
                     // Edit preflight failures are non-terminal advisories until
                     // the paired TurnComplete, but their typed code tells the
                     // terminal path not to persist the optimistic fallback.
