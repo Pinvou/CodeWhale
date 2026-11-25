@@ -118,6 +118,112 @@ pub fn locked_cli_path(name: &str) -> Option<std::path::PathBuf> {
     Some(super::paths::assets_cli_dir(name, &pin.version).join(executable_name(name)))
 }
 
+pub(crate) fn connector_failure_exit_is_ambiguous(code: i64) -> bool {
+    // A shell can use an ordinary child exit code to report a launch error.
+    // Windows PowerShell notably returns 1 for a nonexistent executable.
+    matches!(code, 0 | 126 | 127 | 9009) || cfg!(windows) && code == 1
+}
+
+pub(crate) fn registered_telemetry_cli(key: &str, program: &str, cwd: &std::path::Path) -> bool {
+    use std::path::Path;
+
+    if !Path::new(program).is_absolute() && !program.contains(['/', '\\']) {
+        return false;
+    }
+    let installed = match key {
+        "eip" | "zhidao" => {
+            let Some(name) = Path::new(program).file_name() else {
+                return false;
+            };
+            let dir = super::paths::bundle_skills_dir().join(key).join("bin");
+            let exact = dir.join(name);
+            Some(if exact.is_file() {
+                exact
+            } else {
+                dir.join(executable_name(&name.to_string_lossy()))
+            })
+        }
+        "tmeet" => Some(tmeet_launcher_path(&super::os::connector_cli_command(
+            "tmeet", "tmeet",
+        ))),
+        "feishu" | "wecom" | "dingtalk" => {
+            let bin = match key {
+                "feishu" => "lark-cli",
+                "wecom" => "wecom-cli",
+                _ => "dws",
+            };
+            locked_cli_path(bin)
+                .filter(|path| launcher_is_executable(path))
+                .or_else(|| {
+                    super::paths::managed_connector_bin_dir()
+                        .map(|dir| dir.join(executable_name(bin)))
+                })
+        }
+        _ => None,
+    };
+    installed.is_some_and(|path| matches_installed_connector_launcher(program, cwd, &path))
+}
+
+pub(crate) fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {
+    // The bundled Node route for TMeet wraps the app-resolved CLI shim as its
+    // first argument. On other routes the shim itself is the executable.
+    command
+        .get_args()
+        .next()
+        .unwrap_or_else(|| command.get_program())
+        .into()
+}
+
+fn launcher_is_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: the CString owns a valid NUL-terminated path for the call.
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    true
+}
+
+pub(crate) fn matches_installed_connector_launcher(
+    program: &str,
+    cwd: &std::path::Path,
+    installed: &std::path::Path,
+) -> bool {
+    use std::path::Path;
+
+    let requested = Path::new(program);
+    if !requested.is_absolute() && !program.contains(['/', '\\']) {
+        return false;
+    }
+    if !installed.is_absolute() || !launcher_is_executable(installed) {
+        return false;
+    }
+    let normalize = |value: &Path| super::os::platform_compat_path(&value.to_string_lossy());
+    let installed = normalize(installed);
+    let matches = |value: &Path| {
+        let value = normalize(value);
+        if cfg!(windows) {
+            value
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+                .eq(installed
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase()))
+        } else {
+            value == installed
+        }
+    };
+    // An identical name reached through PATH provides no launch evidence.
+    matches(&cwd.join(requested))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +247,100 @@ mod tests {
         assert!(locked_cli_path("tmeet").is_none(), "tmeet 无 lock 条目");
         assert!(locked_cli_path("no-such-cli").is_none());
         assert!(all_artifact_pins().len() >= 3, "lock 表应含全部制品");
+    }
+
+    #[test]
+    fn registered_telemetry_cli_accepts_only_the_resolved_installation() {
+        use crate::platform::{
+            paths,
+            test_support::{
+                EnvRestore, managed_connector_bin_dir_or_assert_unsupported, with_temp_home,
+            },
+        };
+        use std::path::{Component, Path, PathBuf};
+
+        fn launcher(root: &Path, path: &Path) {
+            let relative = path
+                .strip_prefix(root)
+                .expect("fixture escaped its temporary home");
+            assert!(
+                relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create_new(path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+
+        with_temp_home("connector-registry", || {
+            let home_dir =
+                PathBuf::from(std::env::var("PINVOU3_HOME").expect("temporary home must be UTF-8"));
+            assert!(home_dir.is_absolute());
+            assert_eq!(paths::pinvou3_home(), home_dir);
+            let Some(managed) = managed_connector_bin_dir_or_assert_unsupported() else {
+                return;
+            };
+            let cwd = home_dir.join("work");
+            let npm_prefix = home_dir.join("npm-prefix");
+            let _npm_env = EnvRestore::capture(&["NPM_CONFIG_PREFIX"]);
+            // SAFETY: with_temp_home holds the shared ENV_LOCK through restoration.
+            unsafe { std::env::set_var("NPM_CONFIG_PREFIX", &npm_prefix) };
+            let tmeet_shim = if cfg!(windows) {
+                npm_prefix.join("tmeet.cmd")
+            } else {
+                npm_prefix.join("bin/tmeet")
+            };
+            let skill_shim = |key: &str| {
+                let filename = if cfg!(windows) {
+                    format!("{key}.cmd")
+                } else {
+                    key.to_owned()
+                };
+                paths::bundle_skills_dir()
+                    .join(key)
+                    .join("bin")
+                    .join(filename)
+            };
+            let fixtures = [
+                ("eip", skill_shim("eip")),
+                ("zhidao", skill_shim("zhidao")),
+                ("tmeet", tmeet_shim),
+                ("feishu", managed.join(executable_name("lark-cli"))),
+            ];
+            for (key, installed) in &fixtures {
+                launcher(&home_dir, installed);
+                let basename = installed.file_name().unwrap().to_str().unwrap();
+                let lookalike = cwd.join(basename);
+                launcher(&home_dir, &lookalike);
+                assert!(
+                    registered_telemetry_cli(key, installed.to_str().unwrap(), &cwd),
+                    "{key}"
+                );
+                assert!(
+                    !registered_telemetry_cli(key, lookalike.to_str().unwrap(), &cwd),
+                    "{key}"
+                );
+                assert!(!registered_telemetry_cli(key, basename, &cwd), "{key}");
+            }
+
+            let current =
+                locked_cli_path("lark-cli").expect("supported platform must pin lark-cli");
+            launcher(&home_dir, &current);
+            assert!(registered_telemetry_cli(
+                "feishu",
+                current.to_str().unwrap(),
+                &cwd
+            ));
+            assert!(!registered_telemetry_cli(
+                "feishu",
+                fixtures[3].1.to_str().unwrap(),
+                &cwd
+            ));
+        });
     }
 }

@@ -20,7 +20,7 @@ recipe 是 JSON 对象：
 | `valuesFile` | 不使用 | 私有站点 values 的绝对路径 |
 | `secretSnapshotFile` | 不使用 | 私有 JSON：`namespace/Secret名/key` 到该 key 的实际文本值 |
 
-`personal` 固定使用 `compose.personal.yaml` 与 `compose.personal-workload.yaml`；`models` 继续叠加 finance、reconciliation、models。可显式选择现有 finance、reconciliation、signup、organizations、invocation、closure、approval-recovery、receivable-write-off、payment-financial-repair、ledger-repair、entitlement-correction、audit-export overlays，但不能重复基础组合已含的 overlay，organizations / invocation 必须以 models 为基础。工具不接受任意 `-f`、shell 或 renderer 选项。`--profile '*'` 只用于 `config` 的完整运维声明清点，不会执行这些 profile。不同模块新引入的私有进程或环境键若不在预检允许范围内，会明确拒绝；不能据此自行扩大权限或假定该组合已验证。正式配置回归实际覆盖的组合在测试与发行证据中列明；选择器列出名字不等于所有可排列组合已经运行验证。
+`personal` 固定使用 `compose.personal.yaml` 与 `compose.personal-workload.yaml`；`models` 继续叠加 finance、reconciliation、models。可显式选择现有 finance、reconciliation、signup、organizations、invocation、closure、approval-recovery、receivable-write-off、payment-financial-repair、ledger-repair、entitlement-correction、audit-export overlays，但不能重复基础组合已含的 overlay，organizations / invocation 必须以 models 为基础。工具不接受任意 `-f`、shell 或 renderer 选项。`--profile '*'` 只用于 `config` 的完整运维声明清点，不会执行这些 profile。不同模块新引入的私有进程或环境键若不在预检允许范围内，会明确拒绝；不能据此自行扩大权限或假定该组合已验证。短信网关使用可选 `enterprise-sms` overlay，支持 personal 和 models。须将网关镜像加入独立清单，预检会核对专用持久目录、凭据文件和 Account 发送配置。正式配置回归实际覆盖的组合在测试与发行证据中列明；选择器列出名字不等于所有可排列组合已经运行验证。
 
 Helm 使用当前 chart、`values-production-new.yaml` 与私有站点 values，保留三域 `pre-install,pre-upgrade`、权重和删除策略。Secret 快照是离线配置输入，工具不调用 Kubernetes，不证明快照等于当前已安装 Secret；缺少被消费的 key 明确失败，optional key 可为空，但生产迁移的备份 key 始终必需。系统 CA 的 DSN 使用 `sslrootcert=system`；当前迁移 scratch 镜像已包含系统根证书。该模式不需要额外 pgpass/CA volume。Compose 的文件式 CA 和 pgpass 则必须来自准确只读 bind，并实际存在且没有 symlink 路径。
 

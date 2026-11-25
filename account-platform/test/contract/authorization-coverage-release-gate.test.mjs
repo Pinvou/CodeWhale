@@ -213,7 +213,18 @@ test('authorization release gate classifies every HTTP task event callback and C
   // It also includes the two profile-revocation receipt claim/confirm routes.
   // Also retain main's approval delivery terminal recovery worker.
   // Identity Adapter also exposes POST /users/mobile/sms-only for Account.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 432, tasks: 35, events: 18, cli: 28 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 432, tasks: 35, events: 18, cli: 29 });
+});
+
+test('enterprise SMS gateway requires an exact workload authorization entry', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'enterprise-sms-gateway'), [{
+    name: 'enterprise-sms-gateway', source: 'account-platform/cmd/enterprise-sms-gateway/main.go',
+    strategy: 'workload.bearer-authenticated-sms-gateway',
+  }]);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'enterprise-sms-gateway');
+  }, /unclassified_cli:enterprise-sms-gateway/);
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {
