@@ -36821,7 +36821,7 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
     // Per-tool runtime contracts (a tool whose `execute` demands
     // schema-optional parameters on every call) are pinned by the per-tool
     // census tests beside their definitions (`update_goal`, `send_later`,
-    // `agents/message`, `agents/followup`, `Web`), not here.
+    // `agents/message`, `agents/followup`, `agent`, `Web`), not here.
     let _env_lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let home = tmp.path().join("home");
@@ -36899,7 +36899,7 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
     );
     let mut processed = original.clone();
     // This assert is a direction tripwire, not a invariant of the contract:
-    // it holds because `update_goal`/`send_later`/`Web` are on the
+    // it holds because `update_goal`/`send_later`/`agent`/`Web` are on the
     // catalog and fail closed by name (`update_goal` alone holds it —
     // goal_state always registers). The `agents/message`/`agents/followup`
     // list entries are defensive: those tools are model-hidden and never

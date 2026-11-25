@@ -27764,3 +27764,64 @@ fn coordination_lane_precedence_matches_the_isolation_seam() {
         "the manifest leg covers a claim-less worktree child"
     );
 }
+
+#[test]
+fn strict_mode_fails_the_agent_tool_closed() {
+    // The `agent` tool carries its per-action requirements in a
+    // `dependentSchemas` tree (`start` needs `prompt`, every targeted
+    // action needs an `agent_id` or `name`), and the schema marks those
+    // fields optional. The strict strip pass deletes the tree silently and
+    // the optional-removal pass takes the fields with it, so a strict
+    // `agent` ships callable with `action` alone while the runtime rejects
+    // every call but the vacuous `wait` — the same every-call-broken class
+    // as `update_goal`. The tool ships unchanged and non-strict via
+    // `STRICT_UNUSABLE_TOOLS`; this census feeds its real schema through
+    // the pipeline so the list and the tool cannot drift apart.
+    let workspace = tempdir().expect("temp workspace");
+    let manager = new_shared_subagent_manager(workspace.path().to_path_buf(), 1);
+    let config = crate::config::Config {
+        api_key: Some("deepseek-test-key".to_string()),
+        provider: Some("deepseek".to_string()),
+        ..Default::default()
+    };
+    let client = crate::client::DeepSeekClient::new(&config).expect("DeepSeek parent client");
+    let runtime = SubAgentRuntime::new(
+        client,
+        "deepseek-chat".to_string(),
+        crate::tools::ToolContext::new(workspace.path().to_path_buf()),
+        false,
+        None,
+        manager,
+    );
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(workspace.path().to_path_buf(), 1),
+        runtime,
+    );
+    let mut tools = vec![crate::models::Tool {
+        tool_type: None,
+        name: ToolSpec::name(&tool).to_string(),
+        description: ToolSpec::description(&tool).to_string(),
+        input_schema: ToolSpec::input_schema(&tool),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }];
+    let original_schema = tools[0].input_schema.clone();
+    let original_description = tools[0].description.clone();
+
+    assert!(
+        !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+        "agent must fail closed, not ship strict callable with `action` alone"
+    );
+    assert_eq!(tools[0].strict, None, "agent must ship non-strict");
+    assert_eq!(
+        &tools[0].input_schema, &original_schema,
+        "agent keeps its schema"
+    );
+    assert_eq!(
+        &tools[0].description, &original_description,
+        "agent keeps its description"
+    );
+}

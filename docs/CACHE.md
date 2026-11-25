@@ -111,12 +111,17 @@ registry. One boundary is deliberate (round 25): the pattern-compile memo
 persists across requests while the per-request compile budget resets, so a
 pattern that abstained on a budget-refused first pass can be judged on a
 later pass and flip its tool's verdict — the bytes then differ between the
-first preparation and a warm one without a declared change. Catalogs within
+first preparation and a warm one without a declared change. (The memo is
+per OS thread, so the boundary is per thread: two preparations on
+different threads hold independent memos; every stability claim above
+holds per thread.) Catalogs within
 the compile budget (the default catalog is far below it) never see the
-boundary. Declared change fields cover provider identity
+boundary. Declared change fields include provider identity
 (`change:provider`), the token budget (with the goal objective, as
 `change:goal`), the resolved model (`change:model`), and a re-planned route
-(`change:route`). A flip that changes the gate's verdict — official host ↔
+(`change:route`) — the route-relevant subset of the header set, which also
+declares session mode, translation, verbosity, system prompt, resume, and
+tool-surface changes. A flip that changes the gate's verdict — official host ↔
 foreign host, a padded URL, or a provider retype — changes the shaped tool
 bytes: when one of those declared fields moved with the flip, the pin
 re-declares through it; only a flip no declared field moved with surfaces as

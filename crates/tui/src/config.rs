@@ -1126,8 +1126,16 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
 /// Whether the DeepSeek strict tool pipeline (schema reshaping plus
 /// `tool_choice: "required"`) acts on a route: the user flag AND the
 /// official-route gate. The engine turn-surface build, the child sub-agent
-/// surface, and the doctor all answer from this one composition so the
-/// surfaces can never disagree about where strict mode is in scope.
+/// surface, and the doctor all call this one predicate — there is no
+/// second composition to drift. The surfaces still choose their own
+/// ARGUMENTS: the engine feeds the session provider with the resolved
+/// route's URL, the child feeds its own config's provider and URL (the
+/// per-turn children receive the route-scoped config, off-turn follow-ups
+/// the engine session config), the doctor the launch identity. Every
+/// divergence so far fails closed (an out-of-scope judgment only ever
+/// strips reshaping or downgrades `tool_choice`), and the doctor's route
+/// report names which surface it answered from — but "the surfaces can
+/// never disagree" holds for the predicate, not for the arguments.
 pub fn strict_tool_mode_for_route(flag: bool, provider: ApiProvider, base_url: &str) -> bool {
     flag && route_is_official_deepseek_family(provider, base_url)
 }

@@ -1109,10 +1109,19 @@ fn validate_base_url_security(base_url: &str) -> Result<()> {
     // here — a session that can never start while the doctor reported the
     // route ready (round 23).
     let scheme_normalized = base_url.to_ascii_lowercase();
-    if scheme_normalized.starts_with("https://")
-        || scheme_normalized.starts_with("http://localhost")
-        || scheme_normalized.starts_with("http://127.0.0.1")
-        || scheme_normalized.starts_with("http://[::1]")
+    if scheme_normalized.starts_with("https://") {
+        return Ok(());
+    }
+    // Loopback admission is a HOST-BOUNDARY judgment, not a prefix match:
+    // `http://localhost.evil.com` (and, after the round-27 scheme
+    // normalization, `HTTP://LOCALHOST.attacker.com`) matched the old
+    // `starts_with("http://localhost")` arms and auto-allowed without the
+    // env hatch. `base_url_uses_local_host` extracts the authority the
+    // request actually dials — userinfo and port stripped, IPv6 brackets
+    // unwrapped, case folded — and matches loopback/unspecified addresses
+    // exactly, so a lookalike host falls through to the env hatch like any
+    // other remote host.
+    if scheme_normalized.starts_with("http://") && crate::config::base_url_uses_local_host(base_url)
     {
         return Ok(());
     }
@@ -1130,7 +1139,7 @@ fn validate_base_url_security(base_url: &str) -> Result<()> {
         return Ok(());
     }
 
-    if base_url.starts_with("http://") {
+    if scheme_normalized.starts_with("http://") {
         anyhow::bail!(
             "Refusing insecure base URL '{display_base_url}'.\n\
              \n\
@@ -13464,6 +13473,28 @@ mod tests {
 
             assert!(validate_base_url_security("http://localhost:8080").is_ok());
             assert!(validate_base_url_security("http://127.0.0.1:8080").is_ok());
+            assert!(validate_base_url_security("http://[::1]:9000").is_ok());
+            // Round 27: loopback admission is a HOST-BOUNDARY judgment, not
+            // a prefix match. The lookalike hosts auto-allowed through the
+            // old `starts_with("http://localhost")` arms fall through to
+            // the env hatch like any other remote host, and the case-variant
+            // spellings the round-27 scheme normalization would have
+            // widened match the same exact-host rule.
+            let lookalike = validate_base_url_security("http://localhost.evil.com")
+                .expect_err("lookalike loopback host must not auto-allow");
+            assert!(lookalike.to_string().contains("Refusing insecure base URL"));
+            let case_variant = validate_base_url_security("HTTP://LOCALHOST.attacker.com")
+                .expect_err("case-variant lookalike must not auto-allow");
+            assert!(
+                case_variant
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
+            // Other schemes keep refusing even on a loopback host: the
+            // local-host arm keys on the http scheme.
+            let ftp = validate_base_url_security("ftp://localhost/file")
+                .expect_err("non-http scheme must refuse");
+            assert!(ftp.to_string().contains("only HTTPS"));
         }
         // from base_url_security_allows_non_local_http_with_explicit_opt_in
         {

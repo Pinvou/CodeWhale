@@ -171,6 +171,17 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
 /// `"list"` action still works, but the tool's titular action is dead;
 /// `agents/message` and `agents/followup` runtime-require a target
 /// (`agent_id`/`name`, `tools/subagent/coord.rs`) for every call;
+/// `agent` — the model-facing sub-agent surface — carries its per-action
+/// requirements in a `dependentSchemas` tree (`start` needs `prompt`,
+/// every targeted action needs an `agent_id` or `name`;
+/// `tools/subagent/mod.rs` `input_schema`): the strip pass deletes that
+/// tree silently and the optional-removal pass takes the fields with it,
+/// so a strict `agent` ships callable with `action` alone while the
+/// runtime rejects every call but the vacuous `wait` (nothing can spawn).
+/// Like `send_later`, read-only actions (`roster`/`status`) would have
+/// survived; the titular surface is dead, so the tool ships unchanged and
+/// non-strict instead (pinned beside the real schema,
+/// `tools/subagent/mod.rs`).
 /// `Web` runtime-requires `query` for `search`, `url` for `fetch`, and
 /// `port` for `wait` (`tools/web_tool.rs` dispatch) — all three actions
 /// are dead, and after the optional-removal pass the generic removal note
@@ -193,6 +204,7 @@ const STRICT_UNUSABLE_TOOLS: &[&str] = &[
     "send_later",
     "agents/message",
     "agents/followup",
+    "agent",
     "Web",
 ];
 
@@ -429,12 +441,13 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
         // judged. The pipeline used to run sanitize+enforce a second time
         // on the real schema, recomputing byte-identical output per tool
         // per request.
-        if let Some((normalized, removed_optionals, widened_consts)) =
+        if let Some((normalized, removed_optionals, widened_consts, narrowed_maps)) =
             strict_schema_supported(&tool.input_schema)
         {
-            // Count the hybrid-map narrowings on the authored shape before
-            // the enforce pass overwrites them, so the note can say so.
-            let narrowed_maps = count_strict_map_narrowings(&tool.input_schema, true);
+            // `narrowed_maps` is counted inside the gate on the sanitized
+            // clone (the collapse-landed hybrid maps included, the
+            // enforce-pass blanket injection excluded) — see the counting
+            // comment there.
             tool.input_schema = normalized;
             if !removed_optionals.is_empty() || narrowed_maps > 0 || widened_consts > 0 {
                 let note = strict_removal_note(&removed_optionals, narrowed_maps, widened_consts);
@@ -614,9 +627,12 @@ fn count_strict_map_narrowings(schema: &Value, ships: bool) -> usize {
             // pass treats as an object — the only nodes that can carry a
             // hybrid map here once the pre-strip detector has passed the
             // tool. A hybrid map inside those subtrees must not be claimed.
-            // (A single-element union branch's keys can also be discarded
-            // by the collapse merge — a narrowing inside one is still
-            // counted; that corner is left disclosed rather than modeled.)
+            // (The count runs on the sanitized clone — see
+            // [`strict_schema_supported`] — so a single-element collapse
+            // that lands `additionalProperties` onto a properties-bearing
+            // parent IS counted; the base-merge discard corner this comment
+            // used to describe no longer exists now the collision guard
+            // keeps the keyword instead of merging it away.)
             "patternProperties" | "dependencies" | "additionalProperties" => {}
             _ => count += count_strict_map_narrowings(value, ships),
         }
@@ -2105,7 +2121,7 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 /// flag. The gate judges a normalized clone and returns that clone, so the
 /// caller ships exactly the shape that was judged — "the gate judges the
 /// shape that ships" holds by construction instead of by determinism.
-fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>, usize)> {
+fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>, usize, usize)> {
     let mut normalized = schema.clone();
     sanitize(&mut normalized);
     // The enforce pass strips some constraints before the compatibility
@@ -2118,6 +2134,18 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>, usize)
     if has_unrepresentable_stripped_constraint(&normalized, true) {
         return None;
     }
+    // Round 27: the narrowing note's count is computed HERE — on the
+    // sanitized clone, after the collapse pass has landed its keywords and
+    // before the enforce pass overwrites them — not on the authored schema.
+    // Counting on the authored shape missed a single-element collapse that
+    // contributes `additionalProperties` onto a properties-bearing parent
+    // that authored no `properties`: the narrowing happened and shipped,
+    // the count read zero, and the whole disclosure sentence was
+    // suppressed. Counting on the enforced clone instead would count the
+    // blanket `additionalProperties: false` injection on every object node
+    // (a silent-by-design strip the body discloses separately). The
+    // sanitized-clone population is exactly the authored-plus-collapse set.
+    let narrowed_maps = count_strict_map_narrowings(&normalized, true);
     // Gate the shape that would actually ship: the enforce pass removes
     // optional properties, so a null-carrying shape under an optional
     // property is faithfully represented by that removal and no longer
@@ -2194,7 +2222,7 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>, usize)
     }
     removed_optionals.sort();
     removed_optionals.dedup();
-    Some((normalized, removed_optionals, widened_consts))
+    Some((normalized, removed_optionals, widened_consts, narrowed_maps))
 }
 
 /// Detect the constraints the enforce pass strips before the compatibility
@@ -2327,6 +2355,17 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
 /// rules living in `strict_schema_supported`).
 fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bool) -> bool {
     if let Some(obj) = schema.as_object() {
+        // Round 27: a `$ref` beside judged sibling pins — the definition's
+        // constraints conjunct on the wire while every arm below reads only
+        // `obj`'s own keywords, so the node judges nothing across the
+        // reference edge. Fail closed before any member/pin arm can
+        // abstain compatible past a cap (an oversized enum beside a `$ref`
+        // used to take the cap-abstention arm and ship). The walk recurses
+        // into property schemas, definitions, and branches, so nested
+        // occurrences inherit this arm.
+        if ref_siblings_carry_judged_pins(obj) {
+            return true;
+        }
         if obj.contains_key("oneOf")
             || obj.contains_key("allOf")
             || obj.contains_key("dependentSchemas")
@@ -3152,6 +3191,49 @@ thread_local! {
 /// cached after the first pass) never reach the budget at all.
 const STRICT_PATTERN_COMPILE_BUDGET: usize = 128;
 
+/// Judged keywords whose wire semantics conjunct with a sibling `$ref`
+/// (draft 2020-12: applicator and vocabulary keywords compose) while every
+/// judge in this module reads the node's own keywords alone. A node that
+/// carries `$ref` beside any of these cannot be honestly judged — the
+/// resolved definition's constraints are invisible to the member and pin
+/// comparisons, so round 27 fails such nodes closed (tool-level, the same
+/// direction any unjudgeable shape pays). Annotations (`title`,
+/// `description`, `default`, `examples`, `example`) do not trigger: they
+/// constrain nothing. The keywords listed are the ones that survive the
+/// strip pass — the widening family (`minLength`, `uniqueItems`, …) is
+/// gone before the gate runs. `properties`/`required` are included: the
+/// property-coverage arm reads only `obj`'s own property set, so a
+/// required name the *definition* carries is silently lost. This extends
+/// the `$defs`-entries-are-judged-live precedent — a definition shaped
+/// `{"$ref": …, "properties": …}` fails the tool closed even unreferenced,
+/// exactly as an unjudgeable definition already does.
+const REF_SIBLING_JUDGED_KEYWORDS: &[&str] = &[
+    "type",
+    "enum",
+    "const",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "pattern",
+    "format",
+    "items",
+    "properties",
+    "required",
+    "additionalProperties",
+];
+
+/// Round 27: whether this node pairs a `$ref` with a judged sibling pin —
+/// the conjunction the node-level judges cannot see across the reference
+/// edge.
+fn ref_siblings_carry_judged_pins(obj: &Map<String, Value>) -> bool {
+    obj.contains_key("$ref")
+        && obj
+            .keys()
+            .any(|key| REF_SIBLING_JUDGED_KEYWORDS.contains(&key.as_str()))
+}
+
 /// The pair judge's remaining call budget for the current request
 /// preparation: taken by each coverage/composition judgment and handed
 /// back after it (round 23 — the budget used to be created fresh per node,
@@ -3280,8 +3362,33 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
         || pattern.contains("\\W")
         || pattern.contains("\\s")
         || pattern.contains("\\S")
-        || pattern.contains("\\p{")
-        || pattern.contains("\\P{")
+        // Round 27: the bare property-shorthand spellings the brace scans
+        // missed — `\pL` (the wire's IdentityEscape reads literal `p` plus
+        // letter where Rust reads the Unicode class). Subsumes the brace
+        // forms above; over-abstention is the conservative direction, the
+        // pattern still ships and binds on the wire.
+        || pattern.contains("\\p")
+        || pattern.contains("\\P")
+        // Round 27: the remaining judge-decides-differently families, each
+        // pinned in `strict_fixwave_r27`. `\A`/`\z` are absolute haystack
+        // anchors here where Annex B reads literal `A`/`z` (the `\b` line
+        // one family over). `\u{…}`/`\x{…}`/`\Uxxxxxxxx` are Rust
+        // code-point escapes where the wire reads literal text — the 4-hex
+        // `\uXXXX` and 2-hex `\xHH` forms are identical in both dialects
+        // and keep judging. POSIX `[[:alpha:]]` classes are letters here
+        // where the wire parses a junk class plus a literal `]`. And
+        // `has_rust_only_flag_group` covers the inline-flag spellings
+        // `(?m`, `(?s`, `(?U`, `(?x`, `(?u`, `(?-u`, `(?mus` and the
+        // `(?P<name>` group: ECMA-262 has no inline-flag syntax at all, so
+        // every one of those is a wire SyntaxError where this side
+        // compiles and judges.
+        || pattern.contains("\\A")
+        || pattern.contains("\\z")
+        || pattern.contains("\\u{")
+        || pattern.contains("\\x{")
+        || pattern.contains("\\U")
+        || pattern.contains("[[:")
+        || has_rust_only_flag_group(pattern)
     {
         return None;
     }
@@ -3355,6 +3462,26 @@ fn parse_repeat_bound(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
         *cursor += 1;
     }
     saw.then_some(value)
+}
+
+/// Whether the pattern opens a Rust-only flag group — `(?flags)` or
+/// `(?flags:…)`, flags over `i m s U u x` plus `-` negation — or Rust's
+/// `(?P<name>` named-group spelling. ECMA-262 has no inline-flag syntax at
+/// all, so `(?m)^a` compiles and judges here and is a SyntaxError on the
+/// wire; named groups on the wire are `(?<name>…)` without the `P`. The
+/// ECMA-legal `(?` forms — `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`,
+/// `(?<name>` — all begin with a character outside this set, so common
+/// non-capturing groups, lookaround, and named groups keep judging.
+fn has_rust_only_flag_group(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    (0..bytes.len().saturating_sub(1)).any(|index| {
+        bytes[index] == b'('
+            && bytes[index + 1] == b'?'
+            && matches!(
+                bytes.get(index + 2),
+                Some(b'i' | b'm' | b's' | b'U' | b'u' | b'x' | b'-' | b'P')
+            )
+    })
 }
 
 /// Expansion-screen bound on the product of bounded-repeat upper bounds;
@@ -3664,6 +3791,18 @@ fn value_clears_bounds_with(
     obj: &Map<String, Value>,
     pattern: Option<&regex::Regex>,
 ) -> bool {
+    // Round 27: a `$ref` beside judged sibling pins — the caller judges the
+    // value against `obj` alone and never resolves the pointer, while the
+    // wire conjuncts the definition's constraints with the siblings (draft
+    // 2020-12; see [`REF_SIBLING_JUDGED_KEYWORDS`]). A member that clears
+    // `obj` can still violate the definition it sits beside —
+    // `{"$ref": "#/n", "enum": [1]}` where `n` demands `minimum: 5` shipped
+    // strict with an empty wire value set — so the honest verdict here is
+    // not-clearing. Every judge site (enum/const members, property leaves,
+    // pair-side pins) funnels through this function and inherits the check.
+    if ref_siblings_carry_judged_pins(obj) {
+        return false;
+    }
     // Round 26: `items` binds every element of an array pin the way
     // `properties` binds the members of an object pin — the member judges
     // read type/bounds/pattern/format but never `items`, so a required
@@ -3674,15 +3813,38 @@ fn value_clears_bounds_with(
     // this same arm — an array element that is itself an array beside a
     // nested `items` re-enters here — bounded by serde_json's 128-level
     // parse limit, the same stack-safety line every walk in this module
-    // draws.
+    // draws. Round 27: an `items` whose only shape is a `$ref` gives the
+    // conjunct a map it cannot read — every element clears a bare-ref map —
+    // so the honest node verdict is fail-closed (the reference walk has
+    // already proven resolvability; this is purely the judgment gap).
+    // Round 27: object elements meet items' property contract the way
+    // object members meet the node's properties — the r26 conjunct read
+    // only the scalar constraints items carries directly, so a required
+    // `{"items":{"type":"object","properties":{"a":{"type":"integer"}}},
+    // "enum":[[{"a":"x","b":2}]]}` shipped strict while every wire
+    // instance violated the property type or the enforced
+    // `additionalProperties: false`. The property-pattern compile hoists
+    // per node (one compile for the whole member scan, the line the enum
+    // arm draws); non-object elements bail inside the object judge, and an
+    // items node without a `properties` map never reaches here (the
+    // nested-empty-properties arm fails it closed first).
     if let Some(elements) = value.as_array()
         && let Some(items) = obj.get("items").and_then(Value::as_object)
     {
+        if items.contains_key("$ref") {
+            return false;
+        }
         let item_pattern = compiled_documented_pattern(items);
-        if !elements
-            .iter()
-            .all(|element| value_clears_bounds_with(element, items, item_pattern.as_ref()))
-        {
+        let items_property_patterns = compiled_property_patterns(items);
+        if !elements.iter().all(|element| {
+            value_clears_bounds_with(element, items, item_pattern.as_ref())
+                && pinned_object_value_compatible_with(
+                    element,
+                    items,
+                    &items_property_patterns,
+                    PINNED_OBJECT_JUDGE_DEPTH,
+                )
+        }) {
             return false;
         }
     }
@@ -4160,6 +4322,19 @@ fn schema_pair_satisfiable(
     depth: usize,
     budget: &mut usize,
 ) -> bool {
+    // Round 27: resolution below REPLACES the side with its definition,
+    // silently dropping the side's own judged siblings from the judgment —
+    // a branch `{"$ref": "#/n", "maximum": 3}` beside a string branch was
+    // judged as bare `n` vs `string` and shipped a union whose every
+    // instance must clear both `n` and `maximum: 3`. The check sits BEFORE
+    // the depth/budget exhaustion arm on purpose: `$ref` is not a judged
+    // constraint in that arm's keyword set, so an exhausted pair of
+    // ref-with-pins sides would otherwise abstain compatible and ship.
+    if a.as_object().is_some_and(ref_siblings_carry_judged_pins)
+        || b.as_object().is_some_and(ref_siblings_carry_judged_pins)
+    {
+        return false;
+    }
     // Cycle bounds: see the doc comment. Both sit far above anything a
     // non-cyclic document reaches, so the only shapes they turn away are
     // hostile cycles. Exhaustion used to abstain compatible-by-default —
@@ -6357,13 +6532,34 @@ mod strict_fixwave_r23 {
     }
 
     #[test]
-    fn ref_pinned_satisfiable_node_keeps_shipping() {
-        // Guard against overclosure: the ref pin alone (no contradicting
-        // bounds) ships strict.
+    fn ref_pinned_node_with_sibling_pins_fails_closed() {
+        // Round 27: a `$ref` beside a judged sibling pin fails closed — the
+        // judge reads only the node's own keywords and never resolves the
+        // pointer, while the wire conjuncts the definition with the sibling
+        // (draft 2020-12). The old satisfiable-sibling guard shipped
+        // `{"$ref": "#/num", "minimum": 0}` beside `num: number` because
+        // THIS sibling happened to be satisfiable; but a MEMBER of the node
+        // (an `enum`, a manufactured `const`) is judged against the sibling
+        // alone and never against the conjuncted window, so this sibling's
+        // satisfiability proves nothing about the pair the wire enforces.
+        // The honest line is fail-closed for any judged sibling.
         let (all, strict) = verdict(json!({
             "type": "object",
             "properties": {
                 "u": {"$ref": "#/$defs/num", "minimum": 0}
+            },
+            "required": ["u"],
+            "$defs": {"num": {"type": "number"}}
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+        // A bare `$ref` beside annotation-only siblings keeps shipping:
+        // annotations constrain nothing, so there is nothing to judge
+        // beside the pointer.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"$ref": "#/$defs/num", "description": "a number"}
             },
             "required": ["u"],
             "$defs": {"num": {"type": "number"}}
@@ -9240,7 +9436,7 @@ mod tests {
         // The same table under an OPTIONAL property is removed wholesale —
         // no fail-closed, no widening concern: the constraint ships nowhere.
         let mut tools = vec![test_tool(
-            "agent",
+            "deps_optional_fixture",
             json!({
                 "type": "object",
                 "properties": {
@@ -10180,6 +10376,7 @@ mod tests {
                 "send_later",
                 "agents/message",
                 "agents/followup",
+                "agent",
                 "Web"
             ]
         );
@@ -17353,5 +17550,348 @@ mod strict_fixwave_r26 {
         let mut d = Vec::new();
         pinned_canonical_bytes(&nul_string, &mut d);
         assert_ne!(c, d, "array elements are length-prefixed too");
+    }
+}
+
+/// Round-27 fixwave pins. Every fix this wave landed is pinned here; each
+/// pin was shown red on the unfixed tree by the round-27 review probes (or,
+/// for the contract-change pin, by the mutation run against the restored
+/// arm) before the fix was trusted.
+mod strict_fixwave_r27 {
+    use super::*;
+    use serde_json::json;
+
+    fn pinned_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn strict_verdict(schema: Value) -> Option<bool> {
+        let mut tools = vec![pinned_tool("probe", schema)];
+        let _ = prepare_tools_for_strict_mode(&mut tools);
+        tools[0].strict
+    }
+
+    #[test]
+    fn remaining_dialect_families_abstain_like_the_round26_line() {
+        // Round 27 MAJOR-1: the substring scans stopped at the round-26
+        // families; six more spellings compile and judge here while the
+        // wire (ECMA-262 Annex B, no `u` flag — patterns ship verbatim and
+        // flagless) errors or reads them as literals:
+        // - inline flags other than `(?i` (`(?m`, `(?s`, `(?U`, `(?x`,
+        //   `(?u`, `(?-u`, `(?mus`): ECMA has NO inline-flag syntax, every
+        //   one is a wire SyntaxError;
+        // - `(?P<name>`: Rust-only named-group spelling (the wire spells
+        //   named groups `(?<name>`);
+        // - braceless property classes `\pL`/`\PL`: wire IdentityEscape
+        //   reads literal `p` + letter — the round-26 pinned example with
+        //   the brace dropped;
+        // - `\A`/`\z`: absolute haystack anchors here, literal `A`/`z`
+        //   there;
+        // - `\u{…}`/`\x{…}`/`\Uxxxxxxxx`: Rust code-point escapes, wire
+        //   literal text;
+        // - POSIX `[[:alpha:]]`: letters here, junk class plus literal `]`
+        //   there.
+        for (name, pattern) in [
+            ("multiline-flag", "(?m)^a"),
+            ("dotall-flag", "(?s)a.b"),
+            ("swap-greedy-flag", "(?U)a+"),
+            ("verbose-flag", "(?x) a b"),
+            ("unicode-flag", "(?u)a"),
+            ("negated-flag", "(?-u)\\x01"),
+            ("multi-flag", "(?mus)^a"),
+            ("p-named-group", "(?P<word>x)"),
+            ("braceless-property", "\\pL{3}"),
+            ("braceless-negated-property", "\\PL"),
+            ("text-start-anchor", "\\Aabc\\z"),
+            ("braced-unicode-escape", "^\\u{41}$"),
+            ("braced-hex-escape", "^\\x{41}$"),
+            ("eight-hex-escape", "^\\U00000041$"),
+            ("posix-class", "^[[:alpha:]]+$"),
+        ] {
+            let mut node = serde_json::Map::new();
+            node.insert("pattern".to_string(), json!(pattern));
+            assert!(
+                compiled_documented_pattern(&node).is_none(),
+                "{name}: {pattern} must abstain — Rust compiles it, the wire \
+                 errors or reads it as literal text"
+            );
+        }
+        // The ECMA-legal `(?` forms keep judging: non-capturing groups,
+        // lookaround, and wire-spelled named groups are identical in both
+        // dialects. (Lookaround `(?=`/`(?!` is deliberately NOT in this
+        // control list: the regex crate refuses to compile it, so it takes
+        // the compile-error → abstain → ship arm — the disclosed line the
+        // end-to-end lookaround pin already draws.)
+        for (name, pattern) in [
+            ("non-capturing-group", "(?:abc|def)"),
+            ("named-group", "(?<word>[a-z]+)"),
+            ("four-hex-escape", "^\\u0041$"),
+            ("two-hex-escape", "^\\x41$"),
+            ("plain-class", "[a-z]{3}"),
+        ] {
+            let mut node = serde_json::Map::new();
+            node.insert("pattern".to_string(), json!(pattern));
+            assert!(
+                compiled_documented_pattern(&node).is_some(),
+                "{name}: {pattern} is dialect-equivalent and must still judge"
+            );
+        }
+        // End to end: an abstained pattern ships strict with the member
+        // unjudged (the disclosed abstention-ships line), while a member
+        // that genuinely misses a judged pattern still fails closed.
+        let abstained = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": { "type": "string", "pattern": "(?m)^a", "enum": ["abc"] }
+            },
+            "required": ["u"]
+        }));
+        assert_eq!(abstained, Some(true), "abstention ships the tool strict");
+        let judged = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": { "type": "string", "pattern": "^[a-z]{3}$", "enum": ["abcd"] }
+            },
+            "required": ["u"]
+        }));
+        assert_eq!(judged, None, "a judged missing member still fails closed");
+    }
+
+    #[test]
+    fn object_elements_of_array_pins_meet_the_items_property_contract() {
+        // Round 27 MAJOR-2: the r26 items conjunct judged only the scalar
+        // constraints items carries directly. An object element is now also
+        // judged against items' property set, required names, and per-key
+        // constraints — the shape the const→enum landing itself
+        // manufactures. The items author `required` because the enforce
+        // pass removes every property the schema does not require.
+        let violating = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "a": { "type": "integer" } },
+                        "required": ["a"]
+                    },
+                    "enum": [[{"a": "x", "b": 2}]]
+                }
+            },
+            "required": ["u"]
+        }));
+        assert_eq!(
+            violating, None,
+            "object element violating items' property type and enforced \
+             additionalProperties must fail the tool closed"
+        );
+        let satisfying = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "a": { "type": "integer" } },
+                        "required": ["a"]
+                    },
+                    "enum": [[{"a": 1}]]
+                }
+            },
+            "required": ["u"]
+        }));
+        assert_eq!(satisfying, Some(true), "conforming object elements ship");
+        // Nested: an array property value beside its own items re-enters
+        // the conjunct through the pinned-object leaf.
+        let nested = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "a": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["a"]
+                    },
+                    "enum": [[{"a": [1]}]]
+                }
+            },
+            "required": ["u"]
+        }));
+        assert_eq!(nested, None, "nested items bind through the object judge");
+    }
+
+    #[test]
+    fn items_under_a_ref_fails_closed() {
+        // Round 27 MAJOR-3d: `items: {"$ref": …}` hands the conjunct a bare
+        // ref map — every element clears it — while the wire resolves the
+        // definition. The node fails closed instead of shipping an
+        // unjudgeable member scan.
+        let schema = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/s" },
+                    "enum": [[1]]
+                }
+            },
+            "required": ["u"],
+            "$defs": { "s": { "type": "string" } }
+        }));
+        assert_eq!(schema, None, "items under $ref is unjudgeable");
+    }
+
+    #[test]
+    fn ref_siblings_carrying_judged_pins_fail_closed_everywhere() {
+        // Round 27 MAJOR-3: the definition's constraints conjunct with the
+        // node's sibling pins on the wire (draft 2020-12) while every judge
+        // reads the node's own keywords alone. Each shape shipped strict
+        // with an empty or narrower wire value set before the fix.
+        // enum beside a contradicting definition:
+        let enum_vs_definition = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": { "$ref": "#/$defs/n", "enum": [1] }
+            },
+            "required": ["u"],
+            "$defs": { "n": { "type": "number", "minimum": 5 } }
+        }));
+        assert_eq!(
+            enum_vs_definition, None,
+            "empty wire window must fail closed"
+        );
+        // a crossed window across the ref edge:
+        let crossed_window = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": { "$ref": "#/$defs/n", "maximum": 3 }
+            },
+            "required": ["u"],
+            "$defs": { "n": { "type": "number", "minimum": 5 } }
+        }));
+        assert_eq!(crossed_window, None, "[5,3] must fail closed");
+        // a type the definition disjoins:
+        let disjoint_type = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": { "$ref": "#/$defs/n", "type": "string" }
+            },
+            "required": ["u"],
+            "$defs": { "n": { "type": "number" } }
+        }));
+        assert_eq!(disjoint_type, None, "string ∧ number admits nothing");
+        // the pair-side replacement: when the pair judge RUNS on a
+        // ref-with-pins side, resolution used to replace the branch with
+        // its definition and drop the sibling pin, reading `n` vs `x` as
+        // compatible. The check now fires at the judge entry. A union keeps
+        // the round-24 single-live-branch leniency — a satisfiable sibling
+        // branch still witnesses the union — so the pin breaks the OTHER
+        // branch (empty enum) to show the ref+pins branch no longer counts
+        // as a live witness:
+        let pair_side = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/n", "maximum": 3 },
+                        { "enum": [] }
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": { "n": { "type": "number", "minimum": 5 } }
+        }));
+        assert_eq!(
+            pair_side, None,
+            "the ref+pins branch must count incompatible, not resolve away \
+             compatible"
+        );
+        // annotations beside a $ref keep shipping — they constrain nothing.
+        let annotations_only = strict_verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": { "$ref": "#/$defs/n", "description": "a number" }
+            },
+            "required": ["u"],
+            "$defs": { "n": { "type": "number" } }
+        }));
+        assert_eq!(annotations_only, Some(true));
+        // a bare $ref keeps shipping.
+        let bare_ref = strict_verdict(json!({
+            "type": "object",
+            "properties": { "u": { "$ref": "#/$defs/n" } },
+            "required": ["u"],
+            "$defs": { "n": { "type": "number" } }
+        }));
+        assert_eq!(bare_ref, Some(true));
+    }
+
+    #[test]
+    fn collapse_landed_narrowings_are_counted_in_the_note() {
+        // Round 27: the narrowing count moved onto the sanitized clone. A
+        // single-element collapse that lands `additionalProperties` onto a
+        // properties-bearing parent used to read count 0 on the authored
+        // shape and suppress the whole disclosure sentence for a narrowing
+        // that shipped.
+        let mut tools = vec![pinned_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "p": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "anyOf": [ { "properties": { "a": { "type": "string" } }, "required": ["a"] } ],
+                        "required": ["a"]
+                    }
+                },
+                "required": ["p"]
+            }),
+        )];
+        assert!(prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, Some(true));
+        let description = &tools[0].description;
+        assert!(
+            description.contains("was narrowed to `false` on 1 object schema"),
+            "the collapse-landed narrowing must be counted: {description}"
+        );
+    }
+
+    #[test]
+    fn agent_tool_fails_closed_by_name_like_its_hidden_siblings() {
+        // Round 27 MAJOR-4: `agent` (the model-facing sub-agent surface)
+        // carries its per-action requirements in a `dependentSchemas` tree
+        // the strip pass deletes, so a strict `agent` shipped callable with
+        // `action` alone while the runtime rejected every call but the
+        // vacuous `wait`. The tool now ships unchanged and non-strict by
+        // name; the real-schema census beside the tool pins the binding.
+        let schema = strict_verdict_named(
+            "agent",
+            json!({
+                "type": "object",
+                "properties": { "action": { "enum": ["start", "roster"] } },
+                "required": ["action"]
+            }),
+        );
+        assert_eq!(schema, None, "agent must fail closed by name");
+    }
+
+    fn strict_verdict_named(name: &str, schema: Value) -> Option<bool> {
+        let mut tools = vec![pinned_tool(name, schema)];
+        let _ = prepare_tools_for_strict_mode(&mut tools);
+        tools[0].strict
     }
 }

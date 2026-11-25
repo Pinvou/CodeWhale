@@ -746,8 +746,8 @@ strict_tool_mode = true
 
 Off by default. When enabled, requests routed to an **official DeepSeek-family
 route** (provider-typed DeepSeek — the `deepseek`, legacy `deepseek-cn`, and
-`deepseek-anthropic` typings — on any path of `api.deepseek.com` or the
-legacy `api.deepseeki.com` alias, including the Anthropic-compatible
+`deepseek-anthropic` typings — on a canonical path of `api.deepseek.com` or
+the legacy `api.deepseeki.com` alias, including the Anthropic-compatible
 Messages route) also set
 `tool_choice: "required"` and reshape every active tool schema to DeepSeek's
 strict contract: optional parameters are removed from the schema (each
@@ -766,14 +766,26 @@ Two carve-outs: on thinking-enabled chat requests to the DeepSeek dialect the
 on routes whose model resolves to the Responses endpoint the wire hardcodes
 `strict: false` per tool and sends `tool_choice: "auto"` (the doctor's
 `responses_dialect` verdict reports this). `required` applies to every other
-request on the route.
+request on the route. URL spellings the URL standard would normalize —
+a trailing-dot host, percent-escaped or non-ASCII host bytes, an explicit
+`:443`, whitespace, query strings — degrade out of scope (the doctor's
+`custom_endpoint` verdict reports them): point the setting at the
+canonical spelling to get the reshaping.
 
 Tools whose schema cannot be represented faithfully under the strict subset —
 root alternatives, required nullables, or tools whose runtime demands
-schema-optional parameters (`update_goal`, `send_later`, `agents/message`,
-`agents/followup`, `Web`) — fail closed per tool: they keep their original
-schema and ship without the strict flag, so they stay callable non-strict.
-`tool_choice` follows the route gate, not per-tool outcomes: it stays
+schema-optional parameters (`update_goal`, `send_later`, `agent`,
+`agents/message`, `agents/followup`, `Web`) — fail closed per tool: they
+keep their original schema and ship without the strict flag, so they stay
+callable non-strict. `agent` (the model-facing sub-agent surface) carries
+its per-action requirements in a `dependentSchemas` table the strict
+contract cannot express, so under strict every call but `roster`/`status`
+would be rejected — the tool ships non-strict instead. `agents/message` and
+`agents/followup` are model-hidden (never offered to the model), so their
+entries are defense-in-depth. `send_later`'s read-only `list` action would
+have stayed usable and is dropped with the tool — one honest omission
+priced over a half-usable strict entry. `tool_choice` follows the route
+gate, not per-tool outcomes: it stays
 `required` on an in-scope route even when some tools fail closed. The child
 sub-agent surface requests with `auto` regardless.
 
@@ -809,7 +821,10 @@ parent — now keep the authored composition instead of merging into it (on
 Moonshot this means a pathological schema that previously shipped now
 drops from the request via the omitted-tools list, fail-closed); and the
 `remember` tool's schema marks `note` required (its runtime already
-rejects a missing `note` for append and revise, and an all-optional schema
+rejects a missing `note` for append and revise; `retire` ignores the field
+but the schema now demands it — the over-require is deliberate, one
+honest schema over a per-action split the strict subset cannot express,
+and an all-optional schema
 would leave strict mode nothing to keep). The `codewhale doctor` strict-mode
 verdict grades the current route: `disabled` (setting off), `ready`
 (official beta host), `fallback_non_beta` (official non-beta path — the

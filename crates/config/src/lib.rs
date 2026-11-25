@@ -4865,7 +4865,12 @@ fn xiaomi_mimo_base_url_is_pay_as_you_go(base_url: &str) -> bool {
 /// canonicalization and credential scoping cannot disagree.
 #[must_use]
 pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> bool {
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    // No `trim()` of leading/trailing whitespace: the TUI's strict route
+    // gate rejects whitespace-padded URLs outright, and this matcher's
+    // whole point is to answer the same question the gate answers — a
+    // padded URL is "official" to neither. (Interior whitespace never
+    // matched the literals anyway.)
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     match provider {
         ProviderKind::Deepseek => matches!(
             normalized.as_str(),

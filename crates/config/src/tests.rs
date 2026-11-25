@@ -7075,8 +7075,9 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
         "https://api.deepseek.com",
         "https://api.deepseek.com/v1/",
         "https://api.deepseek.com/beta",
-        // The second official host the TUI strict/beta routing already
-        // recognizes (round 25) — the same three paths per host.
+        // The legacy compat host the TUI strict/beta routing already
+        // recognizes (round 25; docs/REBRAND.md — not an official
+        // endpoint) — the same three paths per host.
         "https://api.deepseeki.com",
         "https://api.deepseeki.com/v1/",
         "https://api.deepseeki.com/beta",
@@ -7097,6 +7098,17 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
     assert!(!provider_base_url_is_official(
         ProviderKind::Deepseek,
         "https://api.deepseeki.com.evil.example/v1"
+    ));
+    // Round 27: no whitespace trimming — the TUI strict route gate rejects
+    // padded URLs outright, and this matcher answers the same question the
+    // gate answers, so a padded URL is official to neither.
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "  https://api.deepseek.com/v1"
+    ));
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "https://api.deepseek.com/v1  "
     ));
 }
 

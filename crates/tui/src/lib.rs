@@ -7379,8 +7379,12 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
         // The table key follows the LAUNCH identity: for a custom identity
         // the raw root's `provider` string names a table no session serves
         // (the settings re-point), so the identity's own key is the table
-        // the session reads.
-        "provider_config_table": if identity.provider == crate::config::ApiProvider::Custom {
+        // the session reads. The legacy literal custom route has no table
+        // at all — the session reads the root — and answers from the
+        // helper's honest branch instead of naming `providers.custom`.
+        "provider_config_table": if identity.provider == crate::config::ApiProvider::Custom
+            && !config.uses_legacy_literal_custom_route()
+        {
             format!("providers.{}", identity.key)
         } else {
             doctor_provider_config_table(config, identity.provider)
@@ -7394,6 +7398,18 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
             .wire_protocol
             .unwrap_or_else(|| doctor_effective_wire_protocol(config, provider)),
         "base_url": {
+            // Names which URL this block answers from — the prepared
+            // route's endpoint when the launch route resolved, the
+            // configured value when it did not. The same config can
+            // classify differently across that boundary (the prepared
+            // config clears a stale foreign root the raw read still
+            // names), so the Err-state report marks its source instead of
+            // implying the two states answer identically.
+            "source": if target.resolution == DoctorModelResolution::Resolved {
+                "prepared_route"
+            } else {
+                "configured"
+            },
             "redacted": redacted_base_url,
             "class": doctor_base_url_class(provider, &target.base_url),
             "fingerprint": crate::utils::redacted_identifier_for_log(&target.base_url),
@@ -7475,7 +7491,11 @@ fn doctor_effective_wire_protocol(
 }
 
 /// The report spelling for one wire format, shared by the resolved-route
-/// answer and the static fallback so the JSON vocabulary cannot drift.
+/// answer and the static fallback so the route report's own JSON vocabulary
+/// cannot drift. (The capability section of the same report serializes the
+/// identical enum as the variant name — `"Responses"`/`"AnthropicMessages"`
+/// — a case-map a cross-section consumer performs by hand; the shared
+/// helper scopes to the route report only.)
 fn wire_format_label(format: codewhale_config::provider::WireFormat) -> &'static str {
     match format {
         codewhale_config::provider::WireFormat::ChatCompletions => "chat_completions",
@@ -7829,6 +7849,12 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
                 DoctorModelResolution::ConfiguredOnly,
                 None,
                 None,
+                // Nothing is servable in this state, so the configured URL
+                // is all there is to show — the prepared route config does
+                // not exist. The route report labels it (`route_error` and
+                // the base_url source marker below) so the same config is
+                // never classified one way here and the opposite way once
+                // resolution succeeds.
                 config.deepseek_base_url(),
             ),
         };
@@ -7948,7 +7974,12 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 "enabled, but the strict tool pipeline only acts on official \
                  DeepSeek-family https endpoints (the api.deepseeki.com legacy \
                  compat host is also recognized); this custom endpoint keeps its \
-                 tools unreshaped and {tool_choice_clause}"
+                 tools unreshaped and {tool_choice_clause}. Spellings the URL \
+                 standard normalizes to the official host — a trailing-dot FQDN, \
+                 percent-escaped or non-ASCII host bytes, an explicit default \
+                 port — also land here while the request still reaches the \
+                 official API; point the setting at the canonical spelling \
+                 to get the reshaping"
             ),
             recommended_base_url: None,
         };
@@ -8142,7 +8173,12 @@ fn doctor_tls_status(config: &Config) -> DoctorTlsStatus {
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
     let provider = scoped.provider_identity_for(scoped.api_provider());
-    let insecure_skip_tls_verify = config.insecure_skip_tls_verify();
+    // The flag answers from the identity-scoped clone, not the raw root:
+    // the raw read named the served provider while judging a different
+    // table's flag (a warning contradicted by the same run's probe, or a
+    // clearance hiding a route the client bails on) — the same
+    // launch-scoping the provider name above already went through.
+    let insecure_skip_tls_verify = scoped.insecure_skip_tls_verify();
     let message = if insecure_skip_tls_verify {
         format!(
             "TLS certificate verification cannot be disabled for provider {provider}; use SSL_CERT_FILE with a trusted custom CA bundle"
@@ -15774,6 +15810,33 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    fn doctor_route_report_names_the_root_for_the_legacy_literal_custom_route() {
+        // Round 27: the identity-keyed table label specialized on
+        // `provider == Custom` alone, so the legacy literal shape — root
+        // `base_url`/`api_key`, no `[providers.custom]` table — was told
+        // its session reads `providers.custom`, a table that does not
+        // exist, while the helper's honest branch sat unreachable behind
+        // the caller. The label falls through to the helper on that shape.
+        let config = Config {
+            provider: Some("custom".to_string()),
+            base_url: Some("https://gateway.example.com/v1".to_string()),
+            api_key: Some("local-test-key".to_string()),
+            ..Default::default()
+        };
+        assert!(config.uses_legacy_literal_custom_route());
+
+        let route = doctor_route_report(&config);
+
+        assert_eq!(route["provider"], "custom");
+        assert_eq!(
+            route["provider_config_table"],
+            "root (legacy literal custom)"
+        );
+        let serialized = serde_json::to_string(&route).expect("route JSON");
+        assert!(!serialized.contains("local-test-key"));
+    }
+
+    #[test]
     fn doctor_operate_fleet_json_lists_multi_layer_profile_paths() {
         // #5098: doctor must name the winning layer and every losing path
         // when project and personal both define the same id.
@@ -21386,6 +21449,37 @@ mod strict_doctor_fixwave_r22 {
         ds4.wire = Some("responses".to_string());
         ds4.auth_mode = Some("none".to_string());
         (tmp, config, home, env_lock)
+    }
+
+    #[test]
+    fn doctor_tls_flag_answers_the_served_table_not_the_raw_root() {
+        // Round 27: the provider NAME answered the launch identity's scoped
+        // table while the flag read the raw root's active table — a
+        // `[providers.beta-route]` flag on a `ds4` launch warned about
+        // `ds4` carrying a flag `ds4` does not have (the exact
+        // sibling-drift class the wire line went through in round 26).
+        // Both halves now answer the scoped clone: the fixture's raw root
+        // is `beta-route` (whose table carries the flag) while the
+        // remembered launch provider is `ds4` (whose table is clean).
+        let (_tmp, mut config, _home, _env_lock) = repoint_fixture();
+        config
+            .providers
+            .as_mut()
+            .expect("fixture providers")
+            .custom
+            .get_mut("beta-route")
+            .expect("fixture beta-route table")
+            .insecure_skip_tls_verify = Some(true);
+
+        let status = doctor_tls_status(&config);
+
+        assert_eq!(status.provider, "ds4");
+        assert!(
+            !status.insecure_skip_tls_verify,
+            "the raw root's beta-route flag must not leak into the served \
+             provider's TLS verdict"
+        );
+        assert!(status.message.contains("enabled"));
     }
 
     #[test]
