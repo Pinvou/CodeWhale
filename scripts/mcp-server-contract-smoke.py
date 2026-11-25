@@ -158,12 +158,11 @@ def content_json(response: dict) -> dict:
 #     schema is enforced on the wire, not advisory.
 #
 # The guard mirrors the T11 engine pipeline (schema_sanitize.rs — the
-# document-precise Moonshot face lands on the wire via CodeWhale #143, with
+# document-precise Moonshot face landed on the wire via CodeWhale #143, with
 # the provider faces in #144/#145/#146/#147) against exactly that document
-# set. Until the close-out re-pin lands that batch on this repository's
-# gitlink, the guard pins the TARGET contract: the parent's pinned tree
-# still runs the pre-T11 sanitizer, and the rules here converge with the
-# wire at the re-pin, not independently:
+# set. The close-out re-pin consumed that batch on this repository's
+# gitlink (2026-11-24, cc2adf8ef9), so the parent's pinned tree now runs
+# the T11 sanitizer and the rules here converge with the wire:
 #   - Advisory keywords are STRIPPED, not rejected. The specification's
 #     unsupported list names the annotation group outright ("暂不支持
 #     title、$comment 等描述性元数据，也不支持 format 格式注解字段");
@@ -827,12 +826,11 @@ def check_schema_contract(tool_id: str, tools: list) -> int:
     tree), then the walker's whole rule set
     applies to what the Moonshot wire would carry — shape, per-type keyword
     admissibility, enum/default value typing, required⊆properties, and the
-    resource budgets. Against the T11 face these rules mirror, a schema
-    this guard accepts is not one the validator would drop; against the
-    currently pinned pre-T11 face the strips and the loosened budgets run
-    ahead of the engine, and the pinned sanitizer would still reject some
-    guard-green schemas — the interim-face tripwire in the unit tests
-    keeps that window loud until the close-out re-pin.
+    resource budgets. Against the T11 face these rules mirror — now the
+    pinned face since the close-out re-pin (2026-11-24, cc2adf8ef9) — a
+    schema this guard accepts is not one the validator would drop; the
+    gitlink tripwire in the unit tests keeps future face advances loud
+    until the pin is consciously re-blessed.
     """
     offenders: list[str] = []
     for tool in tools:
