@@ -17889,6 +17889,30 @@ mod strict_fixwave_r27 {
         assert_eq!(schema, None, "agent must fail closed by name");
     }
 
+    #[test]
+    fn the_value_judge_itself_refuses_ref_siblings() {
+        // Round 27 MAJOR-3: the member-level check lives INSIDE
+        // `value_clears_bounds_with` — defense-in-depth beneath the walk
+        // and pair entry checks, and the contract every future call site
+        // inherits. Pinned by direct call: the end-to-end pins above
+        // cannot see which layer caught the shape.
+        let with_pins = json!({
+            "$ref": "#/$defs/n",
+            "enum": [1]
+        });
+        let obj = with_pins.as_object().expect("map");
+        assert!(
+            !value_clears_bounds_with(&json!(1), obj, None),
+            "a member must not clear a $ref-with-pins node"
+        );
+        let bare_ref = json!({ "$ref": "#/$defs/n" });
+        let bare = bare_ref.as_object().expect("map");
+        assert!(
+            value_clears_bounds_with(&json!(1), bare, None),
+            "a bare $ref imposes no member constraint here"
+        );
+    }
+
     fn strict_verdict_named(name: &str, schema: Value) -> Option<bool> {
         let mut tools = vec![pinned_tool(name, schema)];
         let _ = prepare_tools_for_strict_mode(&mut tools);
