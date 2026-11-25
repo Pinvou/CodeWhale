@@ -130,6 +130,15 @@ pub(crate) async fn run_shell_producer_fixture(
         bool,
         Option<&Value>,
     ) -> Option<Value>,
+    connector: fn(
+        &deepseek_tui::tools::shell::SharedShellManager,
+        &str,
+        &str,
+        &str,
+        bool,
+        Option<&Value>,
+    ) -> Option<&'static str>,
+    connector_command: fn(&std::path::Path, i64, bool) -> &'static str,
 ) {
     // TestHome holds the harness-wide environment lock for the entire Engine
     // lifetime. All runtime state belongs to this fixture, never the user home.
@@ -145,9 +154,17 @@ pub(crate) async fn run_shell_producer_fixture(
         (2, "exit 0", None, None),
         (3, "sleep 4", Some(1), None),
         (4, "if true; then", None, None),
+        (5, "", None, None),
+        (6, "", None, Some(7)),
+        (7, "", None, None),
     ] {
         let folder = work.path().join(format!("case_{index}"));
         std::fs::create_dir_all(&folder).unwrap();
+        let command = if index >= 5 {
+            connector_command(&folder, expected_exit.unwrap_or(0), index != 7)
+        } else {
+            command
+        };
         let session = format!("shell_diagnostic_session_{index}");
         let manager = deepseek_tui::tools::shell::new_shared_shell_manager(folder.join("jobs"));
         let api = deepseek_tui::config::Config::default();
@@ -288,6 +305,37 @@ pub(crate) async fn run_shell_producer_fixture(
                                 Some(explicit),
                             );
                         }
+                        let connector_key =
+                            connector(&manager, &session, turn, &id, success, original_metadata);
+                        let veto_results = matches!(index, 5 | 6).then(|| {
+                            // Same real job and origin tuple as the attributable control.
+                            ["sandbox_denied", "blocked", "backgrounded", "canceled"].map(|flag| {
+                                let veto = serde_json::json!({ (flag): true });
+                                let allowed = serde_json::json!({ (flag): false });
+                                let vetoed =
+                                    connector(&manager, &session, turn, &id, success, Some(&veto));
+                                let attributed = connector(
+                                    &manager,
+                                    &session,
+                                    turn,
+                                    &id,
+                                    success,
+                                    Some(&allowed),
+                                );
+                                (flag, vetoed, attributed)
+                            })
+                        });
+                        assert!(
+                            connector(
+                                &manager,
+                                &session,
+                                turn,
+                                "other_call",
+                                success,
+                                original_metadata,
+                            )
+                            .is_none()
+                        );
                         let statuses = manager
                             .lock()
                             .unwrap()
@@ -304,6 +352,8 @@ pub(crate) async fn run_shell_producer_fixture(
                             success,
                             result.err().map(|e| e.to_string()).unwrap_or_default(),
                             metadata,
+                            connector_key,
+                            veto_results,
                             statuses,
                         ));
                     }
@@ -314,19 +364,22 @@ pub(crate) async fn run_shell_producer_fixture(
             observation
         })
         .await;
-        handle.send(Op::Shutdown).await.unwrap();
+        let shutdown = handle.send(Op::Shutdown).await;
         let mut running = running;
-        if tokio::time::timeout(Duration::from_secs(10), &mut running)
-            .await
-            .is_err()
-        {
-            running.abort();
-            panic!("fixture engine shutdown timed out");
+        match tokio::time::timeout(Duration::from_secs(10), &mut running).await {
+            Ok(result) => result.expect("fixture engine task failed"),
+            Err(_) => {
+                running.abort();
+                let _ = running.await;
+                panic!("fixture engine shutdown timed out");
+            }
         }
-        let (success, error, metadata, statuses) = observed
+        shutdown.expect("fixture engine did not accept shutdown");
+        let (success, error, metadata, connector_key, veto_results, statuses) = observed
             .expect("fixture turn timed out")
             .expect("real default bash did not execute");
-        assert_eq!(success, index == 2);
+        assert_eq!(success, matches!(index, 2 | 5 | 7));
+        assert_eq!(connector_key, matches!(index, 5 | 6).then_some("feishu"));
         assert_eq!(
             statuses.len(),
             1,
@@ -348,9 +401,17 @@ pub(crate) async fn run_shell_producer_fixture(
                 .diagnostic_error(&error, "tool_result")
                 .diagnostic_tool_metadata(metadata.as_ref());
         }
+        if let Some(key) = connector_key {
+            event = event.tool(key, key, "cli");
+        }
         telemetry.track(event);
         let outbox = telemetry.outbox.lock().unwrap();
         let event = &outbox.records[0].event;
+        if let Some(key) = connector_key {
+            assert_eq!(event["tool_key"], key);
+            assert_eq!(event["tool_name"], key);
+            assert!(!event.to_string().contains("lark-cli"));
+        }
         if index == 4 {
             // The tool name does not select a parser. Require the real host
             // shell's nonzero syntax-error receipt without assuming a
@@ -390,6 +451,43 @@ pub(crate) async fn run_shell_producer_fixture(
                     .keys()
                     .any(|key| key.starts_with("diagnostic_"))
             );
+        }
+        drop(outbox);
+        if let Some(veto_results) = veto_results {
+            let turn = "witness_turn_fixture";
+            // Use the same operation registration and completion as the app.
+            for (flag, vetoed, attributed) in veto_results {
+                for (denied, key, expected_key, expected_name) in [
+                    (true, vetoed, "shell", "bash"),
+                    (false, attributed, "feishu", "feishu"),
+                ] {
+                    let call = format!("veto_{flag}_{denied}");
+                    let metadata = serde_json::json!({ (flag): denied });
+                    events::start_tool_call(&telemetry, &session, turn, &call, "bash");
+                    events::complete_tool_call(
+                        &telemetry,
+                        &session,
+                        turn,
+                        &call,
+                        success,
+                        (!success).then_some("tool_error"),
+                        (!success).then_some(error.as_str()),
+                        Some(&metadata),
+                        || key,
+                    );
+                    let outbox = telemetry.outbox.lock().unwrap();
+                    let events = &outbox.records[outbox.records.len() - 2..];
+                    let started = &events[0].event;
+                    let completed = &events[1].event;
+                    assert_eq!(started["event_name"], "tool_call_started");
+                    assert_eq!(completed["event_name"], "tool_call_completed");
+                    assert_eq!(started["operation_id"], completed["operation_id"]);
+                    assert_eq!(completed["success"], success);
+                    assert_eq!(completed["tool_key"], expected_key, "flag {flag}={denied}");
+                    assert_eq!(completed["tool_name"], expected_name);
+                    assert_eq!(completed["tool_type"], "cli");
+                }
+            }
         }
     }
 }

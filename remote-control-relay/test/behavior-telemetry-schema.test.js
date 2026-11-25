@@ -150,6 +150,15 @@ test("accepts only normalized names on tool events", () => {
     duration_ms: 12,
   };
   assert.deepEqual(validateBehaviorEventShape(toolEvent, { now: NOW }), { ok: true });
+  assert.deepEqual(validateBehaviorEventShape({
+    ...toolEvent, tool_key: "hdm", tool_name: "hdm", success: false, error_category: "tool_error",
+    diagnostic_id: toolEvent.event_id, diagnostic_code: "tool_failed", diagnostic_component: "tool",
+    diagnostic_trace_id: "a".repeat(64), diagnostic_site: "tool_result",
+    diagnostic_environment: { tool_key: "hdm" },
+  }, { now: NOW }), { ok: true });
+  assert.deepEqual(validateBehaviorEventShape({
+    ...toolEvent, tool_key: "feishu", tool_name: "feishu", tool_type: "cli",
+  }, { now: NOW }), { ok: true });
   assert.deepEqual(validateBehaviorEventShape({ ...toolEvent, execution_task_key: "a".repeat(64) }, { now: NOW }), { ok: true });
   assert.equal(validateBehaviorEventShape({ ...toolEvent, execution_task_key: "raw-task" }, { now: NOW }).ok, false);
   assert.equal(validateBehaviorEventShape(taskFinished({ execution_task_key: "a".repeat(64) }), { now: NOW }).ok, false);
