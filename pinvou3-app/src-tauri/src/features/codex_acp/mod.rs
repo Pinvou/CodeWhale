@@ -27,6 +27,17 @@ mod stall;
 mod store;
 pub mod workspace;
 
+#[derive(Debug)]
+pub(crate) struct AcpPromptValidationError(String);
+
+impl std::fmt::Display for AcpPromptValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AcpPromptValidationError {}
+
 // 纯提取：连接池自身仍是本 facade 的 impl 块；安装、登录与 Kimi 内省的
 // 无副作用自由函数已迁入对应子模块，这里显式引入 mod.rs 实际使用的符号。
 use install::{

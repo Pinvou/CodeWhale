@@ -78,6 +78,13 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T1|宿主模型传输约束接口|CodeWhale/crates/tui/src/config.rs|pub trait ModelHttpPolicy"
+  "T1|主模型与 HTTP/1 回退应用宿主约束|CodeWhale/crates/tui/src/client.rs|policy.configure(builder, &base_url)"
+  "T1|宿主冻结路线配置独立视觉策略|pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|.vision_http_policy()"
+  "T1|Host HTTP policy covers primary fallback and vision|CodeWhale/crates/tui/src/client/transport_policy_tests.rs|fn forkguard_host_http_policy_reaches_primary_fallback_and_vision"
+  "T1|Host HTTP policy construction denial is closed|CodeWhale/crates/tui/src/client/transport_policy_tests.rs|fn forkguard_host_http_policy_construction_denial_fails_closed"
+  "T1|Host HTTP policy cannot be installed through TOML|CodeWhale/crates/tui/src/config/host_http_policy_tests.rs|fn forkguard_host_http_policy_cannot_be_supplied_by_toml"
+  "T1|Vision public registry accepts original config fields|CodeWhale/crates/tui/tests/host_http_policy_public_api.rs|fn forkguard_host_http_policy_public_registry_accepts_original_three_field_literal"
   "T1|终态错误来源随真实选中结果传递     |CodeWhale/crates/tui/src/core/events.rs|error_source: Option<TurnErrorSource>,"
   "T1|普通路由本地准备失败保持运行时来源 |CodeWhale/crates/tui/src/core/engine/tests.rs|ordinary_route_preparation_failure_is_runtime_without_sending_http"
   "T1|宿主只消费明确模型来源终态         |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|== Some(deepseek_tui::core::events::TurnErrorSource::Model))"

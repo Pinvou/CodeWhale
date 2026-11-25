@@ -4452,6 +4452,7 @@ mod tests {
             action_calls: std::sync::atomic::AtomicUsize,
             task_calls: std::sync::atomic::AtomicUsize,
             block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+            model_preflight_service: Option<Arc<super::super::task::RemoteTaskService>>,
             defer_action: std::sync::atomic::AtomicBool,
         }
 
@@ -4498,10 +4499,37 @@ mod tests {
 
             async fn submit_task(
                 &self,
-                _lease: &LeaseContext,
+                lease: &LeaseContext,
                 session_ref: &str,
                 payload: &Value,
             ) -> Result<Value, String> {
+                if let Some(service) = &self.model_preflight_service {
+                    let package =
+                        super::super::temporary_model::TemporaryModelPackageV1::from_wire_value(
+                            &payload["temporary_model_package"],
+                        )
+                        .unwrap();
+                    package
+                        .validate_for_task(lease, payload["task_id"].as_str().unwrap())
+                        .unwrap();
+                    let preflight = package
+                        .validate_runtime_credential()
+                        .map_err(|error| error.code);
+                    let mut bound = payload.clone();
+                    bound["session_id"] = json!("b-session-admission");
+                    let error = service
+                        .prepare_bound_admission_with_preflight(
+                            lease,
+                            &bound,
+                            3_500,
+                            Some(session_ref),
+                            preflight,
+                            |_| panic!("credential rejection must not install task resources"),
+                        )
+                        .err()
+                        .expect("temporary credential preflight must refuse before admission");
+                    return Err(error.code.to_owned());
+                }
                 // B 权威会话 id 与 A 的引用不同，由派发层改写回去。
                 let prior = self
                     .task_calls
@@ -4843,6 +4871,73 @@ mod tests {
         assert!(dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({
             "session_id":"session-a-ref", "reject_with":"controlled_submission_worker_failed",
         })).await.is_err(), "ambiguous worker outcomes are never definitive rejection receipts");
+
+        let (_, service, live, mut submit) =
+            super::super::task_admission_test_support::task_admission_fixture();
+        let mut package = super::super::temporary_model::temporary_model_package_fixture(
+            codewhale_config::API_KEYRING_SENTINEL,
+        );
+        package.binding.connection_id = live.connection_id.clone();
+        package.binding.controller_lease_id = live.controller_lease_id.clone();
+        package.binding.lease_epoch = live.lease_epoch.parse().unwrap();
+        package.binding.relay_epoch = live.relay_epoch.clone();
+        package.binding.remote_control_generation = live.remote_control_generation.clone();
+        package.binding.task_id = submit["task_id"].as_str().unwrap().to_owned();
+        submit["v"] = json!(1);
+        submit["type"] = json!("task_submit");
+        submit["request_id"] = json!("request-model-preflight");
+        submit["session_id"] = json!("a-ref-admission");
+        submit["model_source"] = json!("controller_temporary");
+        submit["temporary_model_package"] = package.to_wire_value();
+        super::super::protocol::validate_controller_payload_json(
+            &submit.to_string(),
+            SenderRole::ControllerA,
+        )
+        .unwrap();
+
+        let model_port = StubPort {
+            model_preflight_service: Some(service.clone()),
+            ..StubPort::default()
+        };
+        let frames = dispatch_decrypted_payload(&model_port, &live, "task_submit", &submit)
+            .await
+            .unwrap();
+        let [(kind, refusal)] = frames.as_slice() else {
+            panic!("the controlling device expects one definitive task status");
+        };
+        assert_eq!(*kind, "task_status");
+        assert_eq!(refusal["task_status"], "failed");
+        assert_eq!(refusal["rejection_code"], "model_credential_invalid");
+        assert_eq!(refusal["request_id"], submit["request_id"]);
+        assert_eq!(refusal["session_id"], "a-ref-admission");
+        assert_eq!(refusal["task_id"], submit["task_id"]);
+        assert!(refusal.get("temporary_model_package").is_none());
+        let fixture = super::super::test_support::pairing_fixture("relay-key-service");
+        let (a_keys, b_keys) = super::super::test_support::paired_session_keys(
+            fixture.a_keys,
+            fixture.b_keys,
+            &fixture.reservation,
+        );
+        let controlled = ControlledLaneState::default();
+        controlled
+            .install(super::super::crypto::ControllerRole::B, &live, b_keys)
+            .unwrap();
+        let controlling = super::super::encrypted_lane::ControllingLaneState::default();
+        controlling
+            .install(super::super::crypto::ControllerRole::A, &live, a_keys)
+            .unwrap();
+        let capabilities = vec!["encrypted_frames_v1".into(), "task_v1".into()];
+        let frame = controlled.seal(kind, refusal, &capabilities).unwrap();
+        let (received_kind, received) = controlling.open(&frame, &capabilities).unwrap();
+        assert_eq!(received_kind, "task_status");
+        assert_eq!(received["task_id"], submit["task_id"]);
+        assert_eq!(received["session_id"], "a-ref-admission");
+        assert_eq!(received["task_status"], "failed");
+        assert_eq!(received["rejection_code"], "model_credential_invalid");
+        assert_eq!(received["client_request_id"], submit["client_request_id"]);
+        assert_eq!(received["request_id"], submit["request_id"]);
+        assert!(received.get("temporary_model_package").is_none());
+        assert!(service.status("task-admission").is_err());
 
         let frames = dispatch_decrypted_payload(
             &port,

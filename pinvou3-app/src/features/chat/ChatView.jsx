@@ -181,9 +181,10 @@ const CHAT_PANEL_LOADERS = Object.freeze({
   subagent: () => import('../multiagent/SubagentTranscriptPanel.jsx'),
   auxChat: () => import('../aux-chat/AuxChatPanel.jsx'),
   // Round-18: the sender card is deferred out of the main entry — its static
-  // copy pushed the web build past the 500 kB startup budget, and entry
-  // policy requires new entry work to be split or lazy-loaded. Prefetched on
-  // mount below, so delivered messages render without a visible delay.
+  // copy pushed the web main entry past the then-500 kB budget, and the lazy
+  // split keeps the startup entry lean.
+  // Prefetched on mount below, so delivered messages render without a
+  // visible delay.
   sessionMessageCard: () => import('./SessionMessageCard.jsx'),
 });
 const LazyArtifactsPanel = React.lazy(() => CHAT_PANEL_LOADERS.artifacts().then((m) => ({ default: m.ArtifactsPanel })));
@@ -319,6 +320,12 @@ import {
   isPersonalWorkbenchTemplateDraftForTemplate,
   shouldUsePersonalWorkbenchScene,
 } from './personal-workbench-scene.js';
+// Publishes the scene-payload inverse (window.__PINVOU_SCENE_PAYLOAD__) for the
+// bridges' history replay and remote admissions. ChatView is the static entry
+// of every window that replays a conversation, so loading it guarantees the
+// publisher is up before the first session opens; the bridges read the global
+// lazily.
+import './scene-payload.js';
 import {
   DATA_VISUALIZATION_SCENE_KEY,
   DOCUMENT_WRITING_SCENE_KEY,
@@ -1049,7 +1056,7 @@ const openChatExternalUrl = (url) => {
       // Artifacts live in the app-level Right Dock; its host owns narrow-layout fallback.
       // Warm the deferred sender-card chunk at view entry: delivered messages
       // render it above the body, and the mount-time prefetch keeps the lazy
-      // split (entry-budget policy) free of visible first-render delay.
+      // split free of visible first-render delay.
       useEffect(() => {
         prefetchChatPanel('sessionMessageCard');
       }, []);

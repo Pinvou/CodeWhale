@@ -1,5 +1,5 @@
 // Public, disposable config-only fixtures. These are never deployment credentials.
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -33,7 +33,9 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
   const rendererSHA256 = bytesDigest(readFileSync(binary));
   const options = { binary, binarySHA256: rendererSHA256 };
   if (kind === 'compose') {
-    const overlays = settings.tokenEvents ? ['token-events'] : [];
+    const overlays = [];
+    if (settings.tokenEvents) overlays.push('token-events');
+    if (settings.enterpriseSMS) overlays.push('enterprise-sms');
     const texts = [...composeCompositions[profile], ...overlays].map(name => readFileSync(resolve(repositoryRoot, `account-platform/deploy/production/compose.${name}.yaml`), 'utf8'));
     const variables = [...new Set(texts.flatMap(text => [...text.matchAll(/\$\{([A-Z0-9_]+)/g)].map(m => m[1])))];
     const env = {};
@@ -74,6 +76,19 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
       SMS_VERIFICATION_HMAC_KEY_BASE64: key.toString('base64').replace(/=+$/, ''), REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64: key.toString('base64'),
       SMS_PROVIDER: 'http-generated', SMS_HTTP_ENDPOINT: 'https://sms.fixture.invalid', SMS_HTTP_BEARER_TOKEN: 'public-fixture-only',
       MANUAL_REVIEW_ON_CALL_USER_IDS: `${subjects['account-service']},${subjects['billing-service']}` };
+    if (settings.enterpriseSMS) {
+      if (process.platform !== 'win32') chmodSync(env.ENTERPRISE_SMS_STATE_DIRECTORY, 0o700);
+      const token = 'public-fixture-only-token-for-sms-configuration';
+      Object.assign(raw.ACCOUNT_SERVICE_PRIVATE_ENV_FILE, {
+        SMS_PROVIDER: 'aliyun-managed', SMS_HTTP_ENDPOINT: 'https://enterprise-sms-gateway:8443/v1/sms/send', SMS_HTTP_BEARER_TOKEN: token,
+        ALIYUN_SMS_ACCESS_KEY_ID: 'public-fixture-id', ALIYUN_SMS_ACCESS_KEY_SECRET: 'public-fixture-secret',
+        ALIYUN_SMS_SIGN_NAME: 'Public fixture', ALIYUN_SMS_REGISTER_TEMPLATE: 'SMS_101', ALIYUN_SMS_LOGIN_TEMPLATE: 'SMS_101',
+      });
+      for (const purpose of ['REGISTER', 'LOGIN', 'PROFILE_MOBILE', 'PASSWORD_RESET']) env[`ENTERPRISE_SMS_${purpose}_TEMPLATE`] = 'SMS_102';
+      for (const name of ['tls.crt', 'tls.key', 'ca-bundle.pem', 'access-key-id', 'access-key-secret', 'bearer-token']) {
+        writeFileSync(join(env.ENTERPRISE_SMS_SECRET_DIRECTORY, name), name === 'bearer-token' ? token + '\n' : 'public fixture only\n', { mode: 0o600 });
+      }
+    }
     raw.IDENTITY_SERVICE_PRIVATE_ENV_FILE = { WORKLOAD_IDENTITY_RULES_JSON: JSON.stringify(rule('identity')),
       IDENTITY_PASSWORD_HMAC_KEY_BASE64: key.toString('base64').replace(/=+$/, ''), AUTH_RISK_HMAC_KEY_BASE64: key.toString('base64').replace(/=+$/, ''),
       AUTH_RISK_REDIS_URL: 'rediss://identity:fixture@redis.fixture.invalid:6379/1' };

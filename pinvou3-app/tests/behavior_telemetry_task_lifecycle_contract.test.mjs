@@ -6,6 +6,8 @@ import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
 
 const telemetry = behaviorTelemetryRust;
 const chat = readFileSync(new URL('../src-tauri/src/app/commands/chat.rs', import.meta.url), 'utf8');
+const codex = readFileSync(new URL('../src-tauri/src/app/commands/codex.rs', import.meta.url), 'utf8');
+const memory = readFileSync(new URL('../src-tauri/src/app/commands/memory.rs', import.meta.url), 'utf8');
 const forwarder = readFileSync(new URL('../src-tauri/src/features/assistant/forwarder.rs', import.meta.url), 'utf8');
 const runtime = readFileSync(new URL('../src-tauri/src/app/commands/runtime.rs', import.meta.url), 'utf8');
 
@@ -15,7 +17,12 @@ test('assistant submissions are guarded through admission or typed rejection', (
   const sent = chat.indexOf('submission.sent()');
   assert(begin >= 0 && begin < send);
   assert(sent > send);
-  assert.match(telemetry, /impl Drop for TaskSubmissionGuard[\s\S]*reject_task_submission/);
+  assert.match(telemetry, /rejection: Some\(TaskSubmissionRejection::InternalError\)/);
+  assert.match(telemetry, /impl Drop for TaskSubmissionGuard[\s\S]*?self\.rejection\.take\(\)[\s\S]*?reject_task_submission/);
+  assert.match(chat, /submission\.set_rejection_reason\(TaskSubmissionRejection::ValidationFailed\)/);
+  for (const source of [chat, codex, memory]) {
+    assert.match(source, /submission\.set_rejection_reason\(submission_send_rejection\(&\w+\)\)/);
+  }
   assert.match(telemetry, /BehaviorEvent::new\("task_submitted"\)/);
   assert.match(telemetry, /BehaviorEvent::new\("task_rejected"\)/);
 });

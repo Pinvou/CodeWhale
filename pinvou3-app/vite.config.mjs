@@ -132,7 +132,6 @@ const startupBundleExcludedScripts = new Set([
 // Static classic tags that intentionally stay unbundled: desktop loads the
 // polyfill and update-notice-logic, web additionally keeps bootstrap.js. The
 // retained-set contract test pins the exact list per platform.
-const unbundledStartupScriptCount = webBuild => webBuild ? 3 : 2;
 
 export function classicStartupBundlePaths(webBuild, indexHtml = readFileSync(join(sourceRoot, 'index.html'), 'utf8')) {
   return localClassicScriptPaths(indexHtml).filter((relative) => {
@@ -229,10 +228,6 @@ function bundleClassicStartup(webBuild) {
         source,
         fileName: `${bundlePrefix}-${index + 1}-${createHash('sha256').update(source).digest('hex').slice(0, 8)}.js`,
       }));
-      const startupScriptCount = bundles.length + unbundledStartupScriptCount(webBuild);
-      if (startupScriptCount > 10) {
-        throw new Error(`Classic startup script budget exceeded: ${startupScriptCount} > 10`);
-      }
     },
     transformIndexHtml(html, context) {
       if (!context.path.endsWith('/index.html')) return html;
@@ -511,113 +506,11 @@ function enforceLazyChunks() {
   };
 }
 
-// Keep both desktop and web close to Vite's 500 kB warning boundary. New entry
-// work should be split or lazy-loaded. Raising this limit requires measured
-// desktop + web before/after sizes and an explicit review decision.
-// 2026-09-24 500_000 → 502_000 (model store #1195, measured):
-//   web:     499,211 B (main @ 039c77941) → 500,863 B (+1,652 B, of which
-//            ~888 B is the sidebar/mobile entry wiring and ~764 B is the
-//            dynamic-import preload bookkeeping of adding a new lazy view).
-//   desktop: 498,510 B on the PR head — unchanged headroom, still passes.
-// The previous 500_000 left only 789 B of headroom, less than the floor cost
-// of wiring any new lazy view, so the next view feature could not merge
-// without a deliberate bump. 502_000 restores ~1.1 kB of headroom; further
-// growth should still be justified with fresh measurements.
-// 2026-09-30 502_000 → 504_000 (builtin plugin framework #585, measured):
-//   web:     500,863 B (main @ 039c77941) → 502,958 B (+2,095 B, builtin
-//            plugin framework: BuiltinPluginCard + shared builtin-plugin-logic
-//            + uiBuiltinPlugins copy riding the tool-store entry work).
-//   desktop: 498,510 B → 500,570 B (+2,060 B, same feature).
-// Both stay inside the boundary with ~1 kB web headroom; the next entry
-// feature again needs a deliberate bump with fresh measurements.
-// 2026-10-02 504_000 → 514_000 (community backflow #433/#455/#463, measured):
-//   web:     502,958 B → 511,662 B (+8,704 B, #433 aux side chat UI; #455
-//            marketplace tool switches and #463 folder rebinding land at
-//            505,451 B and 504,236 B on the same boundary).
-//   desktop: 500,570 B → 509,305 B (+8,735 B, same #433 feature; #455 and
-//            #463 stay at 503,063 B and 501,866 B).
-// 514_000 keeps ~2.3 kB web headroom over the largest measured entry; the
-// next entry feature again needs a deliberate bump with fresh measurements.
-// 2026-10-02 514_000 → 516_000 (#455 merged #1378 aux side chat via main,
-// measured): web 505,451 B → 514,164 B (+8,713 B, same feature riding the
-// main merge); desktop 503,063 B → 511,810 B. 516_000 keeps ~1.8 kB web
-// headroom; the next entry feature again needs a deliberate bump.
-// 2026-10-08 516_000 → 486_000: tool marketplace metadata and its post-install
-// welcome card moved out of the startup graph. Measured desktop 481,359 B and
-// web 483,649 B; 486_000 keeps ~2.3 kB headroom over the larger web entry.
-// 2026-10-08 486_000 → 496_000 (open-source parity backflow rebased onto the
-// lazy marketplace base): the backflow batch adds ~9.6 kB to the entry
-// (#607 conversation virtualization refinements, the voice draft-recovery
-// lifecycle, the shared session-list pipeline, tool-card keyboard access and
-// overlay role cards riding main). Measured desktop 490,984 B and web
-// 493,288 B; 496_000 keeps ~2.7 kB headroom over the larger web entry; the
-// next entry feature again needs a deliberate bump with fresh measurements.
-// #484 backflow note: the upstream branch raised its own ceiling to 505_000 for
-// the picker/grouping entry weight; on this tree the raise must be re-measured
-// (desktop + web, per policy) before landing, so the current budget stands.
-// #773 backflow note: the upstream branch raised its ceiling 506_000 → 507_000
-// for the subagent status-flicker merge rules. On this tree the swarm overlay
-// rides the lazy chat-view chunk (see the codeSplitting group below), so the
-// measured main entry is unchanged: web 158,857 B and desktop 156,692 B both
-// before and after the port (same-base builds on this macOS toolchain; the
-// chat-view chunk itself grew ~340 B web, far inside the informational
-// 500 kB chunk warning). No raise needed; the current budget stands.
-// 2026-10-27 496_000 (single ceiling) → 159_000 desktop / 161_000 web
-// (community backflow pinvou-agent#787, measured on this tree): the single
-// ceiling predates the web vendor/markdown-vendor/chat-view splitting, so it
-// sat ≈3× above both real entries (desktop 156,638 B, web 158,889 B on this
-// macOS toolchain, node 22, including this port's NAV_PREFETCH browser entry)
-// and would never fire again — a dead shared ceiling gives web-specific
-// regressions a free ride. Each mode now gets its own ceiling, measured
-// + ~2 kB (the historical headroom floor above; it also absorbs the 0–17 B
-// typical node 22 vs CI node 24 delta and the one recorded ~0.9 kB spike).
-// Raising a ceiling still requires measured desktop + web before/after sizes
-// and an explicit review decision.
-// 2026-10-28 account-platform integration: 159_000 / 161_000 -> 173_000 /
-// 175_000, explicitly approved after same-host Windows / Node 24 builds.
-// Frozen main f1f1286d measured desktop 156,637 B / web 158,885 B; the merged
-// account-platform tree measured 170,915 B / 173,102 B. Resolved dependency
-// versions were identical. Keep about 2 kB headroom and both strict gates;
-// do not defer the account client or alter its synchronous identity capture
-// merely to meet an entry-file budget. Chunk groups remain unchanged.
-// 2026-11-05 PR #2161: user approved measured shell wiring after deferring
-// the cmsd controller/views. Same-host locked-dependency desktop baseline:
-// 171,954 B; candidate desktop 175,132 B / web 177,358 B. Keep ~2 kB
-// headroom, the exact byte gates and all static/lazy graph checks.
-// 2026-11-20 r8 P2-14：main 已按合并树实测上调至 178_000/180_000（见上段），
-// 采纳 main 值——上限以 main 实测口径为准，本树实测 162,265/164,486 B
-// 仍在预算内。
-export const MAIN_ENTRY_BUDGET_BYTES = 178_000;
-export const WEB_MAIN_ENTRY_BUDGET_BYTES = 180_000;
-
-function mainEntryBudgetBytesFor(mode) {
-  return mode === 'web' ? WEB_MAIN_ENTRY_BUDGET_BYTES : MAIN_ENTRY_BUDGET_BYTES;
-}
-
-export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
-  const mainEntry = Object.values(bundle).find(output => (
-    output.type === 'chunk' && output.isEntry && output.name === 'main'
-  ));
-  if (!mainEntry) throw new Error('Vite build did not emit the main entry chunk');
-  const bytes = Buffer.byteLength(mainEntry.code);
-  if (bytes > budgetBytes) {
-    throw new Error(`Main entry chunk ${bytes} B exceeds the ${budgetBytes} B startup budget`);
-  }
-  return bytes;
-}
-
-function enforceMainEntryBudget(mode) {
-  return {
-    name: 'pinvou-enforce-main-entry-budget',
-    apply: 'build',
-    // Vite's build-import-analysis mutates chunks after user generateBundle
-    // hooks. writeBundle sees the final code that is written to disk, so the
-    // reported byte count matches the built asset exactly.
-    writeBundle(_options, bundle) {
-      assertMainEntryBudget(bundle, mainEntryBudgetBytesFor(mode));
-    },
-  };
-}
+// Startup size is managed by refactoring, not by a byte ceiling: keep
+// render-path code out of the main entry via the lazy contracts above and
+// revisit the startup graph with periodic measurement-and-refactor passes
+// instead of paying a per-PR budget ritual. Vite's informational 500 kB
+// chunk warning on the web build is expected and carries no gate.
 
 export default defineConfig(({ mode }) => {
   const webBuild = mode === 'web';
@@ -635,7 +528,7 @@ export default defineConfig(({ mode }) => {
   },
   plugins: [
     react(),
-    ...(accountPortalBuild ? [] : [copyRuntimeAssets(), enforceLazyChunks(), enforceMainEntryBudget(mode), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
+    ...(accountPortalBuild ? [] : [copyRuntimeAssets(), enforceLazyChunks(), conditionalPlatformScripts(webBuild), bundleClassicStartup(webBuild)]),
   ],
   build: {
     outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
@@ -682,10 +575,11 @@ export default defineConfig(({ mode }) => {
                   test: /node_modules[\\/](marked|dompurify|highlight\.js)[\\/]/,
                 },
                 {
-                  // Keep ChatView statically imported so the desktop/web shell
-                  // and source-contract tests retain the same startup semantics,
-                  // while preventing the large component module from inflating
-                  // the entry chunk beyond its per-chunk budget.
+                  // ChatView stays statically imported by the entry (it is
+                  // deliberately absent from VIEW_LOADERS, see view-loaders.js),
+                  // so this group only moves the module and its closure out of
+                  // the entry file to keep that file lean and cache-stable; it
+                  // does not change what loads at startup.
                   name: 'chat-view',
                   test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
                 },

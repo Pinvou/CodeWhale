@@ -896,6 +896,12 @@ GATE_JOB_LEVEL_IFS = {
 # Round-6 review (#1518): 本 PR 新钉的三枚步骤(锁文件 registry 卫生门禁/
 # test-registry guard/Prepare Rust disk capacity)同样按 name+if 钉住,
 # 一并登记;rust-lint 的磁盘与 zram 步骤为本 PR 新增,同表钉住防诱饵替换。
+# Round-29 review correction of the stale round-28 note: windows-rust-test IS
+# in the table now (see the Round-28 review MINOR-6b entry below); its step-name
+# uniqueness is ALSO covered job-wide by the round-45 duplicate-step assertion
+# in test_windows_rust_test_parallel_phases_preserve_routing_and_coverage —
+# the entry's own tooth is deletion detection (exactly-once: 0 ≠ 1), on top
+# of that job-wide duplicate check.
 PINNED_GATE_STEP_NAMES = {
     "fast-gate": (
         "Checkout (含 submodule,fork 为 public 直接拉)",
@@ -958,6 +964,18 @@ PINNED_GATE_STEP_NAMES = {
         "Prune release artifacts before the cache save (push only)",
         "Verify script (plist/usage-key/bundle targets checks, push only)",
         "Probe and export the macOS lld link flags",
+    ),
+    # Round-28 review MINOR-6b (translated, round-29): the two gated-test steps were not in
+    # this table before — the uniqueness guard (exactly-once anti-decoy) did not cover
+    # them, so an echo-laundered empty-shell step could bypass every same-named assertIn
+    # pin. Both jobs joined the table. (The windows-rust-test entry additionally
+    # duplicates the round-45 job-wide duplicate-step assertion's uniqueness direction;
+    # its own tooth is deletion detection.)
+    "windows-rust-test": (
+        "pinvou-cli Windows-gated unit tests",
+    ),
+    "macos-cli-check": (
+        "pinvou-cli macOS-gated unit tests",
     ),
 }
 
@@ -1474,6 +1492,82 @@ python3() { fixture_mock python3 "$@"; }
                              "PINVOU_CI_RESOURCE_LEDGER": directory}, capture_output=True, text=True, timeout=30, check=False)
                     self.assertEqual(result.returncode, 7 if failure else 0, result.stderr)
                     self.assertEqual(len(result.stdout.splitlines()), failure or 2, result.stdout)
+
+    def test_network_transport_download_uses_current_upload_id(self):
+        workflow = (ROOT / ".github/workflows/ci-network-transport.yml").read_text(encoding="utf-8")
+        job = _without_inline_comments(_extract_job_block(workflow, "storage-roundtrip"))
+        upload = _step_named(job, "Upload authenticated transport probe")
+        require_id = _step_named(job, "Require the current transport probe artifact ID")
+        wait = _step_named(job, "Wait for the current transport probe to be listed")
+        download = _step_named(job, "Download authenticated transport probe")
+        verify = _step_named(job, "Verify tested commit and exact bytes for both transports")
+        guarded = r"""(?m)^        ['"]?(?:if|continue-on-error)['"]?:"""
+        self.assertRegex(upload, r"(?m)^        id: upload_probe$")
+        self.assertIn("          name: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}", upload)
+        self.assertIn("        if: ${{ steps.upload_probe.outputs.artifact-id == '' }}", require_id)
+        self.assertRegex(require_id, r'(?m)^        run: node -e "throw new Error\(.+\)"$')
+        self.assertNotRegex(require_id, r"""(?m)^        ['"]?continue-on-error['"]?:""")
+        self.assertRegex(upload, r"(?m)^          retention-days: 1$")
+        self.assertRegex(wait, r"(?m)^        timeout-minutes: 2$")
+        self.assertRegex(wait, r"(?m)^        uses: actions/github-script@v8$")
+        self.assertRegex(wait, r"(?m)^          retries: 0$")
+        self.assertNotRegex(wait, guarded)
+        self.assertRegex(wait, r"(?m)^          PROBE_ARTIFACT_ID: \$\{\{ steps\.upload_probe\.outputs\.artifact-id \}\}$")
+        self.assertIn("          PROBE_ARTIFACT_NAME: ci-network-canary-${{ runner.os }}-${{ github.run_attempt }}", wait)
+        self.assertRegex(wait, r"(?m)^            const deadline = performance\.now\(\) \+ 60000;$")
+        self.assertIn("github.rest.actions.listWorkflowRunArtifacts({", wait)
+        self.assertIn("...context.repo, run_id: context.runId, per_page: 100, page,", wait)
+        self.assertIn("request: { signal },", wait)
+        self.assertIn("findArtifact(AbortSignal.timeout(Math.min(5000, remaining)))", wait)
+        self.assertEqual(1, job.lower().count("actions/download-artifact@"))
+        self.assertNotRegex(download, guarded)
+        self.assertRegex(download, r"(?m)^        uses: actions/download-artifact@v8$")
+        self.assertIn("          github-token: ${{ github.token }}", download)
+        self.assertIn("          repository: ${{ github.repository }}", download)
+        self.assertIn("          run-id: ${{ github.run_id }}", download)
+        self.assertRegex(download, r"(?m)^          digest-mismatch: error$")
+        self.assertRegex(download, r"(?m)^          artifact-ids: \$\{\{ steps\.upload_probe\.outputs\.artifact-id \}\}$")
+        self.assertNotRegex(download, r"(?m)^          (?:name|pattern):")
+        self.assertEqual(["node scripts/ci-network-probe.cjs verify"], _step_run_lines(verify))
+        self.assertNotRegex(verify, guarded)
+        self.assertLess(job.index(upload), job.index(require_id))
+        self.assertLess(job.index(require_id), job.index(wait))
+        self.assertLess(job.index(wait), job.index(download))
+        self.assertLess(job.index(download), job.index(verify))
+
+    def test_network_transport_polls_until_exact_upload_is_listed(self):
+        workflow = (ROOT / ".github/workflows/ci-network-transport.yml").read_text(encoding="utf-8")
+        job = _extract_job_block(workflow, "storage-roundtrip")
+        wait = _step_named(job, "Wait for the current transport probe to be listed")
+        script = textwrap.dedent(wait.split("          script: |\n", 1)[1])
+        harness = r"""
+const assert = require('node:assert/strict');
+const source = require('node:fs').readFileSync(0, 'utf8');
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const wait = new AsyncFunction('github', 'context', 'process', 'setTimeout', source);
+const name = 'ci-network-canary-Linux-2';
+const repo = {owner: 'Pinvou', repo: 'pinvou3'};
+const context = {repo, runId: 123};
+const env = {PROBE_ARTIFACT_ID: '721', PROBE_ARTIFACT_NAME: name};
+let calls = 0;
+const github = {rest: {actions: {
+  async listWorkflowRunArtifacts({owner, repo: repository, run_id, request}) {
+    assert.deepEqual({owner, repo: repository}, repo);
+    assert.equal(run_id, context.runId);
+    assert.ok(request.signal instanceof AbortSignal);
+    const id = ++calls === 1 ? 720 : 721;
+    return {data: {artifacts: [{id, name, expired: false}]}, headers: {}};
+  },
+}}};
+wait(github, context, {env}, resolve => queueMicrotask(resolve))
+  .then(() => assert.equal(calls, 2))
+  .catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(
+            ["node", "-e", harness], input=script, text=True,
+            capture_output=True, timeout=10, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_deployment_contract_artifacts_are_attempt_scoped(self):
         job = _without_inline_comments(
@@ -3254,6 +3348,44 @@ python3() { fixture_mock python3 "$@"; }
         # runtime zero-match guard is the tripwire that fails the leg; this
         # pin holds the line itself.
         self.assert_run_filtered_filter(windows_rust_steps, "pinvou-cli", "windows_batch_tests")
+        # Round-27 review (m10): the Windows leg gains the executed-count
+        # guard the macOS leg grew in round-24 -- an #[ignore]d pin prints
+        # "ok. 0 passed; N ignored" and used to pass silently here. The
+        # macOS step's "same filtered-run pattern" comment is now true
+        # again; pin the guard bodies so a deletion reverts the asymmetry.
+        # Round-35 review: the src-tauri regression loop's guard carries
+        # the IDENTICAL needle text, so the old whole-job assertIn was
+        # satisfied by EITHER copy -- deleting either guard left the suite
+        # green. Pin THIS step's copy inside its own step slice (the loop
+        # pin holds the job-wide occurrence count) so each copy binds
+        # individually.
+        guard_steps = [
+            step
+            for step in re.split(r"\n      - name: ", windows_rust_steps)[1:]
+            if "run_filtered() {" in step
+        ]
+        self.assertEqual(
+            len(guard_steps),
+            1,
+            "exactly one step defines the run_filtered helper whose "
+            "executed-count guard this pin binds",
+        )
+        self.assertIn(
+            "^test result: ok\\. [1-9][0-9]* passed",
+            guard_steps[0],
+            "the pinvou-cli run_filtered executed-count guard keeps an "
+            "#[ignore]d pin from passing the step silently (the round-23 "
+            "review hole, closed symmetrically in round-27); this "
+            "step-sliced pin must fail when THIS copy is deleted or its "
+            "regex weakened",
+        )
+        self.assertIn(
+            "filter '$*' executed 0 tests (an ignored-only run must not "
+            "pass the guard)",
+            guard_steps[0],
+            "the pinvou-cli guard's failure wording is pinned inside THIS "
+            "step's slice so the sibling loop guard cannot satisfy it",
+        )
         self.assert_run_filtered_filter(
             windows_rust_steps,
             "adapter-gaia",
@@ -3395,6 +3527,38 @@ python3() { fixture_mock python3 "$@"; }
             "rustup show active-toolchain",
             macos_cli_steps,
             "the macOS leg must run the toolchain pinned by rust-toolchain.toml",
+        )
+        # Round-24 review (m6): the macOS-gated alias-flag pin step compiles
+        # and executes on no other leg, so deleting the whole step fails no
+        # test and silently reverts the leg to compile-only - the exact
+        # orphan class the benchmark-core filter pins above close for the
+        # Windows leg. Pin the step, its filter, and the three guard bodies
+        # (zero-match, ok-result, executed-count) so a deletion or guard
+        # swap fails this policy suite.
+        self.assertIn(
+            "- name: pinvou-cli macOS-gated unit tests",
+            macos_cli_steps,
+        )
+        # Round-28 review MINOR-6a (translated, round-29): the filter used a bare assertIn —
+        # the suite's own assert_run_filtered_filter helper (Round-50, exact end-of-line
+        # token pin) exists precisely for the coordinated test-name+filter rename keeping
+        # the old text green as a line substring; all seven Windows filters already go
+        # through the helper, this one joins the same caliber.
+        self.assert_run_filtered_filter(
+            macos_cli_steps,
+            "pinvou-cli",
+            "system_prefix_hits_run_through_the_production_alias_flag",
+        )
+        self.assertIn("grep -qE 'running [1-9][0-9]* tests?'", macos_cli_steps)
+        self.assertIn('grep -q "^test result: ok"', macos_cli_steps)
+        self.assertIn(
+            "a renamed test must not become a silent pass", macos_cli_steps
+        )
+        self.assertIn(
+            "^test result: ok\\. [1-9][0-9]* passed",
+            macos_cli_steps,
+            "the executed-count guard keeps an #[ignore]d pin from passing "
+            "the step silently (the round-23 review hole)",
         )
 
         required_gate = self._required_gate()
@@ -5094,6 +5258,56 @@ python3() { fixture_mock python3 "$@"; }
             "回归过滤器 '$filter' 匹配 0 个测试",
         ]:
             self.assertIn(needle, windows_rust_test)
+        # Round-32 review: the loop gains the executed-count guard its
+        # pinvou-cli sibling grew in round-27 — an ignored-only run
+        # prints "ok. 0 passed; N ignored" and passed the zero-match
+        # guard alone. Round-35 review: the sibling run_filtered guard
+        # carries the IDENTICAL needle text, so a whole-job assertIn was
+        # satisfied by EITHER copy — deleting either guard left the suite
+        # green. Pin THIS loop's copy inside its own step slice, and hold
+        # the job-wide occurrence count at exactly two (one per guard
+        # copy), so each copy binds individually.
+        loop_steps = [
+            step
+            for step in re.split(r"\n      - name: ", windows_rust_test)[1:]
+            if "/tmp/windows_regression.log" in step
+        ]
+        self.assertEqual(
+            len(loop_steps),
+            1,
+            "exactly one step owns the src-tauri regression loop whose "
+            "executed-count guard this pin binds",
+        )
+        self.assertIn(
+            "^test result: ok\\. [1-9][0-9]* passed",
+            loop_steps[0],
+            "the loop's executed-count guard keeps a filter whose every "
+            "match is #[ignore]d from passing the leg silently; this "
+            "step-sliced pin must fail when THIS copy is deleted or its "
+            "regex weakened",
+        )
+        self.assertIn(
+            "regression filter '$filter' passed 0 tests — an ignored-only "
+            "run must not pass the guard",
+            loop_steps[0],
+            "the loop guard's failure wording is pinned inside THIS "
+            "step's slice so the sibling run_filtered guard cannot "
+            "satisfy it",
+        )
+        self.assertEqual(
+            windows_rust_test.count("^test result: ok\\. [1-9][0-9]* passed"),
+            2,
+            "the job must carry EXACTLY two executed-count guard copies "
+            "(the regression loop and the pinvou-cli run_filtered body); "
+            "a deleted or newly duplicated copy must fail the suite",
+        )
+        self.assertEqual(
+            windows_rust_test.count("an ignored-only run must not pass the guard"),
+            2,
+            "the executed-count failure wording must appear exactly once "
+            "per guard copy; a deleted or duplicated echo must fail the "
+            "suite",
+        )
 
     def test_windows_regression_executes_managed_process_and_install_tests(self):
         # Linux excludes the Windows Job Object regressions; the other Windows

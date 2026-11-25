@@ -55,6 +55,10 @@ pub use os::path_identity_is_same_or_nested;
 // on unix, ASCII case-insensitive on Windows) instead of a drifting
 // `cfg!(windows)` re-copy.
 pub use os::path_component_eq;
+// 回流必要支撑（community #876）：CLI 的 artifacts 镜像补齐 `BLOCKED_COMPONENT_PREFIXES`
+// 腿时需要与上方 `path_component_eq` 相同的 crate 边界形状——平台感知的前缀比对
+// （macOS/Windows 大小写折叠），避免 CLI 侧再养一份漂移的本地复写。
+pub use os::path_component_prefix;
 // Same crate-boundary shape as the re-exports above: the headless CLI's
 // file-persisting lanes (`artifacts write`, `feedback submit`) were the last
 // holders of a drifting local stage-then-rename copy; they now consume the
@@ -78,6 +82,22 @@ pub mod behavior_telemetry_test_support {
 
     pub const TELEMETRY_DEFAULT_BASE_URL: &str = super::telemetry::TELEMETRY_DEFAULT_BASE_URL;
     pub const TELEMETRY_ENROLLMENT_TOKEN: &str = super::telemetry::TELEMETRY_ENROLLMENT_TOKEN;
+
+    pub fn connector_failure_exit_is_ambiguous(code: i64) -> bool {
+        super::connector_lock::connector_failure_exit_is_ambiguous(code)
+    }
+
+    pub fn tmeet_launcher_path(command: &std::process::Command) -> std::path::PathBuf {
+        super::connector_lock::tmeet_launcher_path(command)
+    }
+
+    pub fn matches_installed_connector_launcher(
+        program: &str,
+        cwd: &Path,
+        installed: &Path,
+    ) -> bool {
+        super::connector_lock::matches_installed_connector_launcher(program, cwd, installed)
+    }
 
     pub fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()> {
         super::filesystem::atomic_write_private(path, content)

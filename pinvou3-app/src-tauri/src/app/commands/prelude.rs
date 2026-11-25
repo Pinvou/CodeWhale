@@ -5,6 +5,7 @@ pub(super) use serde::{Deserialize, Serialize};
 pub(super) use tauri::{AppHandle, Emitter, Manager, State};
 
 pub(super) use crate::features::assistant::engine_pool::EnginePool;
+pub(super) use crate::features::behavior_telemetry::TaskSubmissionRejection;
 pub(super) use crate::features::knowledge::KnowledgeService;
 pub(super) use crate::features::monitor::{MonitorSnapshot, MonitorState, VllmSnapshot};
 pub(super) use crate::features::sessions::{SerializableMode, SessionModeState};
@@ -46,6 +47,18 @@ macro_rules! sync_command_passthrough {
 
 pub(super) use async_command_passthrough;
 pub(super) use sync_command_passthrough;
+
+pub(super) fn submission_send_rejection(error: &anyhow::Error) -> TaskSubmissionRejection {
+    if error.is::<crate::features::codex_acp::AcpPromptValidationError>() {
+        TaskSubmissionRejection::ValidationFailed
+    } else if error.is::<crate::features::assistant::engine::TurnSubmissionTimeout>()
+        || error.is::<tokio::time::error::Elapsed>()
+    {
+        TaskSubmissionRejection::Timeout
+    } else {
+        TaskSubmissionRejection::InternalError
+    }
+}
 
 /// Unified redaction at the command-layer error exit: `context` + redacted error string (credentials/keys
 /// must not pass through verbatim to the frontend). Hoisted from the old settings.rs local; shared by settings / memory.
