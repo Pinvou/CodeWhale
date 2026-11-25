@@ -1,6 +1,6 @@
 import { runSMSConflictCases } from './account_platform_sms_conflict_cases.mjs';
 import { navigateFixture } from './helpers/navigate-fixture.mjs';
-import { registrationRepairCopy, smsStatusCopy, smsTemplateCopy } from '../src/shared/i18n.js';
+import { accountAuthCopy, accountPlatformCopy, registrationRepairCopy, smsStatusCopy, smsTemplateCopy } from '../src/shared/i18n.js';
 import { profileRepairQueueCopy } from '../src/shared/admin-profile-repair-i18n.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -208,6 +208,54 @@ try {
     await page.click('.ap-auth-submit');
     await waitText('account-a');
     assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(([method]) => method === 'sms-login')), 'SMS login was not used');
+  });
+  for (const [code, role, message] of [
+    ['REGISTRATION_RECOVERING', 'status', accountAuthCopy.en.smsSignupRecovering],
+    ['REGISTRATION_MANUAL_REVIEW_REQUIRED', 'status', accountAuthCopy.en.smsSignupManualReview],
+    ['SMS_UNAVAILABLE', 'alert', accountPlatformCopy.en.smsUnavailable],
+  ]) await caseRun('desktop SMS signup feedback ' + code + ' requires a new code', async () => {
+    await desktopGuest();
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    await page.click('.ap-auth-signup-consent input');
+    const send = async () => {
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode));
+      await page.waitForSelector('[role=dialog]');
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]') && !document.querySelector('.ap-auth-submit').disabled);
+    };
+    await send();
+    const sessionChecks = await page.evaluate(() => globalThis.f01.nativeSessionChecks);
+    await page.evaluate(code => { globalThis.f01.smsLoginError = 'mobile_auth_failed: ' + code; }, code);
+    await page.type('input[autocomplete=one-time-code]', '000000');
+    await page.click('.ap-auth-submit');
+    await page.waitForFunction((role, message) =>
+      document.querySelector('.ap-login .ap-alert[role=' + role + ']')?.textContent === message, {}, role, message);
+    assert(await page.evaluate(expectedSessionChecks => {
+      const { authenticated, authenticatedCallbacks, nativeCalls, nativeSessionChecks, id } = globalThis.f01;
+      const attempts = nativeCalls.filter(([method]) => method === 'sms-login');
+      return !authenticated && authenticatedCallbacks.length === 0 &&
+        nativeSessionChecks === expectedSessionChecks &&
+        attempts.length === 1 && attempts[0][1].challenge_id === id &&
+        document.querySelector('input[autocomplete=one-time-code]').value === '' &&
+        !document.querySelector('input[autocomplete=tel-national]').disabled &&
+        document.querySelector('.ap-auth-submit').disabled;
+    }, sessionChecks), 'failed SMS login kept the old challenge or started a success refresh');
+
+    await page.evaluate(() => {
+      globalThis.f01.smsLoginError = null;
+      globalThis.f01.smsChallengeId = globalThis.f01.other;
+    });
+    await send();
+    await page.type('input[autocomplete=one-time-code]', '111111');
+    await page.click('.ap-auth-submit');
+    await page.waitForFunction(() => globalThis.f01.authenticatedCallbacks.length > 0);
+    assert(await page.evaluate(() => {
+      const { authenticated, authenticatedCallbacks, nativeCalls, id, other } = globalThis.f01;
+      const attempts = nativeCalls.filter(([method]) => method === 'sms-login');
+      return authenticated && authenticatedCallbacks.length === 1 && authenticatedCallbacks[0] === id &&
+        attempts.length === 2 &&
+        attempts[1][1].challenge_id === other && attempts[1][1].code === '111111';
+    }), 'fresh code did not authenticate with its own challenge');
   });
   const fillRegistration = async () => {
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
