@@ -340,6 +340,12 @@ class WebpkiCiContractTests(unittest.TestCase):
             with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
                 self.verify_workflow(workflow.replace('actions/setup-go@v6', replacement))
 
+    def assert_upload_retention(self, step, days):
+        sections = re.split(r'^        (?=\S)', step, flags=re.M)
+        inputs = [section for section in sections if section.startswith('with:\n')]
+        self.assertEqual(len(inputs), 1)
+        self.assertEqual(re.findall(r'^          retention-days: (.*)$', inputs[0], re.M), [str(days)])
+
     def verify_diagnostic_uploads(self, workflow):
         # Explicitly review each diagnostic-only entry. More uploads do not add
         # a Rust policy consumer, but neither an unknown entry nor a new action
@@ -371,7 +377,7 @@ class WebpkiCiContractTests(unittest.TestCase):
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]
             self.assertEqual(len(entries), 1)
             self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
-            self.assertIn('retention-days: 1\n', entries[0])
+            self.assert_upload_retention(entries[0], 1)
             if name == 'Upload frontend setup bundle':
                 self.assertIn('        id: frontend_setup_upload\n', entries[0])
                 self.assertEqual(re.findall(r'^        continue-on-error: (.*)$', entries[0], re.M), ['true'])
@@ -391,7 +397,7 @@ class WebpkiCiContractTests(unittest.TestCase):
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]
             self.assertEqual(len(entries), 1)
             self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
-            self.assertIn(f"retention-days: {2 if job == 'required-gate' else 7}\n", entries[0])
+            self.assert_upload_retention(entries[0], 2 if job == 'required-gate' else 7)
             self.assertIn('        timeout-minutes: 3\n', entries[0])
             self.assertIn('        continue-on-error: true\n', entries[0])
             if job == 'fast-gate':
@@ -500,6 +506,26 @@ class WebpkiCiContractTests(unittest.TestCase):
                 self.verify_workflow(workflow.replace('actions/upload-artifact@v7', replacement))
         with self.assertRaises(AssertionError):
             self.verify_diagnostic_uploads(workflow + '\n      - uses: actions/upload-artifact@v7\n')
+
+    def test_diagnostic_upload_retention_before_another_step(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        job = job_block(workflow, 'windows-relay-tools-test')
+        with_next_step = job.rstrip() + '\n      - name: Report diagnostic delivery\n        run: echo done\n\n'
+        self.verify_diagnostic_uploads(workflow.replace(job, with_next_step, 1))
+
+        upload = next(step for step in with_next_step.split('\n      - ')
+                      if step.startswith('name: Preserve Windows relay tools process receipt\n'))
+        retention = '          retention-days: 7'
+        for case, invalid in [
+            ('missing', upload.replace('\n' + retention, '')),
+            ('wrong', upload.replace(retention, '          retention-days: 70')),
+            ('duplicate', upload.replace(retention, retention + '\n          retention-days: 30')),
+            ('env instead of with', upload.replace('\n' + retention, '').replace(
+                '        env:\n', '        env:\n' + retention + '\n', 1)),
+        ]:
+            changed_job = with_next_step.replace(upload, invalid, 1)
+            with self.subTest(case=case), self.assertRaises(AssertionError):
+                self.verify_diagnostic_uploads(workflow.replace(job, changed_job, 1))
 
     def test_gate_diagnostic_exception_is_bound_to_its_exact_job_and_fields(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
