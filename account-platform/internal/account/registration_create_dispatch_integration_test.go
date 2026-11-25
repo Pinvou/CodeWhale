@@ -3,6 +3,7 @@ package account
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/identityadapter"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -61,8 +63,149 @@ func registrationDispatchReady(t *testing.T, r *PostgresRepository) uuid.UUID {
 	return id
 }
 
+type signupCompensationRetryRepository struct {
+	*PostgresRepository
+	attempts int
+}
+
+func (r *signupCompensationRetryRepository) CompensatePreIdentityRegistration(ctx context.Context, id uuid.UUID, code string, version int64) error {
+	r.attempts++
+	if r.attempts == 1 {
+		return errors.New("controlled compensation write failure")
+	}
+	return r.PostgresRepository.CompensatePreIdentityRegistration(ctx, id, code, version)
+}
+
+func testConsentedSignupRestartsAfterDispatchProof(t *testing.T, f *retainedWalletFenceFixture) {
+	t.Helper()
+	t.Setenv("APP_ENV", "test")
+	ctx := context.Background()
+	r := &signupCompensationRetryRepository{PostgresRepository: f.repository(t)}
+	if err := r.ConfigureRegistrationBonusFingerprint("fixture-mobile-signup", make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PrepareRegistrationBonusEligibility(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var createRequests atomic.Int32
+	createOperations := make(chan uuid.UUID, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/internal/v1/registration-operations/"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("{\"code\":\"IDENTITY_REGISTRATION_NOT_FOUND\"}"))
+		case req.Method == http.MethodPost && req.URL.Path == "/internal/v1/registration/password-references/validate":
+			w.WriteHeader(http.StatusNoContent)
+		case req.Method == http.MethodPost && req.URL.Path == identity.MobileSignupCreatePath:
+			var create struct {
+				OperationID uuid.UUID `json:"registration_operation_id"`
+				Policy      string    `json:"password_policy_version"`
+				Handle      string    `json:"password_handle"`
+				First       bool      `json:"first_attempt"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&create); err != nil ||
+				create.OperationID == uuid.Nil || create.Policy != identity.MobileSignupCredentialMode || create.Handle != "" || !create.First {
+				t.Error("expected a first-attempt SMS-only identity create with an operation ID", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			switch createRequests.Add(1) {
+			case 1:
+				createOperations <- create.OperationID
+				w.WriteHeader(http.StatusGone)
+				_, _ = w.Write([]byte("{\"code\":\"IDENTITY_CREATE_NOT_DISPATCHED\"}"))
+			case 2:
+				createOperations <- create.OperationID
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte("{\"subject\":\"controlled-restarted-signup\"}"))
+			default:
+				t.Error("unexpected additional create request")
+				w.WriteHeader(http.StatusConflict)
+			}
+		default:
+			t.Errorf("unexpected identity adapter route: %s %s", req.Method, req.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPIdentityProvisioner(server.URL, "controlled-proof-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &smsProviderFake{verified: true}
+	auth := newMobileAuthForTest(t, r, provider, client)
+	auth.now = func() time.Time { return r.now() }
+	const mobile = "+8613800138000"
+	issueChallenge := func() uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		if err := r.CreateSMSChallenge(ctx, SMSChallenge{
+			ID: id, Mobile: mobile, Purpose: SMSPurposeLogin, Provider: provider.Descriptor(),
+			ExpiresAt: r.now().Add(5 * time.Minute), SignupConsentVersion: mobileSignupConsentVersion, SignupIssuer: auth.issuer,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.MarkSMSChallengeSent(ctx, id, "controlled", nil); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	// Age only the first challenge past the sending cooldown. Account and
+	// authorization writes use the live clock, matching PostgreSQL now().
+	liveClock := r.now
+	r.now = func() time.Time { return liveClock().Add(-time.Minute - time.Second) }
+	first := issueChallenge()
+	r.now = liveClock
+	if subject, err := auth.VerifyLogin(ctx, mobile, first, "123456"); subject != "" || !errors.Is(err, ErrRegistrationRecovering) {
+		t.Fatal("failed signup issued an identity or did not return the retry response", err)
+	}
+	var firstOperation uuid.UUID
+	var status string
+	var proof bool
+	err = r.pool.QueryRow(ctx, `
+SELECT id, status, last_error_code='SMS_SIGNUP_CREATE_NOT_DISPATCHED'
+  AND identity_subject IS NULL AND committed_user_id IS NULL
+  AND COALESCE(compensation_evidence @> '{"authority":"IDENTITY_ADAPTER","creation_never_dispatched":true}'::jsonb
+	  AND (compensation_evidence->>'attempt_version')::bigint=signup_first_dispatch_version, false)
+FROM registration_operations WHERE sms_challenge_id=$1`, first).Scan(&firstOperation, &status, &proof)
+	if err != nil || status != "COMPENSATED" || !proof || r.attempts != 2 || createRequests.Load() != 1 {
+		t.Fatal("explicit proof did not release the first operation after retry", status, proof, r.attempts, createRequests.Load(), err)
+	}
+	if dispatched := <-createOperations; dispatched != firstOperation {
+		t.Fatal("the first create did not use the original registration operation")
+	}
+	if _, err := auth.VerifyLogin(ctx, mobile, first, "123456"); !errors.Is(err, ErrSMSInvalid) || createRequests.Load() != 1 {
+		t.Fatal("the compensated operation allowed replay of the original code", err)
+	}
+
+	restarted := issueChallenge()
+	subject, err := auth.VerifyLogin(ctx, mobile, restarted, "123456")
+	if err != nil || subject != "controlled-restarted-signup" || createRequests.Load() != 2 {
+		t.Fatal("fresh code did not create the replacement account exactly once", err, createRequests.Load())
+	}
+	var restartedOperation, userID uuid.UUID
+	err = r.pool.QueryRow(ctx, "SELECT id, committed_user_id FROM registration_operations WHERE sms_challenge_id=$1 AND status='PROVISIONING'", restarted).Scan(&restartedOperation, &userID)
+	if err != nil || userID == uuid.Nil || restartedOperation == firstOperation || restartedOperation != <-createOperations {
+		t.Fatal("the fresh challenge did not commit a distinct registration operation", err)
+	}
+	principal := identity.Principal{Issuer: auth.issuer, Subject: subject}
+	if decision, err := r.AuthorizeBoundSMSLogin(ctx, principal, restarted); err != nil || !decision.Allowed || decision.UserID != userID {
+		t.Fatal("replacement account did not authorize the new code", err)
+	}
+	if _, err := r.AuthorizeBoundSMSLogin(ctx, principal, first); !errors.Is(err, ErrForbidden) {
+		t.Fatal("original code authorized the replacement account", err)
+	}
+}
+
 func TestRegistrationCreateDispatchRuntimePostgres(t *testing.T) {
 	f := retainedWalletFenceActors(t)
+	t.Run("consented-signup-restarts-after-dispatch-proof", func(t *testing.T) {
+		testConsentedSignupRestartsAfterDispatchProof(t, f)
+	})
 	t.Run("consented-sms-creates-account-before-wallet", func(t *testing.T) {
 		testConsentedMobileSignup(t, f)
 	})
