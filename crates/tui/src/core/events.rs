@@ -18,6 +18,10 @@ use crate::tools::spec::{ToolError, ToolResult};
 use crate::tools::subagent::{AgentWorkerStatus, CoordinationDetailProjection, SubAgentResult};
 use crate::tools::user_input::UserInputRequest;
 
+/// Reserved boolean in model-tool completion metadata, set by the engine
+/// when it cancels the call while preserving a legacy result for the transcript.
+pub const TOOL_CALL_CANCELLED_METADATA_KEY: &str = "engine_tool_cancelled";
+
 /// Final status for a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnOutcomeStatus {
@@ -232,7 +236,11 @@ pub enum Event {
     /// deliberately long-running tool turn stale.
     ToolCallHeartbeat,
 
-    /// Tool call completed
+    /// Tool call completed.
+    ///
+    /// A model tool cancelled by the engine can carry
+    /// [TOOL_CALL_CANCELLED_METADATA_KEY] in the event result. That marker
+    /// is added to the host event without modifying the model's tool result.
     ToolCallComplete {
         id: String,
         name: String,
