@@ -605,6 +605,10 @@ impl TemporaryModelPackageV1 {
         Ok(package)
     }
 
+    pub(crate) fn validate_runtime_credential(&self) -> Result<()> {
+        validate_runtime_primary_credential(&self.primary, |name| std::env::var(name).ok())
+    }
+
     pub(crate) fn validate_for_task(&self, live: &LeaseContext, task_id: &str) -> Result<()> {
         self.validate()?;
         if !self.binding.matches(live, task_id) {
@@ -851,7 +855,7 @@ fn validate_runtime_primary_credential(
     if cli_source.as_deref() == Some("cli")
         || classify_config_api_key_value(primary.secret.expose()) != ConfigApiKeyValueKind::Literal
     {
-        return Err(error("model_runtime_invalid"));
+        return Err(error("model_credential_invalid"));
     }
     Ok(())
 }
@@ -1147,6 +1151,9 @@ impl super::controlled::ControlledCleanupSink for TemporaryModelStore {
 pub(crate) type SharedTemporaryModelStore = Arc<TemporaryModelStore>;
 
 #[cfg(test)]
+pub(crate) use self::tests::package as temporary_model_package_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::remote_control::controller::protocol::{
@@ -1186,7 +1193,7 @@ mod tests {
             });
             assert_eq!(
                 result.err().map(|error| error.code),
-                denied.then_some("model_runtime_invalid")
+                denied.then_some("model_credential_invalid")
             );
         }
 
@@ -1196,7 +1203,8 @@ mod tests {
             API_KEYRING_SENTINEL,
         );
         let failure = validate_runtime_primary_credential(&sentinel, |_| None).unwrap_err();
-        assert_eq!(failure.code, "model_runtime_invalid");
+        assert_eq!(failure.code, "model_credential_invalid");
+        assert!(super::super::task_rejection::is_definite(failure.code));
     }
 
     fn route(base_url: &str, preset: &str, key: &str) -> ExportRoute {
@@ -1230,7 +1238,7 @@ mod tests {
         }
     }
 
-    fn package(key: &str) -> TemporaryModelPackageV1 {
+    pub(crate) fn package(key: &str) -> TemporaryModelPackageV1 {
         TemporaryModelPackageV1 {
             package_id: "package-0001".into(),
             binding: TemporaryModelBinding {
@@ -1864,6 +1872,12 @@ mod tests {
             assert!(
                 validate_export_target(base_url).is_err(),
                 "{base_url} must not be exportable"
+            );
+        }
+        for base_url in ["https://models.example.test:0/v1", "https://8.8.8.8:0/v1"] {
+            assert_eq!(
+                validate_export_target(base_url).unwrap_err().code,
+                "model_endpoint_invalid"
             );
         }
         assert!(validate_export_target("https://api.deepseek.com/v1").is_ok());

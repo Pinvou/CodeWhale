@@ -104,7 +104,7 @@ fn parse_endpoint(base_url: &str) -> Result<reqwest::Url, &'static str> {
     if url.scheme() != "https" {
         return Err("model_endpoint_insecure");
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if !url.username().is_empty() || url.password().is_some() || url.port() == Some(0) {
         return Err("model_endpoint_invalid");
     }
     Ok(url)
@@ -238,12 +238,14 @@ mod tests {
             host: "owned.invalid".into(),
             addresses: vec!["1.1.1.1:0".parse().unwrap(), "8.8.8.8:0".parse().unwrap()],
         };
-        let actual = resolver
-            .resolve("owned.invalid".parse().unwrap())
-            .await
-            .unwrap()
-            .collect::<Vec<_>>();
-        assert_eq!(actual, resolver.addresses);
+        for host in ["owned.invalid", "OWNED.INVALID", "owned.invalid."] {
+            let actual = resolver
+                .resolve(host.parse().unwrap())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(actual, resolver.addresses);
+        }
         assert!(
             resolver
                 .resolve("localhost".parse().unwrap())
@@ -281,6 +283,21 @@ mod tests {
         ] {
             assert!(RuntimeEgress::prepare(base, None).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn temporary_model_preparation_rejects_port_zero() {
+        let endpoint = "https://1.1.1.1:0/v1";
+        assert_eq!(
+            RuntimeEgress::prepare(endpoint, None).await.unwrap_err(),
+            "model_endpoint_invalid"
+        );
+        assert_eq!(
+            RuntimeEgress::prepare("https://1.1.1.1/v1", Some(endpoint))
+                .await
+                .unwrap_err(),
+            "model_endpoint_invalid"
+        );
     }
 
     #[tokio::test]
@@ -385,13 +402,21 @@ mod tests {
                 assert_eq!(response.text().await.unwrap(), "owned TLS response");
                 let response = client.get(format!("{base}/redirect")).send().await.unwrap();
                 assert_eq!(response.status(), reqwest::StatusCode::FOUND);
-                assert!(
-                    client
-                        .get("https://unprepared.invalid/")
-                        .send()
-                        .await
-                        .is_err()
-                );
+                let error = client
+                    .get("https://unprepared.invalid/")
+                    .send()
+                    .await
+                    .unwrap_err();
+                assert!(error.is_connect());
+                let mut causes =
+                    std::iter::successors(std::error::Error::source(&error), |cause| {
+                        cause.source()
+                    });
+                assert!(causes.any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.to_string() == "model_endpoint_unprepared")
+                }));
             }
         }
     }
