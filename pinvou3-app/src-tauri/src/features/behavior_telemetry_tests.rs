@@ -1251,6 +1251,115 @@ fn diagnostic_eof_uses_the_error_source_and_preserves_process_facts() {
 }
 
 #[test]
+fn submission_rejections_keep_their_reason_and_only_close_pending_attempts() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    let lease = telemetry.current_lease().unwrap();
+    let session = "submission_rejection_test";
+    let mut attempt = TaskAttempt {
+        attempt_id: String::new(),
+        submitted_at: now_ms(),
+        admitted_at: None,
+        turn_id: None,
+        mode: "assistant".into(),
+        initiator_type: "user".into(),
+        input_type: "text".into(),
+        has_attachment: false,
+        first_output_emitted: false,
+        generation: lease.generation,
+        collection_period_id: lease.collection_period_id.clone(),
+    };
+
+    for (reason, category, diagnostic_code) in [
+        (
+            TaskSubmissionRejection::ValidationFailed,
+            "validation_failed",
+            "validation_failed",
+        ),
+        (
+            TaskSubmissionRejection::Timeout,
+            "timeout",
+            "request_timeout",
+        ),
+        (
+            TaskSubmissionRejection::InternalError,
+            "internal_error",
+            "internal_error",
+        ),
+    ] {
+        attempt.attempt_id = token("attempt_", 16);
+        telemetry
+            .tasks
+            .lock()
+            .unwrap()
+            .insert(session.into(), attempt.clone());
+        telemetry.track_for_lease(
+            events::task_fields(BehaviorEvent::new("task_submitted"), session, &attempt),
+            &lease,
+        );
+        events::reject_task_submission(
+            &telemetry,
+            session,
+            "stale_attempt",
+            TaskSubmissionRejection::InternalError,
+        );
+        events::reject_task_submission(&telemetry, session, &attempt.attempt_id, reason);
+        events::reject_task_submission(
+            &telemetry,
+            session,
+            &attempt.attempt_id,
+            TaskSubmissionRejection::InternalError,
+        );
+        assert!(!telemetry.tasks.lock().unwrap().contains_key(session));
+
+        let outbox = telemetry.outbox.lock().unwrap();
+        let batch = outbox.batch();
+        let rejected: Vec<_> = batch
+            .iter()
+            .filter(|row| {
+                row.event["event_name"] == "task_rejected"
+                    && row.event["attempt_id"] == attempt.attempt_id
+            })
+            .collect();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].event["stage"], "submission");
+        assert_eq!(rejected[0].event["error_category"], category);
+        assert_eq!(rejected[0].event["diagnostic_code"], diagnostic_code);
+    }
+
+    attempt.attempt_id = token("attempt_", 16);
+    attempt.admitted_at = Some(now_ms());
+    attempt.turn_id = Some("admitted_turn".into());
+    telemetry
+        .tasks
+        .lock()
+        .unwrap()
+        .insert(session.into(), attempt.clone());
+    events::reject_task_submission(
+        &telemetry,
+        session,
+        &attempt.attempt_id,
+        TaskSubmissionRejection::InternalError,
+    );
+    assert!(
+        telemetry.tasks.lock().unwrap()[session]
+            .admitted_at
+            .is_some()
+    );
+    assert!(
+        !telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .batch()
+            .iter()
+            .any(|row| row.event["event_name"] == "task_rejected"
+                && row.event["attempt_id"] == attempt.attempt_id)
+    );
+}
+
+#[test]
 fn diagnostic_late_terminal_cannot_write_a_successor_context() {
     fn submit(t: &BehaviorTelemetry, lease: &CollectionLease, session: &str) -> TaskAttempt {
         let attempt = TaskAttempt {

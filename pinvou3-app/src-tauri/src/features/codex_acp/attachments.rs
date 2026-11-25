@@ -5,11 +5,11 @@ use agent_client_protocol::schema::v1::{
     ContentBlock, EmbeddedResource, EmbeddedResourceResource, ImageContent, PromptCapabilities,
     ResourceLink, TextContent, TextResourceContents,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde::Serialize;
 
-use super::workspace::WorkspacePromptReference;
+use super::{AcpPromptValidationError, workspace::WorkspacePromptReference};
 use crate::features::files::file_ingest::{self, IngestResult};
 
 const EMBED_FILE_MAX_TOKENS: u32 = 8_000;
@@ -98,10 +98,10 @@ pub(super) fn prepare_codex_prompt(
 
         if attachment.kind == "image" {
             if !capabilities.image {
-                bail!(
+                bail!(AcpPromptValidationError(format!(
                     "当前 Codex ACP Agent 未声明图片输入能力: {}",
                     attachment.basename
-                );
+                )));
             }
             let data =
                 fs::read(&path).with_context(|| format!("读取图片附件失败: {}", path.display()))?;
@@ -175,7 +175,7 @@ pub(super) fn prepare_codex_prompt(
     }
 
     if blocks.is_empty() {
-        bail!("消息和附件不能同时为空");
+        bail!(AcpPromptValidationError("消息和附件不能同时为空".into()));
     }
     Ok(PreparedCodexPrompt {
         blocks,
@@ -213,7 +213,9 @@ fn codex_image_mime_type(path: &Path) -> Result<&'static str> {
         .to_ascii_lowercase();
     image_mime_type(path)
         .filter(|mime| *mime != "image/svg+xml" && *mime != "image/bmp")
-        .ok_or_else(|| anyhow!("Codex 不支持该图片格式: .{extension}"))
+        .ok_or_else(|| {
+            AcpPromptValidationError(format!("Codex 不支持该图片格式: .{extension}")).into()
+        })
 }
 
 fn text_mime_type(path: &Path) -> &'static str {
@@ -599,6 +601,7 @@ mod tests {
         )
         .err()
         .expect("image capability must be enforced");
+        assert!(error.is::<AcpPromptValidationError>());
         assert!(error.to_string().contains("未声明图片输入能力"));
     }
 }

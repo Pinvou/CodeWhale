@@ -94,7 +94,7 @@ pub fn begin_task_submission(
         app: app.clone(),
         session_id: session_id.to_string(),
         attempt_id: attempt.attempt_id,
-        reject_on_drop: true,
+        rejection: Some(TaskSubmissionRejection::InternalError),
     }
 }
 
@@ -585,16 +585,12 @@ pub fn track_artifact_exported(
     Ok(())
 }
 
-pub fn reject_task_submission(
-    app: &tauri::AppHandle,
+pub(super) fn reject_task_submission(
+    telemetry: &BehaviorTelemetry,
     session_id: &str,
     attempt_id: &str,
-    error_category: &str,
-    stage: &str,
+    reason: TaskSubmissionRejection,
 ) {
-    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
-        return;
-    };
     let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
         let removed = if tasks.get(session_id).is_some_and(|attempt| {
             attempt.attempt_id == attempt_id
@@ -613,8 +609,8 @@ pub fn reject_task_submission(
     if let Some(attempt) = attempt {
         telemetry.track_for_lease(
             task_fields(BehaviorEvent::new("task_rejected"), session_id, &attempt)
-                .string("error_category", error_category)
-                .stage(stage),
+                .string("error_category", reason.category())
+                .stage("submission"),
             &attempt.lease(),
         );
     }
