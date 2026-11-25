@@ -76,10 +76,33 @@ const hostFilePicker = readSource(
   'utf8',
 );
 const commandsRoot = path.join(root, 'src-tauri', 'src', 'app', 'commands');
-const commands = fs.readdirSync(commandsRoot)
-  .filter(name => name.endsWith('.rs'))
-  .sort() // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of the string array is the asserted expectation
-  .map(name => readSource(path.join(commandsRoot, name), 'utf8'))
+// Round-20 review (S14): the aggregation previously covered only top-level
+// files, so `dependencies/` subdirectories escaped the scan. Switched to
+// recursive collection (sorted by full path; ordering stays deterministic).
+// Round-21 review: readdirSync's default sort triggers
+// unicorn/require-array-sort-compare (CI frontend-test has been red since the
+// round-20 wave) — use an explicit comparator instead of relying on the
+// implicit behavior of elements happening to be strings. Round-22 review:
+// switched to readdirSync's withFileTypes (Dirent.isDirectory has lstat
+// semantics) — statSync follows directory symlinks, so a linked directory
+// under any of the three scan roots would recurse across trees (false red) or
+// even loop; same shape as the bridge_domain_protocol suite's sourceFiles.
+function walkRustSources(rootDir) {
+  const files = [];
+  const visit = dir => {
+    for (const entry of fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(full);
+      else if (entry.name.endsWith('.rs')) files.push(full);
+    }
+  };
+  visit(rootDir);
+  return files;
+}
+const commands = walkRustSources(commandsRoot)
+  .map(fullPath => readSource(fullPath, 'utf8'))
   .join('\n');
 const remoteControlCommands = readSource(path.join(commandsRoot, 'remote_control.rs'), 'utf8');
 const remoteControlManagerRoot = path.join(
@@ -90,10 +113,13 @@ const remoteControlManagerRoot = path.join(
   'remote_control',
   'manager',
 );
-const remoteControlManager = fs.readdirSync(remoteControlManagerRoot)
-  .filter(name => name.endsWith('.rs'))
-  .sort() // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of the string array is the asserted expectation
-  .map(name => readSource(path.join(remoteControlManagerRoot, name), 'utf8'))
+// Round-21 review: the two aggregations also go through walkRustSources
+// recursion — manager/ and platform/ are flat directories today, and a
+// non-recursive enumeration would silently miss subdirectories appearing in
+// the future (same class as the commands S14). While flat, the DFS order
+// matches the old name sort, so existing assertions are unaffected.
+const remoteControlManager = walkRustSources(remoteControlManagerRoot)
+  .map(fullPath => readSource(fullPath, 'utf8'))
   .join('\n');
 const remoteControlPlatformRoot = path.join(
   root,
@@ -103,10 +129,8 @@ const remoteControlPlatformRoot = path.join(
   'remote_control',
   'platform',
 );
-const remoteControlPlatform = fs.readdirSync(remoteControlPlatformRoot)
-  .filter(name => name.endsWith('.rs'))
-  .sort() // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic order of the string array is the asserted expectation
-  .map(name => readSource(path.join(remoteControlPlatformRoot, name), 'utf8'))
+const remoteControlPlatform = walkRustSources(remoteControlPlatformRoot)
+  .map(fullPath => readSource(fullPath, 'utf8'))
   .join('\n');
 const settingsView = readSource(path.join(root, 'src', 'features', 'settings', 'SettingsView.jsx'), 'utf8');
 const artifactsPanel = readSource(path.join(root, 'src', 'features', 'artifacts', 'ArtifactsPanel.jsx'), 'utf8');
@@ -131,7 +155,7 @@ const codeViewerContent = readSource(
 );
 const acpPlatformClient = readSource(path.join(root, 'src', 'features', 'codex', 'acpClient.js'), 'utf8');
 const acpErrors = readSource(path.join(root, 'src', 'features', 'codex', 'acpErrors.js'), 'utf8');
-const i18n = ['zh', 'en', 'ja'].map((l) => readSource(path.join(root, 'src', 'shared', 'i18n', `${l}.js`), 'utf8')).join('\n'); // 拆分后三语在 i18n/ 目录
+const i18n = ['zh', 'en', 'ja'].map((l) => readSource(path.join(root, 'src', 'shared', 'i18n', `${l}.js`), 'utf8')).join('\n'); // after the split the three languages live in the i18n/ directory
 const appMain = readSource(path.join(root, 'src', 'app', 'main.jsx'), 'utf8');
 const policy = JSON.parse(readSource(path.join(root, 'src', 'platform', 'web', 'access-policy.json'), 'utf8'));
 const allowed = new Set(policy.allowed_commands);
@@ -231,10 +255,13 @@ for (const command of [
   // remote_control.rs 里定义的每一个 web_access_* 命令,新增命令不加进
   // 任一侧即红(结构性漏网:rpc 代理三兄弟、bridge_ready 由此兜住)。
   ...desktopOnlyWebAccessCommands,
-  // 上传包展示名/说明编辑写 bundles.json 并可能回写 SKILL.md：写操作桌面专用。
+  // Editing an uploaded bundle's display name/description writes bundles.json
+  // and may rewrite SKILL.md: a write operation, desktop-only.
   'update_bundle_display_meta',
-  // 回收站恢复/彻底删除与两种包导出都是桌面端写操作（原生保存对话框 + 文件系统
-  // 变更）：Web 端回收站只读，仅放行 list_recycled_plugins，写命令留在桌面端。
+  // Recycle-bin restore/purge and both bundle exports are desktop write
+  // operations (native save dialog + filesystem changes): the Web-side recycle
+  // bin is read-only, only list_recycled_plugins is allowed, and the write
+  // commands stay on the desktop.
   'restore_recycled_plugin',
   'purge_recycled_plugin',
   'export_recycled_plugin',
@@ -325,7 +352,15 @@ assert.equal(
 // 一类)由本钉永久兜住:任何新 web_access_* 命令不加进任一侧即红。
 {
   const defined = new Set();
-  for (const match of remoteControlCommands.matchAll(/pub(?:\([\w:]+\))? (?:async )?fn (web_access_\w+)\(/g)) {
+  // Round-19 review M1: the regex must be anchored at line start. The earlier
+  // unanchored version also counted the 8 signature-shaped strings in the
+  // `#[cfg(test)]` folded-error pin data table ("pub async fn
+  // web_access_chat(" and friends) as definitions — after a real command was
+  // deleted or renamed, the Set was still propped up by those phantom hits and
+  // the reverse-existence pin was blind for the other 8/42 policy commands
+  // (probe evidence). Production signatures all sit at column 0 while table
+  // data is indented, so line-start anchoring separates them precisely.
+  for (const match of remoteControlCommands.matchAll(/^pub(?:\([\w:]+\))? (?:async )?fn (web_access_\w+)\(/gm)) {
     defined.add(match[1]);
   }
   assert.ok(defined.size >= 50,
@@ -340,6 +375,17 @@ assert.equal(
     assert.ok(defined.has(command),
       `${command} is anti-pinned but no longer defined in remote_control.rs`);
   }
+  // Round-15 review M1: reverse-existence pin — every web_access_* allowed by
+  // the Web policy must still be defined in remote_control.rs. Deleting only
+  // the Rust command while the policy kept the name left the forward pins all
+  // green while the phone invoked a nonexistent command at runtime (until then
+  // only the Rust→policy direction existed).
+  for (const command of allowed) {
+    if (command.startsWith('web_access_')) {
+      assert.ok(defined.has(command),
+        `${command} is allowed by the web policy but no longer defined in remote_control.rs`);
+    }
+  }
 }
 
 // 事件半边的反钉——web_access:* 事件全部管理专用
@@ -349,6 +395,123 @@ assert.equal(
 // 新增同名事件即被扫进(此前事件半边没有任何反向钉)。
 for (const source of [remoteControlManager, desktopRemoteControlBridge]) {
   for (const match of source.matchAll(/"web_access:([a-z_]+)"/g)) {
+    const eventName = `web_access:${match[1]}`;
+    assert.equal(allowedEvents.has(eventName), false,
+      `${eventName} is a management channel and must never enter the web event policy`);
+  }
+}
+// Round-11 review M4: the anti-pin for the event half — every web_access:*
+// event is management-only (status carries the pairing URL/QR, rpc_request
+// carries the proxied command and args, event_subscribe is subscription
+// control). Structurally scan the web_access:* literals in the Rust manager
+// and the JS bridge: none of them may appear in the Web policy event list,
+// and a new same-named event is swept straight into the anti-pin (the event
+// half previously had no reverse pin at all).
+// Round-15 review M5: include the command layer in the scan. Round-18 review
+// correction of the terms: the command layer has zero hits today — this
+// source now contributes zero assertions, as forward-looking backstop: if the
+// command layer ever adds a same-named event literal (forwarding/status
+// channel), the scan immediately catches it into the anti-pin instead of
+// letting it slip through.
+// Round-19 review: widen the scan surface from the single remote_control.rs
+// to the whole app/commands aggregation (aggregated at the top of this file;
+// reused); relax the regex to any quote style (single quotes/template
+// literals) and allow digits in segment names ([a-z0-9_]+), closing three
+// bypass spellings proven by probe; strip comment lines first so a doc
+// mention cannot create phantom assertions (the phantom direction is already
+// fail-closed; stripping only avoids a false red if the policy ever changes).
+// Round-20 review: make the aggregation recursive (dependencies/
+// subdirectories escaped the scan before) and bring the
+// features/remote_control/platform aggregation into the scan too (it
+// previously served only other pins); both new surfaces have zero
+// web_access:* hits today — purely forward-looking backstop.
+// Strip only pure comment lines (starting with // or /*): code lines with
+// trailing comments must be kept, otherwise a `web_access:x` literal hidden in
+// the code before a trailing comment would be deleted with the whole line,
+// making the scan fail-open (the same class the Round-17 correction fixed).
+// Block-comment continuation lines (`* …`) are kept — text there can only
+// create fail-closed phantom assertions, never let a real violation through.
+// Round-29 review MINOR-5: a line OPENING with a block comment is pure only
+// when that comment closes on the same line with nothing but whitespace
+// after it — `/* note */ emit("web_access:x");` used to be stripped whole
+// (the opener regex matched), deleting a real literal from the scan; the
+// fail-open class this function exists to close. An unclosed opener line is
+// still pure (the whole line is comment); a closed opener followed by code
+// is now kept, so its literals stay fail-closed-scanned.
+// Round-30 review P2 (JensenChen28): the scan STOPS at the first close —
+// after a leading block comment closes, delimiters in the remainder are
+// executable/string text, not comment syntax (JS block comments do not nest
+// either). Parsing them let `/* note */ const s = "/*"; emit("web_access:x");`
+// re-open a phantom comment (depth stuck > 0 → whole line stripped) and a
+// trailing `/* tail */` move closedAt past the code (slice empty → stripped):
+// both fail-open, letting a forbidden literal evade the contract scan.
+// Freezing the close point keeps the whole remainder — conservative in the
+// only changed direction: a chained `/* a */ /* b */` line is now kept too,
+// which can only add fail-closed phantom assertions, never drop one.
+function stripPureCommentLines(source) {
+  return source.split('\n')
+    .filter(line => {
+      if (/^\s*\/\//.test(line)) return false;
+      if (!/^\s*\/\*/.test(line)) return true;
+      let inBlockComment = false;
+      let closedAt = -1;
+      for (let index = 0; index + 1 < line.length; index += 1) {
+        const two = line.slice(index, index + 2);
+        if (!inBlockComment && two === '/*') {
+          inBlockComment = true;
+          index += 1;
+          continue;
+        }
+        if (inBlockComment && two === '*/') {
+          // First close ends the comment AND the scan (round-30): freeze the
+          // remainder as code, do not parse further delimiters.
+          closedAt = index + 2;
+          break;
+        }
+      }
+      // Unclosed block opener (closedAt never set): the whole line is comment.
+      if (closedAt === -1) return false;
+      // Closed on this line: keep only when code follows the comment (the
+      // probe-executed round-29 direction — an inverted predicate here
+      // strips exactly the code-bearing lines the fix exists to keep).
+      return line.slice(closedAt).trim() !== '';
+    })
+    .join('\n');
+}
+// Round-30 review P2 regressions (trailing-code forms after a closed leading
+// block comment): each kept string must survive the strip VERBATIM — a
+// regression that re-parses delimiters (nested-depth counter or continued
+// scanning) deletes the line and silently green-lights its forbidden literal.
+assert.equal(
+  stripPureCommentLines('/* note */ const s = "/*"; emit("web_access:bad");'),
+  '/* note */ const s = "/*"; emit("web_access:bad");',
+  'delimiters inside trailing code are not comment syntax: the code-bearing line must survive the strip whole',
+);
+assert.equal(
+  stripPureCommentLines('/* note */ emit("web_access:bad"); /* tail */'),
+  '/* note */ emit("web_access:bad"); /* tail */',
+  'a trailing block comment must not move the close point past executable code: the line must survive the strip whole',
+);
+// Guard the direction the round-30 fix changed AWAY from the old depth
+// counter: JS block comments do not nest, so the first `*/` closes even
+// after an inner `/*` — code after it must stay in the scan.
+assert.equal(
+  stripPureCommentLines('/* /* nested */ emit("web_access:bad");'),
+  '/* /* nested */ emit("web_access:bad");',
+  'JS block comments do not nest: the first close ends the scan and the trailing code must survive',
+);
+// Unchanged contract: pure comment lines and unclosed openers stay stripped,
+// so doc mentions cannot create phantom scan hits.
+assert.equal(stripPureCommentLines('/* note */'), '', 'a closed pure-comment line is still stripped');
+assert.equal(stripPureCommentLines('/* note'), '', 'an unclosed opener line is still stripped');
+assert.equal(stripPureCommentLines('// note'), '', 'a // line is still stripped');
+assert.equal(
+  stripPureCommentLines('const s = 1; /* tail */'),
+  'const s = 1; /* tail */',
+  'a code-opening line with a trailing comment is kept (round-17 class)',
+);
+for (const source of [remoteControlManager, desktopRemoteControlBridge, commands, remoteControlPlatform].map(stripPureCommentLines)) {
+  for (const match of source.matchAll(/["'`]web_access:([a-z0-9_]+)["'`]/g)) {
     const eventName = `web_access:${match[1]}`;
     assert.equal(allowedEvents.has(eventName), false,
       `${eventName} is a management channel and must never enter the web event policy`);
@@ -394,8 +557,8 @@ assert.match(
 );
 
 // Memory organize is a global action (no session scope, same surface as
-// get_memory_overview): the settings "AI 整理记忆" (AI organize memory) button and
-// the "上次整理" (last organized) history read must work on WebUI too; missing
+// get_memory_overview): the settings "AI organize memory" button and the
+// "last organized" history read must work on WebUI too; missing
 // either one makes the button fail silently with command_not_allowed.
 for (const command of ['organize_memory', 'get_memory_organize_history']) {
   assert.equal(allowed.has(command), true, `${command} must be allowed on Web (memory organize)`);
@@ -551,12 +714,42 @@ assert.doesNotMatch(codexWorkspacePanel, /invoke\('get_codex_workspace_(?:change
   'the shared workspace UI must not bypass the Web-safe command adapter');
 assert.doesNotMatch(codexView, /invoke\('cancel_codex_acp'/,
   'the shared ACP UI must not bypass the Web-safe cancellation adapter');
+// Round-15 review HIGH (mutation evidence): `?.[0] || ''` turns extraction
+// drift (a rename, conversion to an arrow function, reformatting that removes
+// the column-0 `\n}`) into a trivially-true doesNotMatch against the empty
+// string — the workspacePath leak defense silently goes dark while the whole
+// suite stays green. Assert the extraction is non-empty before running the
+// anti-pin.
+const createAcpSessionSource =
+  acpPlatformClient.match(/export function createAcpSession\b[\s\S]*?\n\}/)?.[0];
+assert.ok(
+  createAcpSessionSource,
+  'createAcpSession must be extractable for the workspacePath anti-pin; if this \
+   assertion fires the function was renamed or restructured and the pin below \
+   must be re-anchored',
+);
+// Round-29 review MINOR-6: the `\n}` cut truncates at the FIRST column-0
+// closing brace — `assert.ok` covers non-existence but not truncation, so a
+// restructure that introduces an early column-0 brace would silently scan
+// only the function's head and let a leak below the cut escape. Pin a floor
+// length under the real function (755 chars at extraction time): a truncated
+// extraction lands far below it and turns red, while ordinary growth keeps
+// passing. Re-measure this floor if the function is legitimately rewritten.
+assert.ok(
+  createAcpSessionSource.length >= 600,
+  `the createAcpSession extraction is ${createAcpSessionSource.length} chars — \
+   suspiciously below the known function size (755+), meaning the column-0 \
+   brace cut truncated the scan window and the anti-pin below no longer \
+   covers the whole function`,
+);
 assert.doesNotMatch(
-  acpPlatformClient.match(/export function createAcpSession[\s\S]*?\n\}/)?.[0] || '',
+  createAcpSessionSource,
   /web_access_create_codex_acp_session[\s\S]*?workspacePath/,
   'Web code-session creation must submit only the opaque workspace handle',
 );
-// Web 列表必须走投影命令（主机绝对路径降级为目录名），不得直接调用桌面原命令。
+// The Web list must go through the projection command (host absolute paths
+// downgraded to directory names) and must not call the desktop's original
+// command directly.
 assert.match(acpPlatformClient, /web_access_list_codex_acp_sessions/,
   'the Web session list must go through the path-redacting wrapper');
 assert.doesNotMatch(codexView, /list_codex_acp_sessions/,
@@ -574,7 +767,8 @@ assert.match(codeViewerContent, /\{!hideDesktopActions && onReveal && \(/);
 assert.match(codeViewerContent, /\{!hideDesktopActions && onOpen && \(/,
   'the shared code preview must omit desktop system actions when callbacks are unavailable');
 
-// 浏览器本机上传:双入口按能力协商门控,分块有界,取消/失败路径完备。
+// Browser-side device upload: the dual entry is gated by capability
+// negotiation, chunks are bounded, and the cancel/failure paths are complete.
 assert.match(
   bootstrap,
   /deviceFileUpload:\s*\[[\s\S]*?"web_access_upload_attachment_chunk"[\s\S]*?"web_access_abort_attachment_upload"[\s\S]*?"web_access_discard_attachment"[\s\S]*?\]/,
@@ -601,8 +795,9 @@ assert.match(webBridge, /web_access_discard_attachment/,
   'removed or late-cancelled attachments must release their opaque desktop handle');
 assert.match(remoteControlCommands, /stage_uploaded_attachments\(attachments, &session_id, &?store\)/,
   'uploaded attachments must be staged into the Session workspace before the engine sees their paths');
-// Agent 安装命令行/输出可能含内部镜像源或主机路径，Web status 投影必须清除；
-// 安装终局的 error 字段同为错误链，一并仅桌面端展示。
+// Agent install command lines/output may contain internal mirror sources or
+// host paths; the Web status projection must strip them. The install-outcome
+// error field is part of the same error chain and is likewise desktop-only.
 assert.match(remoteControlCommands,
   /project_acp_status_for_web[\s\S]*?status\.install_command = None[\s\S]*?status\.install_latest_line = None[\s\S]*?status\.install_finished = None/,
   'the Web agent-status projection must strip install command/output lines and the install outcome');
@@ -884,6 +1079,8 @@ assert.doesNotMatch(hostFilePicker, /currentWorkspaceHandle/,
   'browsing never carries a workspace handle, so no stale-handle fallback path may remain');
 assert.match(hostFilePicker, /localizedPickerError/,
   'both the listing and confirm-mint failures must map stable authorization codes to localized copy');
+assert.match(hostFilePicker, /web_session_list_host_files_failed[\s\S]{0,200}labels\.listingFailed/,
+  'the round-21 stable browse/mint failure code must map to localized picker copy, not render as a bare code');
 assert.match(hostFilePicker,
   /(?:var|const|let) confirmedGeneration = loadGeneration;[\s\S]{0,900}if \(disposed \|\| confirmedGeneration !== loadGeneration\) return;/,
   'a late confirm-mint failure must not touch the UI after the picker closed or a newer listing rendered');
@@ -907,6 +1104,28 @@ for (const label of [
 ]) {
   assert.equal(i18n.includes(label), true, `missing localized host workspace error: ${label}`);
 }
+// Round-23 review MINOR: listingFailed previously existed only in the picker's
+// built-in Chinese fallback table — the en/ja dictionaries lacked the key, so
+// every language rendered the Chinese fallback. Pin the key's presence in all
+// three languages on the same terms as workspaceNotAuthorized; deleting the
+// dictionary key goes red.
+for (const label of [
+  'Listing desktop files failed. Please try again.',
+  'デスクトップのファイル一覧の読み込みに失敗しました。もう一度お試しください。',
+  '读取桌面端文件列表失败，请重试。',
+]) {
+  assert.equal(i18n.includes(label), true, `missing localized host file listing failure: ${label}`);
+}
+// Round-34 review MAJOR: localizedPickerError composes the final text —
+// recognized stable codes render their complete localized sentence bare,
+// and only unrecognized errors carry the loadFailed prefix around raw
+// detail. Re-wrapping the mapped copy at the call sites (the previous
+// shape) spliced the prefix and the sentence together in every language
+// (zh: "读取失败：读取桌面端文件列表失败，请重试。"); either rollback goes red.
+assert.doesNotMatch(hostFilePicker, /loadFailed\(localizedPickerError/,
+  'the picker must not re-wrap the mapper output — recognized codes already render complete sentences');
+assert.match(hostFilePicker, /return labels\.listingFailed;[\s\S]{0,200}return labels\.loadFailed\(message\);/,
+  'recognized wire codes must render bare and unrecognized errors must keep the loadFailed prefix');
 assert.match(appMain, /PinvouHostFilePickerStrings\s*=\s*misc\.hostFilePicker/,
   'the active locale must reach the Web host picker error branch');
 assert.match(remoteControlCommands,
@@ -1047,6 +1266,23 @@ function literalListeners(source) {
   return new Set([...source.matchAll(/\blisten\(\s*["']([^"']+)["']/g)].map(match => match[1]));
 }
 const webListenerNames = literalListeners(webBridge);
+// Round-25 review MINOR: a non-empty extraction was never asserted — if the
+// listen( wrapper drifted off the literal regex, webListenerNames silently
+// became an empty set and the desktop-coverage cross-check below degenerated
+// into a vacuous loop (the same hole as the createAcpSession anti-pin).
+// Round-27 review m13: a floor of >=3 only buys "non-empty" — measured with
+// 26 listeners, dropping 23 still kept the suite green, consistent with this
+// file's round-15 M2 precedent of converging to an exact count (a floor
+// tolerates deleting most of the guards while staying green). Switched to an
+// exact census; adding/removing a listener must update this count.
+// 合并后形态适配：official main 的 web/bridge.js 比回流载荷基线多一个字面
+// listener（实测 27 个），精确计数按合并后树的实际清点值更新为 27。
+assert.equal(webListenerNames.size, 27,
+  'webBridge listener extraction must resolve the full literal-listener \
+   census (26 at round-27, 27 on the merged tree); an empty set means the \
+   listen( wrapper drifted off the regex and the desktop-coverage \
+   cross-check below is vacuous, a smaller set means listeners were removed \
+   and the census must be updated in the same commit');
 const desktopListenerNames = literalListeners(desktopBridgeSources.join('\n'));
 for (const eventName of webListenerNames) {
   assert.equal(desktopListenerNames.has(eventName), true,
@@ -1143,17 +1379,23 @@ const composerShared = readSource(path.join(root, 'src', 'features', 'settings',
 assert.match(composerShared, /const canSwitchModels = can\('sessionModelSwitch'\);/);
 assert.match(composerShared, /const canMutateToolStore = can\('toolStoreMutations'\);/);
 assert.match(composerShared, /const toolSwitchDisabled = !canMutateToolStore;/);
-// 只增不减 + 未提交可撤销：会话中阻隔「关闭」，但本会话内刚打开（pending）、
-// 尚未随新一轮对话进入上下文的允许改回；新一轮被后端受理后才锁死。
+// Add-only plus revocable-before-commit: while a session is active, switching
+// a tool "off" is blocked, but a tool opened within the current session
+// (pending) that has not yet entered context with a new round may be switched
+// back; it locks only after the backend accepts the new round.
 assert.match(composerShared, /if \(toolSwitchDisabled \|\| \(hasActiveSession && enabled && !pending\.ids\.has\(id\)\)\) return;/);
 assert.match(composerShared, /if \(toolSwitchDisabled \|\| \(hasActiveSession && projectSkillsEnabled && !pending\.projectSkills\)\) return;/);
 assert.match(composerShared, /if \(enabled\) pending\.ids\.delete\(id\); else pending\.ids\.add\(id\);/);
 assert.match(composerShared, /window\.addEventListener\('pinvou:chat-round-committed', onCommitted\)/);
 assert.match(composerShared, /pending\.ids\.clear\(\);\s*\n\s*pending\.projectSkills = false;/);
-// 转正（清空 pending）必须在模块级监听里做，不能只在组件 effect 里：受理事件
-// 可能在菜单组件已卸载时到达（排队消息在用户切页后 flush、后台定向发送），
-// 组件级监听会漏清，重挂载后 pending 悬空、已进上下文的工具仍显示可关。
-// 模块级监听注册点还必须先于组件定义，保证清空发生在组件 bump 重渲染之前。
+// The commit (clearing pending) must happen in a module-level listener, not
+// only inside a component effect: the acceptance event can arrive after the
+// menu component has unmounted (queued messages flushing after the user
+// switches pages, background directed sends), and a component-level listener
+// would miss the clear, leaving pending dangling after remount with tools
+// already in context still showing as switchable.
+// The module-level listener registration must also precede the component
+// definition so the clear happens before the component's bump re-render.
 const moduleListenerIdx = composerShared.indexOf(
   "window.addEventListener('pinvou:chat-round-committed', (event)",
 );
@@ -1161,11 +1403,14 @@ assert.ok(
   moduleListenerIdx >= 0 && moduleListenerIdx < composerShared.indexOf('const ComposerToolMenu'),
   'round-committed pending-clear listener must be registered at module level (before ComposerToolMenu), not only inside the component',
 );
-// 提交信号由发送链路在后端受理新一轮后派发：常规发送（desktop/web doSendFor）、
-// Web 首轮提交、接受计划（desktop/web acceptPlan）、编辑重跑（desktop/web
-// editLastTurn）、原生代码车道发送与接受方案，缺任一处 pending 都不会转正。
-// FFE4-1：原始 dispatch 只存在于 shared/tool-store-events.js；platform 桥接层
-// 的 7 处发送/接受/重跑路径必须经 window.PinvouToolStoreEvents 调用。
+// The commit signal is dispatched by the send chain after the backend accepts
+// the new round: ordinary sends (desktop/web doSendFor), the Web first-turn
+// commit, accepting a plan (desktop/web acceptPlan), edit-and-rerun
+// (desktop/web editLastTurn), and the native code lane's send and accept-plan
+// — missing any of these sites leaves pending uncommitted.
+// FFE4-1: the raw dispatch exists only in shared/tool-store-events.js; the
+// platform bridge layer's 7 send/accept/rerun paths must call through
+// window.PinvouToolStoreEvents.
 const toolStoreEventsShared = readSource(path.join(root, 'src', 'shared', 'tool-store-events.js'), 'utf8');
 assert.match(toolStoreEventsShared, /pinvou:chat-round-committed/);
 assert.match(toolStoreEventsShared, /pinvou:tools-changed/);
@@ -1192,11 +1437,26 @@ assert.match(composerShared, /bridge\.models\.switchModelRef\(activeSessionId, m
 assert.match(settingsView, /\{canManageModels && editingModel && \(/);
 assert.match(toolStoreView, /if \(!can\('toolStoreMutations'\)\) \{/);
 assert.match(toolStoreView, /const canMutateToolStore = can\('toolStoreMutations'\);/);
-assert.ok((toolStoreView.match(/if \(!canMutateToolStore(\s*\|\|\s*busyRef\.current)?\) return;/g) || []).length >= 4,
-  'all tool install, uninstall, and import handlers must fail closed in WebUI');
-// 回收站 Web 只读降级：list_recycled_plugins 为只读命令（access-policy 放行），
-// 恢复/导出/彻底删除的动作按钮整块挂 canMutateToolStore 门控，处理函数自身
-// fail-closed（含 purge——其确认弹窗入口虽由门控按钮触发，处理函数仍须自守）。
+// Round-15 review M2: a floor of >=4 would tolerate deleting 4 of the 8 guards
+// while staying green; converge to an exact count and update the pin when a
+// guard is added (the same convention as this file's other exact-count pins).
+// Round-21 review (disclosed blind spots): this census counts only the two
+// "pure" guard shapes (`!canMutateToolStore` and `|| busyRef.current`);
+// compound-predicate guards (`|| !somethingElse`, 5 present today) and
+// brace-form guards (`{ return; }`) are not counted; and the count is
+// file-wide, so a deletion at one site cancels an addition at another. New
+// guards landing in those shapes need their own pins; this count cannot be
+// relied on as a backstop for them.
+assert.equal(
+  (toolStoreView.match(/if \(!canMutateToolStore(\s*\|\|\s*busyRef\.current)?\) return;/g) || []).length,
+  8,
+  'all tool install, uninstall, and import handlers must fail closed in WebUI; \
+   if a guard was deliberately removed or added, update this count consciously');
+// Recycle-bin Web read-only downgrade: list_recycled_plugins is a read-only
+// command (allowed by the access policy); the restore/export/purge action
+// buttons are gated wholesale behind canMutateToolStore, and the handlers
+// themselves fail closed (including purge — its confirmation dialog entry is
+// triggered by a gated button, but the handler must still guard itself).
 assert.match(toolStoreView,
   /\{canMutateToolStore && \(\s*<div className="flex items-center gap-2 shrink-0">[\s\S]{0,900}recycled-restore-[\s\S]{0,900}recycled-export-[\s\S]{0,900}recycled-purge-/,
   'recycle bin restore/export/purge buttons must be gated behind canMutateToolStore');

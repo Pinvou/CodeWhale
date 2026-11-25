@@ -1,14 +1,20 @@
 package com.pinvou.identity;
 
 import static org.junit.jupiter.api.Assertions.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.Executors;
+import javax.imageio.ImageIO;
 import org.junit.jupiter.api.Test;
 
 final class PinvouAuthClientTransportTest {
@@ -394,6 +400,65 @@ final class PinvouAuthClientTransportTest {
             assertTrue((System.nanoTime() - started) / 1_000_000 < 7_000,
                 "overflow must cancel before the eight-second deadline or server EOF");
         } finally { overflow.stop(0); workers.shutdownNow(); }
+    }
+
+    @Test void captchaAcceptsPngPairLargerThanAnOrdinaryAuthResponse() throws Exception {
+        var background = captchaImage(280, 120);
+        var piece = captchaImage(44, 44);
+        String body = new ObjectMapper().writeValueAsString(Map.of(
+            "captcha_id", USER, "background_image", background, "piece_image", piece,
+            "width", 280, "height", 120, "piece_width", 44, "piece_height", 44, "piece_y", 28));
+        assertTrue(body.getBytes(StandardCharsets.UTF_8).length > 65_536);
+        HttpServer s = captchaServer(201, body);
+        try {
+            var captcha = client(s).createCaptcha("+8613800000000", "REGISTER", "192.0.2.1", "fixture-device");
+            assertEquals(USER, captcha.get("captcha_id"));
+            assertEquals(background, captcha.get("background_image"));
+            assertEquals(piece, captcha.get("piece_image"));
+        } finally { s.stop(0); }
+    }
+
+    @Test void captchaSuccessAndErrorResponsesHaveSeparateByteLimits() throws Exception {
+        String valid = "{}";
+        HttpServer s = captchaServer(201, valid + " ".repeat(262_144 - valid.length()));
+        try {
+            assertEquals(Map.of(), client(s).createCaptcha("+8613800000000", "REGISTER", "192.0.2.1", "fixture-device"));
+        } finally { s.stop(0); }
+        assertOversizedCaptchaResponse(201, valid + " ".repeat(262_145 - valid.length()));
+        String denied = "{\"code\":\"RATE_LIMITED\"}";
+        assertOversizedCaptchaResponse(429, denied + " ".repeat(65_537 - denied.length()));
+    }
+
+    private void assertOversizedCaptchaResponse(int status, String body) throws Exception {
+        HttpServer s = captchaServer(status, body);
+        try {
+            var error = assertThrows(PinvouAuthClient.AuthClientException.class,
+                () -> client(s).createCaptcha("+8613800000000", "REGISTER", "192.0.2.1", "fixture-device"));
+            assertEquals("AUTH_SERVICE_UNAVAILABLE", error.code());
+        } finally { s.stop(0); }
+    }
+
+    private HttpServer captchaServer(int status, String body) throws Exception {
+        HttpServer s = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        s.createContext("/v1/auth/captcha/challenges", exchange -> {
+            try {
+                exchange.getRequestBody().readAllBytes();
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(status, 0);
+                exchange.getResponseBody().write(body.getBytes(StandardCharsets.UTF_8));
+            } finally { exchange.close(); }
+        });
+        s.start();
+        return s;
+    }
+
+    private String captchaImage(int width, int height) throws Exception {
+        var image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        var pixels = new Random(42).ints(width * height, 0, 1 << 24).toArray();
+        image.setRGB(0, 0, width, height, pixels, 0, width);
+        var bytes = new ByteArrayOutputStream();
+        assertTrue(ImageIO.write(image, "png", bytes));
+        return "data:image/png;base64," + Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 
     @Test void interruptedCallerPreservesItsInterruptFlag() throws Exception {

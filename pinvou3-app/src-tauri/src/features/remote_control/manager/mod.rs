@@ -25,7 +25,8 @@ use super::controller::protocol::LeaseContext;
 use super::controller::shared_transport::ControllerReadReceipt;
 use super::platform;
 use super::protocol::{
-    PROTOCOL_VERSION, WebAccessConfig, WebAccessInfo, WebAccessStatus, WebAccessStatusKind,
+    PROTOCOL_VERSION, WebAccessConfig, WebAccessInfo, WebAccessRevocationDisposition,
+    WebAccessStatus, WebAccessStatusKind, WebAccessStopOutcome,
 };
 use super::relay_client::{self, RelayInbound, RelayOutbound, RelaySender};
 use crate::platform::paths;
@@ -42,7 +43,8 @@ pub use persistence::RelaySettingsInfo;
 // Persistent config / RPC ledger / pending revocation / relay settings helpers
 // are pure and stateless; the facade calls them by name.
 use persistence::{
-    RelaySettings, acquire_process_lock, apply_runtime_relay_override, atomic_write_private_json,
+    PENDING_REVOCATION_QUEUE_FULL_PREFIX, RelaySettings, acquire_process_lock,
+    apply_runtime_relay_override, atomic_write_private_json, clip_pending_endpoint_id_for_log,
     config_path, eligible_pending_revocations, fresh_config, load_config, load_config_from,
     load_or_initialize_rpc_ledger, load_pending_revocations_for_replay, load_relay_settings,
     new_stream_epoch, normalize_relay_address, pairing_info, pending_revocation_key,
@@ -160,15 +162,18 @@ const LEASE_ID_WIRE_PLACEHOLDER: &str = "lease_000000000000000000000000";
 const RPC_CACHE_CAPACITY: usize = 512;
 const RPC_CACHE_BYTES_CAPACITY: usize = 32 * 1024 * 1024;
 const MAX_RPC_IN_FLIGHT: usize = 32;
-/// 浏览器端 `invoke` 180s 即超时放弃；桌面命令卡死时按此上限惰性释放
-/// in-flight 槽位，避免 `too_many_in_flight_requests` 永久拒绝后续请求。
+/// The browser side gives up on `invoke` after 180s; desktop commands stuck past this
+/// limit have their in-flight slots lazily released, so `too_many_in_flight_requests`
+/// never permanently refuses later requests.
 const RPC_IN_FLIGHT_TTL: Duration = Duration::from_secs(300);
 const MAX_RPC_COMMAND_BYTES: usize = 128;
-/// 新形态多智能体会话（普通 id + 开关标志）在 Web 上是只读的（ADR-0006，
-/// 桌面专属）：查看/列表照常放行（只读横幅要能取数），一切会触发新一轮
-/// 模型执行或改变运行中 turn 状态的入口统一拦截——此前只拦了输入框，
-/// 编辑重发/计划裁决/取消审批/停止生成都能绕过（复核 P1）。桌面端不经本
-/// 漏斗，不受影响。
+/// The new-form multi-agent sessions (ordinary id plus a toggle flag) are read-only
+/// over Web (ADR-0006, desktop-only): view/list still pass (the read-only banner needs
+/// its data), while every entrance that could trigger a new round of model execution
+/// or change a running turn's state is intercepted uniformly — previously only the
+/// input box was blocked, so edit-resend / plan adjudication / approval cancellation /
+/// stop generation could all slip through (review P1). The desktop does not go through
+/// this funnel and is unaffected.
 const MULTI_AGENT_WEB_EXECUTION_DENYLIST: &[&str] = &[
     "accept_plan",
     "cancel_generation",
@@ -233,8 +238,10 @@ fn validate_multi_agent_session_web_scope(
 const MAX_RPC_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_RPC_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const RPC_LEDGER_VERSION: u8 = 1;
-/// 会话分块单独放大：首开会话在高延迟链路上按 256KB 串行拉取过慢。
-/// 上限受 `MAX_RPC_RESPONSE_BYTES`（2MiB）约束，base64 膨胀后仍需留出 JSON 外壳余量。
+/// Session chunks get a separate larger cap: opening a session over a high-latency
+/// link with 256KB serial pulls was too slow. The cap stays under
+/// `MAX_RPC_RESPONSE_BYTES` (2MiB), leaving headroom for the JSON envelope after
+/// base64 expansion.
 pub const MAX_SESSION_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_WEB_ATTACHMENTS: usize = 16;
 const MAX_WEB_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
@@ -291,28 +298,41 @@ fn ensure_web_attachment_cache_room(inner: &mut Inner, bytes: usize) -> Result<(
 }
 const MAX_WEB_ATTACHMENT_UPLOADS: usize = 4;
 const MAX_WEB_ATTACHMENT_UPLOAD_TOTAL_BYTES: usize = 64 * 1024 * 1024;
-/// 浏览器本机上传在桌面端的短生命周期暂存目录前缀。仅带此前缀的目录会被
-/// 启动清扫与附件消费清理删除，避免波及旧版 E2E 使用的其他 uploads 子目录。
+/// Prefix of the desktop's short-lived staging directories for browser-local uploads.
+/// Only directories carrying this prefix are removed by the startup sweep and
+/// attachment-consumption cleanup, so other uploads subdirectories used by legacy E2E
+/// are never touched.
 pub(crate) const WEB_ATTACHMENT_UPLOAD_DIR_PREFIX: &str = "webup_";
 const MAX_WEB_SESSION_DOWNLOADS: usize = 2;
 const PENDING_REVOCATIONS_VERSION: u8 = 1;
 const MAX_PENDING_REVOCATIONS: usize = 32;
 const MAX_PENDING_REVOCATIONS_FILE_BYTES: usize = 256 * 1024;
-/// RPC 账本的有界读取上限:满额 512 条墓碑(每条 ≤256 字节 id + 64 位指纹)
-/// 距离 1 MiB 还有数倍余量,超出即为损坏文件,不得无界读入。
+/// Bounded read cap for the RPC ledger: a full 512 tombstones (each ≤256-byte id plus
+/// a 64-bit fingerprint) leave several times of headroom under 1 MiB; anything larger
+/// is a corrupt file and must not be read unbounded.
 const MAX_RPC_LEDGER_FILE_BYTES: usize = 1024 * 1024;
 const MAX_WEB_SESSION_DOWNLOAD_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const WEB_SESSION_TRANSFER_TTL: Duration = Duration::from_secs(10 * 60);
+/// Round-16 review (M2): freshness window for full-slot eviction. "ready" cannot tell
+/// a "response-lost orphan" from a "download the phone already holds an id for and is
+/// still chunk-reading"; entries read within the window (a chunk read refreshes
+/// last_touched) are never victims. The window is far smaller than the TTL: a real
+/// orphan's cleanup is delayed at most one window, still far earlier than the 10-minute
+/// Reaper.
+const WEB_SESSION_DOWNLOAD_EVICTION_ACTIVE_WINDOW: Duration = Duration::from_secs(30);
 const WEB_SESSION_TRANSFER_REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
-/// 这些 error 码终结本次注册(relay_client 的 run_loop 停止重连),manager
-/// 需要据此做完整清理或停在带原因的 Error 状态。Relay 的 reject 帧不携带
-/// endpoint_id,`handle_relay_message` 的入口必须为它们放行;其余 error 码
-/// (含 `endpoint_not_found` 与瞬时容量/限流类)保持既有行为。本清单与
-/// relay_client::terminal_message 的 RegisterRejected/Revoked 臂保持对齐
-/// (刻意排除 `endpoint_not_found`:其 reject 帧不带 endpoint_id,入口本就
-/// 丢弃;清单放行它只会造出无消费的终结路径),对齐由 relay_client 测试
-/// `terminal_registration_code_lists_stay_aligned` 钉住。
+/// These error codes terminate the registration (relay_client's run_loop stops
+/// reconnecting), and the manager must react with full cleanup or by resting in an
+/// Error state carrying the reason. The relay's reject frames carry no endpoint_id, so
+/// handle_relay_message's entrance must let them through; all other error codes
+/// (including `endpoint_not_found` and the transient capacity/throttle kinds) keep
+/// their existing behavior. This list stays aligned with relay_client::terminal_message's
+/// RegisterRejected/Revoked arms (deliberately excluding `endpoint_not_found`: its
+/// reject frame carries no endpoint_id and the entrance drops it anyway; letting the
+/// list admit it would only create an unconsumed terminal path); the alignment is
+/// pinned by the relay_client test
+/// `terminal_registration_code_lists_stay_aligned`.
 pub(crate) const TERMINAL_REGISTRATION_ERROR_CODES: &[&str] = &[
     "endpoint_revoked",
     "invalid_access_token",
@@ -321,7 +341,7 @@ pub(crate) const TERMINAL_REGISTRATION_ERROR_CODES: &[&str] = &[
     "unsupported_protocol_version",
 ];
 
-/// 从事件 payload 提取会话 id（不同事件用不同字段名）。
+/// Extracts the session id from an event payload (different events use different field names).
 fn event_session_id(payload: &Value) -> Option<&str> {
     payload
         .get("session_id")
@@ -330,8 +350,9 @@ fn event_session_id(payload: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-/// 远程端正式支持代码会话之前，过滤原生代码会话事件。predicate 为 None（未注入）
-/// 时不过滤，行为与注入前一致。
+/// Filters native code-session events until the remote side officially supports code
+/// sessions. With a None predicate (not injected) nothing is filtered and behavior
+/// matches pre-injection.
 fn should_filter_code_session_event(
     predicate: Option<&CodeSessionPredicate>,
     payload: &Value,
@@ -344,9 +365,9 @@ fn should_filter_code_session_event(
     }
 }
 
-/// 转发的 rpc_request 必须指向当前活跃的 Web lease(与 `client_ready` 的
-/// 校验一致)。无活跃 lease 时不过滤:此时主准入路径本就没有可回复的
-/// endpoint,行为与校验加入前一致。
+/// A forwarded rpc_request must target the currently active Web lease (the same check
+/// as `client_ready`). With no active lease nothing is filtered: the main admission
+/// path has no replyable endpoint in that state, matching pre-check behavior.
 /// A changed lease always invalidates subscriptions: they belong to a
 /// concrete Web lease and must rebuild before `client_ready` requests a
 /// replay, otherwise old subscriptions can advance the new client's event
@@ -358,15 +379,24 @@ fn should_filter_code_session_event(
 /// destroying them on every idle reconnect.
 fn apply_web_lease_change(inner: &mut Inner, web_rejoining: bool) {
     inner.subscriptions.clear();
+    // Round-15 review (documenting a deliberate asymmetry): the takeover wipe grants no
+    // reservation exemption — `clear_web_attachments` deletes attachment staging
+    // directories even with an active reservation, unlike the capacity-eviction loop's
+    // reservation-sparing; an in-flight turn's staging source then disappears and that
+    // turn fails (its error chain folds to a stable code, impact limited to one turn).
+    // This is part of the "new client, clean slate" semantics: the replacing client must
+    // not be able to touch any of the previous lease's staged data, and an exemption
+    // would leave behind directories the new client could probe after the takeover.
     if !web_rejoining {
         clear_web_attachments(inner);
     }
 }
 
-/// 撤权的内存侧效果:同步活跃 endpoint 的授权旗标,并立刻作废已铸出的
-/// workspace grant。grant 是绑定 endpoint 的一次性句柄(30 分钟 TTL),
-/// 不清除的话,手机在撤权前铸出的 grant 在整个 TTL 窗口内仍可兑换建立
-/// host 目录会话。
+/// The in-memory side of revocation: syncs the active endpoint's authorization flag
+/// and immediately invalidates all minted workspace grants. A grant is an endpoint-bound
+/// one-shot handle (30-minute TTL); if not cleared, grants the phone minted before the
+/// revocation could still be redeemed to open host-directory sessions for the whole
+/// TTL window.
 fn revoke_host_workspace_state(inner: &mut Inner) {
     if let Some(endpoint) = inner.endpoint.as_mut() {
         endpoint.config.allow_host_workspace = false;
@@ -378,6 +408,61 @@ fn revoke_host_workspace_state(inner: &mut Inner) {
 /// 截断——帧上限 4 MiB 的文本原样存进会随每次状态重发重复序列化。
 const RELAY_ERROR_TEXT_MAX_CHARS: usize = 16_384;
 
+/// `attachment_` prefix plus non-empty alphanumerics is the desktop-minted attachment
+/// handle shape (`attachment_{short_token(32)}`). The shape check keeps caller-chosen
+/// arbitrary bytes out of the error chain (Round-11 review minor).
+fn attachment_handle_is_well_formed(handle: &str) -> bool {
+    match handle.strip_prefix("attachment_") {
+        Some(body) => !body.is_empty() && body.chars().all(|c| c.is_ascii_alphanumeric()),
+        None => false,
+    }
+}
+
+/// Round-29 review MINOR-1: the in-memory backlog is the whole-ledger
+/// acknowledgement source, and `validate_pending_revocation_ledger` rejects
+/// anything over MAX_PENDING_REVOCATIONS — a salvage degradation that leaves
+/// memory-only siblings plus later distinct-key rotations can push the
+/// backlog past the cap, and from then on every acknowledgement persist
+/// fails validation, wedging all pending revocations for the process
+/// lifetime (the wedge heals only at restart, which silently drops the
+/// memory-only leftovers anyway). Retiring the OLDEST entries loudly
+/// converts that permanent wedge into a bounded, named loss under the same
+/// manual-revocation discipline as the salvage truncation log — with the
+/// caveat that a retired entry can still be disk-backed, in which case its
+/// replay worker keeps retrying instead of leaving it joinable; the newest
+/// intents stay ackable, and a retired entry re-enters only by being
+/// requeued. The acknowledgement arms cap both stores: the acked entry can be
+/// a sibling that an earlier re-cap already retired from the memory backlog
+/// while its disk-backed worker stayed alive, so the retain may drop nothing
+/// and the failure arm's re-push would otherwise grow past the cap and
+/// re-wedge every later acknowledgement (the exact wedge class above, in
+/// miniature). Durable-erasure disclosure: a retired disk-backed entry keeps
+/// retrying only for this process's lifetime — the next sibling
+/// acknowledgement's whole-ledger persist is sourced from the (now smaller)
+/// memory backlog, so the same persist drops the retired entry from the
+/// durable ledger too and the worker's eventual success can no longer be
+/// recorded.
+fn cap_pending_revocation_backlog(backlog: &mut Vec<PendingRevocation>) {
+    let excess = backlog.len().saturating_sub(MAX_PENDING_REVOCATIONS);
+    if excess == 0 {
+        return;
+    }
+    let retired: Vec<String> = backlog
+        .drain(0..excess)
+        .map(|entry| clip_pending_endpoint_id_for_log(&entry.endpoint_id))
+        .collect();
+    eprintln!(
+        "[web-access] pending revocation backlog passed the capacity of {} — retired the oldest {} {} (memory-only entries stay joinable until revoked manually; disk-backed entries keep retrying on replay): {}",
+        MAX_PENDING_REVOCATIONS,
+        excess,
+        if excess == 1 { "entry" } else { "entries" },
+        retired.join(", ")
+    );
+}
+
+/// Char-boundary truncation of relay-supplied free text (error messages, host naming
+/// etc.) before storage — otherwise up-to-4-MiB frame text would be stored verbatim
+/// and re-serialized on every status resend (Round-11 review NIT).
 fn bound_relay_text(mut text: String) -> String {
     if let Some((boundary, _)) = text.char_indices().nth(RELAY_ERROR_TEXT_MAX_CHARS) {
         text.truncate(boundary);
@@ -404,9 +489,11 @@ fn relay_registration_error_reason(error_code: &str, relay_message: &str) -> Str
     }
 }
 
-/// 注册终结码的稳定恢复码:`last_error` 原文是英文(渲染进桌面状态行),
-/// SettingsView 据本码映射三语恢复文案,缺失时回退原文。分支必须与
-/// [`relay_registration_error_reason`] 一致,双方由同一测试钉住。
+/// Stable recovery codes for registration terminal codes: the raw `last_error` text is
+/// English (rendered into the desktop status line); SettingsView maps this code to
+/// trilingual recovery copy, falling back to the raw text when absent. The branches must
+/// stay consistent with [`relay_registration_error_reason`]; both sides are pinned by
+/// the same test.
 fn relay_registration_error_code(error_code: &str) -> Option<&'static str> {
     match error_code {
         "invalid_access_token" | "invalid_desktop_secret" => Some("rotate_credentials"),
@@ -424,9 +511,10 @@ fn rpc_request_targets_active_lease(inner: &Inner, lease_id: &str) -> bool {
         .map_or(true, |active| active == lease_id)
 }
 
-/// `client_ready` 两阶段握手(PROTOCOL.md):缺失或非布尔的 `state_ready`
-/// 一律按 phase-1(未就绪)处理——桌面只协商能力与回放游标,不投递业务
-/// 事件;旧版默认 true 会让不发送该字段的客户端跳过就绪屏障。
+/// `client_ready` two-phase handshake (PROTOCOL.md): a missing or non-boolean
+/// `state_ready` is always treated as phase-1 (not ready) — the desktop only negotiates
+/// capabilities and the replay cursor and delivers no business events; defaulting to
+/// true would let clients that never send the field skip the readiness barrier.
 fn client_state_ready(value: &Value) -> bool {
     value
         .get("state_ready")
@@ -466,8 +554,8 @@ const RUST_FORWARDED_EVENTS: &[&str] = &[
     "session:persona_changed",
 ];
 
-/// 远程端正式支持代码会话列表/授权/UI 之前，带 session_id 的原生代码会话事件
-/// 一律不转发。
+/// Until the remote side officially supports code-session listing/authorization/UI,
+/// native code-session events carrying a session_id are never forwarded.
 pub type CodeSessionPredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 fn controller_relay_message(value: &Value) -> bool {
@@ -573,7 +661,6 @@ struct Inner {
     process_lock: Option<fd_lock::RwLockWriteGuard<'static, File>>,
     endpoint: Option<ActiveEndpoint>,
     idle_status: WebAccessStatusKind,
-    idle_error: Option<String>,
     stream: StreamState,
     subscriptions: HashSet<String>,
     bridge_generation: Option<String>,
@@ -608,7 +695,6 @@ impl Default for Inner {
             process_lock: None,
             endpoint: None,
             idle_status: WebAccessStatusKind::Idle,
-            idle_error: None,
             stream: StreamState::new(),
             subscriptions: HashSet::new(),
             bridge_generation: None,
@@ -929,8 +1015,9 @@ struct CachedWebAttachment {
     /// handle. Defer deletion until that reservation finishes so the engine
     /// never races a disappearing upload source.
     discard_requested: bool,
-    /// 浏览器本机上传的桌面暂存目录。附件被消费、淘汰或清空时随之删除，
-    /// 保证上传文件不留存；桌面主机文件附件恒为 None。
+    /// Desktop staging directory for a browser-local upload. Deleted together with the
+    /// attachment on consumption, eviction, or clearing, guaranteeing uploaded files do
+    /// not persist; desktop host-file attachments are always None.
     upload_dir: Option<PathBuf>,
 }
 
@@ -958,8 +1045,8 @@ struct ActiveEndpoint {
     /// the later `client_ready` instant.
     fresh_baseline_seq: Option<u64>,
     last_error: Option<String>,
-    /// 与 `last_error` 成对的稳定恢复码;任何不携带码的错误写入都必须把它
-    /// 清掉,防止旧码被映射到新错误文本上。
+    /// Stable recovery code paired with `last_error`; any error write that carries no
+    /// code must clear it, so an old code is never mapped onto new error text.
     last_error_code: Option<String>,
     sender: RelaySender,
 }
@@ -1383,9 +1470,10 @@ fn reset_web_state(inner: &mut Inner) {
     inner.web_workspace_grants.clear();
 }
 
-/// 停用路径专用的容错读取:web-access.json 损坏或超大时按「无配置」继续,
-/// 让停用始终可用(停用随后会删除该文件)。start/resume/refresh 仍走
-/// `load_config` 的 fail-closed 语义并带具体路径报错。
+/// Fault-tolerant read dedicated to the stop path: a corrupt or oversized
+/// web-access.json continues as "no config" so stop always works (stop deletes the
+/// file right after). start/resume/refresh still follow `load_config`'s fail-closed
+/// semantics and report the concrete path.
 fn load_config_for_stop_at(path: &Path) -> Option<WebAccessConfig> {
     match load_config_from(path) {
         Ok(config) => config,
@@ -1768,9 +1856,41 @@ impl RemoteControlManager {
             .as_ref()
             .map(|endpoint| endpoint.config.clone())
             .or_else(|| persisted_previous.clone());
+        // The caller sees the revocation disposition on the returned info:
+        // local rotation completion and remote revocation are distinct
+        // outcomes, and the queue-full case is reported explicitly instead
+        // of only in a log line.
+        let mut revocation_disposition = None;
         if let Some(previous) = previous_config.as_ref() {
-            queue_pending_revocation_for_removal(previous)?;
-            self.sync_pending_revocation_backlog(previous);
+            match queue_pending_revocation_for_removal(previous) {
+                Ok(()) => {
+                    self.sync_pending_revocation_backlog(previous);
+                    revocation_disposition = Some(WebAccessRevocationDisposition::Queued);
+                }
+                // Round-15 review: a full queue no longer wedges rotation — rotation is a
+                // recovery path, and from the 33rd relay-less rotation onward the queue is
+                // full, where `?` propagation would make every later refresh fail.
+                // Degrade to logging and continue; the cost must be stated honestly
+                // (Round-17 review correction — the original "revocation intent stays in
+                // place" claim was inaccurate): for this queue-full rotation the old
+                // credentials' revocation intent landed nowhere — the full queue rejects
+                // before appending, the backlog sync is skipped with it, and persist_config
+                // below overwrites web-access.json — so the old endpoint stays joinable on
+                // the relay until relay expiry or manual cleanup, the same honest caliber
+                // as the salvage truncation log. Same-key-different-secret conflicts remain
+                // fail-closed per the design boundary recorded in round-14.
+                // The disposition travels on the returned info so the caller
+                // can state the incompleteness explicitly (review P2: logging
+                // alone does not give the caller a truthful completion state).
+                Err(error) if error.starts_with(PENDING_REVOCATION_QUEUE_FULL_PREFIX) => {
+                    eprintln!(
+                        "[web-access] refresh ignores full pending-revocation queue: {error}"
+                    );
+                    revocation_disposition =
+                        Some(WebAccessRevocationDisposition::DeferredFullQueue);
+                }
+                Err(error) => return Err(error),
+            }
         }
         let allow_host_workspace = previous_config
             .as_ref()
@@ -1790,12 +1910,23 @@ impl RemoteControlManager {
         if let Some(previous) = previous {
             let _ = previous.sender.try_send(RelayOutbound::Shutdown);
         }
-        self.replay_pending_revocations()?;
+        // Round-15 review: a `?` here used to report the half-committed window "rotation
+        // committed (old credentials retired, new ones persisted) but activate never ran"
+        // as a failure. Replay is a cleanup path with the same tolerance as stop; a
+        // failure does not roll back the committed rotation.
+        if let Err(error) = self.replay_pending_revocations() {
+            eprintln!("[web-access] refresh ignores pending-revocation replay failure: {error}");
+        }
         self.activate(apply_runtime_relay_override(config))?;
         let inner = self.inner.lock();
-        Ok(pairing_info(inner.endpoint.as_ref().ok_or_else(|| {
-            "Web access endpoint failed to rotate".to_string()
-        })?))
+        let mut info = pairing_info(
+            inner
+                .endpoint
+                .as_ref()
+                .ok_or_else(|| "Web access endpoint failed to rotate".to_string())?,
+        );
+        info.revocation_disposition = revocation_disposition;
+        Ok(info)
     }
 
     /// 撤销本机目录授权但不断开链接:后续 workspace grant 在铸造时被拒,
@@ -1815,6 +1946,15 @@ impl RemoteControlManager {
         // 容错读的同一理由:停用/撤权本身就是恢复手段),否则一次性
         // grant 在剩余 TTL 内仍可兑换。落盘失败仍返回 Err,但此时状态
         // 失效已先行,错误提示宁按已撤销一侧。
+        // P2 (immediate invalidation of old authorization): no failure path below (load,
+        // validation, persist) rolls the in-memory revocation back — the flag is the
+        // user's consent, and re-latching it to true would let the live process accept
+        // fresh grant minting immediately, so the old authorization would never have
+        // been invalidated. (This reverses the Round-15 review MA1 persist-failure
+        // re-latch: the durable authorization file may survive until a retry succeeds —
+        // a later start/enable could resurrect it — and that survivorship is disclosed
+        // in each arm's error text instead of papered over with a silent consent
+        // re-latch.)
         {
             let mut inner = self.inner.lock();
             revoke_host_workspace_state(&mut inner);
@@ -1825,32 +1965,130 @@ impl RemoteControlManager {
         // 一次无实际效果的点击显示失败;改回携带空 endpoint_id 的非活跃
         // 信息(与 stop_current 对未激活 endpoint 的返回形状一致)。不发
         // status:没有任何状态变化可推送,设置页以本次返回的载荷合并。
-        let mut config = match load_config()? {
-            Some(config) => config,
-            None => {
+        // (Round-19 review NIT: that premise relies on the endpoint being empty too — in
+        // the malformed state where the config file was deleted externally while
+        // inner.endpoint remains, the invalidation above really did flip the flag/clear
+        // grants, and not emitting status would leave the UI stuck on an authorized
+        // display until the next unrelated status push. Emit one status refresh when an
+        // endpoint is present; the normal empty-config path stays as-is and emits
+        // nothing.)
+        let mut config = match load_config() {
+            Ok(Some(config)) => config,
+            Err(error) => {
+                // P2: a load failure does not roll back the in-memory revocation either —
+                // the flag stays cleared and the error propagates; a transiently
+                // unreadable config that recovers later is revoked again by the retry.
+                // Round-20 review MINOR: the invalidation above really did clear the grants
+                // (a real state change) — same rationale as the config-absent arm's
+                // Round-19 NIT below, so emit one status refresh before returning the
+                // error, keeping the UI from staying stuck until the next unrelated
+                // status push. The UI shows the authoritative (revoked) memory state; the
+                // raw load error propagates as-is, so unlike the persist-failure arm the
+                // message names only the underlying read failure, not the retry guidance
+                // (round-32 review correction: the earlier wording claimed this arm's
+                // error carried the durable-survivor framing — it never did). No inner
+                // guard is held here (the invalidation block above is closed), so the
+                // exact lock-span pin is not triggered.
+                self.emit_status();
+                return Err(error);
+            }
+            Ok(None) => {
+                let endpoint_present = {
+                    // Take and drop the guard inside a standalone block: the lock must not
+                    // span into emit_status (a non-reentrant lock self-deadlocks on the same
+                    // thread), and this also satisfies the exact lock-span pin's brace-depth
+                    // criterion above.
+                    let inner = self.inner.lock();
+                    inner.endpoint.is_some()
+                };
+                if endpoint_present {
+                    self.emit_status();
+                }
                 return Ok(WebAccessInfo {
                     endpoint_id: String::new(),
                     url: String::new(),
                     qr_data_url: None,
                     status: WebAccessStatusKind::Stopped,
+                    revocation_disposition: None,
                 });
             }
         };
-        validate_config(&config)?;
+        validate_config(&config).map_err(|error| {
+            // Round-22 review MINOR: the validation-failure arm follows the same
+            // discipline as the persist-failure arm — the durable side is untouched while
+            // memory has already had its flag cleared by the invalidation block above.
+            // P2 (immediate invalidation): no re-latch here either — the flag is the
+            // user's consent and re-latching it would let the live process mint fresh
+            // grants immediately; the surviving durable authorization (when the disk
+            // latch is still enabled) is disclosed in the error text instead, and the
+            // authoritative (revoked) memory state is published unconditionally so the
+            // UI never holds a stale authorized row. No inner guard is held here, so
+            // the exact lock-span pin is not triggered.
+            let remains_enabled = config.allow_host_workspace;
+            self.emit_status();
+            // The copy deliberately does not reuse the persist-failure arm's error
+            // phrase — that phrase is the terminator needle of the existing behavioral
+            // pin's (revoke_persist_failure_re_latches…) failure-arm window, and reusing it
+            // here would reverse its window slice and turn it red; the two arms are
+            // different failure shapes anyway, so separate copy is also more accurate.
+            // (Round-28 review calibration: this pin now runs through comment_filtered,
+            // pure comment lines are stripped, and comment mentions no longer form an
+            // injection surface; trailing comments and block comments can still shield it,
+            // handled as a disclosed residual.)
+            if remains_enabled {
+                format!(
+                    "host-workspace revocation did not take effect; folder consent stays enabled on disk: {error}"
+                )
+            } else {
+                format!("host-workspace revocation found an invalid persisted config: {error}")
+            }
+        })?;
         let latched = config.allow_host_workspace;
         if latched {
             config.allow_host_workspace = false;
             // Reader retirement now uses the same lifecycle commit. Keep this
             // existence check for an externally removed file; it is not an
             // atomicity promise against writers outside this manager.
+            // Round-14 review minor: a concurrent desktop_endpoint_revoked (the message
+            // pump arm, which holds no lifecycle lock) may delete the config file right
+            // between this read and the persist; the revocation goal is then already
+            // achieved (the relay-side endpoint is tombstoned, local credentials cleared),
+            // and a flag=false config file must not be resurrected into a "configured"
+            // phantom (otherwise the next start spins one round on a tombstoned endpoint
+            // before handle_revoked cleans it up). The existence check narrows the window
+            // without closing it (closing it fully would need the pump arm to hold the
+            // lifecycle lock — a deadlock surface not worth it); the residual shape
+            // self-heals with no access gain, consistent with this function's existing
+            // comments.
             if config_path().exists() {
-                persist_config(&config)?;
+                if let Err(error) = persist_config(&config) {
+                    // P2 (immediate invalidation on a persist failure): persist failure =
+                    // the original file was not replaced, so the disk still latches
+                    // authorization while the in-memory flag was already cleared above.
+                    // Do NOT roll back the in-memory revocation: re-latching to true
+                    // would let the live process accept fresh grant minting immediately
+                    // (the flag is the user's consent), so the old authorization would
+                    // never have been invalidated. Publish the authoritative (revoked)
+                    // state and propagate a contextual error; the durable authorization
+                    // file may survive until a retry succeeds (a restart/reopen would
+                    // resurrect it) — the error text says plainly to retry the revocation
+                    // once the storage error clears.
+                    eprintln!(
+                        "[web-access] host-workspace revocation failed to persist, durable state left unchanged: {error}"
+                    );
+                    self.emit_status();
+                    return Err(format!(
+                        "durable revocation did not take effect (workspace authorization kept on disk; retry revoke once the storage error clears): {error}"
+                    ));
+                }
             }
         }
-        // 状态失效无条件先行(幂等重入时 grant 清空同样真实发生),状态
-        // 刷新因此一律发送;emit_status→status 会再次锁 inner,取 guard
-        // 的独立块必须先出作用域,否则 parking_lot 不可重入锁在同线程
-        // 自锁(撤销即死锁,死锁钉按括号深度判)。
+        // State invalidation runs unconditionally first (on idempotent re-entry the
+        // grant clearing equally really happens), so the status refresh is always sent;
+        // emit_status→status locks inner again, so the standalone block that takes the
+        // guard must have left scope first, or parking_lot's non-reentrant lock
+        // self-deadlocks on the same thread (revocation would deadlock; the deadlock pin
+        // judges by brace depth).
         self.emit_status();
         let inner = self.inner.lock();
         // endpoint 未激活(resume 尚未成功/激活失败)时
@@ -1863,6 +2101,7 @@ impl RemoteControlManager {
                 url: String::new(),
                 qr_data_url: None,
                 status: WebAccessStatusKind::Stopped,
+                revocation_disposition: None,
             }),
         }
     }
@@ -1971,11 +2210,12 @@ impl RemoteControlManager {
         Ok(self.relay_settings())
     }
 
-    pub fn stop_current(&self) -> Result<(), String> {
+    pub fn stop_current(&self) -> Result<WebAccessStopOutcome, String> {
         let _lifecycle = self.lifecycle.lock();
         self.ensure_process_ownership()?;
-        // 停用本身就是恢复手段,损坏的持久状态不能把停用也卡死:start/resume/
-        // refresh 仍 fail-closed(带具体路径报错),这里只降级读取并继续清理。
+        // Stopping is itself a recovery means; corrupt persistent state must not wedge
+        // stopping too: start/resume/refresh stay fail-closed (reporting the concrete
+        // path) while this only degrades the read and continues cleanup.
         if let Err(error) = self.replay_pending_revocations() {
             eprintln!("[web-access] stop ignores pending-revocation replay failure: {error}");
         }
@@ -1987,13 +2227,37 @@ impl RemoteControlManager {
             .as_ref()
             .map(|endpoint| endpoint.config.clone())
             .or_else(|| persisted.clone());
+        // The stop itself always completes (config deleted, endpoint torn down
+        // below); the outcome carries what happened to the OLD credentials'
+        // remote revocation intent, so the caller can state the incompleteness
+        // explicitly on the queue-full path (review P2: logging alone does not
+        // give the caller a truthful completion state).
+        let mut revocation = WebAccessRevocationDisposition::NotNeeded;
         if let Some(config) = current_config.as_ref() {
-            queue_pending_revocation_for_removal(config)?;
-            self.sync_pending_revocation_backlog(config);
+            match queue_pending_revocation_for_removal(config) {
+                Ok(()) => {
+                    self.sync_pending_revocation_backlog(config);
+                    revocation = WebAccessRevocationDisposition::Queued;
+                }
+                // Round-15 review: a full queue does not wedge stop (a recovery path; same
+                // rationale as the refresh arm); the cost is recorded honestly with the same
+                // caliber as the refresh arm — this stop's revocation intent landed nowhere,
+                // and the endpoint stays joinable on the relay until expiry or manual
+                // cleanup. Same-key-different-secret conflicts keep the round-14 fail-closed
+                // boundary.
+                // The explicit DeferredFullQueue outcome replaces log-only
+                // reporting: nothing durable was recorded, so nothing will
+                // replay for this endpoint after a restart either.
+                Err(error) if error.starts_with(PENDING_REVOCATION_QUEUE_FULL_PREFIX) => {
+                    eprintln!("[web-access] stop ignores full pending-revocation queue: {error}");
+                    revocation = WebAccessRevocationDisposition::DeferredFullQueue;
+                }
+                Err(error) => return Err(error),
+            }
         }
         // A failed removal leaves the old config authoritative. Its queued
         // entry therefore remains dormant instead of revoking a live link.
-        // 损坏的配置文件同样会被删除:停用之后磁盘上不再残留无法解析的状态。
+        // A corrupt config file is deleted too: after stop, no unparseable state remains on disk.
         remove_config()?;
         let endpoint = {
             let mut inner = self.inner.lock();
@@ -2001,7 +2265,6 @@ impl RemoteControlManager {
             inner.rpc_ledger = RpcLedger::default();
             inner.stream.reset();
             inner.idle_status = WebAccessStatusKind::Stopped;
-            inner.idle_error = None;
             take_retired_endpoint(&mut inner)
         };
         if let Some(endpoint) = endpoint {
@@ -2010,9 +2273,14 @@ impl RemoteControlManager {
         if let Err(error) = self.replay_pending_revocations() {
             eprintln!("[web-access] stop ignores pending-revocation replay failure: {error}");
         }
-        remove_rpc_ledger()?;
+        // Round-15 review: the stop itself is complete (config deleted, endpoint torn
+        // down), so a ledger-file removal failure only degrades — returning Err would
+        // make the user see a failure for a stop that already took effect.
+        if let Err(error) = remove_rpc_ledger() {
+            eprintln!("[web-access] stop ignores rpc-ledger removal failure: {error}");
+        }
         self.emit_status();
-        Ok(())
+        Ok(WebAccessStopOutcome { revocation })
     }
 
     fn ensure_process_ownership(&self) -> Result<(), String> {
@@ -2070,6 +2338,10 @@ impl RemoteControlManager {
                     merged.push(entry.clone());
                 }
             }
+            // Round-29 review MINOR-1: the union of salvage-leftover memory entries
+            // and the disk ledger can cross the validation cap — keep the cap
+            // binding right where the merged backlog is adopted.
+            cap_pending_revocation_backlog(&mut merged);
             inner.pending_revocation_backlog = merged;
         }
         for pending in eligible_pending_revocations(&ledger, current.as_ref()) {
@@ -2135,6 +2407,7 @@ impl RemoteControlManager {
             .pending_revocation_backlog
             .retain(|entry| pending_revocation_key(entry) != key);
         inner.pending_revocation_backlog.push(pending);
+        cap_pending_revocation_backlog(&mut inner.pending_revocation_backlog);
     }
 
     fn finish_pending_revocation(
@@ -2159,6 +2432,13 @@ impl RemoteControlManager {
                 std::mem::take(&mut inner.pending_revocation_backlog)
             };
             remaining.retain(|entry| entry != &pending);
+            // Cap before the ledger is built: the acked entry can be a sibling
+            // an earlier re-cap already retired from memory (its disk-backed
+            // worker kept living), so the retain may drop nothing and an
+            // over-cap backlog would otherwise persist a ledger that
+            // `validate_pending_revocation_ledger` rejects — re-wedging every
+            // later acknowledgement until the next lifecycle replay.
+            cap_pending_revocation_backlog(&mut remaining);
             let mut ledger = PendingRevocationLedger::default();
             ledger.entries = remaining.iter().cloned().collect();
             match persist_pending_revocations(&ledger) {
@@ -2167,6 +2447,7 @@ impl RemoteControlManager {
                 }
                 Err(error) => {
                     remaining.push(pending);
+                    cap_pending_revocation_backlog(&mut remaining);
                     self.inner.lock().pending_revocation_backlog = remaining;
                     eprintln!(
                         "[web-access] persist revocation acknowledgement for {endpoint_id} \
@@ -2251,9 +2532,10 @@ impl RemoteControlManager {
         reservation.revalidate()
     }
 
-    /// 绑定/兑换时点的授权旗标复核:reserve 与 session 创建之间用户可能
-    /// 已撤销授权,一次性句柄的 TTL 窗口内不得让撤权前的 reservation 仍把
-    /// host 目录绑进新 session。
+    /// Authorization-flag recheck at bind/redeem time: the user may have revoked
+    /// authorization between reserve and session creation; within the one-shot handle's
+    /// TTL window a pre-revocation reservation must not bind the host directory into a
+    /// new session.
     pub(crate) fn require_host_workspace_authorized(&self) -> Result<(), String> {
         let inner = self.inner.lock();
         let authorized = inner
@@ -2304,8 +2586,9 @@ impl RemoteControlManager {
         self.cache_web_attachment_entry(result, None)
     }
 
-    /// 与 `cache_web_attachment` 同语义，但附件源自浏览器本机上传：登记其
-    /// 桌面暂存目录，缓存条目消亡（消费/淘汰/清空）时一并删除目录。
+    /// Same semantics as `cache_web_attachment`, but the attachment comes from a
+    /// browser-local upload: its desktop staging directory is registered and deleted
+    /// together with the cache entry's death (consumption/eviction/clearing).
     pub fn cache_web_attachment_from_upload(
         &self,
         result: crate::features::files::file_ingest::IngestResult,
@@ -2375,6 +2658,15 @@ impl RemoteControlManager {
         for handle in handles {
             if !unique.insert(handle.as_str()) {
                 return Err("远程控制附件句柄重复".into());
+            }
+            // Round-11 review minor: the refusal string only echoes the desktop-minted
+            // shape (`attachment_<alphanumeric>`). Caller bytes otherwise enter the error
+            // chain verbatim, and after fold_web_chat_error's busy-anchor folding a handle
+            // containing a `reserve Web chat turn: …` segment would disguise a hard failure
+            // as transient busyness, driving the phone to remotely reconcile a turn that
+            // was never admitted.
+            if !attachment_handle_is_well_formed(handle) {
+                return Err("远程控制附件句柄不存在或已过期".into());
             }
             if !inner.web_attachments.contains_key(handle) {
                 return Err(format!("远程控制附件句柄不存在或已过期：{handle}"));
@@ -2461,8 +2753,8 @@ impl RemoteControlManager {
         )
     }
 
-    /// 取消一个进行中的浏览器本机上传并释放其内存缓冲。对未知或已完成的
-    /// ID 幂等——迟到的取消不应产生错误。
+    /// Cancels an in-progress browser-local upload and releases its memory buffer.
+    /// Idempotent for unknown or already-finished ids — a late cancel must not error.
     pub fn abort_web_attachment_upload(&self, upload_id: &str) {
         discard_web_attachment_upload(&mut self.inner.lock(), upload_id);
     }
@@ -2498,37 +2790,74 @@ impl RemoteControlManager {
         if inner.web_session_downloads.contains_key(&download_id) {
             return Err("requested Session download id is already active".into());
         }
-        ensure_web_session_download_capacity(&inner, reserved_bytes)?;
-        let file = download_dir
-            .create_delete_on_close_file(&format!("{download_id}.json"))
-            .map_err(|error| format!("create serialized Session download: {error}"))?;
-        let writer = file
-            .try_clone()
-            .map_err(|error| format!("clone serialized Session download handle: {error}"))?;
-        let reservation_id = crate::features::remote_control::short_token(24);
-        inner
-            .web_session_download_order
-            .push_back(download_id.clone());
-        inner.web_session_downloads.insert(
-            download_id.clone(),
-            WebSessionDownload {
+        // Round-25 review MINOR: eviction previously hooked only into the slot gate — the
+        // byte gate (MAX_WEB_SESSION_DOWNLOAD_TOTAL_BYTES) failing wedged retries just the
+        // same: one ≥128 MiB lost-response orphan pushed active_bytes over the total cap
+        // while the slot count stayed under, so eviction never fired and retries hard-failed
+        // to the TTL Reaper (the same failure surface this fix removes, just in another
+        // dimension). Eviction now hooks uniformly into the capacity gate (slots + bytes):
+        // on a capacity-check failure the oldest expired ready orphans are evicted first and
+        // the check re-run, until capacity is satisfied or nothing is evictable (failing with
+        // the capacity gate's real error, original copy kept); each victim gets one diagnostic
+        // — eviction was previously silent, with the phone seeing only "does not exist or has
+        // expired".
+        let mut evictions = 0_usize;
+        // Round-28 review MINOR-1: a capacity-gate failure after eviction and a serialized-
+        // file creation failure previously exited the function via `?` directly, losing the
+        // diagnostics of evictions that already happened (contradicting this section's own
+        // "one diagnostic per victim"). Funneled into one closure exit: on success or failure
+        // the lock is released first, per-count diagnostics are filled in, and only then is
+        // the result propagated.
+        let begin = (|| -> Result<WebSessionDownloadReservation, String> {
+            while ensure_web_session_download_capacity(&inner, reserved_bytes).is_err() {
+                if !transfer::evict_oldest_ready_session_download(&mut inner) {
+                    ensure_web_session_download_capacity(&inner, reserved_bytes)?;
+                }
+                evictions += 1;
+            }
+            let file = download_dir
+                .create_delete_on_close_file(&format!("{download_id}.json"))
+                .map_err(|error| format!("create serialized Session download: {error}"))?;
+            let writer = file
+                .try_clone()
+                .map_err(|error| format!("clone serialized Session download handle: {error}"))?;
+            let reservation_id = crate::features::remote_control::short_token(24);
+            inner
+                .web_session_download_order
+                .push_back(download_id.clone());
+            inner.web_session_downloads.insert(
+                download_id.clone(),
+                WebSessionDownload {
+                    session_id: session_id.to_string(),
+                    reservation_id: reservation_id.clone(),
+                    file,
+                    reserved_bytes,
+                    total: 0,
+                    ready: false,
+                    last_touched: Instant::now(),
+                },
+            );
+            Ok(WebSessionDownloadReservation {
+                manager: self.clone(),
+                download_id,
                 session_id: session_id.to_string(),
-                reservation_id: reservation_id.clone(),
-                file,
-                reserved_bytes,
-                total: 0,
-                ready: false,
-                last_touched: Instant::now(),
-            },
-        );
-        Ok(WebSessionDownloadReservation {
-            manager: self.clone(),
-            download_id,
-            session_id: session_id.to_string(),
-            reservation_id,
-            writer,
-            committed: false,
-        })
+                reservation_id,
+                writer,
+                committed: false,
+            })
+        })();
+        // Round-27 review M2: diagnostics persist after the manager lock is released (the
+        // same caliber as the cancelled point's "record outside the lock") — once the
+        // allowlist takes effect, record_backend performs append+flush file I/O and must not
+        // run inside the eviction loop's critical section.
+        drop(inner);
+        for _ in 0..evictions {
+            crate::features::sessions::diagnostics::record_backend(
+                "web_session_download_evicted",
+                serde_json::json!({ "trigger": "begin_capacity_gate" }),
+            );
+        }
+        begin
     }
 
     fn commit_web_session_download(
@@ -2564,6 +2893,13 @@ impl RemoteControlManager {
             .filter(|(id, _)| id.as_str() != download_id)
             .map(|(_, download)| download.reserved_bytes)
             .sum::<usize>();
+        // Round-32 review disclosure: between begin and commit the on-disk
+        // partial file is bounded by the caller's reservation estimate, not by
+        // the real total — an under-reserved export can transiently exceed the
+        // budget on disk until THIS commit-time check rejects it and the
+        // reservation's Drop removes the partial file. The steady-state
+        // invariant (sum of committed totals within the cap) is enforced only
+        // here.
         if other_bytes.saturating_add(total) > MAX_WEB_SESSION_DOWNLOAD_TOTAL_BYTES {
             return Err(format!(
                 "进行中的远程控制会话下载将超过 {} MiB 总上限",
@@ -2676,10 +3012,10 @@ impl RemoteControlManager {
                 relay_url: remote_relay_ws_url(),
                 web_client_connected: false,
                 host_workspace_authorized: false,
-                last_error: inner
-                    .idle_error
-                    .clone()
-                    .or_else(|| self.policy_error.clone()),
+                // Round-15 review NIT: the old idle_error field was never assigned a
+                // non-None value (always None + or_else) and was removed; the only source of
+                // idle errors is policy_error.
+                last_error: self.policy_error.clone(),
                 last_error_code: None,
             }
         }
@@ -2789,11 +3125,12 @@ impl RemoteControlManager {
         let mut next_ledger = inner.rpc_ledger.clone();
         next_ledger.acknowledge(request_id, &fingerprint)?;
         if let Err(error) = persist_rpc_ledger(&next_ledger) {
-            // 持久化失败是瞬时的(磁盘满/EACCES 等),与 handle_rpc_request
-            // 的准入路径同一裁决:响应但不写 Complete 缓存。命令尚未执行,
-            // 同一 client_request_id 的重试会经 Pending 臂重派发并重走
-            // begin(settle 收口解除派发代标记);缓存成 Complete 会把这次
-            // 瞬时失败永久重放给手机(replay poisoning)。
+            // A persist failure is transient (disk full/EACCES etc.), adjudicated the same
+            // way as handle_rpc_request's admission path: respond but do not write the
+            // Complete cache. The command has not executed, so a retry with the same
+            // client_request_id redisperses through the Pending arm and re-runs begin (the
+            // settle exit clears the dispatch generation marker); caching it as Complete
+            // would replay this transient failure to the phone forever (replay poisoning).
             Self::settle_begin_persist_failure(&mut inner, request_id, &lease_id, &error);
             return Ok(false);
         }
@@ -3109,10 +3446,10 @@ impl RemoteControlManager {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("relay rejected Web access request");
-                // 注册被确定性拒绝时 run_loop 已停止重连;给出可操作的恢复
-                // 路径,并且该原因必须保持粘性(run_loop 终止路径不再发送
-                // Connection 事件,last_error 不会被「relay connection lost」
-                // 覆盖)。
+                // When a registration is deterministically refused, run_loop has stopped
+                // reconnecting; provide an actionable recovery path, and the reason must stay
+                // sticky (the run_loop termination path no longer sends Connection events, so
+                // last_error is never overwritten by "relay connection lost").
                 self.set_endpoint_error_with_code(
                     relay_registration_error_code(&error_code),
                     relay_registration_error_reason(&error_code, relay_message),
@@ -3330,7 +3667,6 @@ impl RemoteControlManager {
                 reset_web_state(&mut inner);
                 inner.stream.reset();
                 inner.idle_status = WebAccessStatusKind::Revoked;
-                inner.idle_error = None;
                 revoked
             };
             if let Some(endpoint) = revoked {
@@ -3362,6 +3698,11 @@ impl RemoteControlManager {
     }
 
     fn handle_replaced(&self, endpoint_id: &str) {
+        // Disclosed residual (round-30): `desktop_endpoint_replaced` stays
+        // transient-classified on purpose — no revocation-grade cleanup runs
+        // here pending a coordinated relay+client change; this arm only rests
+        // in Error with rotate guidance and leaves `last_error_code` unset so
+        // the terminal-registration machinery does not treat it as terminal.
         {
             let mut inner = self.inner.lock();
             let Some(endpoint) = inner.endpoint.as_mut() else {
@@ -3395,6 +3736,19 @@ impl RemoteControlManager {
         // Subscribe/unsubscribe bookkeeping only; no desktop-side notification
         // is needed for unsubscribe.
         let mut inner = self.inner.lock();
+        // Round-14 review minor: the lease gate takes the same lock, in the same
+        // acquisition, as the subscription change (same caliber as rpc_request's
+        // admission). A frame whose lease does not match the active lease is dropped; with
+        // no active lease it keeps passing (the main path has no replyable target anyway,
+        // and a subscription can only be consumed after the first join — consistent with
+        // the existing semantics).
+        let lease_id = value
+            .get("lease_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !rpc_request_targets_active_lease(&inner, lease_id) {
+            return;
+        }
         if subscribe {
             inner.subscriptions.insert(event.to_string());
         } else {
@@ -3449,10 +3803,12 @@ impl RemoteControlManager {
         completion
     }
 
-    /// 准入拒绝分支的结算收口:cacheable(确定性)拒绝进 Complete 缓存,
-    /// 瞬时拒绝(在途饱和、Session/账本暂不可用、触盘的 kb 路径校验)只应答
-    /// 本次——缓存瞬时拒绝会让同 client_request_id 的重试永远重放它,直到
-    /// FIFO 淘汰。收口理由同 [`Self::settle_tombstone_outcome`]。
+    /// Settlement funnel for the admission-refusal branch: cacheable (deterministic)
+    /// refusals enter the Complete cache, while transient refusals (in-flight saturation,
+    /// Session/ledger temporarily unavailable, the disk-touching kb path validation)
+    /// answer only this request — caching a transient refusal would make retries with the
+    /// same client_request_id replay it forever, until FIFO eviction. Same funnel
+    /// rationale as [`Self::settle_tombstone_outcome`].
     fn settle_admission_rejection(
         inner: &mut Inner,
         request_id: &str,
@@ -3503,9 +3859,10 @@ impl RemoteControlManager {
         completion
     }
 
-    /// 是否为 TTL 扫描写入的超时占位(唯一的 `rpc_timed_out` 产出点在
-    /// `handle_rpc_request` 的扫描)。`complete_rpc` 据此允许真实完成取代
-    /// 占位;确定性拒绝等真终态码各不相同,不会被误取代。
+    /// Whether this is a timeout placeholder written by the TTL sweep (the only
+    /// `rpc_timed_out` producer is handle_rpc_request's sweep). `complete_rpc` uses this
+    /// to let a real completion replace the placeholder; real terminal codes like
+    /// deterministic refusals all differ and are never mistakenly replaced.
     fn rpc_completion_is_in_flight_timeout(completion: &RpcCompletion) -> bool {
         !completion.ok && completion.error_code.as_deref() == Some(RPC_TIMED_OUT_CODE)
     }
@@ -3664,13 +4021,15 @@ impl RemoteControlManager {
                 .values()
                 .filter(|entry| matches!(entry, RpcCacheEntry::Pending(_)))
                 .count();
-            // 与 client_ready 相同的 lease 校验:携带已被接替 lease 的
-            // rpc_request 是接替竞态中的迟到帧,直接忽略,不进入幂等缓存。
-            // 校验必须在准入同一把锁内:先单独验锁再准入会在两锁之间留出
-            // takeover 窗口,迟到帧仍可进入缓存并被分发。takeover 时
-            // pending RPC 会先重打新 lease 再被重投,不会误伤重投路径;
-            // 无活跃 lease 时保持原行为(主准入路径本来就没有可回复的
-            // endpoint)。
+            // The same lease validation as client_ready: an rpc_request carrying a lease
+            // that has already been superseded is a late frame in a takeover race — ignore it
+            // directly, without entering the idempotency cache.
+            // The validation must sit under the same lock as admission: validating the lease
+            // separately and then admitting leaves a takeover window between the two locks
+            // where a late frame could still enter the cache and be dispatched. On takeover,
+            // pending RPCs are re-stamped with the new lease before being re-delivered, so
+            // the redelivery path is never hurt; with no active lease the original behavior
+            // is kept (the main admission path has no replyable endpoint anyway).
             if !rpc_request_targets_active_lease(&inner, &lease_id) {
                 return;
             }
@@ -3693,10 +4052,10 @@ impl RemoteControlManager {
                             && pending.dispatched_generation != bridge_generation
                         {
                             pending.dispatched_generation = bridge_generation.clone();
-                            // 重派发必须重置 TTL 时钟:Pending 可能是 begin
-                            // 持久化失败后的重试臂,继承最初入场的
-                            // dispatched_at 会让窗口尾部的重试几乎立刻被
-                            // TTL 扫描伪造成 rpc_timed_out。
+                            // Redispatch must reset the TTL clock: a Pending entry may be the
+                            // retry arm after a begin persist failure, and inheriting the original
+                            // dispatched_at would let retries near the window's end be fabricated
+                            // into rpc_timed_out by the TTL sweep almost immediately.
                             pending.dispatched_at = Instant::now();
                             RpcRequestAction::Dispatch(RpcDispatch {
                                 request_id: request_id.clone(),
@@ -3727,8 +4086,9 @@ impl RemoteControlManager {
                 None => {
                     if let Some(tombstone) = inner.rpc_ledger.get(&request_id).cloned() {
                         if tombstone.fingerprint != fingerprint || tombstone.acknowledged {
-                            // 缓存判定收口在 settle_tombstone_outcome(只有
-                            // 自身指纹+已确认可缓存,冲突按次重算)。
+                            // The caching decision is funneled into settle_tombstone_outcome
+                            // (only own-fingerprint + acknowledged is cacheable; conflicts recompute
+                            // per request).
                             let completion = Self::settle_tombstone_outcome(
                                 &mut inner,
                                 &request_id,
@@ -3751,10 +4111,11 @@ impl RemoteControlManager {
                                 in_flight_count,
                             );
                             if let Some(rejection) = rejection {
-                                // 瞬时拒绝(在途饱和、Session 暂不可用)只回复
-                                // 本次请求;缓存会让同 client_request_id 的重试
-                                // 永远重放这个拒绝,直到 FIFO 淘汰。结算收口在
-                                // settle_admission_rejection,测试直接钉住它。
+                                // A transient refusal (in-flight saturation, Session temporarily
+                                // unavailable) answers only this request; caching would make retries
+                                // with the same client_request_id replay the refusal forever, until
+                                // FIFO eviction. The settlement funnels into
+                                // settle_admission_rejection, which tests pin directly.
                                 let completion = Self::settle_admission_rejection(
                                     &mut inner,
                                     &request_id,
@@ -3800,9 +4161,9 @@ impl RemoteControlManager {
                             }
                             Ok(NewRpcAdmission::Durable(next_ledger)) => {
                                 if let Err(error) = persist_rpc_ledger(&next_ledger) {
-                                    // 持久化失败是瞬时的:不写响应缓存,同
-                                    // client_request_id 的重试重新走完整准入,
-                                    // 而不是永远重放这一次失败。
+                                    // A persist failure is transient: no response cache write — a
+                                    // retry with the same client_request_id walks the full admission
+                                    // again, instead of replaying this one failure forever.
                                     let completion = rpc_error_completion(
                                         "rpc_ledger_unavailable",
                                         format!(
@@ -3833,7 +4194,7 @@ impl RemoteControlManager {
                                 }
                             }
                             Err(error) => {
-                                // 同上:账本不可用是瞬时状态,不缓存该拒绝。
+                                // Same as above: ledger unavailability is a transient state, so the refusal is not cached.
                                 let completion = rpc_error_completion(
                                     "rpc_ledger_unavailable",
                                     format!(
@@ -4115,13 +4476,14 @@ impl RemoteControlManager {
         if source == EventSource::Frontend && RUST_FORWARDED_EVENTS.contains(&event) {
             return Ok(());
         }
-        // 远程端正式支持代码会话列表/授权/UI 之前，先过滤原生代码会话事件：事件
-        // payload 携带的会话 id（`session_id` 用于 chat:* / artifact:disk，
-        // `id` 用于 session:*）指向品悟原生代码会话（仅原生，不含 ACP 会话）时
-        // 不转发（scheduled_task:run_updated 的 payload 现为空，不会命中本过滤）。
-        // 远程 WebUI 不会收到
-        // 它无法展示/授权的代码会话消息流；predicate 只对真实代码会话 id 返回
-        // true，普通会话不受影响。
+        // Until the remote side officially supports code-session listing/authorization/UI,
+        // native code-session events are filtered first: when the session id carried by the
+        // event payload (`session_id` for chat:* / artifact:disk, `id` for session:*) points
+        // at a Pinvou-native code session (native only, not ACP sessions), the event is not
+        // forwarded (scheduled_task:run_updated's payload is currently empty and never hits
+        // this filter). The remote WebUI never receives a code session's message stream that
+        // it cannot display or authorize; the predicate returns true only for real code
+        // session ids, so ordinary sessions are unaffected.
         if should_filter_code_session_event(
             self.inner.lock().code_session_predicate.as_ref(),
             &payload,
@@ -4186,8 +4548,10 @@ impl RemoteControlManager {
                 return Ok(());
             }
             if !subscribed {
-                // 旧版 WebUI 没有协商的新事件不能直接推送，否则会把桌面端判为
-                // 不兼容并断开；事件已写入 journal，后续订阅客户端仍可通过回放恢复。
+                // New events an older WebUI did not negotiate must not be pushed directly,
+                // or it would judge the desktop incompatible and disconnect; the event is
+                // already in the journal, so later subscribing clients can still recover it
+                // via replay.
                 return Ok(());
             }
             debug_assert_eq!(
@@ -4273,7 +4637,11 @@ impl RemoteControlManager {
 
     fn emit_status(&self) {
         let status = self.status();
-        let _ = self.app.emit("web_access:status", status);
+        // The status payload carries a pairing URL containing an access_token fragment
+        // plus a QR code — sensitive content sent only to the main window (consistent with
+        // the other web_access:* events), never broadcast to auxiliary WebViews such as
+        // reader/pet.
+        let _ = self.app.emit_to("main", "web_access:status", status);
     }
 }
 
@@ -5658,6 +6026,14 @@ mod tests {
         assert!(serde_json::to_vec(&completion.result).unwrap().len() < 1024);
     }
 
+    // Round-25 review MAJOR-2 source pins share one caliber: pure comment lines are
+    // filtered before matching.
+    // Round-27 review m14: the filtering primitive was lifted into platform::test_support
+    // for sharing — this module's 14 call sites and sibling pins like persistence.rs
+    // previously each inlined the same closure (rung-2: the helper must delete the
+    // callers' code, not coexist with it).
+    use crate::platform::test_support::comment_filtered;
+
     #[test]
     fn js_rpc_completions_carry_error_code_and_category_to_the_browser() {
         // The desktop proxy strips the structured VoiceCommandError object down
@@ -6135,6 +6511,224 @@ mod tests {
         }
     }
 
+    /// Round-17 review: stop/refresh's full-queue degradation arms discriminate by the
+    /// shared prefix PENDING_REVOCATION_QUEUE_FULL_PREFIX, but the binding between the
+    /// error text and that constant had no pin — a mutation changing persistence.rs's
+    /// format! back to a different-wording literal would break the degradation arm's match,
+    /// revive the full-queue wedge regression, and keep the whole suite green (the
+    /// degradation-arm pins only assert "references the constant and has no `?`", blind to
+    /// text drift). Pin the discrimination contract itself: a full-queue error must start
+    /// with the shared prefix.
+    #[test]
+    fn full_revocation_queue_error_carries_the_shared_degrade_prefix() {
+        let directory = std::env::temp_dir().join(format!(
+            "pinvou-revocation-queue-full-{}-{}",
+            std::process::id(),
+            crate::features::remote_control::short_token(12)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("pending.json");
+        for index in 0..MAX_PENDING_REVOCATIONS {
+            queue_pending_revocation_at(
+                &path,
+                test_pending_revocation(&format!("ep_queue_full_{index}")),
+            )
+            .expect("filling the queue exactly to capacity must succeed");
+        }
+        let overflow =
+            queue_pending_revocation_at(&path, test_pending_revocation("ep_queue_full_overflow"))
+                .expect_err("the entry past capacity must be refused");
+        assert!(
+            overflow.starts_with(PENDING_REVOCATION_QUEUE_FULL_PREFIX),
+            "the full-queue error must carry the shared degrade prefix so the \
+             stop/refresh recovery arms can recognize it: {overflow}"
+        );
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    /// Review P2 (revocation durability on the full-queue path): the
+    /// stop/refresh degradation arms report `DeferredFullQueue` precisely
+    /// because nothing durable was recorded for the deferred endpoint. This
+    /// test crosses the restart boundary the way replay does — reload the
+    /// ledger from disk after the refusal — and pins that the deferred
+    /// endpoint is genuinely absent (nothing will replay for it) while every
+    /// capacity entry survives. A future change that silently persists the
+    /// deferred intent, or that drops capacity entries on reload, turns red.
+    #[test]
+    fn deferred_full_queue_intent_is_absent_from_the_restart_replay() {
+        let directory = std::env::temp_dir().join(format!(
+            "pinvou-revocation-restart-{}-{}",
+            std::process::id(),
+            crate::features::remote_control::short_token(12)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("pending.json");
+        for index in 0..MAX_PENDING_REVOCATIONS {
+            queue_pending_revocation_at(
+                &path,
+                test_pending_revocation(&format!("ep_restart_full_{index:02}")),
+            )
+            .expect("filling the queue exactly to capacity must succeed");
+        }
+        let overflow = test_pending_revocation("ep_restart_deferred");
+        let refused = queue_pending_revocation_at(&path, overflow.clone()).is_err();
+        assert!(refused, "the deferred endpoint must be refused at capacity");
+        // Restart: reload the ledger from disk the way replay does (strict
+        // read — the filled ledger is valid on disk).
+        let reloaded =
+            load_pending_revocations_from(&path).expect("restart reload must yield a ledger");
+        assert_eq!(reloaded.entries.len(), MAX_PENDING_REVOCATIONS);
+        assert!(
+            reloaded
+                .entries
+                .iter()
+                .all(|entry| entry.endpoint_id != overflow.endpoint_id),
+            "nothing durable may exist for the DeferredFullQueue endpoint: the \
+             outcome honestly states the intent will not replay after a restart"
+        );
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    /// Round-29 review MINOR-1: the in-memory backlog must never grow past
+    /// MAX_PENDING_REVOCATIONS — a salvage degradation that leaves memory-only
+    /// siblings plus later distinct-key rotations used to push it over, and
+    /// every acknowledgement persist then failed the ledger validation cap
+    /// forever (no revocation could be acked in that process). The cap keeps
+    /// the newest entries in order and retires the oldest; a no-op cap (the
+    /// pre-fix behavior) or a newest-retiring cap turns this red.
+    #[test]
+    fn pending_revocation_backlog_cap_keeps_the_newest_entries() {
+        let over_cap: Vec<PendingRevocation> = (0..MAX_PENDING_REVOCATIONS + 2)
+            .map(|index| test_pending_revocation(&format!("ep_backlog_cap_{index:02}")))
+            .collect();
+        let mut backlog = over_cap.clone();
+        cap_pending_revocation_backlog(&mut backlog);
+        assert_eq!(
+            backlog.len(),
+            MAX_PENDING_REVOCATIONS,
+            "the backlog must land exactly on the ledger validation cap"
+        );
+        assert!(
+            backlog
+                .iter()
+                .all(|entry| entry.endpoint_id.starts_with("ep_backlog_cap_")),
+            "only fixture entries may remain after the cap"
+        );
+        // The OLDEST entries retire: with memory-first seeding the front of
+        // the backlog is the oldest intent, and a salvage leftover set is
+        // exactly that — retiring the newest instead (or keeping everything,
+        // the pre-fix wedge) breaks these two directions.
+        assert!(
+            backlog
+                .iter()
+                .all(|entry| entry.endpoint_id != "ep_backlog_cap_00"
+                    && entry.endpoint_id != "ep_backlog_cap_01"),
+            "the two entries past the cap must be the retired oldest, not the newest"
+        );
+        assert_eq!(
+            backlog.last().map(|entry| entry.endpoint_id.as_str()),
+            Some("ep_backlog_cap_33"),
+            "the newest entry must survive the cap so the last rotation stays ackable"
+        );
+        // Exactly at cap the helper is an identity — a cap that trims even
+        // one entry below the limit silently loses ackable intents.
+        let mut at_cap: Vec<PendingRevocation> = (0..MAX_PENDING_REVOCATIONS)
+            .map(|index| test_pending_revocation(&format!("ep_backlog_fit_{index:02}")))
+            .collect();
+        cap_pending_revocation_backlog(&mut at_cap);
+        assert_eq!(at_cap.len(), MAX_PENDING_REVOCATIONS);
+        assert_eq!(
+            at_cap.first().map(|entry| entry.endpoint_id.as_str()),
+            Some("ep_backlog_fit_00"),
+            "at-cap backlogs must pass through unchanged"
+        );
+    }
+
+    /// Round-29 review MINOR-1 wiring pin: the cap must be bound at BOTH backlog
+    /// growth sites — the replay union (salvage leftovers + disk ledger) and
+    /// the post-queue sync. Deleting either call keeps the behavioral cap
+    /// test green (it drives the helper directly), so each site carries its
+    /// own needle; deleting the helper body's retire direction is covered by
+    /// the behavioral test.
+    #[test]
+    fn revocation_backlog_cap_is_wired_into_replay_and_sync() {
+        let source = include_str!("mod.rs");
+        let replay_start = source
+            .find("fn replay_pending_revocations(")
+            .expect("replay_pending_revocations must exist");
+        let replay_body = &source[replay_start..];
+        let replay_body = &replay_body[..replay_body
+            .find("\n    fn ")
+            .expect("replay_pending_revocations body must be terminated by the next fn")];
+        let replay_body = comment_filtered(replay_body);
+        assert!(
+            replay_body.contains("cap_pending_revocation_backlog(&mut merged)"),
+            "the replay union must run the backlog cap before adopting the \
+             merged backlog, or salvage leftovers plus rotations re-wedge \
+             acknowledgement persists"
+        );
+        let sync_start = source
+            .find("fn sync_pending_revocation_backlog(")
+            .expect("sync_pending_revocation_backlog must exist");
+        let sync_body = &source[sync_start..];
+        let sync_body = &sync_body[..sync_body
+            .find("\n    fn ")
+            .expect("sync_pending_revocation_backlog body must be terminated by the next fn")];
+        let sync_body = comment_filtered(sync_body);
+        let push_at = sync_body
+            .find("pending_revocation_backlog.push(pending)")
+            .expect("the sync must still push the queued entry");
+        let cap_at = sync_body
+            .find("cap_pending_revocation_backlog(&mut inner.pending_revocation_backlog)")
+            .expect("the post-queue sync must run the backlog cap");
+        assert!(
+            push_at < cap_at,
+            "the cap must run after the push, or the just-queued entry can be \
+             the one silently over cap"
+        );
+    }
+
+    #[test]
+    fn revocation_ack_arms_cap_the_backlog_before_both_stores() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn finish_pending_revocation(")
+            .expect("finish_pending_revocation must exist");
+        let rest = &source[start..];
+        let end = ["\n    fn ", "\n    pub fn "]
+            .iter()
+            .filter_map(|needle| rest.find(needle))
+            .min()
+            .expect("finish_pending_revocation body must be terminated by the next fn item");
+        let body = comment_filtered(&rest[..end]);
+        let retain_at = body
+            .find("remaining.retain(")
+            .expect("the acknowledged arm must retain past the acked entry");
+        let ledger_at = body
+            .find("PendingRevocationLedger::default()")
+            .expect("the acknowledged arm must build the whole-ledger persist");
+        let push_at = body
+            .find("remaining.push(pending)")
+            .expect("the persist-failure arm must re-queue the entry");
+        let cap_needle = "cap_pending_revocation_backlog(&mut remaining)";
+        let first_cap = body
+            .find(cap_needle)
+            .expect("the acknowledged arm must cap the backlog before the ledger build");
+        assert!(
+            retain_at < first_cap && first_cap < ledger_at,
+            "the cap must run after the retain and before the ledger is built, or \
+             a retired-sibling re-push can persist an over-cap ledger that \
+             validation rejects"
+        );
+        // `find` runs on the [push_at..] slice, so a match already places the
+        // failure-arm cap after the re-push; only its presence needs pinning
+        // (an offset-ordering assert here would be vacuous).
+        body[push_at..].find(cap_needle).expect(
+            "the persist-failure arm must cap again after the re-push, or \
+                     the re-push can grow the backlog past MAX_PENDING_REVOCATIONS",
+        );
+    }
+
     #[test]
     fn pending_revocations_round_trip_in_a_bounded_private_ledger() {
         let directory = std::env::temp_dir().join(format!(
@@ -6229,8 +6823,9 @@ mod tests {
             &json!({ "type": "error", "code": "endpoint_not_found" }),
             "ep_retired"
         ));
-        // 指名他端点的 endpoint_not_found 不是本端点消失的证明:在它上面
-        // ack 会删掉仍可能存在于 relay 侧的本端点持久撤销条目。
+        // An endpoint_not_found naming a different endpoint is not proof this endpoint is
+        // gone: acking on it would delete this endpoint's persisted revocation entry, which
+        // may still exist on the relay side.
         assert!(!relay_client::terminal_relay_message(
             &json!({
                 "type": "error",
@@ -6239,12 +6834,12 @@ mod tests {
             }),
             "ep_retired"
         ));
-        // endpoint_revoked 错误码证明 endpoint 已墓碑化,等价于撤销成功。
+        // The endpoint_revoked error code proves the endpoint is tombstoned — equivalent to a successful revocation.
         assert!(relay_client::terminal_relay_message(
             &json!({ "type": "error", "code": "endpoint_revoked" }),
             "ep_retired"
         ));
-        // 凭据拒绝不证明 endpoint 消失:持久撤销条目不能被当作已确认删除。
+        // A credential refusal does not prove the endpoint is gone: the persisted revocation entry must not be treated as confirmed-deleted.
         assert!(!relay_client::terminal_relay_message(
             &json!({ "type": "error", "code": "invalid_desktop_secret" }),
             "ep_retired"
@@ -6303,6 +6898,327 @@ mod tests {
     }
 
     #[test]
+    fn eviction_active_window_stays_far_below_the_transfer_ttl() {
+        // Round-29 review MINOR-3: both eviction tests derive fixture age FROM
+        // the constant, so drifting the value itself (e.g. 30s → 590s, hugging
+        // the 10-minute TTL) kept the whole suite green while the "orphans are
+        // reaped far earlier than the TTL" property silently died — a phone
+        // holding a download_id could then wait out nearly the whole TTL
+        // before losing it to the reaper. Pin the value and the relationship
+        // independent of the constants' use as fixture clocks; changing either
+        // bound turns this red.
+        assert_eq!(
+            WEB_SESSION_DOWNLOAD_EVICTION_ACTIVE_WINDOW,
+            std::time::Duration::from_secs(30),
+            "the freshness window is a deliberate 30s value, not derivable from \
+             the other bounds"
+        );
+        assert!(
+            WEB_SESSION_DOWNLOAD_EVICTION_ACTIVE_WINDOW * 10 <= WEB_SESSION_TRANSFER_TTL,
+            "the window must stay an order of magnitude below the TTL so eviction \
+             reaps orphans far earlier than the TTL reaper"
+        );
+    }
+
+    #[test]
+    fn full_download_slots_evict_the_oldest_ready_orphan() {
+        // Round-15 review: at full slots, begin first evicts the oldest ready orphan
+        // (response lost; the phone never got a download_id); entries not yet ready that the
+        // engine is still writing must never be victims, keeping the existing full-slot error
+        // in that case. Round-16 review (M2): the victim criteria gain a freshness window —
+        // "ready" cannot tell an orphan from a download being read (chunk reads refresh
+        // last_touched); only ready entries whose updates have aged past the window are
+        // evictable; ready entries inside the window are kept too.
+        let aged = |id: &str, ready: bool| {
+            (
+                id.to_string(),
+                WebSessionDownload {
+                    session_id: "session_a".into(),
+                    reservation_id: format!("reservation_{id}"),
+                    file: tempfile::tempfile().unwrap(),
+                    reserved_bytes: 1,
+                    total: 1,
+                    ready,
+                    // Round-18 review: direct subtraction panics on hosts whose monotonic clock
+                    // has been up for less than 31s (freshly booted) — a test crash rather than a
+                    // red assertion, with a misleading failure language. Checked fallback: fall
+                    // back to window+1s first, then to the window boundary, and finally to now;
+                    // the degradation only lets the assertion fail cleanly as "not past the
+                    // window", never panicking.
+                    last_touched: match Instant::now().checked_sub(
+                        WEB_SESSION_DOWNLOAD_EVICTION_ACTIVE_WINDOW
+                            + std::time::Duration::from_secs(1),
+                    ) {
+                        Some(aged_at) => aged_at,
+                        None => Instant::now()
+                            .checked_sub(WEB_SESSION_DOWNLOAD_EVICTION_ACTIVE_WINDOW)
+                            .unwrap_or_else(Instant::now),
+                    },
+                },
+            )
+        };
+        let mut inner = Inner::default();
+        // Round-16 follow-up review (M1): two ready, window-expired candidates — the victim
+        // must be the insertion-oldest one; a reversed-iteration (.rev(), LIFO) mutant would
+        // evict the newer candidate, so this assertion is genuinely order-sensitive.
+        for (download_id, entry) in [
+            aged("download_old", true),
+            aged("download_second", true),
+            aged("download_new", false),
+        ] {
+            inner
+                .web_session_download_order
+                .push_back(download_id.clone());
+            inner.web_session_downloads.insert(download_id, entry);
+        }
+        assert!(transfer::evict_oldest_ready_session_download(&mut inner));
+        assert!(!inner.web_session_downloads.contains_key("download_old"));
+        assert!(inner.web_session_downloads.contains_key("download_second"));
+        assert!(inner.web_session_downloads.contains_key("download_new"));
+        assert_eq!(
+            inner.web_session_download_order,
+            ["download_second", "download_new"]
+        );
+
+        // The second eviction takes the next-oldest ready candidate under the same FIFO semantics.
+        assert!(transfer::evict_oldest_ready_session_download(&mut inner));
+        assert!(!inner.web_session_downloads.contains_key("download_second"));
+        assert_eq!(inner.web_session_download_order, ["download_new"]);
+
+        // Only not-ready entries remain (engine still writing): no victim, returns false and leaves everything as-is.
+        assert!(!transfer::evict_oldest_ready_session_download(&mut inner));
+        assert_eq!(inner.web_session_downloads.len(), 1);
+        assert_eq!(inner.web_session_download_order, ["download_new"]);
+
+        // Round-16 review (M2): ready entries inside the window (being chunk-read) are never
+        // victims — the seconds-long read gaps where last_touched is not refreshed must not
+        // evict a download mid-read.
+        let fresh_ready = aged("download_fresh", true);
+        inner
+            .web_session_downloads
+            .insert("download_fresh".into(), {
+                let mut entry = fresh_ready.1;
+                entry.last_touched = Instant::now();
+                entry
+            });
+        inner
+            .web_session_download_order
+            .push_back("download_fresh".into());
+        assert!(!transfer::evict_oldest_ready_session_download(&mut inner));
+        assert!(inner.web_session_downloads.contains_key("download_fresh"));
+        assert_eq!(
+            inner.web_session_download_order,
+            ["download_new", "download_fresh"]
+        );
+    }
+
+    #[test]
+    fn chunk_read_refreshes_last_touched_so_active_downloads_stay_uneligible() {
+        // Round-20 review MAJOR-1: the 30s active window rests on chunk reads refreshing
+        // last_touched in the non-eof arm (transfer.rs's eviction-predicate comment says so
+        // explicitly). Behavioral pin: seed an entry inside the window but older than this
+        // read, drive one non-eof chunk read, and assert the entry survives with last_touched
+        // strictly advanced (compare, don't subtract — hosts with a freshly started monotonic
+        // clock must not panic). The compilable mutant deleting the refresh branch previously
+        // kept the whole suite green (mutant executed) — mid-read downloads became evictable
+        // under full-slot pressure, exactly the regression this window guards against; this
+        // pin turns it red. The eof arm's "remove the entry, no refresh" is covered by the
+        // existing read tests.
+        use std::io::Write as _;
+        let mut inner = Inner::default();
+        let marker = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(5))
+            .unwrap_or_else(Instant::now);
+        let file = tempfile::tempfile().expect("tempfile for the download payload");
+        (&file)
+            .write_all(b"0123456789")
+            .expect("seed the payload bytes");
+        inner
+            .web_session_download_order
+            .push_back("download_read".to_string());
+        inner.web_session_downloads.insert(
+            "download_read".to_string(),
+            WebSessionDownload {
+                session_id: "session_a".to_string(),
+                reservation_id: "reservation_read".to_string(),
+                file,
+                reserved_bytes: 10,
+                total: 10,
+                ready: true,
+                last_touched: marker,
+            },
+        );
+        let chunk = transfer::read_web_session_download_chunk(
+            &mut inner,
+            "download_read",
+            "session_a",
+            0,
+            4,
+        )
+        .expect("the seeded entry must serve a chunk");
+        assert!(
+            !chunk.eof,
+            "offset 0/limit 4 of a 10-byte payload is not eof"
+        );
+        let entry = inner
+            .web_session_downloads
+            .get("download_read")
+            .expect("a non-eof read must keep the entry");
+        assert!(
+            entry.last_touched > marker,
+            "a non-eof chunk read must refresh last_touched — the eviction \
+             freshness window is only sound while active reads stay fresh"
+        );
+        assert_eq!(
+            inner.web_session_download_order,
+            ["download_read"],
+            "a non-eof read must not disturb the eviction order"
+        );
+    }
+
+    /// Wiring pin (Round-16 review MAJOR-2): begin's full-slot eviction wiring was
+    /// previously invisible to tests — driving `begin_web_session_download` directly needs an
+    /// AppHandle (unconstructible in unit tests), and the only eviction behavioral pins ran
+    /// through the helper, so deleting the wiring inside begin (or changing `>=` to `>`, or
+    /// moving the call after the capacity check into dead code) kept the whole suite green
+    /// (mutant executed). Per this module's established convention that "helper-level tests
+    /// cannot pin wiring points" (the same module caliber as
+    /// `rpc_request_lease_gate_is_wired_inside_the_admission_lock`), this uses a source pin:
+    /// pinning the if line's and the call's byte-exact shape plus the "evict first, capacity
+    /// gate after" ordering.
+    #[test]
+    fn begin_session_download_wires_the_eviction_before_the_capacity_gate() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("pub fn begin_web_session_download(")
+            .expect("begin_web_session_download must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("\n    fn ")
+            .expect("begin body must be terminated by the next fn")];
+        // Round-24 review (m7): pure comment lines are filtered first — after commenting
+        // out the wiring line (`// transfer::evict_…`) the needle still lived inside the
+        // comment text and a bare find stayed green (same filtering caliber as round-23's
+        // three sibling pins; trailing // and block-comment mentions can still shield it,
+        // a disclosed residual).
+        let body = crate::platform::test_support::comment_filtered(body);
+        let gate = body
+            .find("while ensure_web_session_download_capacity(&inner, reserved_bytes).is_err() {")
+            .expect(
+                "begin must gate eviction on the capacity check itself: \
+                     deleting the wiring silently reverts the orphan-wedge fix \
+                     to hard failure (round-25 extends the gate to both the \
+                     slot and the byte dimension)",
+            );
+        let call = body
+            .find("transfer::evict_oldest_ready_session_download(&mut inner)")
+            .expect(
+                "the eviction call must stay wired inside the gate (a \
+                     commented-out call keeps the needle only in a comment, \
+                     which the line filter strips)",
+            );
+        let capacity = body
+            .find("ensure_web_session_download_capacity(&inner, reserved_bytes)?;")
+            .expect("the capacity gate must stay in begin");
+        assert!(
+            gate < call && call < capacity,
+            "begin must evict the oldest aged ready orphan on a failed capacity \
+             check and re-check BEFORE propagating the gate error; moving the \
+             call after the propagate (or deleting the loop) would strand the \
+             orphan-wedge fix as dead code"
+        );
+        assert_eq!(
+            body.matches("transfer::evict_oldest_ready_session_download(&mut inner)")
+                .count(),
+            1,
+            "begin must keep exactly one eviction call site: the capacity-gated \
+             loop covers both the slot and the byte dimension"
+        );
+        assert!(
+            body.contains("web_session_download_evicted"),
+            "each eviction must emit a diagnostic; a silent eviction leaves the \
+             phone staring at a bare download-not-found error"
+        );
+        // Round-27 review m3: the diagnostics' "placement" had no pin — hoisting record
+        // out of the loop / moving it before `if !evict` (the failure-propagation path would
+        // emit one too) both compiled and stayed green. Pin the count-increment arm right
+        // after the eviction call and inside the loop body, with each per-victim record after
+        // `drop(inner)` (the I/O-outside-the-lock caliber).
+        let if_open = body
+            .find("if !transfer::evict_oldest_ready_session_download(&mut inner) {")
+            .expect("the failed-eviction propagate arm must exist");
+        let increment = body
+            .find("evictions += 1;")
+            .expect("each successful eviction must be counted");
+        let unlock = body
+            .find("drop(inner);")
+            .expect("the manager lock must be released before the diagnostic I/O");
+        let record = body
+            .find("record_backend(")
+            .expect("the diagnostic record call must exist");
+        assert_eq!(
+            body.matches("evictions += 1;").count(),
+            1,
+            "exactly one counted eviction per failed capacity check: a second \
+             increment site would double-count evictions"
+        );
+        assert!(
+            gate < if_open && if_open < increment && increment < unlock && unlock < record,
+            "the eviction counter must live inside the gate loop after the \
+             propagate arm, and the per-eviction record must fire only after \
+             the manager lock is released; hoisting the record above the loop \
+             (fires with no eviction) or inside the lock (file I/O under the \
+             critical section) both regress the wiring silently"
+        );
+        // Round-28 review MINOR-2: the trigger literal in the payload had no pin — changing
+        // the mod.rs-side literal kept the whole suite green while diagnostics' enum
+        // allowlist silently dropped it, degrading every eviction diagnostic to empty
+        // details. The enum's other-side acceptance is guarded by diagnostics.rs's
+        // acceptance pin; the two sides join into end-to-end coverage here.
+        assert!(
+            body.contains(r#""trigger": "begin_capacity_gate""#),
+            "the eviction diagnostic payload must carry the trigger literal \
+             that sessions/diagnostics.rs enum-normalizes; renaming it here \
+             silently degrades every eviction diagnostic to empty details"
+        );
+    }
+
+    /// Wiring pin (Round-16 follow-up review M2): the same critical section where commit
+    /// flips ready must refresh last_touched — the begin→commit span can exceed the
+    /// eviction freshness window; flipping ready without refreshing would make a just-
+    /// committed download the phone has not started chunk-reading yet immediately evictable
+    /// as "ready and aged past the window". Helper-level tests cannot construct a Manager
+    /// (AppHandle); per this module's convention a source pin pins the flip and the refresh's
+    /// adjacency, and the mutant deleting the refresh line turns this pin red.
+    #[test]
+    fn commit_marks_download_ready_with_a_fresh_last_touched() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn commit_web_session_download(")
+            .expect("commit_web_session_download must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("\n    fn ")
+            .expect("commit body must be terminated by the next fn")];
+        // Round-24 review (m7): pure comment lines are filtered first, same caliber as the
+        // previous pin — after commenting out the last_touched refresh line the needle must
+        // not stay green by hiding in comment text.
+        let body = crate::platform::test_support::comment_filtered(body);
+        let ready_flip = body
+            .find("download.ready = true;")
+            .expect("commit must flip the download ready at the reservation it verified");
+        let freshness = body.find("download.last_touched = Instant::now();").expect(
+            "commit must refresh last_touched together with the ready flip: \
+                     deleting it makes a just-committed download instantly evictable \
+                     when its begin->commit span crosses the eviction window",
+        );
+        assert!(
+            ready_flip < freshness && freshness - ready_flip < 200,
+            "the freshness refresh must stay adjacent to the ready flip"
+        );
+    }
+
+    #[test]
     fn cancelled_session_download_releases_only_the_matching_lease() {
         let mut inner = Inner::default();
         inner.web_session_download_order =
@@ -6343,16 +7259,16 @@ mod tests {
 
     #[test]
     fn code_session_event_filter_is_inert_without_predicate() {
-        // predicate 未注入（启动早期）时不过滤任何事件，行为与注入前一致。
+        // With no predicate injected (startup-early), nothing is filtered — behavior matches pre-injection.
         let payload = json!({ "session_id": "code-sess-1" });
         assert!(!should_filter_code_session_event(None, &payload));
     }
 
     #[test]
     fn code_session_events_are_filtered_for_each_field_name_variant() {
-        // 字段名契约(原 event_session_id_reads_each_event_family_field_name):
-        // chat:* / artifact:disk 用 session_id,session:* 用 id,
-        // scheduled_task:run_updated 用 sessionId。
+        // Field-name contract (formerly event_session_id_reads_each_event_family_field_name):
+        // chat:* / artifact:disk use session_id, session:* uses id,
+        // scheduled_task:run_updated uses sessionId.
         assert_eq!(
             event_session_id(&json!({ "session_id": "s-chat" })),
             Some("s-chat")
@@ -6379,10 +7295,11 @@ mod tests {
             );
         }
 
-        // 恒真 predicate 下过滤器等价于 event_session_id 的存在性判定
-        // (原 event_session_id_ignores_missing_or_non_string_fields 与
-        // code_session_filter_only_fires_on_a_session_id_field):不带会话 id
-        // 或 id 非字符串的全局事件不得被误伤。
+        // Under an always-true predicate the filter is equivalent to event_session_id's
+        // existence check (formerly
+        // event_session_id_ignores_missing_or_non_string_fields and
+        // code_session_filter_only_fires_on_a_session_id_field): global events without a
+        // session id, or whose id is not a string, must never be collateral damage.
         let always: CodeSessionPredicate = Arc::new(|_: &str| true);
         assert_eq!(
             event_session_id(&json!({ "kind": "session:list_changed" })),
@@ -6401,7 +7318,7 @@ mod tests {
 
     #[test]
     fn plain_session_events_survive_the_code_session_filter() {
-        // 普通会话事件必须不受影响：predicate 只对真实代码会话 id 返回 true。
+        // Ordinary session events must be unaffected: the predicate returns true only for real code-session ids.
         let predicate: CodeSessionPredicate =
             Arc::new(|session_id: &str| session_id.starts_with("code-"));
         for payload in [
@@ -6437,7 +7354,7 @@ mod tests {
     #[test]
     fn forwarded_rpc_requests_must_target_the_active_lease() {
         let mut inner = Inner::default();
-        // 无活跃 endpoint:不过滤(主准入路径本来就没有可回复的 endpoint)。
+        // No active endpoint: no filtering (the main admission path has no replyable endpoint anyway).
         assert!(rpc_request_targets_active_lease(&inner, TEST_LEASE_ID));
 
         inner.endpoint = Some(test_active_endpoint(Some(TEST_LEASE_ID)));
@@ -6448,7 +7365,7 @@ mod tests {
              and must be dropped before touching the idempotency cache"
         );
 
-        // 无活跃 lease(client 已断开)时保持原行为:不在此处过滤。
+        // No active lease (client already disconnected) keeps the original behavior: no filtering here.
         inner.endpoint = Some(test_active_endpoint(None));
         assert!(rpc_request_targets_active_lease(&inner, TEST_LEASE_ID));
     }
@@ -6549,6 +7466,12 @@ mod tests {
             let body = &body[..body
                 .find("\n    fn ")
                 .unwrap_or_else(|| panic!("{fn_name} body must be terminated by the next fn"))];
+            // Round-28 review: sibling wiring pins gained comment filtering across
+            // round-23/24 but this pin missed it — with the real parse+call lines commented
+            // out, the needle survived inside the comment text and the suite stayed green.
+            // The same caliber is completed here (trailing comments and block comments can
+            // still shield it — a disclosed residual).
+            let body = crate::platform::test_support::comment_filtered(body);
             assert!(
                 body.contains("get(\"web_rejoining\")"),
                 "{fn_name} must parse the web_rejoining flag from the frame"
@@ -6626,6 +7549,43 @@ mod tests {
         inner.web_attachment_order.push_back("attachment_a".into());
         inner.web_attachments.insert("attachment_a".into(), cached);
         inner.web_attachment_bytes = 64;
+        // Round-15 review MA4: the rejoin arm must seed all three — with only attachments
+        // seeded, mutants clearing in-flight uploads (or session downloads) in the keep arm
+        // kept the whole suite green (mutant executed), half-reviving Round-2's
+        // watchdog-swallows-uploads regression.
+        inner.web_attachment_uploads.insert(
+            "upload_a".to_string(),
+            WebAttachmentUpload {
+                file_name: "notes.txt".into(),
+                total: 3,
+                data: b"abc".to_vec(),
+                last_touched: Instant::now(),
+            },
+        );
+        // Round-29 review MINOR-4: the upload-order twin of the download-order
+        // seam — the upload pop loop removes whatever entry the order's front
+        // id names, so a stale id costs one live upload (over-eviction). Seed
+        // the queue and pin its consistency with the map on both arms;
+        // deleting `web_attachment_upload_order.clear()` in the takeover wipe
+        // used to keep the whole suite green.
+        inner
+            .web_attachment_upload_order
+            .push_back("upload_a".to_string());
+        inner
+            .web_session_download_order
+            .push_back("download_a".to_string());
+        inner.web_session_downloads.insert(
+            "download_a".to_string(),
+            WebSessionDownload {
+                session_id: "session_a".into(),
+                reservation_id: "reservation_a".into(),
+                file: tempfile::tempfile().unwrap(),
+                reserved_bytes: 1,
+                total: 1,
+                ready: false,
+                last_touched: Instant::now(),
+            },
+        );
 
         // Rejoin (same token holder, previous socket already gone): the
         // staged transfer survives an idle-watchdog reconnect; only the
@@ -6639,6 +7599,32 @@ mod tests {
             inner.web_attachments.contains_key("attachment_a"),
             "a rejoin must keep staged attachments"
         );
+        assert!(
+            inner.web_attachment_uploads.contains_key("upload_a"),
+            "a rejoin must keep in-flight uploads"
+        );
+        assert!(
+            inner.web_session_downloads.contains_key("download_a"),
+            "a rejoin must keep session downloads"
+        );
+        // Round-16 review (M2 test seam): the order queue and the map must move together. A
+        // stale id itself would not be evicted (the victim criteria require the map entry to
+        // be present; a missing one is skipped) — the real harm of missing the queue cleanup
+        // is dead weight: the stale id occupies a slot until the next prune (which runs only
+        // inside begin/commit) retains it away by the map; pin the consistency of both
+        // cleanups.
+        assert!(
+            inner
+                .web_session_download_order
+                .contains(&"download_a".to_string()),
+            "a rejoin must keep the download eviction order consistent with the map"
+        );
+        assert!(
+            inner
+                .web_attachment_upload_order
+                .contains(&"upload_a".to_string()),
+            "a rejoin must keep the upload order consistent with the map"
+        );
 
         // Takeover (fresh client replaces a live one): the wipe must stay so
         // the replacing client cannot touch the previous lease's transfers.
@@ -6646,6 +7632,15 @@ mod tests {
         assert!(inner.web_attachments.is_empty());
         assert!(inner.web_attachment_uploads.is_empty());
         assert!(inner.web_session_downloads.is_empty());
+        assert!(
+            inner.web_session_download_order.is_empty(),
+            "a takeover wipe must clear the eviction order alongside the map"
+        );
+        assert!(
+            inner.web_attachment_upload_order.is_empty(),
+            "a takeover wipe must clear the upload order alongside the map; a \
+             stale id makes the upload pop loop remove a live upload"
+        );
 
         std::fs::remove_dir_all(&staging).ok();
     }
@@ -6690,6 +7685,18 @@ mod tests {
         // 持 guard 调用 = 同线程自锁,撤销路径必死锁。单测无法真构造 Manager 走
         // 命令入口,这里以源码契约钉死不变量:emit_status 的括号
         // 深度必须浅于取 inner guard 的位置——即 guard 已先出作用域。
+        // Round-15 review MA1's persist-failure arm takes/drops the guard in deeper
+        // nesting before emitting, which the naive "first emit depth < first lock depth"
+        // criterion cannot see (mutant executed: false positive). Replaced with exact span
+        // judgment: every emit_status site must not fall before the brace-block closure of
+        // any self.inner.lock() site.
+        //
+        // Round-24 review (m) disclosed residual: the spans come from counting bare { / },
+        // comments and strings included — a comment or string literal containing an unbalanced
+        // `}` between a lock site and its block closure would truncate the span early, and a
+        // future "emit inside the guard span" regression could be judged outside it (silently
+        // green; same caliber as the round-23 sibling pins). Under today's text all three lock
+        // spans close before their emit sites; the green baseline was confirmed by manual review.
         let source = include_str!("mod.rs");
         let body = source
             .split("pub fn revoke_host_workspace")
@@ -6697,8 +7704,6 @@ mod tests {
             .expect("revoke_host_workspace must exist");
         let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
         let open = body.find('{').expect("function body braces");
-        let lock = body.find("self.inner.lock()").expect("inner lock site");
-        let emit = body.find("self.emit_status()").expect("emit_status site");
         let depth_at = |pos: usize| {
             body[open..pos]
                 .chars()
@@ -6707,14 +7712,67 @@ mod tests {
                 .checked_sub(body[open..pos].chars().filter(|c| *c == '}').count())
                 .expect("brace depth cannot go negative in valid Rust")
         };
+        let sites = |needle: &str| {
+            let mut found = Vec::new();
+            let mut offset = 0usize;
+            while let Some(pos) = body[offset..].find(needle) {
+                found.push(offset + pos);
+                offset += pos + needle.len();
+            }
+            found
+        };
+        let lock_sites = sites("self.inner.lock()");
         assert!(
-            depth_at(emit) < depth_at(lock),
-            "emit_status (depth {}) must run outside the scope that took the inner \
-             guard (depth {}); holding the guard across it re-locks the same \
-             non-reentrant mutex and deadlocks the revoke path",
-            depth_at(emit),
-            depth_at(lock)
+            !lock_sites.is_empty(),
+            "the revoke path must synchronize on the inner mutex"
         );
+        let emit_sites = sites("self.emit_status()");
+        assert!(
+            !emit_sites.is_empty(),
+            "the revoke path must push the refreshed status"
+        );
+        // guard bound at `lock` is still live at `emit` when the brace depth
+        // never drops below the lock's own scope between the two sites.
+        let guard_live = |lock: usize, emit: usize| -> bool {
+            let lock_depth = depth_at(lock);
+            if depth_at(emit) < lock_depth {
+                return false;
+            }
+            let mut relative = 0i32;
+            for c in body[lock..emit].chars() {
+                match c {
+                    '{' => relative += 1,
+                    '}' => {
+                        relative -= 1;
+                        if relative < 0 {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            true
+        };
+        // EVERY emit site must run outside the scope of EVERY live inner
+        // guard (the first-site-only form missed the persist-failure
+        // reconciliation branch, whose emit sits in a nested block after its
+        // own scoped lock - holding the non-reentrant mutex across emit
+        // re-locks on the same thread and deadlocks the revoke path).
+        for &emit in &emit_sites {
+            let offenders: Vec<usize> = lock_sites
+                .iter()
+                .copied()
+                .filter(|&lock| lock < emit && guard_live(lock, emit))
+                .collect();
+            assert!(
+                offenders.is_empty(),
+                "emit_status at byte offset {} must run outside the scope of every \
+                 live inner guard (live locks at {:?}); holding the guard across it \
+                 re-locks the same non-reentrant mutex and deadlocks the revoke path",
+                emit,
+                offenders
+            );
+        }
     }
 
     /// 接线钉:撤销的安全语义「同步失效已铸发的
@@ -6724,25 +7782,551 @@ mod tests {
     /// inner)` 或 `persist_config(&config)?` 会让撤销退回「只改内存、
     /// 已铸发 grant 在 TTL 内仍可兑换」的 pre-fix 行为而全套件
     /// 保持绿。
+    /// Wiring pin (Round-10 review M2): revocation's safety semantics — "invalidate minted
+    /// workspace grants in sync + persist the consent flag" — only takes effect at the
+    /// command-path call sites; `revoking_host_workspace_also_invalidates_minted_grants`
+    /// drives the free helper directly and cannot see the wiring. Deleting
+    /// `revoke_host_workspace_state(&mut inner)` or `persist_config(&config)?` would revert
+    /// revocation to the pre-fix behavior "memory-only change; minted grants stay redeemable
+    /// for their 30-minute TTL" while the whole suite stays green (mutant executed: all 20
+    /// revoke-matching tests green).
+    /// Wiring pin (P2, immediate invalidation of old authorization): no failure path may
+    /// re-latch the consent flag to true — the flag is the user's consent, and re-latching
+    /// it lets the live process accept fresh grant minting immediately, so the old
+    /// authorization was never invalidated. Invalidation-first (grants cleared), the
+    /// persist-failure arm publishing the authoritative (revoked) state, and the contextual
+    /// error must all be present; any failure path showing an `= true` rollback turns red.
     #[test]
-    fn revoke_host_workspace_wires_grant_invalidation_and_latches_the_flag() {
+    fn revoke_host_workspace_keeps_revocation_in_force_on_persistence_failures() {
         let source = include_str!("mod.rs");
         let body = source
             .split("pub fn revoke_host_workspace(")
             .nth(1)
             .expect("revoke_host_workspace must exist");
         let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
+        let body = comment_filtered(body);
         assert!(
-            body.contains("persist_config(&config)?"),
-            "revoke must latch the consent flag into the persisted config"
+            body.contains("revoke_host_workspace_state(&mut inner);")
+                && body
+                    .find("revoke_host_workspace_state(&mut inner);")
+                    .unwrap()
+                    < body.find("let mut config = match load_config() {").unwrap(),
+            "revoke must invalidate already-minted workspace grants on the live state \
+             BEFORE any durable read/write"
         );
         assert!(
             body.contains("revoke_host_workspace_state(&mut inner);"),
             "revoke must invalidate already-minted workspace grants on the live state"
         );
         assert!(
+            !body.contains("allow_host_workspace = true"),
+            "no failure path may re-latch the consent flag: the flag is the user's \
+             authorization and re-latching it lets the live process mint fresh grants \
+             immediately, violating immediate revocation"
+        );
+        assert!(
+            body.contains("persist_config(&config)"),
+            "revoke must latch the consent flag into the persisted config"
+        );
+        assert!(
             body.contains("self.emit_status();"),
             "revoke must push the refreshed status so the modal reflects the revoked row"
+        );
+        // Re-review P2 (persist-failure reconciliation): a persist failure must
+        // not propagate through a bare `?` — the authoritative state must be
+        // published and the error returned with context (the in-memory
+        // revocation stays in force, no rollback).
+        {
+            let persist_at = body
+                .find("if let Err(error) = persist_config(&config)")
+                .expect("the persist-failure reconciliation branch must exist");
+            let persist_branch = &body[persist_at..];
+            let persist_branch = &persist_branch[..persist_branch
+                .find("}\n            }")
+                .unwrap_or(persist_branch.len())];
+            assert!(
+                persist_branch.contains("self.emit_status();"),
+                "a persist failure must publish the authoritative (revoked) \
+                 state before propagating"
+            );
+            assert!(
+                persist_branch.contains("durable revocation did not take effect"),
+                "the persist-failure error must say that durable revocation did not \
+                 take effect instead of a bare propagation"
+            );
+        }
+    }
+
+    /// Wiring pin (P2, immediate invalidation — reverses the Round-15 review MA1 re-latch
+    /// contract): a persist failure must NOT re-latch the in-memory consent flag — the flag
+    /// is the user's consent, and re-latching it to the disk side would let the live process
+    /// accept fresh grant minting immediately, so the old authorization was never
+    /// invalidated. The arm must publish the authoritative (revoked) state, return a
+    /// contextual Err (no bare `?`), and say plainly that the durable revocation did not
+    /// take effect and that the revocation should be retried once the storage error clears
+    /// (the surviving durable file is a disclosed residual, not a rollback signal).
+    #[test]
+    fn revoke_persist_failure_keeps_memory_revoked_and_reports_the_durable_survivor() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split("pub fn revoke_host_workspace(")
+            .nth(1)
+            .expect("revoke_host_workspace must exist");
+        let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
+        let body = comment_filtered(body);
+        assert!(
+            !body.contains("persist_config(&config)?"),
+            "revoke must not propagate a persist failure with `?`: a bare \
+             propagation would skip the authoritative status re-emit and the \
+             contextual error copy"
+        );
+        assert!(
+            body.contains("if let Err(error) = persist_config(&config)"),
+            "the persist failure must be handled inside revoke, not propagated"
+        );
+        assert!(
+            !body.contains("folder access remains enabled"),
+            "the re-latch-era copy must stay gone: the arm no longer re-latches \
+             memory to the disk side, so the old rollback framing must not \
+             resurface as the failure copy"
+        );
+        // Round-16 review (M1c) caliber: the failure arm's status re-emit must fall inside
+        // the failure-arm window (between the persist if-let and the error copy); deleting
+        // the in-arm emit turns red (the function tail already has an emit, so a
+        // function-level contains would stay green).
+        let failure_arm_start = body
+            .find("if let Err(error) = persist_config(&config)")
+            .expect("the persist failure arm must exist");
+        let failure_arm_end = body
+            .find("durable revocation did not take effect")
+            .expect("the durable-survivor error copy must exist");
+        let failure_arm = &body[failure_arm_start..failure_arm_end];
+        // P2 reversal (Round-24 MAJOR caliber): a re-latch assignment inside THIS arm's
+        // window is exactly the contract violation the final review blocked on — an
+        // arm-bounded window assertion so the validate arm (or any future arm) cannot
+        // backstop it. Round-32 review: the needle drops the `= true` tail so a
+        // differently-spelled rollback (a variable or helper carrying the latch) cannot
+        // slip the window either; the window holds no legitimate assignment.
+        assert!(
+            !failure_arm.contains("allow_host_workspace ="),
+            "the persist-failure arm must keep the in-memory revocation in force: \
+             re-latching the consent flag inside the arm would let the live \
+             process mint fresh grants immediately, violating immediate \
+             invalidation of the old authorization"
+        );
+        assert!(
+            failure_arm.contains("self.emit_status();"),
+            "the failure arm must re-emit status so the UI shows the authoritative \
+             revoked row instead of a stale authorized one"
+        );
+        // Round-20 review (S04) caliber: the copy assertion only proves the text exists,
+        // not that it is the returned Err — pin that `return Err(` falls inside the
+        // failure-arm window (a log-and-continue mutation would misreport a failed
+        // persist as success).
+        assert!(
+            failure_arm.contains("return Err("),
+            "the durable-survivor error message must be returned as an Err from \
+             inside the persist-failure arm; a log-and-continue mutation \
+             would misreport a failed persist as success"
+        );
+        // Round-28 review MINOR-8a caliber: pin the emit -> return order — the re-latch
+        // step of the old ordering is gone; emitting before returning keeps the published
+        // payload the authoritative revoked state.
+        let emit_at = failure_arm
+            .find("self.emit_status();")
+            .expect("the failure-arm status re-emit must exist");
+        let return_at = failure_arm
+            .find("return Err(")
+            .expect("the returned Err must exist");
+        assert!(
+            emit_at < return_at,
+            "order must be status re-emit -> returned Err: the authoritative \
+             revoked state must be published before the error propagates"
+        );
+    }
+
+    /// Round-20 review MINOR pin: the strict-read failure arm (config corrupt/unreadable)
+    /// previously returned via `?` right after the in-memory invalidation had really flipped
+    /// the flag/cleared grants, with no status refresh — the UI stayed on the authorized
+    /// display until the next unrelated status push (Round-19 NIT already added the same emit
+    /// for the config-absent malformed state; this pin brings the corrupt state under the
+    /// same discipline). Source pin: the failure-arm window must contain both the error return
+    /// and emit_status; deleting the emit turns red. Round-21 review correction: the round-20
+    /// window spanned both match arms, and the emit assertion was backstopped by the Ok(None)
+    /// arm's own emit — deleting only the failure arm's emit kept the whole suite green (the
+    /// split-confirmation bypass mutant); corrected to an arm-bounded window (the emit falls
+    /// between `Err(error) => {` and `return Err(error)`, order verified too), after which a
+    /// single deletion turns red.
+    #[test]
+    fn revoke_strict_load_failure_re_emits_status_before_returning() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split("pub fn revoke_host_workspace(")
+            .nth(1)
+            .expect("revoke_host_workspace must exist");
+        let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
+        let body = comment_filtered(body);
+        let load_start = body
+            .find("let mut config = match load_config()")
+            .expect("the strict config readback must exist");
+        let load_end = body
+            .find("validate_config(&config)")
+            .expect("the readback match must be followed by validation");
+        let match_body = &body[load_start..load_end];
+        assert!(
+            match_body.contains("Err(error) => {"),
+            "the strict readback must still return its error: stop/revoke is a \
+             recovery path and a corrupt config must not wedge it"
+        );
+        let err_arm_start = match_body
+            .find("Err(error) => {")
+            .expect("the strict-load failure arm must exist");
+        let err_arm = &match_body[err_arm_start..];
+        let return_pos = err_arm
+            .find("return Err(error)")
+            .expect("the strict-load failure arm must return the error");
+        let err_body = &err_arm[..return_pos];
+        assert!(
+            err_body.contains("self.emit_status();"),
+            "the strict-load failure arm must re-emit status BEFORE returning: \
+             the invalidation above already flipped the flag and destroyed \
+             grants, so the UI would hold a stale authorized row until an \
+             unrelated push"
+        );
+    }
+
+    /// Round-22 review MINOR source pin (P2 reversal applied): the validate_config failure
+    /// arm must NOT re-latch the consent flag — the flag is the user's consent and
+    /// re-latching it would let the live process mint fresh grants immediately (the same
+    /// immediate-invalidation contract as the persist-failure arm). The arm must keep its
+    /// bare-`?`-rejection (handled at the arm), an unconditional status refresh, and error
+    /// copy that discloses the surviving durable consent when the disk latch is still
+    /// authorized. A bare `?` revert, deleting the emit, a conditional emit, or an `= true`
+    /// rollback all turn red.
+    #[test]
+    fn revoke_validation_failure_emits_and_discloses_the_durable_survivor() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split("pub fn revoke_host_workspace(")
+            .nth(1)
+            .expect("revoke_host_workspace must exist");
+        let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
+        let body = comment_filtered(body);
+        let arm_start = body
+            .find("validate_config(&config).map_err(|error| {")
+            .expect("the validation failure must be handled at the arm, not propagated with a bare `?` (the memory side was already invalidated above; the UI must not hold a stale authorized row)");
+        let arm = &body[arm_start..];
+        let arm_end = arm.find("})?;").expect("the map_err arm must close");
+        let arm_body = &arm[..arm_end];
+        // P2 reversal (Round-24 MAJOR caliber): a rollback assignment inside this arm's
+        // window is exactly the contract violation the final review blocked on.
+        // Round-32 review: the needle drops the `= true` tail so a differently-spelled
+        // rollback (the arm's own `remains_enabled` variable, or a helper) cannot slip
+        // the window; the window's only allow_host_workspace text is the flag READ that
+        // feeds `remains_enabled`, which carries no `=`.
+        assert!(
+            !arm_body.contains("allow_host_workspace ="),
+            "the validation-failure arm must keep the in-memory revocation in \
+             force: re-latching the consent flag inside the arm would let the \
+             live process mint fresh grants immediately, violating immediate \
+             invalidation of the old authorization"
+        );
+        let emit_pos = arm_body
+            .find("self.emit_status();")
+            .expect("the validation failure arm must refresh status before returning");
+        // Round-23 review MINOR caliber: the emit's unconditional position — the braces
+        // between the arm opener's `{` and the emit must be balanced, so a mutant moving
+        // the emit inside any conditional block mismatches and turns red. Both shapes (disk
+        // still authorized / config invalid) must refresh the emitted state. (The slice is
+        // pure code today; the brace-counting caliber matches the exact lock-span pin —
+        // braces inside strings/comments are a drift-fragile surface, a disclosed
+        // residual.)
+        let between = &arm_body["validate_config(&config).map_err(|error| {".len()..emit_pos];
+        assert_eq!(
+            between.matches('{').count(),
+            between.matches('}').count(),
+            "the status refresh must be unconditional: both shapes (disk \
+             still authorized / config invalid) must refresh the emitted \
+             state"
+        );
+        assert_eq!(
+            arm_body.matches("self.emit_status();").count(),
+            1,
+            "the arm must keep exactly one unconditional status refresh"
+        );
+        assert!(
+            arm_body.contains("did not take effect; folder consent stays enabled on disk"),
+            "the error must say the revocation did not take effect when the              disk latch is still authorized (the durable survivor is              disclosed, not rolled back)"
+        );
+        assert!(
+            arm_body.contains("found an invalid persisted config"),
+            "the already-unauthorized shape must report the corrupt config: the              revocation substantively succeeded there"
+        );
+    }
+
+    /// Round-19 review NIT pin (round-21 review addition: this arm previously had no pin at
+    /// all — deleting the whole block kept the suite green): the malformed state where config
+    /// is missing but an in-memory endpoint remains — the invalidation block really did flip
+    /// the flag/clear grants, so one conditional status refresh is added, keeping the UI from
+    /// staying stuck on the authorized display. Source pin: within the Ok(None) arm window,
+    /// `if endpoint_present {` and its in-block emit_status must coexist; deleting the
+    /// conditional block (or just the emit) turns red.
+    #[test]
+    fn revoke_missing_config_arm_emits_status_when_endpoint_present() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split("pub fn revoke_host_workspace(")
+            .nth(1)
+            .expect("revoke_host_workspace must exist");
+        let body = &body[..body.find("\n    pub fn ").unwrap_or(body.len())];
+        let body = comment_filtered(body);
+        let load_start = body
+            .find("let mut config = match load_config()")
+            .expect("the strict config readback must exist");
+        let load_end = body
+            .find("validate_config(&config)")
+            .expect("the readback match must be followed by validation");
+        let match_body = &body[load_start..load_end];
+        let ok_arm_start = match_body
+            .find("Ok(None) => {")
+            .expect("the config-absent arm must exist");
+        let ok_arm = &match_body[ok_arm_start..];
+        let return_pos = ok_arm
+            .find("return Ok(WebAccessInfo")
+            .expect("the config-absent arm must return the stopped payload");
+        let ok_body = &ok_arm[..return_pos];
+        let guard_pos = ok_body.find("if endpoint_present {").expect(
+            "the config-absent arm must conditionally refresh status when \
+                 an in-memory endpoint is still alive: the invalidation above \
+                 already flipped the flag, so the UI would hold a stale \
+                 authorized row until an unrelated push",
+        );
+        let guard_tail = &ok_body[guard_pos..];
+        let guard_end = guard_tail
+            .find("}")
+            .expect("the conditional refresh block must close");
+        assert!(
+            guard_tail[..guard_end].contains("self.emit_status();"),
+            "the conditional refresh must emit status inside the \
+             endpoint-present block"
+        );
+    }
+
+    /// Wiring pin (Round-15 review minor: full-queue wedging of recovery paths). stop/refresh
+    /// must degrade a full pending-revocation queue to log-and-continue by the shared prefix;
+    /// reverting to `queue_pending_revocation(…)?`'s `?` propagation revives both wedge
+    /// classes at once: stop cannot stop, and refresh fails permanently from the 33rd rotation
+    /// on (mutant executed). The same-key-different-secret conflict branch stays as-is (the
+    /// round-14 fail-closed boundary).
+    #[test]
+    fn recovery_paths_degrade_a_full_revocation_queue_instead_of_wedging() {
+        let source = include_str!("mod.rs");
+        for (fn_name, label) in [("pub fn stop_current(", "stop"), ("fn refresh(", "refresh")] {
+            let body = source
+                .split(fn_name)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{fn_name} must exist"));
+            let end = ["\n    fn ", "\n    pub fn ", "\n    #[test]"]
+                .iter()
+                .filter_map(|marker| body.find(marker))
+                .min()
+                .unwrap_or(body.len());
+            let body = comment_filtered(&body[..end]);
+            assert!(
+                !body.contains("queue_pending_revocation_for_removal(config)?")
+                    && !body.contains("queue_pending_revocation_for_removal(previous)?"),
+                "{label} must not propagate a full pending-revocation queue with `?`: a full queue would wedge the recovery path itself",
+            );
+            assert!(
+                body.contains("PENDING_REVOCATION_QUEUE_FULL_PREFIX"),
+                "{label} must recognize the shared queue-full prefix and degrade to a log",
+            );
+            // Round-18 review: the guard's and conflict arm's polarity was previously covered
+            // only by weak "references the constant + no ?" assertions — widening the guard into
+            // rewrites like `starts_with(PREFIX) || !error.is_empty()` would silently flip the
+            // round-14-recorded same-key-different-secret fail-closed boundary into fail-open
+            // with every existing assertion green. Pin the guard and the catch-all conflict arm
+            // by byte-exact shape. (Round-19 review: the guard needle must include the arm
+            // opener `=> {` — a bare guard needle is superstring-blind, and the disjunction
+            // widening `|| !error.is_empty()` keeps the old needle verbatim; with the opener
+            // included, any widening inserts text before `=> {` and the needle mismatches.)
+            assert!(
+                body.contains(
+                    "Err(error) if error.starts_with(PENDING_REVOCATION_QUEUE_FULL_PREFIX) => {"
+                ),
+                "{label} must gate the degrade on the exact shared queue-full prefix arm; \
+                 widening the guard (e.g. a disjunctive `||` clause) silently flips the \
+                 documented conflicting-secret fail-closed boundary to fail-open",
+            );
+            assert!(
+                body.contains("Err(error) => return Err(error),"),
+                "{label} must keep the catch-all conflict arm fail-closed; degrading it \
+                 drops revocation intents for conflicting credentials without any \
+                 durable record",
+            );
+            // Round-22 review (m5): the two contains checks ignore arm order — swapping the
+            // guard arm and the catch-all arm still compiles, the queue-full error is rerouted
+            // to return through the fail-closed conflict arm, stop/refresh wedging revives, and
+            // both needles are present verbatim. Pin by position that the guard precedes the
+            // catch-all (the same style as this test's existing entry/tolerate order
+            // assertions).
+            let guard_at = body
+                .find("Err(error) if error.starts_with(PENDING_REVOCATION_QUEUE_FULL_PREFIX) => {")
+                .expect("guard needle pinned above");
+            let catchall_at = body
+                .find("Err(error) => return Err(error),")
+                .expect("catch-all needle pinned above");
+            assert!(
+                guard_at < catchall_at,
+                "{label} must match the queue-full guard arm before the \
+                 catch-all conflict arm: swapping the two arms compiles and \
+                 routes queue-full errors into the fail-closed conflict \
+                 return, resurrecting the stop/refresh wedge with both \
+                 needles still present"
+            );
+            // Round-24 review (m1, mutant confirmed): the order assertion is blind to "inserted
+            // arms" — inserting a same-shaped log-and-continue arm between the guard and the
+            // catch-all left both needles and the order assertion green (executed this round).
+            // Round-25 review MAJOR-3 (another mutant confirmed): the [guard_at..catchall_at]
+            // slice is still blind to arms inserted **before** the guard — the same arm inserted
+            // between Ok(()) and the guard (compiles) leaves the in-window count at 1 and the
+            // assertion green (executed this round). Changed to counting every `Err(` arm opener
+            // (binding spelling irrelevant) from the match opener to the catch-all: any arm
+            // inserted before or between pushes the count past the guard's own single one.
+            let match_open = body
+                .find("match queue_pending_revocation_for_removal(")
+                .expect("the queue_pending_revocation match must exist");
+            assert!(
+                match_open < guard_at,
+                "{label} must keep the queue-full guard arm inside the \
+                 queue_pending_revocation match"
+            );
+            assert_eq!(
+                body[match_open..catchall_at].matches("Err(").count(),
+                1,
+                "{label} must keep the queue-full guard arm as the only Err \
+                 arm before the catch-all conflict arm: an arm inserted \
+                 before or between them (e.g. a conflicting-secret arm that \
+                 logs and continues) silently flips the documented round-14 \
+                 fail-closed boundary to fail-open (executed mutants)"
+            );
+        }
+        // refresh's post-commit replay must likewise not wedge activate (the half-committed
+        // window of a committed rotation must not be reported as a failure).
+        let refresh_body = source
+            .split("fn refresh(")
+            .nth(1)
+            .expect("refresh must exist");
+        let end = ["\n    fn ", "\n    pub fn ", "\n    #[test]"]
+            .iter()
+            .filter_map(|marker| refresh_body.find(marker))
+            .min()
+            .unwrap_or(refresh_body.len());
+        let refresh_body = comment_filtered(&refresh_body[..end]);
+        // The entrance's fail-closed replay (start/resume/refresh, one caliber) is kept; the
+        // post-commit, pre-activate replay must take the tolerant arm and never propagate `?`.
+        assert!(
+            refresh_body.contains("[web-access] refresh ignores pending-revocation replay failure"),
+            "the post-commit replay before activate must tolerate failure like stop does",
+        );
+        // Round-16 review (M1b): the entrance replay's fail-closed `?` was previously an
+        // optional assertion (a both-optional if-let) — deleting the entrance `?` line kept
+        // this pin green, letting the entry path be silently flipped to tolerant. Changed to a
+        // mandatory assertion + order verification.
+        let entry_form = refresh_body.find("self.replay_pending_revocations()?;");
+        assert!(
+            entry_form.is_some(),
+            "the entry-path replay must stay fail-closed (`?`): refresh may not \
+             run against an undrained revocation backlog"
+        );
+        let tolerate_form =
+            refresh_body.find("[web-access] refresh ignores pending-revocation replay failure");
+        assert!(
+            tolerate_form.is_some(),
+            "the committed-rotation tolerate arm must exist",
+        );
+        assert!(
+            entry_form < tolerate_form,
+            "the fail-closed entry replay must precede the committed-rotation tolerate arm",
+        );
+        // Round-16 review (M1a): stop's rpc-ledger removal degradation had no pin — reverting
+        // to `remove_rpc_ledger()?` would report a failure for a stop that already took effect,
+        // and stop_current cannot be behaviorally driven (no mock_app), so the whole suite
+        // stayed green.
+        let stop_body = source
+            .split("pub fn stop_current(")
+            .nth(1)
+            .expect("stop_current must exist");
+        let stop_end = ["\n    fn ", "\n    pub fn ", "\n    #[test]"]
+            .iter()
+            .filter_map(|marker| stop_body.find(marker))
+            .min()
+            .unwrap_or(stop_body.len());
+        let stop_body = comment_filtered(&stop_body[..stop_end]);
+        assert!(
+            !stop_body.contains("remove_rpc_ledger()?"),
+            "stop must not propagate an rpc-ledger removal failure: the stop has \
+             already taken effect and a `?` would report a completed stop as failed"
+        );
+        assert!(
+            stop_body.contains("[web-access] stop ignores rpc-ledger removal failure"),
+            "a failed rpc-ledger removal must degrade to a log, not fail the stop",
+        );
+    }
+
+    /// Wiring pin (Round-10 review minor): the `web_access:status` payload carries the
+    /// pairing URL and QR bitmap (the token's carrier) and must be emit_to("main"), not
+    /// broadcast — reverting to `app.emit` would deliver it to aux WebViews (reader/pet)
+    /// without any suite turning red.
+    #[test]
+    fn emit_status_scopes_the_payload_to_the_main_webview() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn emit_status(&self)")
+            .expect("emit_status must exist");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+        assert!(
+            body.contains("self.app.emit_to(\"main\", \"web_access:status\""),
+            "web_access:status carries the pairing URL and QR; it must be scoped \
+             to the main webview, not broadcast to every webview"
+        );
+    }
+
+    /// Wiring pin (Round-11 review minor): reserve_web_attachments' refusal string echoes
+    /// only minted-shape handles. The method body needs an AppHandle (emit_status
+    /// dependency), so behavioral pins cannot drive it; deleting the shape gate lets caller
+    /// bytes back into the error chain (where a handle containing a `reserve Web chat turn: …`
+    /// segment disguises a hard failure as transient busyness), turning this pin red.
+    #[test]
+    fn reserve_web_attachments_echoes_only_well_formed_handles() {
+        assert!(attachment_handle_is_well_formed(
+            "attachment_aB3xY9zWq1Mn2Vb5Cd7Ef0gh"
+        ));
+        assert!(!attachment_handle_is_well_formed(
+            "attachment_reserve Web chat turn: session_turn_in_progress"
+        ));
+        assert!(!attachment_handle_is_well_formed("attachment_"));
+        assert!(!attachment_handle_is_well_formed("attachment_x<y>"));
+        assert!(!attachment_handle_is_well_formed("reserves"));
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("pub fn reserve_web_attachments(")
+            .expect("reserve_web_attachments must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("\n    pub fn ")
+            .expect("reserve_web_attachments body must be terminated by the next fn")];
+        let gate = body
+            .find("attachment_handle_is_well_formed(handle)")
+            .expect("reserve_web_attachments must gate echoed handles on the minted shape");
+        let echo = body
+            .find("远程控制附件句柄不存在或已过期：{handle}")
+            .expect("the not-found arm must interpolate the handle");
+        assert!(
+            gate < echo,
+            "the shape gate must run before the handle is interpolated into the error chain \
+             (gate at {gate}, echo at {echo})"
         );
     }
 
@@ -6752,6 +8336,13 @@ mod tests {
     /// 判别),否则 revert 成硬编码 `true` 会复活「reserve→revoke→创建
     /// 失败→restore 复活 grant」的时序(bind-time 复核仍在,属纵深缺口
     /// 而非开放漏洞)。回退接线本钉即红。
+    /// Wiring pin (Round-11 review): the manager half of restore-after-revoke —
+    /// `restore_web_workspace_grant` must read the **live endpoint's** consent flag and pass
+    /// it to the store (the store half's refusal semantics are discriminated by
+    /// workspace_grants.rs's behavioral pin); otherwise reverting to a hardcoded `true`
+    /// revives the "reserve → revoke → creation fails → restore resurrects the grant"
+    /// sequence (the bind-time recheck still exists, making this a defense-in-depth gap rather
+    /// than an open hole). Reverting the wiring turns this pin red.
     #[test]
     fn restore_web_workspace_grant_reads_the_live_consent_flag() {
         let source = include_str!("mod.rs");
@@ -6847,6 +8438,7 @@ mod tests {
         let body = &body[..body
             .find("\n    fn ")
             .expect("replay_pending_revocations body must be terminated by the next fn")];
+        let body = comment_filtered(body);
         assert!(
             body.contains("pending_revocation_key(existing) == pending_revocation_key(entry)"),
             "the replay must dedupe by key instead of overwriting the process backlog"
@@ -6854,6 +8446,29 @@ mod tests {
         assert!(
             !body.contains("pending_revocation_backlog = ledger.entries"),
             "the plain disk-overwrite must not come back; it drops memory-only salvaged entries"
+        );
+        // Round-15 review (S14/S18 F4, mutant executed): swapping the merge seed from held to
+        // ledger.entries (disk priority, same-key conflicts keeping the disk version) still
+        // kept both assertions above green — the key-dedup line is token-symmetric and
+        // direction-blind. Pin the memory-priority seed line: same-key different-value
+        // conflicts keep the memory version (exactly what the in-flight worker retries).
+        assert!(
+            body.contains("let mut merged = held;"),
+            "the merge must seed from the in-process backlog (memory wins conflicts); \
+             seeding from the ledger silently inverts the documented precedence"
+        );
+        // Round-16 follow-up review (M5): the seed line cannot pin the conflict arm — if the
+        // same-key-same-value site were rewritten into retain+push overwrite (ledger version
+        // wins), the seed line stays green. Pin the "append only when the key is absent" guard
+        // shape byte-exactly: same-key different-value conflicts keep the memory version
+        // (exactly what the in-flight worker retries).
+        assert!(
+            body.contains(
+                "if !merged.iter().any(|existing| {\n                    pending_revocation_key(existing) == pending_revocation_key(entry)\n                }) {\n                    merged.push(entry.clone());\n                }"
+            ),
+            "the conflict arm must stay append-only-on-absent-key: a retain+push \
+             overwrite of the same key flips conflict resolution to ledger-wins \
+             while the seed pin stays green"
         );
     }
 
@@ -6997,10 +8612,33 @@ mod tests {
         let body = &body[..body
             .find("\n    fn ")
             .expect("synchronize_client_from_value body must be terminated by the next fn")];
+        let body = comment_filtered(body);
         assert!(
             body.contains("let state_ready = client_state_ready(value);"),
             "the readiness gate must be consulted at the synchronize call site; \
              inlining unwrap_or(true) back lets clients that omit state_ready skip it"
+        );
+        // Round-15 review (S18 F5): mere existence of the binding is not enough — deleting
+        // the downstream consumption (so state_ready never participates in any judgment) kept
+        // the contains above green. Assert that the binding is actually read afterwards.
+        let bound = body
+            .find("let state_ready = client_state_ready(value);")
+            .expect("the binding assert above guarantees the anchor");
+        let after_binding = &body[bound + "let state_ready = client_state_ready(value);".len()..];
+        assert!(
+            after_binding.contains("state_ready"),
+            "state_ready must be consumed downstream of its binding, not bound and discarded",
+        );
+        // Round-16 follow-up review (M5): existence assertions cannot pin polarity — inverting
+        // `if !state_ready {` into `if state_ready {` (delivering business events only to
+        // not-ready clients) kept both the binding and downstream-consumption assertions green.
+        // Pin the negated arm's byte-exact form (the only one in the function body).
+        assert!(
+            after_binding.contains("if !state_ready {"),
+            "the readiness gate must stay negated (a not-ready client resets the \
+             stream and must not receive business events); inverting the polarity \
+             passes business events to not-ready clients while both presence pins \
+             stay green"
         );
     }
 
@@ -7151,6 +8789,45 @@ mod tests {
         assert!(
             !rendered.contains(&pending.desktop_secret),
             "the desktop secret must never appear in Debug output"
+        );
+    }
+
+    /// Wiring pin (Round-11 review minor): subscription frames must pass the active-lease
+    /// gate before touching the subscription set — a late dead-lease subscription frame would
+    /// let the unsubscribe strip a subscription the new client just installed. The dispatch
+    /// body needs an AppHandle, so behavioral pins cannot drive it; deleting the gate or
+    /// moving it after the subscription change turns red.
+    #[test]
+    fn event_subscriptions_are_lease_gated_under_the_mutation_lock() {
+        // Round-14 review minor (alternative to the dispatch-site version): the gate check must
+        // live inside handle_event_subscription's body, under the same lock as the subscription
+        // change — the old shape (the dispatch arm validating the lease separately and then
+        // admitting) left a takeover window between the two locks; this pin turns red on that
+        // revert shape (move the gate check out of the function body and the predicate call is
+        // gone).
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn handle_event_subscription(")
+            .expect("handle_event_subscription must exist");
+        let body = &source[start..];
+        let end = ["\n    fn ", "\n    pub fn ", "\n    #[test]"]
+            .iter()
+            .filter_map(|marker| body.find(marker))
+            .min()
+            .expect("handle_event_subscription body must be terminated by the next item");
+        let body = &body[..end];
+        let lock = body
+            .find("let mut inner = self.inner.lock();")
+            .expect("the handler must lock Inner for the mutation");
+        let gate = body
+            .find("rpc_request_targets_active_lease(&inner, lease_id)")
+            .expect("the lease gate must live inside handle_event_subscription");
+        let mutate = body
+            .find("inner.subscriptions")
+            .expect("the handler must mutate the subscription set");
+        assert!(
+            lock < gate && gate < mutate,
+            "the lease gate must run under the same lock acquisition as the subscription mutation"
         );
     }
 
@@ -7545,6 +9222,13 @@ mod tests {
             }),
         );
 
+        // Round-15 review (S18 F7): this test reads PINVOU3_HOME directly (via pinvou3_home
+        // and the redact_storage_prefix inside settle), while paths' other tests rewrite that
+        // env in parallel within the same test binary — without ENV_LOCK this would
+        // intermittently false-red or produce empty folds. Same scaffolding as the other
+        // env-sensitive tests.
+        let (_env_guard, _env_restore) =
+            crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
         let raw_error = format!(
             "create {}: disk full",
             paths::pinvou3_home()
@@ -7583,7 +9267,11 @@ mod tests {
 
         // 源码契约(同 revoke 死锁钉形态):begin_rpc 必须经 settle 收口应答
         // 持久化失败,且失败分支不得再引入 Complete 缓存(旧实现的
-        // prune_rpc_cache 只在缓存路径出现)——绕过收口即红。
+        // prune_rpc_cache 只在缓存路径出现)——绕过收口即红。Round-29 review
+        // NIT: the needles run on comment-filtered source like the sibling pins — the
+        // raw match let a trailing comment mentioning `prune_rpc_cache` false-red and a
+        // comment mentioning `settle_begin_persist_failure` false-green (the
+        // comment-mention calibration class).
         let source = include_str!("mod.rs");
         let begin_start = source
             .find("pub fn begin_rpc(&self, request_id: &str, generation: &str)")
@@ -7592,6 +9280,7 @@ mod tests {
         let begin_body = &begin_tail[..begin_tail
             .find("\n    pub fn ")
             .expect("begin_rpc body must be terminated by the next fn")];
+        let begin_body = comment_filtered(begin_body);
         assert!(
             begin_body.contains("settle_begin_persist_failure"),
             "begin_rpc must route the persist failure through the settle funnel"
@@ -7599,6 +9288,60 @@ mod tests {
         assert!(
             !begin_body.contains("prune_rpc_cache"),
             "begin_rpc must not cache a completion on the persist-failure path"
+        );
+    }
+
+    /// Review P2 (revocation durability on the full-queue path): the
+    /// degradation arms must surface an explicit incomplete outcome to the
+    /// caller instead of log-only reporting — the stop result carries the
+    /// disposition, the full arms set DeferredFullQueue, the rotation result
+    /// travels it on the returned info, and the command wrapper hands the
+    /// outcome to the frontend. Deleting any leg turns red.
+    #[test]
+    fn revocation_dispositions_are_explicit_on_the_full_queue_paths() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("pub fn stop_current(&self)")
+            .expect("stop_current must exist");
+        let body = &source[start..];
+        let body = &body[..body
+            .find("\n    pub fn ")
+            .or_else(|| body.find("\n    fn "))
+            .expect("stop_current body must be terminated by the next fn")];
+        assert!(
+            body.contains("revocation = WebAccessRevocationDisposition::DeferredFullQueue"),
+            "stop's full-queue arm must set the explicit DeferredFullQueue disposition"
+        );
+        assert!(
+            body.contains("Ok(WebAccessStopOutcome { revocation })"),
+            "stop must return the explicit outcome carrying the disposition"
+        );
+        let refresh_start = source
+            .find("pub fn refresh(&self)")
+            .expect("refresh must exist");
+        let refresh_body = &source[refresh_start..];
+        let refresh_body = &refresh_body[..refresh_body
+            .find("\n    pub fn ")
+            .or_else(|| refresh_body.find("\n    fn "))
+            .expect("refresh body must be terminated by the next fn")];
+        let normalized = refresh_body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            normalized.contains(
+                "revocation_disposition = Some(WebAccessRevocationDisposition::DeferredFullQueue);",
+            ),
+            "refresh's full-queue arm must set the explicit DeferredFullQueue disposition"
+        );
+        assert!(
+            refresh_body.contains("info.revocation_disposition = revocation_disposition;"),
+            "refresh must travel the disposition on the returned info"
+        );
+        let command_source = include_str!("../../../app/commands/remote_control.rs");
+        assert!(
+            command_source.contains("Result<WebAccessStopOutcome, String>"),
+            "the disable command must hand the explicit outcome to the frontend"
         );
     }
 
@@ -7643,10 +9386,22 @@ mod tests {
             .filter_map(|marker| tail.find(marker))
             .min()
             .expect("complete_rpc body must be terminated by the next item");
-        let body = &tail[..end];
+        let body = comment_filtered(&tail[..end]);
         assert!(
             body.contains("rpc_completion_is_in_flight_timeout(completion)"),
             "the Complete arm must route the placeholder decision through the shared predicate"
+        );
+        // Round-15 review MA3: a predicate-negation mutation (`if !Self::…`) kept the whole
+        // suite green under plain contains + insertion counting alone (mutant executed) —
+        // real completions swallowed and terminal states overwritable by later duplicate
+        // completes, reviving both round-5 regression classes at once. Pin the predicate
+        // call's **un-negated** verbatim form inside the if arm: negation, deleting the if,
+        // or renaming the predicate — any of those mutations turns red.
+        assert!(
+            body.contains("if Self::rpc_completion_is_in_flight_timeout(completion) {"),
+            "the supersede decision must stay an un-negated if-arm calling the shared \
+             predicate on completion in complete_rpc; negating it swallows real \
+             completions and lets a later duplicate overwrite terminal values"
         );
         // 朴素 contains 会被 Pending 臂自己的插入
         // 满足——只删占位替换臂的插入(留空 if)时全测试套仍绿,占位吞结果
@@ -7676,7 +9431,7 @@ mod tests {
             .filter_map(|marker| body.find(marker))
             .min()
             .expect("prepare_bridge_generation body must be terminated by the next item");
-        let body = &body[..end];
+        let body = comment_filtered(&body[..end]);
         assert!(
             body.contains("swept_acknowledged"),
             "the generation arm must recognize swept acknowledged placeholders"
@@ -7684,6 +9439,21 @@ mod tests {
         assert!(
             body.contains("RPC_TIMED_OUT_CODE") && body.contains("outcome_unknown_completion()"),
             "the repair must convert the timeout placeholder to the truthful outcome_unknown"
+        );
+        // Round-15 review (S18 F8, mutant analysis): loosening the repair match (dropping
+        // the `!completion.ok` or RPC_TIMED_OUT_CODE leg so every marked placeholder —
+        // including never-acknowledged ones — gets rewritten to outcome_unknown) still kept
+        // the plain contains above green. Pin the verbatim text of the match's three
+        // conjunct legs: deleting any leg turns red.
+        assert!(
+            body.contains(
+                "(*swept_acknowledged
+                    && !completion.ok
+                    && completion.error_code.as_deref() == Some(RPC_TIMED_OUT_CODE))"
+            ),
+            "the repair predicate must keep all three legs (swept-marked, failed, \
+             timeout-coded); loosening any leg rewrites never-executed requests' \
+             honest timeouts into fabricated outcome_unknown",
         );
 
         let source = include_str!("mod.rs");
@@ -7694,7 +9464,7 @@ mod tests {
         let end = body
             .find("let in_flight_count = inner")
             .expect("the sweep body must be terminated by the in-flight count");
-        let body = &body[..end];
+        let body = comment_filtered(&body[..end]);
         assert!(
             body.contains("pending.acknowledged_generation.is_some()"),
             "the sweep must mark placeholders for acknowledged (still-executing) requests"
