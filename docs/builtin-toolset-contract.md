@@ -128,13 +128,12 @@ a plugin-center plugin, carried mainly over MCP (mirroring the Codex desktop app
   `scripts/tests/test_mcp_schema_contract.py`): the wire follows the published
   Moonshot documents strictly — the documents are the sole shipping basis, and a
   live probe may only ever tighten the contract, never widen it. **Landing
-  status (2026-11-12)**: the guard pins the T11 engine pipeline
-  (`schema_sanitize.rs`), which lands on the Moonshot wire via CodeWhale #143
-  with the provider faces in #144/#145/#146/#147; until the close-out re-pin
-  lands that batch on this repository's gitlink, the parent's pinned tree
-  still runs the pre-T11 sanitizer, so this section describes the target
-  contract the pinned tree converges to, not the pinned tree's current
-  behavior. The MFJS
+  status (2026-11-24, closed out)**: the guard pins the T11 engine pipeline
+  (`schema_sanitize.rs`), which landed on the Moonshot wire via CodeWhale #143
+  with the provider faces in #144/#145/#146/#147; the close-out re-pin
+  consumed that batch on this repository's gitlink (cc2adf8ef9), so the
+  parent's pinned tree now runs the T11 sanitizer and this section
+  describes the pinned tree's current behavior. The MFJS
   specification (https://raw.githubusercontent.com/MoonshotAI/walle/main/docs/mfjs-spec.zh.md,
   fetched 2026-11-05) enumerates its supported keywords exactly: `description`,
   `default`, `anyOf`, `properties`, `additionalProperties`, `items`, `type`,
@@ -276,27 +275,22 @@ a plugin-center plugin, carried mainly over MCP (mirroring the Codex desktop app
   fully compliant 10-page deck, at +6% bytes, against an
   all-fields-required control falsified at +76% tokens with `strict:false`
   having no effect) is an observation recorded alongside, not the shipping
-  basis. The resource budgets stop bounding the union only once the T11
-  batch lands: they are aligned to the walle conf.go source defaults
-  (2026-11-05 — 500 branches / 3000 properties / depth 30), so after the
-  close-out re-pin the union's ceiling is the layout count and an 11th
-  layout is an ordinary branch addition. Until that re-pin, the pinned
-  engine still runs the pre-T11 sanitizer whose anyOf cap is 10 — the
-  union sits exactly at that cap, so a new layout added before the re-pin
-  puts make_pptx over it and the pinned engine omits that one tool from
-  the request (per-tool degradation, warn-logged) instead of failing the
-  build: the remaining tools still ship, an emptied tool set omits the
-  `tools` key, and the build fails outright only when an explicit
-  `tool_choice` forces the omitted tool (verified against the pinned
-  child's `sanitize_moonshot_chat_tools` and its chat request builder,
-  2026-11-14; the guard's unit tests pin the pre-T11 face precisely so
-  this window stays loud). The nested union itself is legal on the pinned
-  engine today: it
-  keeps nested multi-branch anyOf verbatim (flattening is a
-  root-composition-only pass) and its validator accepts the union, so the
-  shape does not wait on the re-pin. The schema guard mirrors the T11
-  engine pipeline; its rules converge with that pipeline when the
-  close-out re-pin lands it on this repository's gitlink, not
+  basis. The resource budgets are aligned to the walle conf.go source
+  defaults (2026-11-05 — 500 branches / 3000 properties / depth 30), and
+  since the close-out re-pin (2026-11-24, cc2adf8ef9) the pinned engine
+  runs the T11 sanitizer with those budgets: the union's ceiling is the
+  layout count and an 11th layout is an ordinary branch addition. The
+  historical pre-T11 window (anyOf cap 10, an added layout silently
+  omitted make_pptx from the request — per-tool degradation, warn-logged;
+  an emptied tool set omitted the `tools` key; the build failed outright
+  only when an explicit `tool_choice` forced the omitted tool, verified
+  against the pinned child's `sanitize_moonshot_chat_tools` and its chat
+  request builder, 2026-11-14) is closed; the guard's unit tests keep the
+  pinned face loud for future advances. The nested union itself stays
+  legal: the engine keeps nested multi-branch anyOf verbatim (flattening
+  is a root-composition-only pass) and its validator accepts the union.
+  The schema guard mirrors the T11 engine pipeline; its rules converge
+  with that pipeline at the consciously re-blessed gitlink pin, not
   independently.
 - **Request-shape strips carry their own documentation** (2026-11-05
   posture): the engine's fixed-sampling strip on the Kimi Code membership
