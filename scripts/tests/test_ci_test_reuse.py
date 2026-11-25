@@ -405,6 +405,24 @@ class ReuseTests(unittest.TestCase):
         self.pr['head']['repo']['full_name'] = 'fork/repository'
         self.assertEqual(self.lookup(), ([], None))
 
+    def test_windows_relay_upload_warning_may_skip_but_retirement_cannot(self):
+        name = 'windows-relay-tools-test'
+        policy = REUSE.JOBS[name]
+        self.proof['jobs'] = [name]
+        self.jobs = [self.jobs[0], {
+            'name': name, 'conclusion': 'success', 'run_id': 12, 'labels': ['windows-latest'],
+            'steps': [{'name': step['name'], 'conclusion': 'success'} for step in policy['steps'] if step['name']],
+        }]
+        steps = {step['name']: step for step in self.jobs[1]['steps']}
+        steps['Warn when Windows relay tools diagnostic delivery fails']['conclusion'] = 'skipped'
+        self.assertEqual(self.lookup(), ([name], 12))
+        for required_step in ('Windows PowerShell 5.1 与实际工具回归（禁止跳过）',
+                              'Confirm Windows relay tools resource retirement'):
+            with self.subTest(step=required_step):
+                steps[required_step]['conclusion'] = 'skipped'
+                self.assertEqual(self.lookup(), ([], None))
+                steps[required_step]['conclusion'] = 'success'
+
     def test_queue_policy_edits_and_multi_member_shapes_force_execution(self):
         original=REUSE.git
         def changed(*args):
