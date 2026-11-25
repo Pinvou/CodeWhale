@@ -306,11 +306,19 @@ function diagnosticHistory(events, groupedSamples) {
   };
 }
 
+const EXPORT_GROUP_VALUES = { code: DIAGNOSTIC_CODES, component: DIAGNOSTIC_COMPONENTS, stage: DIAGNOSTIC_STAGES };
+
+export function failureExportGroups(groups) {
+  return Object.fromEntries(Object.entries(EXPORT_GROUP_VALUES).map(([dimension, values]) => [
+    dimension,
+    [...new Set(groups.map(group => group[dimension]))].filter(value => values.includes(value)).sort(),
+  ]));
+}
+
 export function failureExport(events, filters, { groupBy, groupValue, includeEvidence, includeFixed }, reports, actor, caseId, include) {
   const groupField = { code: "diagnostic_code", component: "diagnostic_component", stage: "stage" };
   if (groupBy !== "all" && !Object.hasOwn(groupField, groupBy)) fail("invalid_diagnostic_export_group");
-  const groupValues = { code: DIAGNOSTIC_CODES, component: DIAGNOSTIC_COMPONENTS, stage: DIAGNOSTIC_STAGES };
-  if (groupValue && !groupValues[groupBy]?.includes(groupValue)) fail("invalid_diagnostic_export_group");
+  if (groupValue && !EXPORT_GROUP_VALUES[groupBy]?.includes(groupValue)) fail("invalid_diagnostic_export_group");
   const groups = new Map();
   for (const event of selectedFailureEvents(events, filters, include)) {
     const key = groupBy === "all" ? "all" : event[groupField[groupBy]] || "unknown";

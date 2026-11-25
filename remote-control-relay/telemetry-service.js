@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureExport, failureGroups, failureSamples, failureTimeline } from "./failure-diagnostics.js";
+import { DiagnosticError, FailureReportStore, diagnosticFingerprint, failureExport, failureExportGroups, failureGroups, failureSamples, failureTimeline } from "./failure-diagnostics.js";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { RetentionFacts, retentionFromEvents } from "./retention-store.js";
@@ -3186,9 +3186,7 @@ export function createTelemetryService(options = {}) {
         const { filters, include, issueFor } = diagnosticSelection(new URL(req.url, "http://localhost").searchParams, store.failureReports, detailAllowed);
         const groups = failureGroups(store.behaviorEvents, filters, detailAllowed ? 1 : Math.max(20, MIN_PRIVACY_GROUP_SUBJECTS),
           include, detailAllowed ? Infinity : 200);
-        const exportGroups = detailAllowed ? Object.fromEntries(["code", "component", "stage"].map(dimension => [
-          dimension, [...new Set(groups.map(group => group[dimension]))].sort(),
-        ])) : undefined;
+        const exportGroups = detailAllowed ? failureExportGroups(groups) : undefined;
         json(res, 200, { rows: groups.slice(0, 200).map(row => {
           const issue = issueFor(row.fingerprint);
           return detailAllowed && issue.status === "fixed" && row.last_seen > issue.updated_at
