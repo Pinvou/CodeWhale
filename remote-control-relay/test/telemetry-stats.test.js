@@ -170,11 +170,13 @@ test("hourly usage includes 24 clock hours with exact boundaries and isolated co
   assert(empty.every(row => row.active_devices === 0 && row.new_devices === 0 && row.turns === 0));
 });
 
-test("hourly calendar comparison aligns Beijing days, keeps yesterday complete and leaves future hours null", () => {
+test("hourly calendar comparison aligns Beijing days, includes a full week-ago comparison and leaves future hours null", () => {
   const now = at("2026-10-19T00:30:00");
   const today = at("2026-10-19T00:00:00");
   const yesterday = today - 86_400_000;
+  const lastWeek = today - 7 * 86_400_000;
   const devices = [
+    { device_id: "week", first_seen_at: lastWeek },
     { device_id: "a", first_seen_at: yesterday },
     { device_id: "b", first_seen_at: yesterday + 3_599_999 },
     { device_id: "c", first_seen_at: today },
@@ -184,6 +186,7 @@ test("hourly calendar comparison aligns Beijing days, keeps yesterday complete a
     device_id, attempt_id, event_name: "task_finished", occurred_at, mode: "assistant", initiator_type: "user",
   });
   const events = [
+    event("week", "old", lastWeek + 23 * 3_600_000),
     event("a", "before", yesterday - 1), event("a", "first", yesterday),
     event("b", "late", yesterday + 3_599_999), event("a", "last", today - 1),
     event("c", "today", now), event("future", "future", now + 1),
@@ -191,6 +194,10 @@ test("hourly calendar comparison aligns Beijing days, keeps yesterday complete a
   const report = buildStatsOverview(devices, [], events, now);
   const previous = report.usage_trend_hourly_previous;
   const current = report.usage_trend_hourly_today;
+  const weekAgo = report.usage_trend_hourly_week_ago;
+  assert.equal(weekAgo.length, 24);
+  assert.deepEqual(weekAgo[0], { hour: lastWeek, active_devices: 0, new_devices: 1, turns: 0 });
+  assert.deepEqual(weekAgo[23], { hour: lastWeek + 23 * 3_600_000, active_devices: 1, new_devices: 0, turns: 1 });
   assert.equal(previous.length, 24);
   assert.equal(current.length, 24);
   assert.deepEqual(previous[0], { hour: yesterday, active_devices: 2, new_devices: 2, turns: 2 });
@@ -1193,8 +1200,8 @@ test("remote-control behavior events aggregate only controlled dimensions", () =
   const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "today", now);
   assert.equal(overview.remote_control.event_count, 2);
   assert.deepEqual(overview.remote_control.rows, [
-    { stage: "attachment", outcome: "rejected", reason: "transfer_budget", count: 1 },
-    { stage: "task_terminal", outcome: "ok", reason: "none", count: 1 },
+    { stage: "attachment", outcome: "rejected", reason: "transfer_budget", count: 1, sequence: 1 },
+    { stage: "task_terminal", outcome: "ok", reason: "none", count: 1, sequence: 2 },
   ]);
   assert.deepEqual(overview.remote_control.latency_buckets, { lt_250ms: 1, lt_5s: 1 });
   assert.deepEqual(overview.remote_control.model_sources, { controlled: 1 });
