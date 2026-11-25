@@ -4872,6 +4872,16 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
             "https://api.deepseek.com"
                 | "https://api.deepseek.com/v1"
                 | "https://api.deepseek.com/beta"
+                // The second official host the DeepSeek documents publish
+                // (round 25): the TUI's strict/beta routing has recognized
+                // it since the strict route gate landed, but this matcher
+                // lagged — an app-server route on `api.deepseeki.com/beta`
+                // was rewritten to `/v1` while `function.strict: true`
+                // stayed in the body, the one shape that landed the flag
+                // on a documented non-beta path.
+                | "https://api.deepseeki.com"
+                | "https://api.deepseeki.com/v1"
+                | "https://api.deepseeki.com/beta"
         ),
         ProviderKind::DeepseekAnthropic => matches!(
             normalized.as_str(),

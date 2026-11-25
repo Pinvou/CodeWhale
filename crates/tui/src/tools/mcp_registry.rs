@@ -1196,8 +1196,8 @@ mod tests {
         assert!(
             tools[0]
                 .description
-                .contains("declare required launch arguments cannot be started"),
-            "the context note must name the arguments loss verbatim: {}",
+                .contains("required launch arguments without defaults cannot be started"),
+            "the context note must name the arguments loss and the default carve-out verbatim: {}",
             tools[0].description
         );
     }

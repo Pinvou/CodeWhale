@@ -7075,6 +7075,11 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
         "https://api.deepseek.com",
         "https://api.deepseek.com/v1/",
         "https://api.deepseek.com/beta",
+        // The second official host the TUI strict/beta routing already
+        // recognizes (round 25) — the same three paths per host.
+        "https://api.deepseeki.com",
+        "https://api.deepseeki.com/v1/",
+        "https://api.deepseeki.com/beta",
     ] {
         assert!(provider_base_url_is_official(
             ProviderKind::Deepseek,
@@ -7088,6 +7093,10 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
     assert!(!provider_base_url_is_official(
         ProviderKind::Deepseek,
         "https://api.deepseek.com.evil.example/v1"
+    ));
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "https://api.deepseeki.com.evil.example/v1"
     ));
 }
 

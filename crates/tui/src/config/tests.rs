@@ -13889,6 +13889,30 @@ fn official_host_gate_rejects_invisible_characters_and_dot_segments() {
     assert!(url_is_official_deepseek_host(
         "https://api.deepseek.com/BETA/v1"
     ));
+    // Same-arm spellings the earlier pins did not cover (round 25): a
+    // host-then-userinfo URL (only the user@host direction was pinned),
+    // an empty-port spelling (only an explicit port was pinned), a DEL
+    // byte (the 0x21..=0x7E printable band excludes 0x7F, but only
+    // lower control bytes were pinned), and the lookalike host on the
+    // second official host.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com@evil.example/beta"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com:/beta"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1\u{7f}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseeki.com.evil.example/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        " https://api.deepseeki.com/beta"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseeki.com/beta?x=1"
+    ));
 }
 
 #[test]

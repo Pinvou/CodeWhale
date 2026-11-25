@@ -102,9 +102,18 @@ header change or a history reset explains the difference.
 DeepSeek strict-mode tool shaping (`prepare_tools_for_strict_mode`) states its
 effect here per that rule: it is **frozen-prefix-compatible**. The removal
 note appended to a tool's description is a deterministic pure function of the
-pinned catalog and the route, so on a stable strict route the tools bytes are
-identical every step; the shaping runs on a per-request clone and never
-mutates the registry. Declared change fields cover provider identity
+pinned catalog and the route — the note names are sorted and deduplicated,
+the counts are order-independent, and the per-request pair-judge budget
+resets at every preparation over a stable catalog order — so on a stable
+strict route the tools bytes are identical every step after the first
+preparation; the shaping runs on a per-request clone and never mutates the
+registry. One boundary is deliberate (round 25): the pattern-compile memo
+persists across requests while the per-request compile budget resets, so a
+pattern that abstained on a budget-refused first pass can be judged on a
+later pass and flip its tool's verdict — the bytes then differ between the
+first preparation and a warm one without a declared change. Catalogs within
+the compile budget (the default catalog is far below it) never see the
+boundary. Declared change fields cover provider identity
 (`change:provider`), the token budget (with the goal objective, as
 `change:goal`), the resolved model (`change:model`), and a re-planned route
 (`change:route`). A flip that changes the gate's verdict — official host ↔

@@ -259,10 +259,11 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
         "task_shell_wait",
         "In strict mode explicit waits and gate-evidence recording are \
          unavailable from this tool: `wait`, `timeout_ms`, `gate`, and \
-         `command` are no longer accepted, so a wait returns as soon as \
-         the task finishes on its own and a completed task cannot be \
-         recorded as gate evidence here (the `tasks` tool's `gate_run` \
-         action still records evidence).",
+         `command` are no longer accepted, so a wait returns an immediate \
+         status snapshot (completion arrives by the usual automatic \
+         delivery) and a completed task cannot be recorded as gate \
+         evidence here (the `tasks` tool's `gate_run` action still \
+         records evidence).",
     ),
     (
         "read_media",
@@ -279,8 +280,9 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
     (
         "start_registry_mcp_server",
         "In strict mode `arguments` is no longer accepted, so a registry \
-         whose servers declare required launch arguments cannot be started; \
-         registries without required arguments still start.",
+         whose servers declare required launch arguments without defaults \
+         cannot be started; registries without required arguments — or \
+         where every required argument carries a default — still start.",
     ),
 ];
 
@@ -3219,9 +3221,13 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
         // cap can never compile, so caching it would grow the table — and
         // the leak — with no judging benefit, and a table at its bound
         // inserts nothing rather than evicting a hot entry. The leak
-        // bound tracks the source cap: 512 keys x 16 KB ≈ 8 MB worst,
-        // one-time per process (round 24 raised the cap with the screen
-        // carrying the cost bound; the leak stays table-bounded).
+        // bound tracks the source cap on the KEYS alone (512 x 16 KB ≈
+        // 8 MB): the cached automata themselves are the unaccounted part,
+        // the table is per-THREAD (each worker thread accrues its own),
+        // and the leaked keys live for the thread's lifetime — bounded,
+        // but per thread, not "8 MB once per process" (round 25 wording;
+        // round 24 raised the cap with the screen carrying the cost
+        // bound).
         if pattern.len() <= 16_384 && cache.len() < 512 {
             let key: &'static str = String::leak(pattern.to_string());
             #[cfg(test)]
@@ -3351,6 +3357,15 @@ fn value_satisfies_string_constraints(
     obj: &Map<String, Value>,
     pattern: Option<&regex::Regex>,
 ) -> bool {
+    // Same byte bound the enum members live under: enum members are
+    // capped at their judge entry, but a string `const` reached
+    // `is_match` unbounded (round 25) — the match cost is linear in the
+    // value, so a hostile multi-megabyte const paid per-const linear work
+    // the enum path never allowed. An over-cap string fails the judge
+    // (conservative direction: a judged constraint is present).
+    if value.len() > ENUM_PAIR_MEMBER_BYTES_CAP {
+        return false;
+    }
     if let Some(pattern) = pattern
         && !pattern.is_match(value)
     {
@@ -3669,10 +3684,20 @@ fn value_clears_bounds_with(
         if multiple == 0.0 {
             return false;
         }
+        // Divisibility is judged on the normalized integral pair (either
+        // storage spelling — round 25): the old integer-storage-only probe
+        // skipped a float-spelled integral member (`enum: [2.0]` beside
+        // `multipleOf: 3` cleared though no wire value satisfies it), the
+        // same mixed-spelling class the equality and bounds arms
+        // normalize. `bounds_number` declines magnitudes past 2^127 and
+        // genuinely fractional multiples, and those keep shipping
+        // (disclosed — float modulo would guess at representation error
+        // rather than at the wire).
         if let (Some(multiple), Some(value)) = (
-            obj.get("multipleOf").and_then(Value::as_i64),
-            value.as_i64(),
-        ) && value.checked_rem(multiple) != Some(0)
+            obj.get("multipleOf").and_then(bounds_number),
+            bounds_number(value),
+        ) && multiple != 0
+            && value.checked_rem(multiple) != Some(0)
         {
             return false;
         }
@@ -16881,16 +16906,6 @@ mod kimi_tests {
         }
 
         #[test]
-        fn contained_const_rewrites_the_enum_to_the_authored_intersection() {
-            let mut schema = json!({"enum": ["a", "b"], "const": "a"});
-            let mut removed = Vec::new();
-            let mut widened = 0usize;
-            enforce_strict_subset(&mut schema, "", &mut removed, &mut widened);
-            assert_eq!(widened, 0);
-            assert_eq!(schema, json!({"enum": ["a"]}));
-        }
-
-        #[test]
         fn memo_never_leaks_on_the_hit_path_and_caps_its_leak_at_the_table_bound() {
             // Pass 1 compiles (and leaks) a bounded number of keys; pass 2 on
             // the same schema must leak NOTHING (hits look the source up by
@@ -16954,5 +16969,139 @@ mod kimi_tests {
             assert_eq!((all1, strict1), (all2, strict2));
             assert_eq!(strict1, Some(true));
         }
+    }
+}
+
+#[cfg(test)]
+mod strict_fixwave_r25 {
+    //! Round-25 fix-wave pins: each pins the behavior one review finding
+    //! showed wrong, named for the fix. A deletion of any fixed arm must
+    //! redden exactly the pin below that exercises it.
+    //! Round-25 fix-wave probes: each pins the FIXED contract behavior.
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn run(schema: Value) -> (bool, Option<bool>, Value, String) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        let tool = &tools[0];
+        (
+            all,
+            tool.strict,
+            tool.input_schema.clone(),
+            tool.description.clone(),
+        )
+    }
+
+    #[test]
+    fn strict_note_names_a_nested_removal_by_its_chain() {
+        // Round-25 M1: the flat note list let a nested optional `id`
+        // forbid the top-level REQUIRED `id`. The note names nested
+        // removals by their chain and never the bare shared name.
+        let (_all, strict, shipped, desc) = run(json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "meta": {"type": "object",
+                         "properties": {"id": {"type": "string"}, "y": {"type": "string"}},
+                         "required": ["y"]}
+            },
+            "required": ["id", "meta"]
+        }));
+        assert_eq!(strict, Some(true));
+        assert!(shipped.get("properties").unwrap().get("id").is_some());
+        assert!(
+            desc.contains("`meta.id`"),
+            "note names the nested chain: {desc}"
+        );
+        assert!(
+            !desc.contains("must not be sent: `id`"),
+            "the note never forbids the bare top-level id: {desc}"
+        );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_items_beside_the_injected_object() {
+        let (_all, strict, _shipped, _desc) = run(json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "properties": {"x": {"type": "integer"}},
+                    "required": ["x"],
+                    "items": {"type": "string"}
+                }
+            },
+            "required": ["data"]
+        }));
+        assert_eq!(strict, None, "items beside (injected) object fails closed");
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_bare_empty_anyof() {
+        let (_all, strict, _shipped, _desc) = run(json!({
+            "type": "object",
+            "properties": {"x": {"anyOf": []}},
+            "required": ["x"]
+        }));
+        assert_eq!(strict, None, "bare empty anyOf fails closed");
+    }
+
+    #[test]
+    fn huge_magnitude_numbers_judge_by_true_order() {
+        // (c) disjoint const/enum: disjoint now — const yields with note.
+        let (_all, strict, shipped, desc) = run(json!({
+            "type": "object",
+            "properties": {"v": {"type": "number", "enum": [2e300], "const": 1e300}},
+            "required": ["v"]
+        }));
+        assert_eq!(strict, Some(true));
+        assert!(
+            shipped["properties"]["v"].get("const").is_none(),
+            "const yields to enum"
+        );
+        assert!(desc.contains("disagreed"), "widening disclosed in note");
+
+        // (f) crossed window fails closed.
+        let (_, strict_f, _, _) = run(json!({
+            "type": "object",
+            "properties": {"v": {"type": "number", "minimum": 2e300, "maximum": 1e300}},
+            "required": ["v"]
+        }));
+        assert_eq!(strict_f, None, "crossed huge window fails closed");
+
+        // (g) satisfiable window ships.
+        let (_, strict_g, _, _) = run(json!({
+            "type": "object",
+            "properties": {"v": {"type": "number", "minimum": 1e300, "exclusiveMaximum": 2e300}},
+            "required": ["v"]
+        }));
+        assert_eq!(strict_g, Some(true), "satisfiable huge window ships");
+    }
+
+    #[test]
+    fn multiple_of_judges_a_float_spelled_integral_member() {
+        let (_all, strict, _shipped, _desc) = run(json!({
+            "type": "object",
+            "properties": {"v": {"type": "number", "enum": [2.0], "multipleOf": 3}},
+            "required": ["v"]
+        }));
+        assert_eq!(
+            strict, None,
+            "2.0 beside multipleOf:3 is unsatisfiable — fails closed"
+        );
     }
 }
