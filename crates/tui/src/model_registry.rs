@@ -111,9 +111,20 @@ impl ModelMetadata {
             provider,
             context_window: context_window_for_model(id),
             max_output: max_output_tokens_for_model(id),
-            supports_reasoning: model_supports_reasoning(id),
+            supports_reasoning: model_supports_reasoning(id) || is_bare_kimi_code_k3_family_id(id),
         }
     }
+}
+
+/// The bare Kimi Code membership spellings of the always-thinking K3/K3.1
+/// family. The shared `models.rs` heuristic deliberately stays blind to them
+/// — its route-scoped consumers (the replay and stream-dialect gates) must
+/// not let a bare `k3` on an arbitrary gateway inherit the vendor dialect —
+/// so the registry carries the documented fact for these exact seeded ids at
+/// the seed boundary instead, keeping picker/profile metadata truthful
+/// (review 4689524231).
+fn is_bare_kimi_code_k3_family_id(id: &str) -> bool {
+    matches!(id, "k3" | "k3-256k" | "k3.1-pro" | "k3.1-pro-highspeed")
 }
 
 /// Canonical `(model id, provider)` seeds for the registry.
@@ -375,8 +386,39 @@ mod tests {
             );
             assert_eq!(
                 meta.supports_reasoning,
-                model_supports_reasoning(id),
+                model_supports_reasoning(id) || is_bare_kimi_code_k3_family_id(id),
                 "registry supports_reasoning for {id} drifted from models.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_kimi_code_k3_seeds_report_reasoning_support() {
+        // Review 4689524231: the bare membership spellings of the
+        // always-thinking K3/K3.1 family reach neither the `kimi-` prefix
+        // rule nor the models.dev snapshot, so the seeded rows must be
+        // asserted directly against documented truth instead of only being
+        // compared back to the same heuristic.
+        for id in ["k3", "k3-256k", "k3.1-pro", "k3.1-pro-highspeed"] {
+            let meta = lookup(id).unwrap_or_else(|| panic!("{id} should be seeded"));
+            assert!(
+                meta.supports_reasoning,
+                "the always-thinking membership id {id} must report reasoning support"
+            );
+        }
+        // The fixed-thinking membership highspeed row and its direct twins
+        // stay pinned as well, so the family block cannot silently regress.
+        for id in [
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            "kimi-k3",
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
+        ] {
+            let meta = lookup(id).unwrap_or_else(|| panic!("{id} should be seeded"));
+            assert!(
+                meta.supports_reasoning,
+                "{id} must report reasoning support"
             );
         }
     }

@@ -466,6 +466,14 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     if lower.starts_with("kimi-") {
         return true;
     }
+    // NOTE: the bare Kimi Code K3/K3.1 membership spellings (`k3`,
+    // `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`) are deliberately NOT
+    // matched here. Direct Moonshot and arbitrary OpenAI-compatible routes
+    // can also expose a model named `k3`, and this heuristic's consumers
+    // include the route-scoped replay and stream-dialect gates, which must
+    // not let those routes inherit the vendor dialect. The registry carries
+    // the documented always-thinking fact for the exact seeded ids at the
+    // seed boundary instead (review 4689524231).
     if lower.starts_with("mistral-medium")
         || lower.starts_with("mistral-small")
         || lower.starts_with("magistral")

@@ -499,7 +499,12 @@ fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
     }
 }
 
-pub(super) fn malformed_tool_arguments_input(buffer: &str) -> serde_json::Value {
+/// The shared malformed-arguments sentinel (`raw_arguments`). `pub(crate)`
+/// so the blocking response decoder can represent one malformed Moonshot
+/// call through the same per-tool shape instead of failing the whole
+/// response (review 4689524205); the engine remains the only consumer that
+/// turns it into a tool error.
+pub(crate) fn malformed_tool_arguments_input(buffer: &str) -> serde_json::Value {
     json!({ "raw_arguments": buffer })
 }
 

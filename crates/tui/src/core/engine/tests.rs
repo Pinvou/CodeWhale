@@ -9998,6 +9998,229 @@ async fn provider_error_and_length_never_execute_unclosed_valid_tool_arguments()
 }
 
 #[tokio::test]
+async fn provider_error_after_a_closed_tool_block_does_not_execute_the_call() {
+    // Review 4689524046: ContentBlockStop finalizes the arguments and
+    // removes the tool from the open set, so a provider error frame AFTER
+    // the close used to leave the completed call fully executable before
+    // the saved turn error was ever consulted. The abnormal-termination
+    // invalidation must also cover already-closed blocks.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let turn = vec![
+        canned::message_start("closed-tool-error"),
+        canned::tool_use_block_start(0, "call-closed", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        StreamEvent::Error {
+            error: json!({"message": "provider interrupted after the tool block"}),
+        },
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "This closed tool call must not execute after the stream errored.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send closed-tool error stream");
+
+    let mut starts = 0;
+    let mut completions = 0;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the closed-tool rejection")
+    {
+        match event {
+            // The start event is emitted when the block CLOSES, before the
+            // error frame arrives — that is announcement, not execution.
+            // Non-execution is proven by the per-tool rejection receipt
+            // below.
+            Event::ToolCallStarted { name, .. } if name == "tool_search" => starts += 1,
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                completions += 1;
+                let error = result.expect_err("closed arguments must not execute");
+                assert!(
+                    error.to_string().contains("without normal completion"),
+                    "{error}"
+                );
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert_eq!(starts, 1, "exactly the block-close announcement");
+    assert_eq!(completions, 1, "the closed call is rejected per-tool");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn length_stop_with_a_provider_error_fails_closed_instead_of_clean_length() {
+    // Review 4689524046: a `length` stop followed by an error frame is a
+    // billed incomplete response. The clean-length acceptance branch keyed
+    // on `stream_errors == 0`, which the error frame never incremented, so
+    // the turn silently took the accept-and-continue path.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let turn = vec![
+        canned::message_start("length-error"),
+        canned::tool_use_block_start(0, "call-length", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        canned::message_delta("length", None),
+        StreamEvent::Error {
+            error: json!({"message": "provider interrupted at the length stop"}),
+        },
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A length stop with an error frame must fail closed.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send length+error stream");
+
+    let mut starts = 0;
+    let mut completions = 0;
+    let mut turn_failed = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the failed turn")
+    {
+        match event {
+            Event::ToolCallStarted { name, .. } if name == "tool_search" => starts += 1,
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                completions += 1;
+                let receipt = result.expect("the ladder answers per-tool");
+                assert!(
+                    receipt.content.contains("Not executed"),
+                    "the receipt must not carry tool output: {receipt:?}"
+                );
+                assert_eq!(
+                    receipt
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("side_effect_status"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("not_started"),
+                    "the billed incomplete response must not reach the tool: {receipt:?}"
+                );
+            }
+            Event::TurnComplete { status, .. } => {
+                turn_failed = status == TurnOutcomeStatus::Failed;
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert_eq!(
+        starts, 1,
+        "only the block-close announcement; execution is proven absent by the receipt"
+    );
+    assert_eq!(completions, 1);
+    assert!(
+        turn_failed,
+        "the turn must fail closed on the billed incomplete response"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn clean_length_still_executes_a_closed_complete_tool_call() {
+    // The deliberately preserved shape: a `length` stop on an otherwise
+    // clean stream keeps an already-closed complete call executable, and
+    // the truncation is surfaced as a bounded observation instead.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let followup = vec![
+        canned::message_start("after-tool"),
+        canned::text_block_start(0),
+        canned::text_delta(0, "done"),
+        canned::block_stop(0),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ];
+    let turn = vec![
+        canned::message_start("length-clean"),
+        canned::tool_use_block_start(0, "call-clean-length", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        canned::message_delta("length", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn, followup]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A clean length stop accepts the complete call.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send clean-length stream");
+
+    let mut started = false;
+    let mut completed_ok = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the clean-length continuation")
+    {
+        match event {
+            Event::ToolCallStarted { name, .. } if name == "tool_search" => started = true,
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the clean-length call must execute: {result:?}"
+                );
+                completed_ok = true;
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(started);
+    assert!(completed_ok, "the clean-length closed call must execute");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn real_chat_tool_execution_requires_terminal_proof() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

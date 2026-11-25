@@ -2337,7 +2337,46 @@ fn merge_schema_intersection(
             _ => return None,
         }
     }
+    if !narrow_instance_data_to_intersected_type(&mut merged) {
+        return None;
+    }
     Some(merged)
+}
+
+/// Narrow enum/const instance data to the intersected type. A `type` that
+/// the intersection produced (for example `number` ∩ `integer` → `integer`)
+/// must also constrain the surviving members: keeping a fractional enum
+/// value beside an `integer` type yields a schema MFJS's value-type check
+/// rejects even though the exact intersection is representable (review
+/// 4689524156). An instance-data member the final type can never admit is
+/// removed. Returns `false` when nothing survives — an emptied enum, or a
+/// const incompatible with the final type — meaning no instance satisfies
+/// the intersection and the merge must be declined.
+fn narrow_instance_data_to_intersected_type(merged: &mut Map<String, Value>) -> bool {
+    let Some(final_type) = merged
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return true;
+    };
+    if let Some(values) = merged.get("enum").and_then(Value::as_array).cloned() {
+        let narrowed: Vec<Value> = values
+            .into_iter()
+            .filter(|value| json_value_is_type(value, &final_type))
+            .collect();
+        if narrowed.is_empty() {
+            return false;
+        }
+        merged.insert("enum".into(), Value::Array(narrowed));
+    }
+    if let Some(constant) = merged.get("const") {
+        let constant = constant.clone();
+        if !json_value_is_type(&constant, &final_type) {
+            return false;
+        }
+    }
+    true
 }
 
 fn schema_property_names(schema: &Map<String, Value>) -> Option<std::collections::BTreeSet<&str>> {
@@ -2481,6 +2520,15 @@ fn collapse_single_element_unions(schema: &mut Value) {
         };
         let mut outer = obj.clone();
         outer.remove(key);
+        // An outer with no remaining keywords contributes nothing, so the
+        // exact intersection is the branch itself — the property-set guard
+        // below has nothing to protect (a root `anyOf:[object]` must
+        // collapse onto its branch rather than be dropped as root
+        // composition, review 4689524141).
+        if outer.is_empty() {
+            *obj = inner.clone();
+            continue;
+        }
         if let Some(merged) = merge_schema_intersection(&outer, inner) {
             *obj = merged;
         }
@@ -3293,6 +3341,38 @@ mod tests {
         assert_eq!(schema["enum"], json!(["b"]));
         assert_eq!(schema["minLength"], 1);
         assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn numeric_type_intersection_narrows_enum_members_to_the_result_type() {
+        // Review 4689524156: `number` ∩ `integer` is `integer`, so the
+        // surviving enum must drop fractional members instead of shipping a
+        // schema the MFJS value-type check rejects wholesale.
+        let mut schema = json!({
+            "type": "number",
+            "enum": [0.5, 1, 2],
+            "anyOf": [{"type": "integer"}]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["enum"], json!([1, 2]));
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn numeric_type_intersection_declines_when_no_enum_member_survives() {
+        let mut schema = json!({
+            "type": "number",
+            "enum": [0.5],
+            "anyOf": [{"type": "integer"}]
+        });
+        let original = schema.clone();
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema, original, "an unsatisfiable intersection declines");
     }
 
     #[test]
@@ -7805,12 +7885,12 @@ fn sanitize_kimi_parameters_candidate(
     }
 
     inline_internal_kimi_root_ref(parameters)?;
-    if parameters
-        .as_object()
-        .is_some_and(|root| root.contains_key("anyOf"))
-    {
-        return Err(KimiParameterSchemaError::RootMustBeObject);
-    }
+    // Root composition is not rejected here: `normalize_kimi_compatibility`
+    // first collapses exact singleton unions onto their branch (an
+    // `anyOf:[object]` root is the equivalent plain object and must not be
+    // dropped — the final root checks below still reject every surviving
+    // union), so an early rejection would preempt the collapse (review
+    // 4689524141).
     normalize_kimi_compatibility(parameters, true)?;
     sanitize_for_kimi(parameters);
 
@@ -8618,14 +8698,20 @@ fn resolve_mfjs_reference<'a>(document: &'a Value, reference: &str) -> Option<&'
         .filter(|target| target.is_object())
 }
 
-/// Termination results are contextual in the active reference set: a cycle
-/// detected under one set must not become another path's cached result. The
-/// memo keeps shared reference DAGs linear while `work` retains the strict
-/// total-state budget.
+/// Termination is a pure function of the node: the walk only descends into
+/// schemas a finite instance is actually forced through (required object
+/// properties, arrays with a positive `minItems`), so an untainted verdict
+/// memoizes on node identity and structural depth alone. Nodes whose subtree
+/// hit the reference-cycle guard keep their path context — a guard early
+/// return is only valid for the active reference set — so they are never
+/// memoized and instead re-walk per path under the strict total-state
+/// budget. This keeps shared acyclic reference DAGs linear without paying
+/// one owned active-path key per visited path (review 4689524122).
 #[derive(Default)]
 struct MfjsTerminationState {
-    memo: std::collections::HashMap<(usize, usize, Vec<String>), bool>,
+    memo: std::collections::HashMap<(usize, usize), bool>,
     work: usize,
+    cycle_guard_hits: usize,
 }
 
 fn mfjs_schema_can_terminate(
@@ -8644,6 +8730,7 @@ fn mfjs_schema_can_terminate(
 
     if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
         if !visiting_refs.insert(reference.to_string()) {
+            state.cycle_guard_hits += 1;
             return Ok(false);
         }
         let target = resolve_mfjs_reference(document, reference)
@@ -8654,13 +8741,7 @@ fn mfjs_schema_can_terminate(
         return terminates;
     }
 
-    let mut active_references: Vec<String> = visiting_refs.iter().cloned().collect();
-    active_references.sort();
-    let key = (
-        schema as *const Value as usize,
-        structural_depth,
-        active_references,
-    );
+    let key = (schema as *const Value as usize, structural_depth);
     if let Some(cached) = state.memo.get(&key) {
         return Ok(*cached);
     }
@@ -8669,6 +8750,7 @@ fn mfjs_schema_can_terminate(
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
 
+    let guards_before = state.cycle_guard_hits;
     let result = (|| {
         if let Some(branches) = obj.get("anyOf").and_then(Value::as_array) {
             for branch in branches {
@@ -8688,8 +8770,24 @@ fn mfjs_schema_can_terminate(
 
         match obj.get("type").and_then(Value::as_str) {
             Some("object") => {
-                if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
-                    for property in properties.values() {
+                // walle's termination test is instance-based ("whether a
+                // finite instance exists"): optional properties and
+                // unconstrained additional keys are omission exits, so only
+                // REQUIRED properties can force a recursion that never
+                // bottoms out. A required name with no declared property is
+                // a malformed node and fails closed.
+                if let Some(required) = obj.get("required").and_then(Value::as_array)
+                    && !required.is_empty()
+                {
+                    let properties = obj
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+                    for name in required {
+                        let property = name
+                            .as_str()
+                            .and_then(|name| properties.get(name))
+                            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
                         let mut property_refs = visiting_refs.clone();
                         if !mfjs_schema_can_terminate(
                             property,
@@ -8702,22 +8800,21 @@ fn mfjs_schema_can_terminate(
                         }
                     }
                 }
-                if let Some(additional) = obj.get("additionalProperties").filter(|additional| {
-                    additional.is_object() && !additional.as_object().is_some_and(Map::is_empty)
-                }) && !mfjs_schema_can_terminate(
-                    additional,
-                    document,
-                    visiting_refs,
-                    structural_depth + 1,
-                    state,
-                )? {
-                    return Ok(false);
-                }
                 Ok(true)
             }
             Some("array") => {
-                // Optional and empty-array paths must not hide a cyclic items
-                // schema from the strict walle termination check.
+                // An array whose lower bound is zero admits the empty
+                // instance, so a cyclic `items` schema still terminates;
+                // only a positive `minItems` forces an element (and only
+                // MFJS-unsupported bounds ever reach here unsanitized, so
+                // an absent keyword reads as zero).
+                let min_items = obj.get("minItems").and_then(Value::as_u64).unwrap_or(0);
+                if min_items == 0 {
+                    return Ok(true);
+                }
+                // MFJS allows `items` to be absent, and an unconstrained
+                // array can always be satisfied, so absent `items` counts
+                // as terminating instead of failing with InvalidSchemaNode.
                 let Some(items) = obj.get("items") else {
                     return Ok(true);
                 };
@@ -8733,7 +8830,9 @@ fn mfjs_schema_can_terminate(
             _ => Err(KimiParameterSchemaError::MissingType),
         }
     })();
-    if let Ok(terminates) = result {
+    if let Ok(terminates) = result
+        && state.cycle_guard_hits == guards_before
+    {
         state.memo.insert(key, terminates);
     }
     result
@@ -8741,18 +8840,20 @@ fn mfjs_schema_can_terminate(
 
 /// Shared state for one [`validate_mfjs_expanded_depth`] traversal.
 ///
-/// `completed` memoizes fully-walked (node identity, property depth,
-/// structural depth, active-reference set) states. The active set is part of
-/// the key because a cycle-guard early return reached under one reference
-/// context must not become the cached verdict under another. A shared
-/// acyclic reference subgraph reached again in the same context is skipped
-/// instead of re-walked; `work` counts computed states against
+/// `completed` memoizes fully-walked (node identity, depths) states. The
+/// walk descends into schemas a finite instance is forced through, so a
+/// node's traversal is path-independent and needs no active-reference key;
+/// a node whose subtree hit the reference-cycle guard keeps its path
+/// context, so its entry is removed again and other paths re-walk it under
+/// the strict total-state budget (review 4689524122). `visiting_refs` stays
+/// the per-path cycle guard. `work` counts computed states against
 /// [`MFJS_MAX_EXPANDED_STATES`].
 #[derive(Default)]
 struct MfjsExpandedWalkState {
     visiting_refs: HashSet<String>,
-    completed: HashSet<(usize, usize, usize, Vec<String>)>,
+    completed: HashSet<(usize, usize, usize)>,
     work: usize,
+    cycle_guard_hits: usize,
 }
 
 fn validate_mfjs_expanded_depth(
@@ -8771,6 +8872,7 @@ fn validate_mfjs_expanded_depth(
 
     if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
         if !state.visiting_refs.insert(reference.to_string()) {
+            state.cycle_guard_hits += 1;
             return Ok(());
         }
         let target = resolve_mfjs_reference(document, reference)
@@ -8787,14 +8889,13 @@ fn validate_mfjs_expanded_depth(
     }
 
     // The document is never mutated during validation, so the node address
-    // is a stable identity for the memo.
-    let mut active_references: Vec<String> = state.visiting_refs.iter().cloned().collect();
-    active_references.sort();
+    // is a stable identity for the memo. Insert before walking so a
+    // descendant re-entry skips instead of re-descending; a cycle-tainted
+    // node drops its entry after the walk.
     let state_key = (
         schema as *const Value as usize,
         property_depth,
         structural_depth,
-        active_references,
     );
     if !state.completed.insert(state_key) {
         return Ok(());
@@ -8804,6 +8905,7 @@ fn validate_mfjs_expanded_depth(
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
 
+    let guards_before = state.cycle_guard_hits;
     if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
         for property in properties.values() {
             validate_mfjs_expanded_depth(
@@ -8840,6 +8942,9 @@ fn validate_mfjs_expanded_depth(
                 state,
             )?;
         }
+    }
+    if state.cycle_guard_hits != guards_before {
+        state.completed.remove(&state_key);
     }
     Ok(())
 }
@@ -8933,8 +9038,9 @@ mod kimi_tests {
 
     #[test]
     fn mfjs_termination_prepass_memoizes_required_shared_reference_dags() {
-        // Optional properties now participate in termination checks too. The
-        // context-aware memo keeps the resulting shared-DAG walk linear
+        // Required properties are what the instance-based termination rule
+        // forces the walk through, so the shared-DAG shape below is the
+        // real worst case. The node+depth memo keeps the walk linear
         // instead of exploring 2^depth duplicate paths.
         let mut definitions = serde_json::Map::new();
         definitions.insert(
@@ -8967,6 +9073,10 @@ mod kimi_tests {
 
     #[test]
     fn mfjs_termination_memo_includes_active_reference_context() {
+        // The cycle must run through a REQUIRED property to be real under
+        // the instance-based termination rule: an optional property is an
+        // omission exit. The first context's false verdict is guard-tainted,
+        // so it must not leak into the context without R.
         let document = json!({
             "type": "object",
             "properties": {},
@@ -8974,6 +9084,7 @@ mod kimi_tests {
                 "R": {"type": "string"},
                 "Shared": {
                     "type": "object",
+                    "required": ["again"],
                     "properties": {"again": {"$ref": "#/$defs/R"}}
                 }
             }
@@ -8991,6 +9102,73 @@ mod kimi_tests {
             mfjs_schema_can_terminate(shared, &document, &mut visiting, 0, &mut state)
                 .expect("R terminates when it is no longer active"),
             "a false result cached under active R must not leak into a context without R"
+        );
+    }
+
+    #[test]
+    fn mfjs_termination_admits_recursion_through_an_optional_property() {
+        // Review 4689524112: walle's termination test is instance-based —
+        // omitting an optional property is a finite instance, so recursion
+        // through it terminates and must not fail the tool.
+        let schema = json!({
+            "type": "object",
+            "properties": {"next": {"$ref": "#/$defs/node"}},
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "next": {"$ref": "#/$defs/node"}
+                    }
+                }
+            }
+        });
+
+        validate_mfjs_parameters(&schema)
+            .expect("optional-property recursion has a finite instance");
+    }
+
+    #[test]
+    fn mfjs_termination_admits_recursion_through_an_unbounded_array() {
+        // The empty array is a finite instance when no positive minItems
+        // forces an element, so a recursive `items` schema terminates.
+        let schema = json!({
+            "type": "object",
+            "properties": {"children": {"type": "array", "items": {"$ref": "#/$defs/node"}}},
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}
+                    }
+                }
+            }
+        });
+
+        validate_mfjs_parameters(&schema).expect("empty-array recursion terminates");
+    }
+
+    #[test]
+    fn mfjs_termination_still_rejects_recursion_through_required_properties() {
+        // A required property forces at least one more nesting level, so the
+        // cycle never bottoms out — exactly walle's rejected shape.
+        let schema = json!({
+            "type": "object",
+            "required": ["next"],
+            "properties": {"next": {"$ref": "#/$defs/node"}},
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "required": ["next"],
+                    "properties": {"next": {"$ref": "#/$defs/node"}}
+                }
+            }
+        });
+
+        assert_eq!(
+            validate_mfjs_parameters(&schema).unwrap_err(),
+            KimiParameterSchemaError::NonTerminatingReference
         );
     }
 
@@ -9236,6 +9414,11 @@ mod kimi_tests {
 
     #[test]
     fn kimi_parameters_rejects_root_anyof_with_constraint_siblings() {
+        // With the root union no longer rejected before normalization, the
+        // surviving multi-branch union fails in the compatibility pass on its
+        // disallowed `properties` sibling: MFJS requires `type` inside each
+        // branch, so a root-adjacent sibling constraint has no supported
+        // representation.
         let mut schema = json!({
             "anyOf": [
                 {"type": "object", "properties": {"path": {"type": "string"}}},
@@ -9247,9 +9430,33 @@ mod kimi_tests {
 
         assert_eq!(
             sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
-            KimiParameterSchemaError::RootMustBeObject
+            KimiParameterSchemaError::InvalidKeywordValue
         );
         assert_eq!(schema, original);
+    }
+
+    #[test]
+    fn kimi_parameters_collapses_singleton_root_anyof_onto_its_branch() {
+        // Review 4689524141: an exact singleton root union is the equivalent
+        // plain object and must survive instead of being dropped as root
+        // composition.
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+
+        sanitize_for_kimi_parameters(&mut schema).expect("singleton collapse");
+
+        assert!(schema.get("anyOf").is_none());
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["path"]["type"], "string");
+        assert_eq!(schema["required"], json!(["path"]));
     }
 
     #[test]

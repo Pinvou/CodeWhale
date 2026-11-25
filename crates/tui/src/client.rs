@@ -176,15 +176,120 @@ pub(super) fn try_from_api_tool_name(name: &str) -> Result<String> {
     Ok(out)
 }
 
+/// Lenient decoder for GENERIC (non-Moonshot) provider responses — the
+/// legacy decoder this file shipped before #176. It recovers previously
+/// supported resolution of model-mangled names such as `foo_x00002Ebar` →
+/// `foo_.bar` (review 4689524212). Moonshot identity checks never use this —
+/// they go through [`try_from_api_tool_name`] and the request-owned owner
+/// map, where a guessed identity must fail closed instead.
 pub(super) fn from_api_tool_name(name: &str) -> String {
-    try_from_api_tool_name(name).unwrap_or_else(|_| name.to_string())
+    legacy_lenient_api_tool_name(name)
 }
 
-pub(super) fn normalize_explicit_non_strict_tool(tool: &mut crate::models::Tool) {
-    if tool.strict == Some(false) {
-        crate::tools::schema_sanitize::sanitize(&mut tool.input_schema);
-        crate::tools::schema_canonicalize::canonicalize_schema(&mut tool.input_schema);
+/// The legacy decoder this file shipped before #176: delimiter-tolerant
+/// `-xRRRRRR-` recovery plus the bare-hex second pass for names where the
+/// model stripped or replaced the leading delimiter dash. Only characters
+/// `to_api_tool_name` would have encoded decode back; everything else stays
+/// literal.
+fn legacy_lenient_api_tool_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut iter = name.chars().peekable();
+    while let Some(ch) = iter.next() {
+        if ch != '-' {
+            out.push(ch);
+            continue;
+        }
+        if let Some('-') = iter.peek().copied() {
+            iter.next();
+            out.push('-');
+            continue;
+        }
+        if iter.peek().copied() == Some('x') {
+            iter.next();
+            let mut hex = String::new();
+            for _ in 0..6 {
+                if let Some(h) = iter.next() {
+                    hex.push(h);
+                } else {
+                    break;
+                }
+            }
+            // Only decode if we got exactly 6 hex digits (matching encoder output).
+            // Fewer digits means a truncated/malformed sequence — pass through as-is.
+            if hex.len() == 6
+                && let Ok(code) = u32::from_str_radix(&hex, 16)
+                && let Some(decoded) = std::char::from_u32(code)
+            {
+                if let Some('-') = iter.peek().copied() {
+                    iter.next();
+                }
+                out.push(decoded);
+                continue;
+            }
+            out.push('-');
+            out.push('x');
+            out.push_str(&hex);
+            continue;
+        }
+        out.push('-');
     }
+
+    // Second pass: decode bare hex escapes (e.g. `x00002E`) that the model
+    // may produce when it mangles the `-x00002E-` delimiter form.  Only
+    // decode when the resulting character is one that `to_api_tool_name`
+    // would have encoded (not alphanumeric, not `_`, not `-`).
+    decode_bare_hex_escapes(&out)
+}
+
+/// Decode bare `x[0-9A-Fa-f]{6}` sequences (optionally followed by `-`)
+/// that survive the standard delimiter-based pass.  This handles cases
+/// where the model strips or replaces the leading `-` of `-x00002E-`.
+pub(super) fn decode_bare_hex_escapes(input: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"x([0-9A-Fa-f]{6})-?").unwrap());
+
+    let result = re.replace_all(input, |caps: &regex::Captures| {
+        let hex = &caps[1];
+        if let Ok(code) = u32::from_str_radix(hex, 16)
+            && let Some(decoded) = std::char::from_u32(code)
+        {
+            // Only decode characters that to_api_tool_name would have encoded
+            if !decoded.is_ascii_alphanumeric() && decoded != '_' && decoded != '-' {
+                return decoded.to_string();
+            }
+        }
+        // Not a character we'd encode — leave as-is
+        caps[0].to_string()
+    });
+    result.into_owned()
+}
+
+/// Normalized form of an explicitly non-strict tool for the relaxed lanes.
+///
+/// Returns `None` — meaning "send the tool verbatim, no clone needed" — when
+/// the tool is not explicitly non-strict (normalization would be a no-op) or
+/// when its schema exceeds the shared structural-depth limit: `sanitize`
+/// already no-ops past that limit, and recursing `canonicalize_schema` into
+/// an unchecked schema would walk the stack without a guard (review
+/// 4689524222). Centralizing the depth policy here keeps the adapters from
+/// restating the registry's rule and from deep-copying every tool before
+/// checking it.
+pub(super) fn normalized_explicit_non_strict_tool(
+    tool: &crate::models::Tool,
+) -> Option<crate::models::Tool> {
+    if tool.strict != Some(false) {
+        return None;
+    }
+    if !crate::tools::schema_sanitize::schema_within_structural_depth_limit(&tool.input_schema) {
+        return None;
+    }
+    let mut normalized = tool.clone();
+    crate::tools::schema_sanitize::sanitize(&mut normalized.input_schema);
+    crate::tools::schema_canonicalize::canonicalize_schema(&mut normalized.input_schema);
+    Some(normalized)
 }
 
 // === Types ===
@@ -7354,6 +7459,77 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_off_replays_reasoning_with_effective_enabled_thinking() {
+        // Fixed-thinking legacy ids have no off form: the route shaper sends
+        // `thinking: enabled` and replay follows that effective state.
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_HIGHSPEED_MODEL,
+            ),
+        ] {
+            for streaming in [false, true] {
+                let mut request = k3_request_fixture(model, Some("off"), streaming);
+                request.messages = vec![
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            ContentBlock::Thinking {
+                                thinking: "Inspect the saved tool state".to_string(),
+                                signature: None,
+                                state: None,
+                                redacted_data: None,
+                                reasoning_details: None,
+                            },
+                            ContentBlock::ToolUse {
+                                id: "call-k3-replay".to_string(),
+                                name: "read_file".to_string(),
+                                input: json!({"path": "src/lib.rs"}),
+                                caller: None,
+                                thought_signature: None,
+                            },
+                        ],
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: "call-k3-replay".to_string(),
+                            content: "file contents".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        }],
+                    },
+                ];
+
+                let body = capture_moonshot_chat_request_body(base_url, model, request).await;
+                assert_eq!(body["thinking"]["type"], json!("enabled"), "{model}");
+                let assistant = body["messages"]
+                    .as_array()
+                    .and_then(|messages| {
+                        messages
+                            .iter()
+                            .find(|message| message["role"] == "assistant")
+                    })
+                    .expect("assistant tool history");
+                assert_eq!(
+                    assistant["reasoning_content"],
+                    json!("Inspect the saved tool state"),
+                    "streaming={streaming} {base_url} {model}: effective enabled must preserve the original trace"
+                );
+            }
+        }
+
+        // The disableable legacy ids (direct kimi-k2.6, membership
+        // kimi-for-coding = K2.8 Preview) genuinely turn thinking off for an
+        // explicit off (review 4689524097), so the wire says `disabled` and
+        // the disabled-thinking replay gate strips the trace.
         for (base_url, model) in [
             (
                 crate::config::DEFAULT_MOONSHOT_BASE_URL,
@@ -7398,7 +7574,11 @@ mod tests {
                 ];
 
                 let body = capture_moonshot_chat_request_body(base_url, model, request).await;
-                assert_eq!(body["thinking"]["type"], json!("enabled"));
+                assert_eq!(
+                    body["thinking"]["type"],
+                    json!("disabled"),
+                    "streaming={streaming} {base_url} {model}: an explicit off must disable thinking"
+                );
                 let assistant = body["messages"]
                     .as_array()
                     .and_then(|messages| {
@@ -7407,10 +7587,11 @@ mod tests {
                             .find(|message| message["role"] == "assistant")
                     })
                     .expect("assistant tool history");
-                assert_eq!(
-                    assistant["reasoning_content"],
-                    json!("Inspect the saved tool state"),
-                    "streaming={streaming} {base_url} {model}: effective enabled must preserve the original trace"
+                assert!(
+                    assistant
+                        .get("reasoning_content")
+                        .is_none_or(Value::is_null),
+                    "streaming={streaming} {base_url} {model}: disabled thinking must not replay the trace"
                 );
             }
         }
@@ -7757,15 +7938,28 @@ mod tests {
         .await;
 
         let captured = body["tools"].as_array().expect("captured tool catalog");
+        // tool_search is the always-active discovery path for deferred
+        // native/MCP/skill capabilities; its bounded schema sits outside the
+        // MFJS strict whitelist, so the synthetic definition opts into the
+        // explicit strict:false relaxed lane and must reach the wire
+        // (review 4689524086).
         assert_eq!(
             captured.len(),
-            source_len - 1,
-            "strict mode drops tool_search's incompatible root composition"
+            source_len,
+            "tool_search rides the relaxed lane; every catalog tool reaches the wire"
         );
-        for required in source_names
-            .iter()
-            .filter(|name| name.as_str() != "tool_search")
-        {
+        let tool_search = captured_function(&body, "tool_search");
+        assert_eq!(tool_search["strict"], json!(false));
+        assert_eq!(
+            tool_search["parameters"]["properties"]["max_results"]["minimum"],
+            json!(1),
+            "the bounded schema is preserved verbatim on the relaxed lane"
+        );
+        assert_eq!(
+            tool_search["parameters"]["properties"]["max_results"]["maximum"],
+            json!(8)
+        );
+        for required in source_names.iter() {
             assert!(
                 captured_function(&body, required).is_object(),
                 "{required} must reach the Kimi Code wire"
@@ -8075,8 +8269,14 @@ mod tests {
                 crate::config::MOONSHOT_KIMI_K2_6_MODEL,
                 server.uri(),
             );
-            let mut request =
-                k3_request_fixture(crate::config::MOONSHOT_KIMI_K2_6_MODEL, None, streaming);
+            // An explicit off disables thinking on the disableable legacy
+            // route so the named choice reaches the offered-tool predicate
+            // this test exists to pin (review 4689524097).
+            let mut request = k3_request_fixture(
+                crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+                Some("off"),
+                streaming,
+            );
             let good = test_tool("compatible_lookup");
             let mut bad = test_tool("mcp_pattern_tool");
             // One MFJS whitelist serves every Moonshot route: any unlisted
@@ -9622,18 +9822,25 @@ mod tests {
             let decoded = from_api_tool_name(&encoded);
             assert_eq!(decoded, original);
         }
-        // Non-canonical input stays literal instead of being guessed into
-        // another registry identity; strict callers can reject it.
+        // The canonical decoder stays strict for Moonshot ownership checks:
+        // non-canonical input is refused, never guessed into another
+        // registry identity.
         {
             let mangled = "multi_tool_use.x00002E-parallel";
             assert!(try_from_api_tool_name(mangled).is_err());
-            assert_eq!(from_api_tool_name(mangled), mangled);
         }
-        // Bare hex-looking text is an ordinary literal name, never an escape.
+        // The generic decoder keeps the legacy recovery for model-mangled
+        // names: a bare `x00002E` (the model stripped or replaced the
+        // leading dash) still resolves to the encoded character (review
+        // 4689524212), byte-for-byte as the legacy decoder always did.
         {
-            let literal = "foo_x00002Ebar";
-            assert_eq!(try_from_api_tool_name(literal).unwrap(), literal);
-            assert_eq!(from_api_tool_name(literal), literal);
+            let mangled = "multi_tool_use.x00002E-parallel";
+            assert_eq!(from_api_tool_name(mangled), "multi_tool_use..parallel");
+            assert_eq!(from_api_tool_name("foo_x00002Ebar"), "foo_.bar");
+            assert_eq!(
+                try_from_api_tool_name("foo_x00002Ebar").unwrap(),
+                "foo_x00002Ebar"
+            );
         }
         // from tool_name_bare_hex_preserves_alnum
         {

@@ -826,6 +826,12 @@ struct StreamOutcome {
     pending_message_complete: bool,
     last_text_index: Option<usize>,
     stream_errors: u32,
+    /// A chunk-level `StreamEvent::Error` frame arrived. Kept separate from
+    /// `stream_errors` so the truncated-response ladder can treat a frame
+    /// death honestly WITHOUT the count also feeding the transparent-retry
+    /// predicate, whose "died with nothing" semantics deliberately exclude
+    /// error frames (review 4689524046).
+    frame_error_seen: bool,
     /// Typed, engine-internal drop-recovery state. `Option` + consume-once
     /// means one drop schedules exactly one resume; see [`StreamResume`].
     pending_resume: Option<StreamResume>,
@@ -2547,6 +2553,7 @@ impl Engine {
                 pending_message_complete,
                 last_text_index,
                 stream_errors,
+                frame_error_seen,
                 pending_resume,
                 stream_start,
                 first_token_at,
@@ -2626,7 +2633,10 @@ impl Engine {
 
             if is_incomplete_stop_reason(stop_reason.as_deref()) {
                 let reason = stop_reason_detail(stop_reason.as_deref());
-                if is_output_limit_stop_reason(stop_reason.as_deref()) && stream_errors == 0 {
+                if is_output_limit_stop_reason(stop_reason.as_deref())
+                    && stream_errors == 0
+                    && !frame_error_seen
+                {
                     // Degrade, don't kill the turn — but only when the stream
                     // finished cleanly. A `max_tokens` stop followed by a
                     // transport error is a billed incomplete response: charge
@@ -5927,6 +5937,7 @@ impl Engine {
         let mut last_text_index: Option<usize> = None;
         let mut saw_message_stop = false;
         let mut stream_errors = 0u32;
+        let mut frame_error_seen = false;
         // #103 transparent retry bookkeeping. `any_content_received` flips
         // on the first non-MessageStart event so we know whether DeepSeek
         // billed us / the user has seen any output for this turn yet.
@@ -6615,6 +6626,12 @@ impl Engine {
                     // the same typed envelope contract, record it as the
                     // turn's stream error, and stop consuming. Deltas that
                     // arrive after the failure frame are never forwarded.
+                    // Recording the frame separately keeps the
+                    // truncated-response ladder honest — a `length` stop
+                    // followed by an error frame is a billed incomplete
+                    // response, not the clean-length acceptance branch —
+                    // without also feeding the transparent-retry predicate
+                    // (review 4689524046).
                     let message = error
                         .get("message")
                         .and_then(Value::as_str)
@@ -6627,6 +6644,7 @@ impl Engine {
                     }
                     let _ = self.tx_event.send(Event::error(envelope)).await;
                     stream_error.get_or_insert_with(|| TurnFailure::model(message.to_string()));
+                    frame_error_seen = true;
                     break;
                 }
             }
@@ -6637,6 +6655,35 @@ impl Engine {
             && pending_resume.is_none()
             && !self.cancel_token.is_cancelled()
             && stream_stop_reason_allows_tool_execution(stop_reason.as_deref());
+        // A clean output-limit stop deliberately keeps CLOSED tool calls
+        // executable: the truncated-response ladder accepts complete calls
+        // and continues. Every other `!stream_completed` shape is an abnormal
+        // termination, and a tool whose block already closed still finalized
+        // valid arguments — without this invalidation its call executes
+        // before the saved turn error is ever consulted (review 4689524046).
+        let closed_tools_stay_valid = stream_completed
+            || (stream_error.is_none()
+                && !rate_limit_interrupted
+                && pending_resume.is_none()
+                && !self.cancel_token.is_cancelled()
+                && is_incomplete_stop_reason(stop_reason.as_deref())
+                && is_output_limit_stop_reason(stop_reason.as_deref())
+                && stream_errors == 0
+                && !frame_error_seen);
+        if !closed_tools_stay_valid {
+            let open_tool_indices: std::collections::HashSet<usize> =
+                current_tool_indices.values().copied().collect();
+            for (index, tool_state) in tool_uses.iter_mut().enumerate() {
+                if open_tool_indices.contains(&index) {
+                    continue;
+                }
+                tool_state.invalidate_input_parse_proof();
+                if tool_state.input_parse_error.is_none() {
+                    tool_state.input_parse_error =
+                        Some(INCOMPLETE_STREAM_TOOL_INPUT_ERROR.to_string());
+                }
+            }
+        }
         let mut unfinished_tool_indices: Vec<usize> = current_tool_indices.into_values().collect();
         unfinished_tool_indices.sort_unstable();
         for tool_idx in unfinished_tool_indices {
@@ -6685,6 +6732,7 @@ impl Engine {
             pending_message_complete,
             last_text_index,
             stream_errors,
+            frame_error_seen,
             pending_resume,
             stream_start,
             first_token_at,

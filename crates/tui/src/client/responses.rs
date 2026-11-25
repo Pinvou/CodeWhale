@@ -1228,9 +1228,12 @@ pub(super) fn convert_messages_to_responses_input(
 }
 
 /// Convert a CodeWhale tool definition to a Responses API function tool.
+/// The explicit non-strict clone only happens when normalization actually
+/// applies and the schema is within the shared depth limit (review
+/// 4689524222); otherwise the borrowed tool is used verbatim.
 fn tool_to_responses_function(tool: &Tool) -> Value {
-    let mut tool = tool.clone();
-    super::normalize_explicit_non_strict_tool(&mut tool);
+    let normalized = super::normalized_explicit_non_strict_tool(tool);
+    let tool = normalized.as_ref().unwrap_or(tool);
     let mut parameters = tool.input_schema.clone();
     let constraint_note = schema_sanitize::sanitize_for_responses(&mut parameters);
     let description = match constraint_note {

@@ -9787,6 +9787,10 @@ use self::dispatch::{
     mcp_tool_is_parallel_safe, parse_parallel_tool_calls, plan_tool_execution_batches,
     stamp_tool_result_approval,
 };
+// The blocking response decoder represents one malformed Moonshot tool call
+// through the same per-tool sentinel instead of failing the whole response
+// (review 4689524205); aliased re-export beside the engine's private import.
+pub(crate) use self::dispatch::malformed_tool_arguments_input as malformed_tool_arguments_sentinel;
 #[cfg(test)]
 use self::dispatch::{format_tool_error, parse_tool_input, should_parallelize_tool_batch};
 #[cfg(test)]

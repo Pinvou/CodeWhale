@@ -10425,7 +10425,12 @@ const MOONSHOT_DIRECT_ROUTE_GUIDANCE: &str = "(api.moonshot.ai/v1 or api.moonsho
 /// Canonical endpoints reject `k3[1m]` and known membership/direct cross-pairings,
 /// including the K3.1 family spellings the vendor serves on the opposite
 /// endpoint. Unknown IDs and custom Moonshot-compatible gateways remain
-/// pass-through.
+/// pass-through. The bracketed Claude-Code-only spellings stay inside the
+/// exact-endpoint branches: membership remediation names the membership id,
+/// direct remediation names the direct-platform id (naming `k3` on the
+/// direct route would walk the user into the very cross-pairing rejection
+/// below), and a custom gateway keeps the documented pass-through (review
+/// 4689524239).
 pub(crate) fn validate_kimi_code_api_model_id(
     provider: ApiProvider,
     base_url: &str,
@@ -10438,14 +10443,14 @@ pub(crate) fn validate_kimi_code_api_model_id(
     if model.is_empty() {
         return Ok(());
     }
-    if model.eq_ignore_ascii_case("k3[1m]") {
-        return Err(KIMI_CODE_CLAUDE_ALIAS_GUIDANCE.to_string());
-    }
-    if model.eq_ignore_ascii_case("k3.1-pro[1m]") {
-        return Err(KIMI_CODE_K31_CLAUDE_ALIAS_GUIDANCE.to_string());
-    }
 
     if moonshot_base_url_is_exact_kimi_code(base_url) {
+        if model.eq_ignore_ascii_case("k3[1m]") {
+            return Err(KIMI_CODE_CLAUDE_ALIAS_GUIDANCE.to_string());
+        }
+        if model.eq_ignore_ascii_case("k3.1-pro[1m]") {
+            return Err(KIMI_CODE_K31_CLAUDE_ALIAS_GUIDANCE.to_string());
+        }
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
@@ -10464,6 +10469,16 @@ pub(crate) fn validate_kimi_code_api_model_id(
     }
 
     if moonshot_base_url_is_exact_direct_platform(base_url) {
+        if model.eq_ignore_ascii_case("k3[1m]") {
+            return Err(format!(
+                "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id, and it is a Kimi Code membership id besides. On the direct Moonshot route {MOONSHOT_DIRECT_ROUTE_GUIDANCE} use model = \"kimi-k3\"."
+            ));
+        }
+        if model.eq_ignore_ascii_case("k3.1-pro[1m]") {
+            return Err(format!(
+                "Kimi Code model `k3.1-pro[1m]` is a Claude Code environment convention, not an API model id, and it is a Kimi Code membership id besides. On the direct Moonshot route {MOONSHOT_DIRECT_ROUTE_GUIDANCE} use model = \"kimi-k3.1-pro\"."
+            ));
+        }
         for membership_id in KIMI_CODE_MEMBERSHIP_MODELS {
             if model.eq_ignore_ascii_case(membership_id) {
                 return Err(format!(
