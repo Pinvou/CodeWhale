@@ -3,11 +3,13 @@
  *
  * CodeWhale 把内部运行时信封（子智能体交接 subagent_handoff / 后台 shell 完成
  * shell_completion / 运行时恢复提示 runtime）以 role=user 持久化供父模型上下文
- * 使用，展示层不得渲染为用户气泡。本模块识别三种形态：
+ * 使用，展示层不得渲染为用户气泡。本模块识别四种形态：
  * - 完整信封：<codewhale:runtime_event ... visibility="internal">...</codewhale:runtime_event>
  * - 非权威 provenance：以前导 <turn_meta> 开头的块内 "Input provenance: <id>"，
  *   白名单 {runtime, subagent_handoff, shell_completion}
  * - 标准上下文增量：<context_update> 包裹且带固定运行时前言的完整消息
+ * - 压缩检查点：首文本块的摘要头 + 引擎写入的 provenance 标记
+ *   （见下方检查点判定族）
  *
  * 本模块供 ESM 车道（CodeX 原生车道 code-native-lane.js、子智能体 transcript
  * 面板 subagent-conversation.mjs）共享。tauri/web bridge 的同源判定已收拢到
@@ -82,6 +84,59 @@ function inputProvenanceFromText(value) {
   return match && match[1] ? match[1].toLowerCase() : '';
 }
 
+// ── CodeWhale compaction checkpoint ────────────────────────────────
+// Compaction commits its summary into the saved history as a role="user"
+// message (the model reads it as a user-history item, Codex parity), so the
+// engine's context survives a reload. It is engine-written runtime state,
+// not a user turn: a projection that renders it as typed input shows the
+// model-facing summary under the user's name. Recognition mirrors the
+// foundation's structural predicates (CodeWhale
+// crates/tui/src/history_recognition.rs) rather than a substring scan,
+// because a user may legitimately paste or quote the summary header.
+
+export const COMPACTION_SUMMARY_MARKERS = [
+  'Another language model started to solve this problem',
+  'Conversation Summary (Auto-Generated)',
+];
+
+export const COMPACTION_CHECKPOINT_PROVENANCE = '<!-- codewhale.compaction-checkpoint.v1 -->';
+
+function isCheckpointTextBox(block) {
+  return !!block && block.type === 'text' && block.cache_control == null;
+}
+
+/**
+ * Loose form (`is_compaction_checkpoint_message`): the first text block
+ * begins with the summary header (current or pre-v0.9.6 legacy), and the
+ * only other block, if any, is the provenance marker.
+ */
+export function isCompactionCheckpointBlocks(blocks) {
+  if (!Array.isArray(blocks) || blocks.length === 0 || blocks.length > 2) return false;
+  const first = blocks[0];
+  if (!isCheckpointTextBox(first) || typeof first.text !== 'string') return false;
+  if (COMPACTION_SUMMARY_MARKERS.every(marker => !first.text.startsWith(marker))) return false;
+  return blocks.length === 1
+    || (isCheckpointTextBox(blocks[1]) && blocks[1].text === COMPACTION_CHECKPOINT_PROVENANCE);
+}
+
+/**
+ * Stamped form (`is_generated_compaction_checkpoint`): summary block plus
+ * the engine-written provenance block. Typed input cannot produce this
+ * shape — the marker is its own content block — so it is an unambiguous
+ * checkpoint.
+ *
+ * Display reads ONLY this form as a checkpoint. The bare form matches a
+ * user turn that merely pastes the summary header; the foundation still
+ * reads it loosely in a history with no stamped carrier because a missed
+ * carrier would stack a second summary, but hiding a user's own message
+ * has no such correctness need behind it. A pre-stamp bare carrier turns
+ * stamped on the engine's next restore and disappears from the bubbles
+ * then.
+ */
+export function isGeneratedCompactionCheckpointBlocks(blocks) {
+  return Array.isArray(blocks) && blocks.length === 2 && isCompactionCheckpointBlocks(blocks);
+}
+
 /** 单个文本块是否完全由已知内部运行时内容构成。 */
 export function isInternalRuntimeUserMessage(value) {
   return isContextUpdateRuntimeMessage(value)
@@ -114,6 +169,11 @@ export function isInternalUserMessage(blocks) {
   const textBlocks = (Array.isArray(blocks) ? blocks : [])
     .filter(block => block && block.type === 'text');
   if (INTERNAL_PROVENANCE.has(userMessageInputProvenance(textBlocks))) return true;
+  // The stamped checkpoint is engine-written by construction, so every
+  // consumer reads it as runtime metadata. The bare form matches pasted
+  // headers and stays displayable. Structural, like the foundation: any
+  // extra (non-text) block disqualifies, so the raw blocks are checked.
+  if (isGeneratedCompactionCheckpointBlocks(blocks)) return true;
   let foundInternal = false;
   for (const block of textBlocks) {
     if (!String(block.text || '').trim()) continue;
