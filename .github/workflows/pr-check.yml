@@ -3807,6 +3807,14 @@ jobs:
       # RUSTC_WRAPPER 指向 sh 版(wrapper 只作用于编译期 rustc 进程,
       # cargo run / cargo test 目标进程不继承 RUST_MIN_STACK)。
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
+      # 测试线程栈与生产形状对齐:lib.rs 的 GUI async runtime 显式
+      # thread_stack_size(16 MiB)(勿优化回默认),libtest 测试线程默认 2 MiB。
+      # 底座 cc2adf8(2026-11 批次)后,真实引擎 spawn 组合 future 在 2 MiB
+      # 测试线程上栈溢出(multiagent_regression_tests::
+      # code_session_real_spawn_refresh... CI 实证,本地 arm64/x86_64 双复现;
+      # RUST_MIN_STACK=16 MiB 即过)——生产 worker 本就在 16 MiB 上运行同一
+      # future,测试对齐生产形状,并非放宽门禁;超过 16 MiB 的真回归仍会红。
+      RUST_MIN_STACK: 16777216
       # codewhale-tui 恢复依赖级 O2 后,test binary 变大,link 阶段在 ubuntu 16GB
       # runner 上内存峰值越线被 SIGTERM(merge_group run 实证,exit 143)。
       # 实测(CI 对照):thin LTO + lld 能 Finished + 1180 passed(31min);
@@ -4752,6 +4760,11 @@ jobs:
       # 只在编译期 rustc 注入 RUST_MIN_STACK=16MiB,不泄漏到 cargo test 目标进程。
       # 必须用 ${{ github.workspace }} 绝对路径(避免按 cwd 双拼解析)。
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+      # 测试线程栈与生产形状对齐(同 linux rust-test 腿):生产 runtime 显式
+      # thread_stack_size(16 MiB);底座 cc2adf8(2026-11 批次)后真实引擎
+      # spawn 组合 future 在 libtest 默认 2 MiB 测试线程上栈溢出。RUST_MIN_STACK
+      # 由 libtest 读取、只作用于测试线程,超过 16 MiB 的真回归仍会红。
+      RUST_MIN_STACK: 16777216
       # 2026-10 stable 1.99: the cold `cargo test --lib --no-run` OOM'd the
       # 16 GB hosted runner in the final test-binary link (730 dep crates
       # compile in ~25 minutes, then the link pagefile-thrashes silently for
