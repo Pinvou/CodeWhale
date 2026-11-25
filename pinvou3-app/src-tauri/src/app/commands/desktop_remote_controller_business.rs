@@ -55,6 +55,8 @@ use tauri::{AppHandle, Manager as _};
 
 #[path = "desktop_remote_controller_business/permission_decision.rs"]
 mod permission_decision;
+#[path = "desktop_remote_controller_business/user_input_action.rs"]
+mod user_input_action;
 
 /// E2E-06：B 端清理端口。`ControlledDeviceManager` 在 stop / refresh / 远端断开 /
 /// 恢复失败等任何终态都会触发它；这里用同一代的任务登记表中断本代远端任务，
@@ -971,13 +973,8 @@ impl DesktopControlledBusiness {
                         let views = self.app.state::<Arc<PermissionAuthority>>()
                             .pending_for_task(field("task_id")?);
                         if views.len() > 8 { return Err("permission_capacity".to_owned()); }
-                        let permissions: Vec<Value> = views.into_iter().map(|view| json!({
-                            "permission_request_id":view.permission_request_id,"task_id":view.task_id,
-                            "operation_type":view.operation_type,"risk_level":view.risk_level,
-                            "target_scope":view.target_scope,"preview":view.preview,
-                            "expires_at_ms":view.expires_at_ms.to_string(),"state":view.state,
-                            "decision":view.decision,"dispatch_state":view.dispatch_state,
-                        })).collect();
+                        let permissions: Vec<Value> = views.into_iter()
+                            .map(|view| view.into_remote_action_payload()).collect();
                         Ok(json!({"permissions": permissions}))
                     }
                     "permission_decide" => {
@@ -1099,7 +1096,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         operation: &str,
         body: &Value,
     ) -> Result<Value, String> {
-        if operation == "permission_decide" {
+        if matches!(operation, "user_input_list" | "user_input_respond") {
+            user_input_action::handle(&self.app, lease, session_ref, operation, body).await
+        } else if operation == "permission_decide" {
             self.handle_remote_permission_decision(lease, session_ref, body)
                 .await
         } else {

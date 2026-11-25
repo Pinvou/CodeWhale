@@ -14,6 +14,42 @@ SPEC.loader.exec_module(ENV)
 
 
 class NetworkEnvironmentTests(unittest.TestCase):
+    def test_domestic_registry_preserves_profiles_and_can_return_to_official(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); cargo = root / 'cargo'; cargo.mkdir()
+            config = cargo / 'config.toml'
+            original = '[build]\njobs = 12\n'
+            config.write_text(original)
+            ENV.cargo_source(cargo, 'rsproxy')
+            self.assertIn(original, config.read_text())
+            self.assertIn('sparse+https://rsproxy.cn/index/', config.read_text())
+            ENV.cargo_source(cargo, 'rsproxy')
+            self.assertEqual(config.read_text().count('[source.crates-io]'), 1)
+            ENV.cargo_source(cargo, 'official')
+            self.assertNotIn('rsproxy', config.read_text())
+            self.assertIn(original, config.read_text())
+
+    def test_domestic_registry_refuses_custom_source_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'config.toml'
+            text = '[source.crates-io]\nreplace-with = "private"\n'
+            config.write_text(text)
+            with self.assertRaises(ValueError): ENV.cargo_source(root, 'rsproxy')
+            self.assertEqual(config.read_text(), text)
+
+    def test_ambiguous_or_mixed_source_policies_are_rejected_without_partial_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = root / 'config.toml'
+            text = ENV.MIRROR_CONFIG + '\n[source.private]\nregistry="https://example.invalid/index"\n'
+            config.write_text(text)
+            with self.assertRaises(ValueError): ENV.cargo_source(root, 'rsproxy')
+            self.assertEqual(config.read_text(), text)
+            config.write_text(ENV.MIRROR_CONFIG)
+            (root / 'config').write_text('[build]\njobs=12\n')
+            with self.assertRaises(ValueError): ENV.cargo_source(root, 'rsproxy')
+            self.assertEqual(config.read_text(), ENV.MIRROR_CONFIG)
+
     @unittest.skipUnless(shutil.which('node'), 'Node reports the actual safe download receipt')
     def test_report_retains_stage_evidence_without_raw_errors_urls_or_environment(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -42,7 +78,7 @@ class NetworkEnvironmentTests(unittest.TestCase):
             result = subprocess.run([__import__('sys').executable,
                 str(Path(__file__).parents[1] / 'ci-network-environment.py'),
                 '--cargo-home', str(cargo), '--cache', str(root / 'cache'), '--dist-cache'],
-                env={**os.environ, 'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': str(root),
+                env={**os.environ, 'PINVOU_CI_RUST_MIRROR': 'official', 'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': str(root),
                      'GITHUB_ENV': str(environment), 'NO_PROXY': 'example.invalid'},
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -86,6 +122,20 @@ class NetworkEnvironmentTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('RUSTUP_DIST_SERVER=https://static.rust-lang.org\n', environment.read_text())
             self.assertEqual((rustup / 'sentinel').read_bytes(), b'installed-toolchain')
+
+    @unittest.skipUnless(__import__('sys').platform == 'linux', 'Linux self-hosted mirror policy')
+    def test_linux_self_hosted_default_selects_domestic_source_and_keeps_locked_origin_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); cargo = root / 'cargo'
+            env = {key: value for key, value in os.environ.items() if key != 'PINVOU_CI_RUST_MIRROR'}
+            result = subprocess.run([__import__('sys').executable,
+                str(Path(__file__).parents[1] / 'ci-network-environment.py'),
+                '--cargo-home', str(cargo), '--cache', str(root / 'cache')],
+                env={**env, 'RUNNER_ENVIRONMENT': 'self-hosted', 'GITHUB_ACTIONS': 'false',
+                     'GITHUB_ENV': str(root / 'github-env')}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('PINVOU_CI_CARGO_SOURCE=rsproxy', (root / 'github-env').read_text())
+            self.assertIn('sparse+https://rsproxy.cn/index/', (cargo / 'config.toml').read_text())
 
     def test_only_known_mirror_is_removed_and_every_other_setting_survives(self):
         with tempfile.TemporaryDirectory() as directory:

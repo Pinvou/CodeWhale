@@ -134,7 +134,7 @@ fn setup(card: &str, base: &str) -> SavedModel {
     let row: SavedModel = serde_json::from_value(serde_json::json!({
         "id":"stable-id", "name":"My label", "alias":"My alias",
         "preset":"openai_compatible", "provider_kind":"custom", "model":"wire",
-        "base_url":base, "model_store_card_id":card, "context_window_tokens":32768,
+        "base_url":base, "model_store_card_id":card, "store_card_id":card, "context_window_tokens":32768,
         "max_output_tokens":4096, "reasoning_effort":"high", "vision_model_id":"vision"
     }))
     .unwrap();
@@ -496,8 +496,15 @@ fn successful_enable_repairs_same_route_and_notifies_only_after_persistence() {
             },
         )]);
         db::set_scripts_content(CARD, &scripts, &Default::default()).unwrap();
-        let started =
-            service::start_lifecycle(&service, CARD.into(), "enable".into(), false).unwrap();
+        let started = runtime
+            .block_on(service::start_lifecycle(
+                &service,
+                CARD.into(),
+                "enable".into(),
+                false,
+                false,
+            ))
+            .unwrap();
         let run_id = started["run_id"].as_str().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut from = 0;
@@ -508,6 +515,7 @@ fn successful_enable_repairs_same_route_and_notifies_only_after_persistence() {
                     run_id.into(),
                     from,
                     Some(1),
+                    None,
                 ))
                 .unwrap();
             if result["done"] == true {
@@ -520,7 +528,11 @@ fn successful_enable_repairs_same_route_and_notifies_only_after_persistence() {
     assert!(!run("#!/bin/sh\nexit 1\n"));
     assert_eq!(window(), Some(32768));
     assert_eq!(receipts(), 0);
-    assert_eq!(server.count(), 0);
+    // 合并语义适配（r36 P1-2）：PR 侧 enable 入口的内存准入先做一次
+    // reconcile_running_status（本夹具 running=true → 身份核验探活 1 次，
+    // 60s TTL 缓存）；预检本体已被 repair_intent 短路不探，exit 1 脚本不发
+    // 请求。main 原预算 0 不含准入探活，合并树的真实预算是 1。
+    assert_eq!(server.count(), 1);
     assert!(run(&format!(
         "#!/bin/sh\necho LMM_ENDPOINT_URL={}/chat/completions\necho LMM_ENDPOINT_MODEL=wire\n",
         server.base

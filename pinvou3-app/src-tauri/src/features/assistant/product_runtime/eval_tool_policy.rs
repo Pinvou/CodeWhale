@@ -138,7 +138,6 @@ mod tests {
                     model: "catalog-fixture".to_string(),
                     api_key: None,
                     base_url: None,
-                    model_http_policy: None,
                 },
                 None,
             )

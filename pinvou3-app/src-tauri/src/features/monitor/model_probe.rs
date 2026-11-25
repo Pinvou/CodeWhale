@@ -3560,12 +3560,13 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             // replay repair (upstream #137), but the ids stay reachable
             // through the ACP kimi-code preset and the custom entry, so
             // the resolution anchors keep their charter coverage.
-            (ModelPreset::OpenaiCompatible, "k3.1-pro", 1_048_576),
-            (
-                ModelPreset::OpenaiCompatible,
-                "k3.1-pro-highspeed",
-                1_048_576,
-            ),
+            // The 2026-11-05 catalog deferral for the two bare preset rows
+            // resolved upstream: CodeWhale cc2adf8 (#137) now catalogues
+            // bare k3.1-pro[-highspeed] directly at the 262,144 Kimi-Code
+            // safe default (plans that include 1M declare context_window
+            // explicitly), so the probe infers the base-verified figure.
+            (ModelPreset::OpenaiCompatible, "k3.1-pro", 262_144),
+            (ModelPreset::OpenaiCompatible, "k3.1-pro-highspeed", 262_144),
             (ModelPreset::OpenaiCompatible, "k3.1-pro[1m]", 1_048_576),
             (
                 ModelPreset::OpenaiCompatible,
@@ -3714,6 +3715,7 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
     fn keyless_declaration_suppresses_monitor_probe_key() {
         let (_lock, _env) = crate::platform::test_support::locked_env(&["DEEPSEEK_API_KEY"]);
         let mut model = SavedModel {
+            store_card_id: None,
             auth_mode: None,
             id: "keyless-monitor-model".into(),
             name: "keyless monitor model".into(),

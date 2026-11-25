@@ -31,8 +31,10 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import zipfile
+from unittest.mock import patch
 
 # ── 所有产物落到临时目录,别污染真实 ~/.pinvou3 ──────────────────────────
 _TMP = tempfile.mkdtemp(prefix="pptx_test_")
@@ -124,6 +126,102 @@ def test_output_location():
     cwd = os.path.abspath(os.getcwd())
     assert not p.startswith(cwd) or _TMP.startswith(cwd), "不应落进进程当前目录: %s" % p
     assert "target" not in p and "Program Files" not in p, "不应落进构建/安装目录: %s" % p
+
+
+@case("3b. 已配置的产物目录不可用时报告失败")
+def test_configured_output_directory_unavailable():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        blocked = os.path.join(root, "artifacts")
+        with open(blocked, "w", encoding="utf-8") as f:
+            f.write("already a file")
+        with patch.object(server, "_session_artifacts_dir", blocked):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "位置测试"}])
+        assert result.get("ok") is False, result
+        assert "产物目录" in result.get("error", ""), result
+        assert os.listdir(root) == ["artifacts"], "不得改写到会话之外"
+
+
+@case("3c. 渲染写入部分文件后失败，不登记半成品")
+def test_partial_scoped_output_is_not_published():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        destination = os.path.join(root, "sessions", "controlled-session", "artifacts")
+        deck = [{"layout": "cover", "title": "位置测试"}]
+
+        def render_then_fail(_spec, path):
+            with open(path, "wb") as f:
+                f.write(b"incomplete PPT package")
+            assert all(os.path.isdir(os.path.join(destination, name))
+                       for name in os.listdir(destination))
+            raise OSError("fixture write failure after partial output")
+
+        with patch.object(server, "_session_artifacts_dir", destination):
+            with patch.object(server, "render", side_effect=render_then_fail):
+                failed = server.make_pptx(slides=deck, filename="result")
+            assert not failed["ok"] and os.listdir(destination) == [], failed
+            recovered = server.make_pptx(slides=deck, filename="result")
+        assert recovered["ok"], recovered
+        assert os.listdir(destination) == ["result.pptx"]
+        assert len(Presentation(recovered["path"]).slides) == 1
+
+
+def _directory_redirect(path, target):
+    if os.name == "nt":
+        # A directory junction exercises the reparse-point check without
+        # requiring the Windows symbolic-link privilege on the test runner.
+        import _winapi
+
+        _winapi.CreateJunction(target, path)
+    else:
+        os.symlink(target, path, target_is_directory=True)
+
+
+@case("3d. 拒绝重定向的会话目录")
+def test_redirected_session_directory_is_rejected():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "other-session")
+        session = os.path.join(root, "sessions", "controlled-session")
+        os.mkdir(target)
+        os.makedirs(os.path.dirname(session))
+        _directory_redirect(session, target)
+        destination = os.path.join(session, "artifacts")
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "会话目录"}])
+        assert result.get("ok") is False and "产物目录" in result.get("error", ""), result
+        assert os.listdir(target) == [], "不得在重定向目标下创建产物目录"
+
+
+@case("3e. 拒绝重定向的产物目录")
+def test_redirected_artifact_directory_is_rejected():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "other-artifacts")
+        session = os.path.join(root, "sessions", "controlled-session")
+        os.mkdir(target)
+        os.makedirs(session)
+        destination = os.path.join(session, "artifacts")
+        _directory_redirect(destination, target)
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "产物目录"}])
+        assert result.get("ok") is False and "产物目录" in result.get("error", ""), result
+        assert os.listdir(target) == [], "不得写入重定向的产物目录"
+
+
+@case("3f. 允许重定位整个会话根目录")
+def test_relocated_sessions_root_is_supported():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "relocated-sessions")
+        sessions = os.path.join(root, "sessions")
+        os.mkdir(target)
+        _directory_redirect(sessions, target)
+        destination = os.path.join(sessions, "controlled-session", "artifacts")
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(
+                slides=[{"layout": "cover", "title": "会话根目录"}],
+                filename="relocated",
+            )
+        assert result.get("ok") is True, result
+        assert result["path"] == os.path.join(destination, "relocated.pptx"), result
+        stored = os.path.join(target, "controlled-session", "artifacts", "relocated.pptx")
+        assert len(Presentation(stored).slides) == 1
 
 
 # ── 4. 9 套主题全渲染 ────────────────────────────────────────────────────
@@ -277,6 +375,35 @@ def test_mcp_protocol():
         "tools/call(make_pptx) 应生成文件,实际 %r" % payload
 
 
+@case("9b. MCP 子进程按会话路径生成同名 PPT")
+def test_mcp_session_output():
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "make_pptx", "arguments": {"filename": "same-output", "slides": [
+            {"layout": "cover", "title": "MCP 测试"}
+        ]},
+    }}
+    runner = os.path.abspath(os.path.join(_HERE, "..", "..", "..", "src-tauri",
+        "resources", "common", "bundle", "mcp-servers", "python_dependency_runner.py"))
+    command = [sys.executable, "-I", "-S", "-B", runner,
+               sysconfig.get_path("purelib"), os.path.join(_HERE, "server.py")]
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        outputs = []
+        for session in ("session-a", "session-b"):
+            destination = os.path.join(root, "sessions-${literal}", session, "artifacts")
+            proc = subprocess.run(
+                [*command, "--session-artifacts-dir=" + destination],
+                input=(json.dumps(request) + "\n").encode("utf-8"),
+                capture_output=True, check=True, timeout=60,
+            )
+            payload = json.loads(json.loads(proc.stdout)["result"]["content"][0]["text"])
+            assert payload["ok"], payload
+            assert payload["path"] == os.path.join(destination, "same-output.pptx")
+            assert len(Presentation(payload["path"]).slides) == 1
+            outputs.append(payload["path"])
+        assert len(set(outputs)) == 2
+        assert not os.path.lexists(os.path.join(_TMP, "same-output.pptx"))
+
+
 # ── 10. 非法 JSON 抢救 + 彻底空报错(本次修复:模型大纲一长常生成坏 JSON)──
 @case("10. 非法 JSON 抢救 / 空则 ok:False")
 def test_malformed_json_salvage():
@@ -319,16 +446,16 @@ def test_slides_schema_items_pin():
     branches = items.get("anyOf")
     assert isinstance(branches, list) and branches, "items must be an anyOf union, got %r" % branches
     # One branch per layout. The count is the layout set, NOT a budget
-    # boundary on the TARGET face: the constrained-route resource budgets
-    # are aligned to the walle conf.go source defaults since 2026-11-05
-    # (anyOf ≤ 500 branches, ≤ 3000 properties, depth ≤ 30), but that is
-    # the T11 target budget. The currently pinned pre-T11 engine still
-    # caps anyOf at 10, so these 10 branches sit exactly AT the shipped
-    # limit — adding a layout before the close-out re-pin hits the
-    # 10-branch cap, and the pinned engine's sanitizer then omits the
-    # make_pptx tool from that request with a warning (the build keeps the
-    # remaining tools and fails outright only when an explicit tool_choice
-    # forces the omitted tool).
+    # boundary: the constrained-route resource budgets are aligned to the
+    # walle conf.go source defaults since 2026-11-05 (anyOf ≤ 500 branches,
+    # ≤ 3000 properties, depth ≤ 30), and since the close-out re-pin
+    # (2026-11-24, cc2adf8ef9) the pinned engine enforces those budgets
+    # directly, so the union's ceiling is the layout count. (Historical
+    # pre-T11 window: the engine capped anyOf at 10 and these 10 branches
+    # sat exactly AT that shipped limit — adding a layout made the pinned
+    # engine omit the make_pptx tool from that request with a warning; the
+    # build kept the remaining tools and failed outright only when an
+    # explicit tool_choice forced the omitted tool.)
     assert len(branches) == len(server.LAYOUTS), \
         "one branch per layout (%d), got %d" % (len(server.LAYOUTS), len(branches))
     # Per-branch required = exactly the fields the renderer reads and draws

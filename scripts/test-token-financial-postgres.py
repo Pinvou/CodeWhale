@@ -182,7 +182,7 @@ TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/toke
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 MIGRATIONS_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 MIGRATIONS_REQUIRED = {"TestPinnedMigrationLedgerPostgresIntegration", "TestRestrictedMigrationLedgerPostgresIntegration"}
-SCHEMA_REQUIRED = {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"}
+SCHEMA_REQUIRED = {"TestLatePaymentQueryGenerationsMigrationIdentity", "TestLatePaymentArchiveQueryAdmissionPublicMigration", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestChargebackPrincipalRegisteredIdentity", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"}
 F12_UPGRADE_PARENT = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
 F12_UPGRADE_CHILD = "TestF12PaymentCreditUpgradeChildPostgres"
 F12_UPGRADE_MARKER = "PINVOU_F12_UPGRADE_PHASE_RESULT "
@@ -243,6 +243,8 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestChargebackFrozenExecutionPostgres",
+    "TestChargebackPrincipalIndependentCashPostgres",
     "TestF12PaymentRepairOrderLookupPostgres",
     "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
     "TestRetainedOrganizationOrderHistoryPagination",
@@ -281,6 +283,7 @@ RETAINED_REQUIRED = {
     "TestLatePaymentQueryCommandPostgres",
     "TestLatePaymentQueryClientHTTPPostgres",
     "TestLatePaymentArchiveCommandReplayPostgres",
+    "TestLatePaymentQueryGenerationUpgradePostgres",
     "TestProviderBlindCommandReceiptPostgres",
     "TestLatePaymentScheduleCommandReplayPostgres",
     "TestReconciliationFairRetryRuntimePostgres",
@@ -351,6 +354,56 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestLatePaymentQueryCommandPostgres": {
+        "lost_ACK_original_receipt_new_review_and_terminal_projection",
+        "missing_marker_readonly_and_crash_after_marker_never_dispatch",
+        "concurrent_same_identity_has_one_actual_Provider_dispatch",
+        "actor_case_facts_and_current_owner_cannot_disclose_original_receipt",
+        "record_and_receipt_failure_roll_back_together_and_retry_stays_unknown",
+        "uncertain_marker_commit_grants_zero_external_dispatch",
+        "marker_commit_failure_and_missing_result_do_not_dispatch",
+        "Provider_IO_holds_no_query_or_case_transaction_lock",
+        "exact_900030_direct_Down_refuses_and_retains_marker",
+        "PAY12_committed_before_receipt_fault_is_not_reexecuted_or_forged",
+        "concurrent_legal_terminal_case_is_not_overwritten_by_completion",
+        "cancellation_after_Get_preserves_original_unknown",
+        "reachable_Close_interruption_never_recloses_on_recovery",
+        "runtime_identity_and_completed_receipts_are_immutable",
+    },
+    "TestLatePaymentQueryGenerationsMigrationIdentity": {
+        "up", "down", "checksum", "version", "reserved-admission-version", "name", "metadata-forged",
+        "up-reserved-version-before-db", "down-reserved-version-before-db", "verify-reserved-version-before-db",
+        "up-before-db", "down-before-db", "verify-before-db",
+    },
+    "TestLatePaymentQueryGenerationUpgradePostgres": {"published-pre48-UNKNOWN-and-new-explicit-recovery"},
+    "TestLatePaymentArchiveCommandReplayPostgres": {
+        "lost-ack-recovers-exact-original-terminal-receipt",
+        "current-auth-owner-and-changed-case-identity",
+        "no-receipt-terminal-and-provider-blind-are-not-success",
+        "new-command-retains-original-authority-and-claim-admission",
+        "receipt-insert-failure-rolls-back-original-archive",
+        "concurrent-same-key-archives-once",
+        "key-admission-and-permanent-immutable-receipt",
+        "accepted-unfinished-query-blocks-new-archive-without-changing-facts",
+        "archive-sql-cancellation-retains-database-error-not-business-conflict",
+        "prepare-commit-invalidates-old-archive-snapshot",
+        "new-Prepare-fences-a-previously-completed-current-command",
+        "current-query-real-producer",
+        "current-query-real-producer/real-CLOSED-then-failure-PENDING-and-identical-CLOSED",
+        "current-query-real-producer/latest-canceled-query-stays-UNKNOWN-and-never-redispatches",
+        "current-query-real-producer/completion-fault-keeps-current-pending-until-new-explicit-success",
+        "current-query-real-producer/committed-authority-ACK-loss-failed-completion-current",
+        "current-query-real-producer/committed-authority-ACK-loss-failed-completion-stale",
+        "current-query-real-producer/older-failure-cannot-cover-newer-CLOSED",
+        "current-query-real-producer/older-PENDING-cannot-cover-newer-CLOSED",
+        "current-query-real-producer/older-CLOSED-cannot-cover-newer-CLOSED",
+        "current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED",
+        "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-CLOSED",
+        "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-SUBJECT_UNAVAILABLE",
+        "current-query-real-producer/older-CLOSED-cannot-clear-newer-failure",
+        "current-query-real-producer/older-CLOSED-cannot-clear-newer-PENDING",
+    },
+    "TestLatePaymentArchiveQueryAdmissionPublicMigration": {"fresh-public-cli", "previous-full-upgrade-and-forward-only", "production-900038-version-set-upgrade-and-forward-only"},
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
     },

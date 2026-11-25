@@ -83,6 +83,8 @@ type PaymentCoordinator struct {
 	creditAdmission             paymentcredit.Admission
 	repository                  *PostgresRepository
 	ledgerRepairAuthority       ledgerRepairProofAuthority
+	reconciliationFacts         reconciliationFactsLoader
+	paymentOrderProjection      paymentOrderProjection
 	provider                    PaymentProvider
 	secrets                     map[string][]byte
 	merchantID                  string
@@ -92,6 +94,9 @@ type PaymentCoordinator struct {
 	normalRefundCreationEnabled bool
 	allowTestOnlyCollection     bool
 	breaker                     *resilience.Breaker
+	// Private per-instance acknowledgement seam, installed before use only in
+	// controlled tests. Nil keeps the original direct PostgreSQL execution.
+	archiveQueryObservationCommit func(context.Context, uuid.UUID, uuid.UUID, bool) error
 }
 
 // WithLedgerRepairProofAuthority installs the authenticated, read-only Account

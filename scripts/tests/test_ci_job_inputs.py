@@ -38,6 +38,26 @@ class InputTests(unittest.TestCase):
         self.assertNotEqual(before, self.signature([], routing={'frontend': 'true'}, name='frontend-browser-test'))
         self.assertNotEqual(self.signature([]), self.signature([], routing={'rust_full': 'true'}))
 
+    def test_backflow_mode_only_changes_signatures_that_can_observe_it(self):
+        pr_route = {'backflow_mode': 'windows_full', 'frontend': 'true', 'release_contract': 'true'}
+        queue_route = {**pr_route, 'backflow_mode': 'non_rust'}
+        for name in ('version-consistency', 'frontend-test', 'frontend-browser-test', 'release-contract-test'):
+            with self.subTest(job=name):
+                self.assertEqual(self.signature([], routing=pr_route, name=name),
+                                 self.signature([], routing=queue_route, name=name))
+        self.assertNotEqual(self.signature([], routing=pr_route, name='windows-rust-test'),
+                            self.signature([], routing=queue_route, name='windows-rust-test'))
+
+    def test_opaque_or_producer_needs_reads_keep_backflow_mode(self):
+        for condition in ('fromJSON(toJSON(needs.changes.outputs)).backflow_mode',
+                          "needs.changes.outputs['backflow_mode']", 'needs.changes.outputs.backflow_mode'):
+            workflow = WORKFLOW.replace('  frontend-setup:\n',
+                                        f'  frontend-setup:\n    env:\n      MODE: ${{{{ {condition} }}}}\n', 1)
+            with self.subTest(condition=condition):
+                self.assertNotEqual(
+                    INPUTS.fingerprint('frontend-test', workflow, [], [], {}, {'backflow_mode': 'windows_full'}),
+                    INPUTS.fingerprint('frontend-test', workflow, [], [], {}, {'backflow_mode': 'non_rust'}))
+
     def test_no_implicit_contract_or_empty_unsupported_proof(self):
         self.assertIsNone(self.signature([], name='new-unknown-job'))
         self.assertEqual(self.signature([]), self.signature([('100644', 'blob', 'a'*40, 'account-platform/new.go')]))

@@ -239,6 +239,12 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			old := base.Add(-24 * time.Hour)
 			r.now = func() time.Time { return old }
 			var orders []PaymentOrder
+			if scenario == "fresh-install" {
+				before := providerHealthFinancialFacts(t, ctx, r)
+				if !errors.Is(requireProviderHealth038Schema(ctx, r.pool), errProviderHealth038Fixture) || providerHealthFinancialFacts(t, ctx, r) != before {
+					t.Fatal("historical038 producer must not admit or alter current-schema funds")
+				}
+			}
 			for n := 0; n < 5; n++ {
 				_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
 				orders = append(orders, order)

@@ -9,6 +9,9 @@ pub(crate) mod windows;
 #[cfg(unix)]
 pub(crate) mod posix;
 
+#[cfg(unix)]
+pub(crate) mod local_socket;
+
 // `unsupported` 是「尚未实现能力」的桩集合,供 macos 借用未实现的符号(见
 // `macos/mod.rs` 的 `pub use super::unsupported::*`),并在非三大桌面平台上作为
 // 默认 platform。因此除 linux/windows 外均需声明此模块。

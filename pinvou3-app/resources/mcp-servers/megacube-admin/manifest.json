@@ -1,0 +1,50 @@
+{
+  "id": "megacube-admin",
+  "name": "MegaCube 模型服务",
+  "description": "MegaCube 本机模型安装与服务管理：标准卡安装、后台任务、用户授权后的实验安装、产物登记和验证。Cube Manage Software 失联时保留独立下载与安装记录，不绕过本机管理权。",
+  "version": "1.6.0",
+  "icon": "server",
+  "category": "系统",
+  "mcp_tools": [
+    "mcp_megacube_admin_cube_list_incomplete_installs",
+    "mcp_megacube_admin_cube_preview_install_retry",
+    "mcp_megacube_admin_cube_retry_install",
+    "mcp_megacube_admin_cube_get_status",
+    "mcp_megacube_admin_cube_list_models",
+    "mcp_megacube_admin_cube_get_capacity",
+    "mcp_megacube_admin_cube_get_logs",
+    "mcp_megacube_admin_cube_get_task",
+    "mcp_megacube_admin_cube_plan_switch",
+    "mcp_megacube_admin_cube_start_model",
+    "mcp_megacube_admin_cube_stop_model",
+    "mcp_megacube_admin_cube_switch_model",
+    "mcp_megacube_admin_cube_set_default_model",
+    "mcp_megacube_admin_cube_list_store_models",
+    "mcp_megacube_admin_cube_check_model_repo",
+    "mcp_megacube_admin_cube_install_model",
+    "mcp_megacube_admin_cube_cancel_task",
+    "mcp_megacube_admin_cube_search_models",
+    "mcp_megacube_admin_cube_inspect_source",
+    "mcp_megacube_admin_cube_inspect_environment",
+    "mcp_megacube_admin_cube_fetch_files",
+    "mcp_megacube_admin_cube_fetch_repo",
+    "mcp_megacube_admin_cube_resume_task",
+    "mcp_megacube_admin_cube_validate_artifact",
+    "mcp_megacube_admin_cube_verify_artifacts",
+    "mcp_megacube_admin_cube_validate_runtime",
+    "mcp_megacube_admin_cube_register_artifact",
+    "mcp_megacube_admin_cube_install_local_card"
+  ],
+  "command": "python3",
+  "args": [
+    "megacube_admin_server.py"
+  ],
+  "pip_dependencies": [],
+  "builtin": true,
+  "visibility": "system",
+  "security_level": "L1",
+  "data_access": [
+    "models.manage",
+    "network.download"
+  ]
+}

@@ -39,6 +39,15 @@ use super::desktop_remote_task::{lease_matches_remote_binding, with_current_disp
     deny_unknown_fields
 )]
 pub enum RemoteActionIntent {
+    UserInputList {
+        task_id: String,
+    },
+    UserInputRespond {
+        task_id: String,
+        input_id: String,
+        cancel: bool,
+        answers: Vec<crate::features::remote_control::controller::user_input::InputAnswer>,
+    },
     PermissionList {
         task_id: String,
     },
@@ -93,6 +102,8 @@ pub enum RemoteActionIntent {
 impl RemoteActionIntent {
     fn operation(&self) -> &'static str {
         match self {
+            Self::UserInputList { .. } => "user_input_list",
+            Self::UserInputRespond { .. } => "user_input_respond",
             Self::PermissionList { .. } => "permission_list",
             Self::PermissionDecide { .. } => "permission_decide",
             Self::AttachmentBegin { .. } => "attachment_begin",
@@ -109,7 +120,9 @@ impl RemoteActionIntent {
 
     fn task_id(&self) -> Option<&str> {
         match self {
-            Self::PermissionList { task_id }
+            Self::UserInputList { task_id }
+            | Self::UserInputRespond { task_id, .. }
+            | Self::PermissionList { task_id }
             | Self::PermissionDecide { task_id, .. }
             | Self::AttachmentBegin { task_id, .. }
             | Self::AttachmentChunk { task_id, .. }
@@ -154,6 +167,16 @@ impl serde::Serialize for RemoteActionIntent {
         // The same tagged shape is used only as a bounded source for the
         // server-built body; it is never accepted as a wire envelope.
         let (operation, body) = match self {
+            Self::UserInputList { task_id } => (self.operation(), json!({"task_id":task_id})),
+            Self::UserInputRespond {
+                task_id,
+                input_id,
+                cancel,
+                answers,
+            } => (
+                self.operation(),
+                json!({"task_id":task_id,"input_id":input_id,"cancel":cancel,"answers":answers}),
+            ),
             Self::PermissionList { task_id } => (self.operation(), json!({"task_id":task_id})),
             Self::PermissionDecide {
                 task_id,

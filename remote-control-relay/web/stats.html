@@ -23,6 +23,7 @@
     @media(max-width:680px){.version-grid{grid-template-columns:1fr}.usage-panels .card-title{flex-wrap:wrap}.version-panel .version-list{min-height:0}}
     @media(max-width:680px){.topbar{height:62px;padding:0 16px}.top-brand small,.live{display:none}.content{padding:21px 16px 36px}.headline{align-items:flex-start}.headline h1{font-size:23px}.refresh{display:none}.metrics{grid-template-columns:1fr}.panels{grid-template-columns:1fr}.donut-wrap{justify-content:center}.table-head{align-items:flex-start;gap:10px;flex-wrap:wrap}.tools .search{display:none}.behavior-meta-row{align-items:stretch;flex-direction:column}.behavior-period{justify-content:space-between}}
       #hourlyTrendSvg .line2{stroke-dasharray:none}
+    #remoteView > .table-card + .table-card { margin-top: 18px; }
     #hourlyTrendSvg .previous-day{stroke-dasharray:5 5;opacity:.5}
     .metric-filters label{display:flex;align-items:center;gap:6px;cursor:pointer;min-height:28px}.metric-filters input{width:14px;height:14px;margin:0;accent-color:var(--metric-color)}.metric-filters input:focus-visible{outline:2px solid #3267e3;outline-offset:3px}.metric-filters label:has(input:not(:checked)){color:#98a2b3}
     .period-legend{font-size:11px;gap:16px;margin-top:6px}.period-legend i{width:22px;height:0;border-top:2px solid #778399;border-radius:0}.period-legend .previous-key{border-top-style:dashed;opacity:.5}
@@ -77,7 +78,7 @@
       </section>
       <section class="panels usage-panels">
         <article class="card"><div class="card-title"><div><h2>使用趋势</h2><p>设备活跃、新增与对话次数的相对变化</p></div><div class="seg"><button data-days="7">7 天</button><button class="active" data-days="30">30 天</button></div></div><div class="legend trend-legend metric-filters" role="group" aria-label="筛选周月趋势指标"><label style="--metric-color:#3267e3"><input type="checkbox" data-daily-metric="active_devices" aria-controls="trendSvg" checked>活跃设备</label><label style="--metric-color:#8b5fd3"><input type="checkbox" data-daily-metric="new_devices" aria-controls="trendSvg" checked>新增设备</label><label style="--metric-color:#ed9153"><input type="checkbox" data-daily-metric="turns" aria-controls="trendSvg" checked>对话次数</label></div><div class="chart"><svg id="trendSvg" viewBox="0 0 780 220" preserveAspectRatio="none"></svg><div id="trendTooltip" class="chart-tooltip" role="status" aria-live="polite" hidden></div></div></article>
-        <article class="card"><div class="card-title"><div><h2>今日 / 昨日 24 小时趋势</h2><p>北京时间 0–23 点 · 今日当前小时尚未结束</p></div></div><div class="legend trend-legend metric-filters" role="group" aria-label="筛选小时趋势指标"><label style="--metric-color:#3267e3"><input type="checkbox" data-hourly-metric="active_devices" aria-controls="hourlyTrendSvg" checked>活跃设备</label><label style="--metric-color:#8b5fd3"><input type="checkbox" data-hourly-metric="new_devices" aria-controls="hourlyTrendSvg" checked>新增设备</label><label style="--metric-color:#ed9153"><input type="checkbox" data-hourly-metric="turns" aria-controls="hourlyTrendSvg" checked>对话次数</label></div><div class="legend period-legend"><span><i></i>今日</span><span><i class="previous-key"></i>昨日（完整小时）</span></div><div class="chart"><svg id="hourlyTrendSvg" viewBox="0 0 780 220" preserveAspectRatio="none"></svg><div id="hourlyTrendTooltip" class="chart-tooltip" role="status" aria-live="polite" hidden></div></div></article>
+        <article class="card"><div class="card-title"><div><h2>24 小时趋势</h2><p>北京时间 0–23 点 · 今日当前小时尚未结束</p></div></div><div class="legend trend-legend metric-filters" role="group" aria-label="筛选小时趋势指标"><label style="--metric-color:#3267e3"><input type="checkbox" data-hourly-metric="active_devices" aria-controls="hourlyTrendSvg" checked>活跃设备</label><label style="--metric-color:#8b5fd3"><input type="checkbox" data-hourly-metric="new_devices" aria-controls="hourlyTrendSvg" checked>新增设备</label><label style="--metric-color:#ed9153"><input type="checkbox" data-hourly-metric="turns" aria-controls="hourlyTrendSvg" checked>对话次数</label></div><div class="legend period-legend"><span><i></i>今日</span><span><i class="previous-key"></i>上周同一天（完整小时）</span></div><div class="chart"><svg id="hourlyTrendSvg" viewBox="0 0 780 220" preserveAspectRatio="none"></svg><div id="hourlyTrendTooltip" class="chart-tooltip" role="status" aria-live="polite" hidden></div></div></article>
       </section>
       <section class="card version-coverage" aria-labelledby="versionCoverageTitle">
         <div class="card-title"><div><h2 id="versionCoverageTitle">版本覆盖</h2><p>近 7 日活跃设备 · 各平台分别展示前 5 个版本，其余合并</p></div></div>
@@ -166,7 +167,7 @@
           <article class="metric"><div class="metric-head">主控 / 被控安装实例</div><div class="number" id="remoteDevices">—</div><p class="metric-copy">按角色分别去重，同一实例可能承担两种角色。</p></article>
         </section>
         <section class="card table-card"><div class="table-head"><div class="table-title"><h2>任务效果与连接质量</h2><p>总调用已包含远控调用；此处为细分视图，不再累加。样本不足 30 时隐藏百分比。</p></div></div><div class="table-wrap"><table><thead><tr><th>指标</th><th>观测值</th></tr></thead><tbody id="remoteSummaryRows"></tbody></table></div></section>
-        <section class="card table-card"><div class="table-head"><div class="table-title"><h2>连接、权限与传输事件</h2><p>事件数量用于诊断，不等于调用次数；任务未知状态不推断成功或失败。</p></div></div><div class="table-wrap"><table><thead><tr><th>阶段</th><th>结果</th><th>原因</th><th>次数</th></tr></thead><tbody id="remoteEventRows"></tbody></table></div></section>
+        <section class="card table-card"><div class="table-head"><div class="table-title"><h2>连接、权限与传输事件</h2><p id="remoteEventDescription">次数为该组的观测总数。</p></div></div><div class="table-wrap"><table><thead><tr><th scope="col">序号</th><th scope="col">阶段</th><th scope="col">结果</th><th scope="col">原因</th><th scope="col">次数</th></tr></thead><tbody id="remoteEventRows"></tbody></table></div></section>
       </section>
       <section class="page-view hidden" id="commercialView">
         <section class="metrics">
@@ -187,7 +188,7 @@
 <script>
   const $=id=>document.getElementById(id),nf=new Intl.NumberFormat('zh-CN'),DAY_MS=24*60*60*1000,STATS_TIMEZONE_OFFSET_MS=8*60*60*1000;
   const behaviorOverviewSections=['summary','activation','voice','errors','versions','remote'];
-  const state={dailyMetrics:new Set(['active_devices','new_devices','turns']),hourlyMetrics:new Set(['active_devices','new_devices','turns']),role:null,overview:null,devices:[],behavior:null,behaviorErrors:{},behaviorRequestVersions:{},behaviorRangeRequests:{},dataRefreshVersion:0,behaviorSectionReports:{activation:null,voice:null,errors:null,versions:null,remote:null},toolCalls:null,toolInstalls:null,scenes:null,models:null,commercial:null,range:30,behaviorRanges:{summary:'30',remote:'30',activation:'30',voice:'30',errors:'30',toolCalls:'30',toolInstalls:'30',scenes:'30',models:'30',versions:'30'},view:'devices',status:'all',platform:'all',query:'',deviceSort:'turns_7d',deviceSortDirection:'desc',timer:null};
+  const state={dailyMetrics:new Set(['active_devices','new_devices','turns']),hourlyMetrics:new Set(['active_devices','new_devices','turns']),role:null,loggingOut:false,overview:null,devices:[],behavior:null,behaviorErrors:{},behaviorRequestVersions:{},behaviorRangeRequests:{},dataRefreshVersion:0,behaviorSectionReports:{activation:null,voice:null,errors:null,versions:null,remote:null},toolCalls:null,toolInstalls:null,scenes:null,models:null,commercial:null,range:30,behaviorRanges:{summary:'30',remote:'30',activation:'30',voice:'30',errors:'30',toolCalls:'30',toolInstalls:'30',scenes:'30',models:'30',versions:'30'},view:'devices',status:'all',platform:'all',query:'',deviceSort:'turns_7d',deviceSortDirection:'desc',timer:null};
   const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const platform=value=>({linux:'Linux',windows:'Windows',macos:'macOS'}[String(value||'').toLowerCase()]||value||'—');
   const dateTime=(value,timeZone)=>value?new Date(value).toLocaleString('zh-CN',{...(timeZone?{timeZone}:{}),hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
@@ -200,7 +201,7 @@
   const statsDay=value=>Math.floor((Number(value)+STATS_TIMEZONE_OFFSET_MS)/DAY_MS);
   const statsDayLabel=day=>new Date(day*DAY_MS).toISOString().slice(0,10);
   async function api(path,options={}){const response=await fetch(`/pinvou3/stats/api/${path}`,{...options,headers:{'content-type':'application/json',...(options.headers||{})}});if(response.status===401)throw new Error('unauthorized');if(response.status===403)throw new Error('forbidden');if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-  function showLogin(message=''){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
+  function showLogin(message=''){state.dataRefreshVersion++;clearRemoteReport();failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。';if(state.timer)clearInterval(state.timer);state.timer=null;$('loginLayer').classList.remove('hidden');$('loginError').textContent=message;setTimeout(()=>$('password').focus(),60)}
   function linePath(values,max,left=35,right=770,top=22,bottom=184){
     let connected=false;
     return values.map((value,index)=>{
@@ -220,10 +221,10 @@
     return`${label}–${String((Number(label.slice(-5,-3))+1)%24).padStart(2,'0')}:00（北京时间）`;
   }
   function renderHourlyTrend(){
-    const previous=new Map((state.overview?.usage_trend_hourly_previous||[]).map(row=>[Number(row.hour),row]));
+    const previous=new Map((state.overview?.usage_trend_hourly_week_ago||[]).map(row=>[Number(row.hour),row]));
     const rows=(state.overview?.usage_trend_hourly_today||[]).map(row=>({
       ...row,label:hourlyLabel(row.hour),axis:new Date(Number(row.hour)+STATS_TIMEZONE_OFFSET_MS).toISOString().slice(11,16),
-      previous:previous.get(Number(row.hour)-DAY_MS),
+      previous:previous.get(Number(row.hour)-7*DAY_MS),
     }));
     renderUsageTrend('hourlyTrend', rows, true);
   }
@@ -255,13 +256,13 @@
       const selected=Math.max(0,Math.min(days.length-1,index)),row=days[selected],x=pointX(selected),future=hourly&&row.active_devices===null;
       const currentSummary=series.map(item=>`${item.label} ${item.values[selected]??'—'} ${item.unit}`).join('，');
       const previousSummary=series.map(item=>`${item.label} ${item.previous[selected]??'—'} ${item.unit}`).join('，');
-      const summary=`${row.label}，${hourly?'今日，':''}${future?'尚未到达':currentSummary}${hourly?`；昨日 ${hourlyLabel(Number(row.hour)-DAY_MS)}，${row.previous?previousSummary:'暂无数据'}`:''}`;
+      const summary=`${row.label}，${hourly?'今日，':''}${future?'尚未到达':currentSummary}${hourly?`；上周同一天 ${hourlyLabel(Number(row.hour)-7*DAY_MS)}，${row.previous?previousSummary:'暂无数据'}`:''}`;
       hit.dataset.index=String(selected);hit.setAttribute('aria-valuenow',String(selected));hit.setAttribute('aria-valuetext',summary);
       crosshair.setAttribute('x1',x.toFixed(1));crosshair.setAttribute('x2',x.toFixed(1));
       series.forEach(item=>{const dot=$(`${prefix}Dot${item.dot}`),value=item.values[selected];dot.style.display=value===null?'none':'';dot.setAttribute('cx',x.toFixed(1));dot.setAttribute('cy',pointY(value,item.max).toFixed(1))});
       hover.setAttribute('visibility','visible');
       const detail=previous=>series.map(item=>`<span><i style="background:${item.color}${previous?';opacity:.5':''}"></i>${item.label}<b>${(previous?item.previous:item.values)[selected]===null?'—':nf.format((previous?item.previous:item.values)[selected])} ${item.unit}</b></span>`).join('');
-      tooltip.innerHTML=`<strong>${escapeHtml(row.label)}</strong>${hourly?'<strong class="comparison-label">今日</strong>':''}${future?'尚未到达':detail(false)}${hourly?`<strong class="comparison-label">昨日 ${escapeHtml(hourlyLabel(Number(row.hour)-DAY_MS))}</strong>${row.previous?detail(true):'暂无数据'}`:''}`;
+      tooltip.innerHTML=`<strong>${escapeHtml(row.label)}</strong>${hourly?'<strong class="comparison-label">今日</strong>':''}${future?'尚未到达':detail(false)}${hourly?`<strong class="comparison-label">上周同一天 ${escapeHtml(hourlyLabel(Number(row.hour)-7*DAY_MS))}</strong>${row.previous?detail(true):'暂无数据'}`:''}`;
       tooltip.hidden=false;const bounds=svg.getBoundingClientRect(),chartWidth=svg.parentElement.clientWidth||bounds.width||780,xPx=x/780*chartWidth,half=Math.min((tooltip.offsetWidth||184)/2,Math.max(0,chartWidth/2-4));tooltip.style.left=`${Math.max(half+4,Math.min(chartWidth-half-4,xPx))}px`;
     };
     const indexAt=clientX=>{const bounds=svg.getBoundingClientRect(),viewX=(clientX-bounds.left)/(bounds.width||1)*780,ratio=(Math.max(35,Math.min(770,viewX))-35)/735;return Math.round(ratio*(days.length-1))};
@@ -344,10 +345,21 @@
     const targets={remote:'remoteEventRows',activation:'activationFunnelRows',voice:'voiceFunnelRows',errors:'errorRows',versions:'versionQualityRows',toolCalls:'toolCallRows',toolInstalls:'toolInstallRows',scenes:'sceneRows',models:'modelRows'};
     for(const [section,id] of Object.entries(targets)){if(state.behaviorErrors[section]&&!behaviorReport(section)){const body=$(id),count=body.closest('table').querySelectorAll('thead th').length;body.innerHTML=`<tr><td class="table-empty" colspan="${count}">加载失败，请点击刷新重试</td></tr>`}}
   }
-  function storeBehaviorReport(section,value){if(section==='summary')state.behavior=value;else if(behaviorOverviewSections.includes(section))state.behaviorSectionReports[section]=value;else state[section]=value;delete state.behaviorErrors[section]}
+  function storeBehaviorReport(section,value){
+    if(behaviorOverviewSections.includes(section)&&section!=='remote'&&value?.remote_control){const {remote_control,...report}=value;value=report}
+    if(section==='summary')state.behavior=value;else if(behaviorOverviewSections.includes(section))state.behaviorSectionReports[section]=value;else state[section]=value;delete state.behaviorErrors[section]}
+  function clearRemoteReport(){
+    beginBehaviorRequest('remote');
+    delete state.behaviorRangeRequests.remote;
+    setBehaviorRangeBusy('remote',false);
+    storeBehaviorReport('remote',null);
+    renderRemote();
+    renderBehaviorErrors();
+  }
   function renderRemote(){
     const report=state.behaviorSectionReports.remote,r=report?.remote_control;
-    if(!r||!Number.isFinite(r.task_count)){$('remoteMeta').textContent=report?'当前服务端尚未提供完整远控统计，请升级 Relay。':'等待远控统计';for(const id of ['remoteTasks','remoteSuccess','remoteAwaiting','remoteDevices'])$(id).textContent='—';renderSimpleRows('remoteSummaryRows',[],[()=>'',()=>'']);renderSimpleRows('remoteEventRows',r?.rows||[],[row=>escapeHtml(row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>nf.format(row.count||0)]);return}
+    $('remoteEventDescription').textContent=state.role==='behavior_analyst'?'按事件类别编号。次数为该组的观测总数。':'按所选周期内各组首次发生的时间编号。次数为该组的观测总数。';
+    if(!r||!Number.isFinite(r.task_count)){$('remoteMeta').textContent=report?'当前服务端尚未提供完整远控统计，请升级 Relay。':'等待远控统计';for(const id of ['remoteTasks','remoteSuccess','remoteAwaiting','remoteDevices','remoteSubmitted','remoteOutcomes'])$(id).textContent='—';renderSimpleRows('remoteSummaryRows',[],[()=>'',()=>'']);renderSimpleRows('remoteEventRows',r?.rows||[],[row=>row.sequence??'—',row=>escapeHtml(row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>nf.format(row.count||0)]);return}
     const n=v=>nf.format(v||0),pct=v=>v===null||v===undefined?'样本不足':ratio(v),ms=duration;
     $('remoteMeta').textContent=`双端匿名任务去重 · 北京时间 · ${report.range==='today'?'今日':`${report.range} 天`} · 未归属调用 ${n(r.unattributed_count)} · 未关联任务事件 ${n(r.legacy_event_count)}`;
     $('remoteTasks').textContent=n(r.task_count);$('remoteSubmitted').textContent=`提交 ${n(r.submitted_count)} · 接纳 ${n(r.admitted_count)} · 拒绝 ${n(r.rejected_count)}`;
@@ -369,7 +381,7 @@
       ['主控接收观测率',pct(r.result_receipt_rate)],
     ],[row=>escapeHtml(row[0]),row=>escapeHtml(row[1])]);
     const stages={start:'启用被控',stop:'停用被控',refresh:'刷新配对',claim:'认领',handshake:'握手',connection:'连接',disconnection:'断连',resume:'重连',task_submit:'提交',task_not_sent:'未发送',task_admit:'接纳',task_running:'执行',first_output:'首输出',task_terminal:'终态',task_rejected:'拒绝',result_received:'结果接收',model_used:'模型使用',permission:'权限',attachment:'附件传输',artifact:'产物传输'};
-    renderSimpleRows('remoteEventRows',r.rows||[],[row=>escapeHtml(stages[row.stage]||row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>n(row.count)]);
+    renderSimpleRows('remoteEventRows',r.rows||[],[row=>row.sequence??'—',row=>escapeHtml(stages[row.stage]||row.stage),row=>escapeHtml(row.outcome),row=>escapeHtml(row.reason),row=>n(row.count)]);
   }
   function renderCommercial(){for(const id of ['paidPenetration','arpu','arppu','mrr'])$(id).textContent='未接入';$('paidUsers').textContent='无权威账号数据';$('newPaidUsers').textContent='无权威订单数据';$('renewalRate').textContent='未计算';$('revenueTrend').textContent='商业数据源尚未接入，不展示模拟收入';$('conversionFunnel').innerHTML='<div class="empty-tip">商业与实验指标属于 P2，本版本暂不实现</div>'}
   function syncBehaviorRangeControls(section){document.querySelectorAll(`.behavior-range[data-behavior-section="${section}"] button`).forEach(button=>{const active=button.dataset.range===state.behaviorRanges[section];button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active))})}
@@ -379,6 +391,7 @@
   function beginBehaviorRequest(section){return state.behaviorRequestVersions[section]=(state.behaviorRequestVersions[section]||0)+1}
   function isCurrentBehaviorRequest(section,version){return state.behaviorRequestVersions[section]===version}
   async function refreshBehaviorSection(section,range){
+    if(state.loggingOut)return;
     const version=beginBehaviorRequest(section);
     state.behaviorRangeRequests[section]=version;
     try{
@@ -416,12 +429,14 @@
     return !Object.keys(state.behaviorErrors).length;
   }
   async function refreshData(manual=false){
+    if(state.loggingOut)return;
     const version=++state.dataRefreshVersion,isCurrent=()=>state.dataRefreshVersion===version;
     if(manual)$('refreshButton').textContent='↻ 刷新';
     try{
       const session=await api('session');
       if(!isCurrent())return;
       if(state.role!==session.role){failureRevision++;clearFailureDetail();$('failureRows').replaceChildren()}
+      if(state.role!==session.role)clearRemoteReport();
       state.role=session.role;
       const diagnosticsRefresh=manual&&state.view==='diagnostics';
       let diagnosticsOk=true;
@@ -487,8 +502,20 @@
   $('failureIssueForm').addEventListener('submit',async event=>{event.preventDefault();if(!selectedFailure||state.role!=='operations_admin')return;const revision=failureRevision;try{await diagnosticApi('diagnostics/issue',{method:'POST',headers:{'X-Pinvou-Diagnostics':'1'},body:JSON.stringify({fingerprint:selectedFailure,issue:{status:$('failureIssueStatus').value,fixed_version:$('failureFixedVersion').value.trim()}})},revision);if(revision===failureRevision)await loadFailures()}catch{if(revision===failureRevision)$('failureStatus').textContent='处理状态保存失败，标记已修复时须填写有效修复版本。'}});
   $('logout').addEventListener('click',()=>{failureRevision++;clearFailureDetail();$('failureRows').replaceChildren();$('failureStatus').textContent='请登录后查看故障诊断。'},true);
   $('refreshButton').addEventListener('click',()=>refreshData(true));
-  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
-  $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
+  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();if(state.loggingOut)return;$('loginError').textContent='';try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('loginLayer').classList.add('hidden');await refreshData();if(state.view==='diagnostics'&&$('loginLayer').classList.contains('hidden'))await loadFailures();if(!state.timer&&$('loginLayer').classList.contains('hidden'))state.timer=setInterval(refreshData,30000)}catch(error){showLogin(error.message==='unauthorized'?'密码不正确，请重试':'登录失败，请稍后重试')}});
+  $('logout').addEventListener('click',async()=>{
+    if(state.loggingOut)return;
+    state.loggingOut=true;
+    state.dataRefreshVersion++;
+    if(state.timer)clearInterval(state.timer);
+    state.timer=null;
+    clearRemoteReport();
+    try{await api('logout',{method:'POST',body:'{}'})}catch{}finally{
+      state.role=null;
+      state.loggingOut=false;
+      showLogin();
+    }
+  });
   Object.keys(state.behaviorRanges).forEach(syncBehaviorRangeControls);
   refreshData().then(()=>{if($('loginLayer').classList.contains('hidden')&&!state.timer)state.timer=setInterval(refreshData,30000)});
 </script>

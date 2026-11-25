@@ -12,7 +12,7 @@ const MAX_DNS_ADDRESSES: usize = 32;
 // operation until it really exits, including when its awaiting turn is gone.
 static DNS_BUDGET: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 
-pub(crate) struct PinnedEndpoint {
+struct PinnedEndpoint {
     origin: String,
     host: String,
     addresses: Vec<SocketAddr>,
@@ -31,7 +31,21 @@ impl fmt::Debug for RuntimeEgress {
 }
 
 impl RuntimeEgress {
-    pub(crate) fn new(primary: PinnedEndpoint, vision: Option<PinnedEndpoint>) -> Arc<Self> {
+    pub(crate) async fn prepare(
+        primary_url: &str,
+        vision_url: Option<&str>,
+    ) -> Result<Arc<Self>, &'static str> {
+        let primary = prepare_endpoint(parse_endpoint(primary_url)?).await?;
+        let vision = match vision_url.map(parse_endpoint).transpose()? {
+            Some(url) if url.origin().ascii_serialization() != primary.origin => {
+                Some(prepare_endpoint(url).await?)
+            }
+            _ => None,
+        };
+        Ok(Self::new(primary, vision))
+    }
+
+    fn new(primary: PinnedEndpoint, vision: Option<PinnedEndpoint>) -> Arc<Self> {
         let mut endpoints = vec![primary];
         if let Some(vision) = vision {
             endpoints.push(vision);
@@ -85,7 +99,7 @@ impl reqwest::dns::Resolve for SnapshotResolver {
     }
 }
 
-pub(crate) async fn prepare_endpoint(base_url: &str) -> Result<PinnedEndpoint, &'static str> {
+fn parse_endpoint(base_url: &str) -> Result<reqwest::Url, &'static str> {
     let url = reqwest::Url::parse(base_url).map_err(|_| "model_endpoint_invalid")?;
     if url.scheme() != "https" {
         return Err("model_endpoint_insecure");
@@ -93,6 +107,10 @@ pub(crate) async fn prepare_endpoint(base_url: &str) -> Result<PinnedEndpoint, &
     if !url.username().is_empty() || url.password().is_some() {
         return Err("model_endpoint_invalid");
     }
+    Ok(url)
+}
+
+async fn prepare_endpoint(url: reqwest::Url) -> Result<PinnedEndpoint, &'static str> {
     let host = url
         .host_str()
         .ok_or("model_endpoint_invalid")?
@@ -236,8 +254,9 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_transport_refuses_unprepared_origins_and_insecure_requests() {
-        let endpoint = prepare_endpoint("https://1.1.1.1/v1").await.unwrap();
-        let policy = RuntimeEgress::new(endpoint, None);
+        let policy = RuntimeEgress::prepare("https://1.1.1.1/v1", None)
+            .await
+            .unwrap();
         assert!(
             policy
                 .configure(reqwest::Client::builder(), "https://1.1.1.1:444/v1")
@@ -260,8 +279,33 @@ mod tests {
             "https://[::1]/",
             "https://user:secret@1.1.1.1/",
         ] {
-            assert!(prepare_endpoint(base).await.is_err());
+            assert!(RuntimeEgress::prepare(base, None).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn temporary_routes_share_a_snapshot_only_when_the_origin_matches() {
+        let primary = "https://1.1.1.1/v1";
+        let vision = "https://1.1.1.1:443/vision";
+        let policy = RuntimeEgress::prepare(primary, Some(vision)).await.unwrap();
+        assert_eq!(policy.endpoints.len(), 1);
+        assert!(policy.configure(reqwest::Client::builder(), vision).is_ok());
+
+        let other_port = "https://1.1.1.1:444/vision";
+        let policy = RuntimeEgress::prepare(primary, Some(other_port))
+            .await
+            .unwrap();
+        assert_eq!(policy.endpoints.len(), 2);
+        assert!(
+            policy
+                .configure(reqwest::Client::builder(), other_port)
+                .is_ok()
+        );
+        assert!(
+            RuntimeEgress::prepare(primary, Some("https://test@1.1.1.1/vision"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -281,7 +325,7 @@ mod tests {
             let url = reqwest::Url::parse(base).unwrap();
             assert!(matches!(
                 url.host_str(),
-                Some("primary.invalid" | "vision.invalid")
+                Some("primary.invalid" | "vision.invalid" | "wrong-name.invalid")
             ));
             // Fixture-only pins deliberately use loopback. Production admission
             // cannot produce these pins; private/mixed IP rejection is separate.
@@ -294,6 +338,41 @@ mod tests {
         let policy = RuntimeEgress::new(endpoint(primary), Some(endpoint(vision)));
         let ca =
             reqwest::Certificate::from_pem(fixture["ca_pem"].as_str().unwrap().as_bytes()).unwrap();
+        let untrusted = policy
+            .configure(
+                reqwest::Client::builder().timeout(Duration::from_secs(5)),
+                primary,
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = untrusted
+            .get(format!("{primary}/ok"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect() && !error.is_timeout());
+
+        let mut wrong_name = reqwest::Url::parse(primary).unwrap();
+        wrong_name.set_host(Some("wrong-name.invalid")).unwrap();
+        let wrong_name_policy = RuntimeEgress::new(endpoint(wrong_name.as_str()), None);
+        let wrong_name_client = wrong_name_policy
+            .configure(
+                reqwest::Client::builder()
+                    .add_root_certificate(ca.clone())
+                    .timeout(Duration::from_secs(5)),
+                wrong_name.as_str(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = wrong_name_client
+            .get(format!("{wrong_name}/ok"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect() && !error.is_timeout());
+
         for base in [primary, vision] {
             for http1 in [false, true] {
                 let builder = reqwest::Client::builder()

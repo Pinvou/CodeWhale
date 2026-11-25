@@ -28,6 +28,8 @@ impl CancelRegistry {
         let control = RunControl {
             cancel: Some(Arc::new(AtomicBool::new(false))),
             prompt: Some(Arc::new(PromptSlot::default())),
+            run_id: Some(run_id.to_string()),
+            ..Default::default()
         };
         self.0.lock().insert(run_id.to_string(), control.clone());
         control
@@ -99,7 +101,21 @@ impl CancelRegistry {
 /// 到十几小时。登记里除了操作名还存着 run_id，界面重新进来时按卡片把 run_id
 /// 要回去，就能接着读日志、接着取消、接着应答脚本的提问。
 #[derive(Default)]
-pub struct ActiveCardOps(Mutex<HashMap<String, ActiveEntry>>);
+pub struct ActiveCardOps(Mutex<ActiveOpsState>);
+
+#[derive(Default)]
+struct ActiveOpsState {
+    cards: HashMap<String, ActiveEntry>,
+    engine_cleanup: bool,
+}
+
+pub struct EngineCleanupGuard(Arc<ActiveCardOps>);
+
+impl Drop for EngineCleanupGuard {
+    fn drop(&mut self) {
+        self.0.0.lock().engine_cleanup = false;
+    }
+}
 
 /// 一张卡上正占着坑的那个操作。
 struct ActiveEntry {
@@ -135,7 +151,11 @@ impl ActiveCardOps {
     /// 没有日志也没有取消）。做成 `Option` 而不是再开一个入口，是为了让「占坑」
     /// 和「销号」始终一一对应——多一个入口就多一处会忘记 `finish` 的地方。
     pub fn try_begin(&self, card_id: &str, op: CardOp, run_id: Option<&str>) -> Result<(), String> {
-        let mut m = self.0.lock();
+        let mut state = self.0.lock();
+        if state.engine_cleanup {
+            return Err("正在删除推理引擎，请等待删除完成后再操作模型。".to_string());
+        }
+        let m = &mut state.cards;
         if let Some(entry) = m.get(card_id) {
             let running = entry.op.label;
             return Err(format!("该模型正在{running}，请等当前操作结束后再试"));
@@ -151,22 +171,35 @@ impl ActiveCardOps {
     }
 
     pub fn finish(&self, card_id: &str) {
-        self.0.lock().remove(card_id);
+        self.0.lock().cards.remove(card_id);
+    }
+
+    /// 检查和占位必须在同一把锁内；只查 active_runs 会让新下载在检查后插入。
+    pub fn try_begin_engine_cleanup(self: &Arc<Self>) -> Result<EngineCleanupGuard, String> {
+        let mut state = self.0.lock();
+        if state.engine_cleanup || !state.cards.is_empty() {
+            return Err(
+                "模型商店仍有任务正在进行，请等待下载、部署、启停或删除操作结束后再删除引擎。"
+                    .to_string(),
+            );
+        }
+        state.engine_cleanup = true;
+        Ok(EngineCleanupGuard(Arc::clone(self)))
     }
 
     /// 现在有没有下载在跑。清理下载缓存前要确认——别把正在写的临时块删了。
-    /// 只看下载：部署/启用这些不碰 .incomplete，没必要一并挡住。
+    /// 只看下载类操作（商店下载 + 本地卡片安装，后者同样会跑 download_model）：
+    /// 部署/启用这些不碰 .incomplete，没必要一并挡住。
     pub fn any_download_running(&self) -> bool {
-        self.0
-            .lock()
-            .values()
-            .any(|e| e.op == OP_DOWNLOAD || e.op.kind == "version_stage")
+        self.0.lock().cards.values().any(|e| {
+            e.op == OP_DOWNLOAD || e.op == OP_INSTALL_LOCAL || e.op.kind == "version_stage"
+        })
     }
 
     /// 这张卡上还在跑的那次长操作。界面按卡片接回任务卡时问的就是它。
     pub fn run_for_card(&self, card_id: &str) -> Option<ActiveRun> {
         let m = self.0.lock();
-        let entry = m.get(card_id)?;
+        let entry = m.cards.get(card_id)?;
         Some(ActiveRun {
             card_id: card_id.to_string(),
             run_id: entry.run_id.clone()?,
@@ -180,6 +213,7 @@ impl ActiveCardOps {
     pub fn active_runs(&self) -> Vec<ActiveRun> {
         self.0
             .lock()
+            .cards
             .iter()
             .filter_map(|(card_id, entry)| {
                 Some(ActiveRun {
@@ -197,6 +231,13 @@ pub const OP_DOWNLOAD: CardOp = CardOp {
     kind: "download",
     label: "下载",
 };
+/// 本地卡片安装（install_local）：执行已经物化在 cards/<id>/ 的卡。含的段比
+/// 商店下载多一步部署，但权重那段同样走下载队列、同样碰 .incomplete，
+/// 所以排队/缓存清理都按下载类操作对待。
+pub const OP_INSTALL_LOCAL: CardOp = CardOp {
+    kind: "install_local",
+    label: "安装本地卡片",
+};
 pub const OP_DEPLOY: CardOp = CardOp {
     kind: "deploy",
     label: "部署",
@@ -212,6 +253,10 @@ pub const OP_STOP: CardOp = CardOp {
 pub const OP_UNINSTALL: CardOp = CardOp {
     kind: "uninstall",
     label: "卸载",
+};
+pub const OP_UNINSTALL_RECOVERY: CardOp = CardOp {
+    kind: "uninstall_recovery",
+    label: "核实并恢复模型维护",
 };
 /// 强制移除只借用卡片互斥（真有卸载正在删文件时不能把记录抽走），它同步做完、
 /// 没有 run_id，所以不会出现在「活跃运行」里——界面也没有东西需要接回去。
@@ -315,6 +360,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn engine_cleanup_and_all_card_operations_are_mutually_exclusive() {
+        let ops = Arc::new(ActiveCardOps::default());
+        for op in [
+            OP_DOWNLOAD,
+            OP_DEPLOY,
+            OP_ENABLE,
+            OP_STOP,
+            OP_UNINSTALL,
+            OP_FORCE_REMOVE,
+        ] {
+            ops.try_begin("card-a", op, None).unwrap();
+            assert!(ops.try_begin_engine_cleanup().is_err());
+            ops.finish("card-a");
+        }
+        let guard = ops.try_begin_engine_cleanup().unwrap();
+        assert!(ops.try_begin_engine_cleanup().is_err());
+        assert!(ops.try_begin("card-b", OP_DOWNLOAD, Some("run-b")).is_err());
+        drop(guard);
+        assert!(ops.try_begin("card-b", OP_DOWNLOAD, Some("run-b")).is_ok());
+    }
+
+    #[test]
     fn one_lifecycle_op_per_card() {
         let ops = ActiveCardOps::default();
         assert!(ops.try_begin("card-a", OP_ENABLE, Some("run-1")).is_ok());
@@ -352,6 +419,13 @@ mod tests {
         assert!(ops.any_download_running());
 
         ops.finish("card-b");
+        assert!(!ops.any_download_running());
+
+        // 本地卡片安装同样会跑 download_model、碰 .incomplete，必须一并挡住清理
+        ops.try_begin("card-c", OP_INSTALL_LOCAL, Some("run-c"))
+            .unwrap();
+        assert!(ops.any_download_running());
+        ops.finish("card-c");
         assert!(!ops.any_download_running());
     }
 

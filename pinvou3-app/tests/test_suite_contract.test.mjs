@@ -17,6 +17,7 @@ const helperFiles = new Set([
   "account_platform_recharge_polling_server.mjs",
   "account_platform_sms_conflict_cases.mjs",
   "behavior_telemetry_source.mjs",
+  "megacube_startup_real.mjs", // Explicit --run-live INPUT.json; private service/container acceptance only.
   "bridge_domain_contract.mjs",
   "organization_unit_scope_cases.mjs",
   "bridge_slice_fields.mjs",

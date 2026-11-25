@@ -1,0 +1,833 @@
+//! Discover failed installations from durable task facts, without inventing a
+//! model-library row or deriving lifecycle authority from a directory or log.
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::{config, db, lifecycle::ModelManager, run_state::ActiveCardOps, script_runner};
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Context {
+    source: String,
+    models_dir: String,
+    staging_dir: String,
+    hf_endpoint: String,
+    store_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetryReference {
+    pub original_run_id: String,
+    pub preview_sha256: String,
+}
+
+impl Context {
+    pub(super) fn capture(settings: &config::Settings, source: &str) -> Self {
+        Self {
+            source: source.into(),
+            models_dir: settings.models_dir.clone(),
+            staging_dir: settings.staging_dir.clone(),
+            hf_endpoint: settings.hf_endpoint.clone(),
+            // 主线把商店地址定成常量（config::STORE_URL，配置键已废）：回执里
+            // 记录的"来源"只区分 store/local，不再保存可配置地址。
+            store_url: (source == "store").then(|| config::STORE_URL.to_string()),
+        }
+    }
+
+    pub(super) fn test_mode(&self) -> bool {
+        self.source == "test_store"
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct Receipt {
+    card_id: String,
+    kind: String,
+    created_at: String,
+    outcome: Option<Result<Value, String>>,
+    cancelled: bool,
+    #[serde(default)]
+    install_context: Option<Context>,
+    /// 用户已放弃这条记录：不再提醒，也不再提供重试。打标改写由 service.rs 完
+    /// 成（SavedRun 的所有者）；旧回执没有这个字段，读出来是 false——放弃是本
+    /// 版才有的动作，存量记录的行为保持不变。
+    #[serde(default)]
+    dismissed: bool,
+}
+
+fn safe_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 160 || config::safe_path_component(id).is_err() {
+        return Err("invalid_installation_reference".into());
+    }
+    Ok(())
+}
+
+fn read(id: &str) -> Result<Receipt, String> {
+    safe_id(id)?;
+    let path = config::data_dir().join("runs").join(format!("{id}.json"));
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| "installation_record_unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "installation_record_unavailable")?;
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err("installation_record_untrusted".into());
+    }
+    // Receipt omits the producer's unbounded `lines` array. Stream over those
+    // unused logs while retaining the exact private metadata used for retry;
+    // a legitimate large log must not exhaust the recovery input budget.
+    let receipt: Receipt = serde_json::from_reader(std::io::BufReader::new(file))
+        .map_err(|_| "installation_record_corrupt")?;
+    safe_id(&receipt.card_id)?;
+    Ok(receipt)
+}
+
+/// Cache parsed summaries by descriptor identity and change timestamps. Exact
+/// retry authorization always calls read() again, so this cache grants no rights.
+type ReceiptStamp = (u64, u64, u64, i64, i64, i64, i64);
+type ReceiptCache = BTreeMap<std::path::PathBuf, (ReceiptStamp, Receipt)>;
+static RECEIPT_CACHE: std::sync::LazyLock<parking_lot::Mutex<ReceiptCache>> =
+    std::sync::LazyLock::new(Default::default);
+fn cached_receipt(id: &str) -> Result<Receipt, String> {
+    safe_id(id)?;
+    let path = config::data_dir().join("runs").join(format!("{id}.json"));
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| "installation_record_unavailable")?;
+    // SAFETY: geteuid only reads the effective process identity.
+    let uid = unsafe { libc::geteuid() };
+    if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1 || meta.mode() & 0o077 != 0 {
+        return Err("installation_record_untrusted".into());
+    }
+    let stamp = (
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    );
+    if let Some((saved, receipt)) = RECEIPT_CACHE.lock().get(&path) {
+        if saved == &stamp {
+            return Ok(receipt.clone());
+        }
+    }
+    let receipt = read(id)?;
+    let mut cache = RECEIPT_CACHE.lock();
+    if cache.len() >= 4096 {
+        cache.clear();
+    }
+    cache.insert(path, (stamp, receipt.clone()));
+    Ok(receipt)
+}
+
+fn latest() -> Result<BTreeMap<String, (String, Receipt)>, String> {
+    latest_excluding(None, None)
+}
+
+fn latest_excluding(
+    accepted_run: Option<&str>,
+    card_id: Option<&str>,
+) -> Result<BTreeMap<String, (String, Receipt)>, String> {
+    let directory = config::data_dir().join("runs");
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(_) => return Err("installation_index_unavailable".into()),
+    };
+    let mut result: BTreeMap<String, (String, Receipt)> = BTreeMap::new();
+    for entry in entries {
+        let path = entry.map_err(|_| "installation_index_unavailable")?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or("invalid_installation_reference")?;
+        if accepted_run == Some(id) {
+            continue;
+        }
+        let receipt = if card_id.is_none() {
+            cached_receipt(id)?
+        } else {
+            read(id)?
+        };
+        if card_id.is_some_and(|card| card != receipt.card_id) {
+            continue;
+        }
+        // Stream immutable history one bounded receipt at a time. The bound
+        // covers distinct current identities, never lifetime operation count.
+        if !result.contains_key(&receipt.card_id) && result.len() >= 4096 {
+            return Err("installation_index_limit: model identities need review".into());
+        }
+        let time = chrono::DateTime::parse_from_rfc3339(&receipt.created_at)
+            .map_err(|_| "installation_record_corrupt")?;
+        if let Some((_, previous)) = result.get(&receipt.card_id) {
+            let previous_time = chrono::DateTime::parse_from_rfc3339(&previous.created_at)
+                .map_err(|_| "installation_record_corrupt")?;
+            if time < previous_time {
+                continue;
+            }
+            if time == previous_time {
+                return Err("installation_order_ambiguous".into());
+            }
+        }
+        result.insert(receipt.card_id.clone(), (id.into(), receipt));
+    }
+    Ok(result)
+}
+
+fn failed_install(receipt: &Receipt) -> bool {
+    matches!(receipt.kind.as_str(), "download" | "install_local")
+        && !matches!(receipt.outcome, Some(Ok(_)))
+}
+
+/// 放弃一条安装回执前的全部校验。真正的改写在 service.rs——它是 SavedRun（含
+/// lines 的完整落盘格式）的所有者，这里只负责把「不能放弃」的情况全数拦下。
+///
+/// 三道闸各对应一种真实误用：
+///   * 未终结的记录还在跑，放弃等于把活着的任务从界面上抹掉，结局从此没人写；
+///   * 未完成面板只列失败的 download / install_local，别的种类没有「放弃」语义；
+///   * 脚本进程必须确认已退出（复用重试前的同一道进程检查）——刚点完取消，
+///     进程还在收尾时就放弃，会留下一个再也没人看的活进程。
+pub(super) fn ensure_dismissable(run_id: &str) -> Result<(), String> {
+    let receipt = read(run_id)?;
+    if receipt.outcome.is_none() {
+        return Err("installation_not_terminal".into());
+    }
+    if !failed_install(&receipt) {
+        return Err("installation_not_dismissable".into());
+    }
+    super::orphans::ensure_run_quiet(run_id)?;
+    Ok(())
+}
+
+pub(super) fn summaries(active: &ActiveCardOps) -> Result<Vec<Value>, String> {
+    let mut items = Vec::new();
+    for (_, (id, receipt)) in latest()? {
+        // 已放弃的记录整条沉默：这是「不再提示」的全部语义。同卡之后**新的**
+        // 失败会生成更新的回执，照常出现——放弃只针对这一次尝试，不是拉黑卡片。
+        if receipt.dismissed
+            || !failed_install(&receipt)
+            || db::get_store_model(&receipt.card_id)
+                .map_err(|error| error.to_string())?
+                .is_some()
+        {
+            continue;
+        }
+        // outcome=None 既可能是中断遗留，也可能只是正常下载尚未完成。
+        // 回执读取后核对当前登记，避免把运行中/排队/取消收尾的任务报为失败。
+        // 只排除同一次运行；没有确切归属的记录仍须保留待核实。
+        if receipt.outcome.is_none()
+            && active
+                .run_for_card(&receipt.card_id)
+                .is_some_and(|run| run.run_id == id && run.kind == receipt.kind)
+        {
+            continue;
+        }
+        let terminal = receipt.outcome.is_some();
+        let source_known = receipt.kind == "install_local" || receipt.install_context.is_some();
+        let (error, error_truncated) = match receipt.outcome.and_then(Result::err) {
+            Some(error) => {
+                let (text, truncated) = super::log_page::summary(&error);
+                (Some(text), truncated)
+            }
+            None => (None, false),
+        };
+        items.push(
+            json!({"runId":id,"cardId":receipt.card_id,"kind":receipt.kind,
+            "createdAt":receipt.created_at,"cancelled":receipt.cancelled,"terminal":terminal,
+            "canPreview":terminal&&source_known,"legacyContext":receipt.install_context.is_none(),
+            "error":error,"errorTruncated":error_truncated,"modelWritesGranted":false}),
+        );
+    }
+    Ok(items)
+}
+
+pub(super) struct Preview {
+    pub card_id: String,
+    pub kind: String,
+    pub context: Context,
+    pub package_sha256: String,
+    pub public: Value,
+    receipt_sha256: String,
+}
+
+fn receipt_digest(receipt: &Receipt) -> Result<String, String> {
+    serde_json::to_string(receipt)
+        .map(|value| script_runner::sha256_hex(&value))
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn recheck(
+    run_id: &str,
+    preview: &Preview,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let receipt = read(run_id)?;
+    if receipt_digest(&receipt)? != preview.receipt_sha256
+        || preview.public["previewSha256"].as_str() != Some(expected_sha256)
+    {
+        return Err("installation_preview_changed".into());
+    }
+    if db::get_store_model(&preview.card_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err("installation_already_in_library".into());
+    }
+    super::orphans::ensure_run_quiet(run_id)?;
+    Ok(())
+}
+
+fn candidate(run_id: &str, accepted_run: Option<&str>) -> Result<Receipt, String> {
+    let receipt = read(run_id)?;
+    if !failed_install(&receipt) || receipt.outcome.is_none() {
+        return Err("installation_not_terminal".into());
+    }
+    // 放弃过的记录不能从预览/重试这条侧门复活：面板上它已经消失了，一个看不
+    // 见的条目更不该还能发起安装。
+    if receipt.dismissed {
+        return Err("installation_dismissed".into());
+    }
+    if db::get_store_model(&receipt.card_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err("installation_already_in_library".into());
+    }
+    if latest_excluding(accepted_run, Some(&receipt.card_id))?
+        .get(&receipt.card_id)
+        .map(|(id, _)| id.as_str())
+        != Some(run_id)
+    {
+        return Err("installation_superseded".into());
+    }
+    super::maintenance::ensure_clear(&receipt.card_id)?;
+    super::orphans::ensure_run_quiet(run_id)?;
+    Ok(receipt)
+}
+
+fn context(receipt: &Receipt) -> Result<Context, String> {
+    let source = if receipt.kind == "install_local" {
+        "local"
+    } else {
+        receipt
+            .install_context
+            .as_ref()
+            .map(|context| context.source.as_str())
+            .ok_or("installation_original_source_unknown")?
+    };
+    if !["local", "store", "test_store"].contains(&source) {
+        return Err("installation_original_source_unknown".into());
+    }
+    let context = Context::capture(&config::load_settings(), source);
+    if receipt
+        .install_context
+        .as_ref()
+        .is_some_and(|original| original != &context)
+    {
+        return Err("installation_storage_or_source_changed".into());
+    }
+    Ok(context)
+}
+
+pub(super) fn retry_request(run_id: &str) -> Result<(String, String, Context), String> {
+    let receipt = candidate(run_id, None)?;
+    let context = context(&receipt)?;
+    Ok((receipt.card_id, receipt.kind, context))
+}
+
+pub(super) fn request_identity(run_id: &str) -> Result<(String, String, Context), String> {
+    let receipt = read(run_id)?;
+    if !failed_install(&receipt) || receipt.outcome.is_none() {
+        return Err("installation_not_terminal".into());
+    }
+    if receipt.dismissed {
+        return Err("installation_dismissed".into());
+    }
+    let context = context(&receipt)?;
+    Ok((receipt.card_id, receipt.kind, context))
+}
+
+pub(super) fn preview(run_id: &str) -> Result<Preview, String> {
+    preview_for_retry(run_id, None)
+}
+
+pub(super) fn preview_for_retry(
+    run_id: &str,
+    accepted_run: Option<&str>,
+) -> Result<Preview, String> {
+    let receipt = candidate(run_id, accepted_run)?;
+    let receipt_sha256 = receipt_digest(&receipt)?;
+    let context = context(&receipt)?;
+    // 内置测试商店已随主线 2026-09-30 移除；test_mode() 只是存量回执的兼容
+    // 判读，统一走真实商店来源。
+    let manager = ModelManager::new(None, None);
+    let (name, package_sha256) = if receipt.kind == "install_local" {
+        ModelManager::preview_local_install(&receipt.card_id)
+    } else {
+        manager.preview_store_install(&receipt.card_id)
+    }
+    .map_err(|error| error.to_string())?;
+    let stamp = json!({"run_id":run_id,"receipt_sha256":receipt_sha256,"card_id":receipt.card_id,"kind":receipt.kind,"context":context,"package_sha256":package_sha256});
+    let digest = script_runner::sha256_hex(
+        &serde_json::to_string(&stamp).map_err(|error| error.to_string())?,
+    );
+    let public = json!({"runId":run_id,"cardId":receipt.card_id,"kind":receipt.kind,"cardName":name,
+        "previewSha256":digest,"packageSha256":package_sha256,"legacyContext":receipt.install_context.is_none(),
+        "modelsDir":context.models_dir,"stagingDir":context.staging_dir,"modelWritesGranted":false});
+    Ok(Preview {
+        card_id: receipt.card_id,
+        kind: receipt.kind,
+        context,
+        package_sha256,
+        public,
+        receipt_sha256,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // 放弃的改写在 service.rs（SavedRun 的所有者），测试直接驱动那条真实路径。
+    use super::super::service::{ModelStoreService, dismiss_incomplete_local};
+
+    fn receipt(id: &str, kind: &str, time: &str, outcome: Value) {
+        let value = json!({"card_id":"local-fixture","kind":kind,"created_at":time,"outcome":outcome,"cancelled":false,"lines":[]});
+        super::super::execution_fence::private_write(
+            &config::data_dir().join("runs").join(format!("{id}.json")),
+            &serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn local_package() {
+        let dir = config::data_dir().join("cards/local-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        for script in [
+            "install_engine",
+            "download_model",
+            "deploy",
+            "enable",
+            "stop",
+            "uninstall",
+        ] {
+            std::fs::write(dir.join(format!("{script}.sh")), "#!/bin/bash\nexit 0\n").unwrap();
+        }
+        std::fs::write(dir.join("common.sh"), "# fixture\n").unwrap();
+        std::fs::write(
+            dir.join("card.json"),
+            r#"{"name":"Local fixture","engine_name":"test-engine"}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn live_installations_do_not_surface_as_failures_but_lost_runs_still_do() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        for (kind, op) in [
+            ("download", super::super::run_state::OP_DOWNLOAD),
+            ("install_local", super::super::run_state::OP_INSTALL_LOCAL),
+        ] {
+            receipt(
+                "older",
+                kind,
+                "2026-10-18T00:00:00Z",
+                json!({"Err":"old failure"}),
+            );
+            receipt("current", kind, "2026-10-18T00:00:01Z", Value::Null);
+            let active = ActiveCardOps::default();
+            active
+                .try_begin("local-fixture", op, Some("current"))
+                .unwrap();
+            // Active registration also owns queued work and cancellation
+            // until cleanup; an absent result is not evidence of failure.
+            for cancelled in [false, true] {
+                let mut current = read("current").unwrap();
+                current.cancelled = cancelled;
+                super::super::execution_fence::private_write(
+                    &config::data_dir().join("runs/current.json"),
+                    &serde_json::to_vec(&current).unwrap(),
+                )
+                .unwrap();
+                assert!(summaries(&active).unwrap().is_empty());
+            }
+            receipt(
+                "current",
+                kind,
+                "2026-10-18T00:00:01Z",
+                json!({"Err":"new failure"}),
+            );
+            let failed = summaries(&active).unwrap();
+            assert_eq!(
+                failed.len(),
+                1,
+                "terminal failure must not be hidden by stale activity"
+            );
+            assert_eq!(failed[0]["runId"], "current");
+            assert_eq!(failed[0]["terminal"], true);
+
+            active.finish("local-fixture");
+            receipt("current", kind, "2026-10-18T00:00:01Z", Value::Null);
+            let lost = summaries(&active).unwrap();
+            assert_eq!(
+                lost.len(),
+                1,
+                "unowned unfinished receipt must remain visible"
+            );
+            assert_eq!(lost[0]["runId"], "current");
+            assert_eq!(lost[0]["terminal"], false);
+            assert_eq!(lost[0]["canPreview"], false);
+            assert!(preview("current").err().unwrap().contains("not_terminal"));
+
+            receipt("current", kind, "2026-10-18T00:00:01Z", json!({"Ok":{}}));
+            assert!(summaries(&active).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn only_the_exact_active_installation_owns_an_unfinished_receipt() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt("current", "download", "2026-10-18T00:00:00Z", Value::Null);
+        for (card, id, op) in [
+            (
+                "local-fixture",
+                "another-run",
+                super::super::run_state::OP_DOWNLOAD,
+            ),
+            (
+                "another-card",
+                "current",
+                super::super::run_state::OP_DOWNLOAD,
+            ),
+            (
+                "local-fixture",
+                "current",
+                super::super::run_state::OP_INSTALL_LOCAL,
+            ),
+        ] {
+            let active = ActiveCardOps::default();
+            active.try_begin(card, op, Some(id)).unwrap();
+            assert_eq!(summaries(&active).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn terminal_failures_without_a_row_remain_visible_and_do_not_resurface_after_successful_uninstall()
+     {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "install_local",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"fixture failure"}),
+        );
+        let items = summaries(&ActiveCardOps::default()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["modelWritesGranted"], false);
+        receipt(
+            "later",
+            "uninstall",
+            "2026-10-18T00:00:01Z",
+            json!({"Ok":{}}),
+        );
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
+        assert!(preview("failure").err().unwrap().contains("superseded"));
+    }
+
+    #[test]
+    fn preview_pins_current_package_and_context_but_never_imports_runtime_as_package() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        local_package();
+        receipt(
+            "failure",
+            "install_local",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"fixture failure"}),
+        );
+        let first = preview("failure").unwrap();
+        let directory = config::data_dir().join("cards/local-fixture");
+        std::fs::create_dir_all(directory.join(".venv")).unwrap();
+        std::fs::write(directory.join(".venv/runtime"), "keep runtime").unwrap();
+        assert_eq!(
+            first.public["previewSha256"],
+            preview("failure").unwrap().public["previewSha256"]
+        );
+        std::fs::write(directory.join("deploy.sh"), "#!/bin/bash\nexit 42\n").unwrap();
+        assert_ne!(
+            first.public["previewSha256"],
+            preview("failure").unwrap().public["previewSha256"]
+        );
+        assert_eq!(db::list_store_models().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn unknown_store_source_active_records_and_untrusted_receipts_cannot_resume() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "download",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"fixture failure"}),
+        );
+        assert!(
+            !summaries(&ActiveCardOps::default()).unwrap()[0]["canPreview"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(
+            preview("download")
+                .err()
+                .unwrap()
+                .contains("source_unknown")
+        );
+        receipt(
+            "running",
+            "install_local",
+            "2026-10-18T00:00:01Z",
+            Value::Null,
+        );
+        assert!(preview("running").err().unwrap().contains("not_terminal"));
+        let path = config::data_dir().join("runs/running.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read("running").err().unwrap().contains("untrusted"));
+        assert!(read("../running").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(config::data_dir().join("runs/download.json"), path).unwrap();
+        assert!(read("running").is_err());
+    }
+
+    #[test]
+    fn completed_history_does_not_exhaust_latest_installation_recovery() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        local_package();
+        for i in 0..5000 {
+            receipt(
+                &format!("old-{i}"),
+                "stop",
+                &chrono::DateTime::from_timestamp(1_577_836_800 + i, 0)
+                    .unwrap()
+                    .to_rfc3339(),
+                json!({"Ok":null}),
+            );
+        }
+        receipt(
+            "unique-failure",
+            "install_local",
+            "2026-10-21T00:00:00Z",
+            json!({"Err":"unique recovery proof"}),
+        );
+        assert_eq!(
+            summaries(&ActiveCardOps::default()).unwrap()[0]["runId"],
+            "unique-failure"
+        );
+        assert!(preview("unique-failure").is_ok());
+        assert!(read("old-0").is_ok(), "old IDs remain on disk");
+        receipt(
+            "later-uninstall",
+            "uninstall",
+            "2026-10-21T00:00:01Z",
+            json!({"Ok":null}),
+        );
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
+        assert!(
+            preview("unique-failure")
+                .err()
+                .unwrap()
+                .contains("superseded")
+        );
+    }
+
+    #[test]
+    fn streaming_receipts_still_reject_invalid_json_and_shared_files() {
+        let _home = config::TempHome::new();
+        receipt(
+            "private",
+            "install_local",
+            "2026-10-21T00:00:00Z",
+            json!({"Err":"fixture"}),
+        );
+        let path = config::data_dir().join("runs/private.json");
+        std::fs::write(&path, b"{").unwrap();
+        assert!(read("private").err().unwrap().contains("corrupt"));
+        receipt(
+            "private",
+            "install_local",
+            "2026-10-21T00:00:00Z",
+            json!({"Err":"fixture"}),
+        );
+        let linked = config::data_dir().join("runs/shared.json");
+        std::fs::hard_link(&path, &linked).unwrap();
+        assert!(read("private").err().unwrap().contains("untrusted"));
+        std::fs::remove_file(linked).unwrap();
+        assert!(read("private").is_ok());
+    }
+
+    /// 放弃的完整契约：面板沉默、预览/重试的侧门堵死、回执只是被打标而不是
+    /// 删除——信任校验（属主/权限/链接数）在改写后必须照常通过。
+    #[test]
+    fn dismiss_rejects_a_terminal_receipt_whose_installer_is_still_alive() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"cancelled"}),
+        );
+        let before = std::fs::read(config::data_dir().join("runs/failure.json")).unwrap();
+        let service = ModelStoreService::new();
+        let installer = super::super::orphans::RunGuard::register_with_run_id(
+            std::process::id() as i32,
+            false,
+            "dismiss regression",
+            Some("failure"),
+        );
+        assert!(
+            dismiss_incomplete_local(&service, "failure")
+                .unwrap_err()
+                .contains("installation_process_still_alive")
+        );
+        assert_eq!(
+            std::fs::read(config::data_dir().join("runs/failure.json")).unwrap(),
+            before
+        );
+        drop(installer);
+        dismiss_incomplete_local(&service, "failure").unwrap();
+        assert!(read("failure").unwrap().dismissed);
+    }
+
+    #[test]
+    fn dismissed_receipts_leave_summaries_and_cannot_retry() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "failure",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"fixture failure"}),
+        );
+        let service = ModelStoreService::new();
+        assert_eq!(summaries(&ActiveCardOps::default()).unwrap().len(), 1);
+        dismiss_incomplete_local(&service, "failure").unwrap();
+        assert!(
+            summaries(&ActiveCardOps::default()).unwrap().is_empty(),
+            "放弃后面板必须沉默"
+        );
+        assert!(
+            preview("failure").err().unwrap().contains("dismissed"),
+            "放弃过的记录不能从预览复活"
+        );
+        // 打标不删文件：记录还在，信任校验照常通过，dismissed 已落盘。
+        let receipt = read("failure").unwrap();
+        assert!(receipt.dismissed);
+        // 再放弃一次是幂等的空转，不是错误。
+        dismiss_incomplete_local(&service, "failure").unwrap();
+    }
+
+    #[test]
+    fn dismissing_the_latest_failure_cannot_revive_an_older_retry() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "older",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"old"}),
+        );
+        receipt(
+            "latest",
+            "download",
+            "2026-10-18T00:00:01Z",
+            json!({"Err":"new"}),
+        );
+        let older_path = config::data_dir().join("runs/older.json");
+        let before = std::fs::read(&older_path).unwrap();
+        let service = ModelStoreService::new();
+        dismiss_incomplete_local(&service, "latest").unwrap();
+        assert!(summaries(&ActiveCardOps::default()).unwrap().is_empty());
+        assert!(
+            preview("older")
+                .err()
+                .unwrap()
+                .contains("installation_superseded")
+        );
+        assert!(read("latest").unwrap().dismissed);
+        assert_eq!(std::fs::read(older_path).unwrap(), before);
+    }
+
+    #[test]
+    fn dismiss_rejects_running_and_non_install_records() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let service = ModelStoreService::new();
+        // 还没终结的任务不能放弃：它还活着，结局还没写。
+        receipt("running", "download", "2026-10-18T00:00:00Z", Value::Null);
+        assert!(
+            dismiss_incomplete_local(&service, "running")
+                .err()
+                .unwrap()
+                .contains("not_terminal")
+        );
+        // 未完成面板只列失败的下载/本地安装；stop 这类记录没有「放弃」语义。
+        receipt(
+            "stopped",
+            "stop",
+            "2026-10-18T00:00:01Z",
+            json!({"Ok":null}),
+        );
+        assert!(
+            dismiss_incomplete_local(&service, "stopped")
+                .err()
+                .unwrap()
+                .contains("not_dismissable")
+        );
+    }
+
+    /// 放弃只针对那一次尝试：同卡之后新的失败照常出现，不做一键拉黑。
+    #[test]
+    fn a_newer_failure_still_surfaces_after_dismiss() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        receipt(
+            "old",
+            "download",
+            "2026-10-18T00:00:00Z",
+            json!({"Err":"old failure"}),
+        );
+        let service = ModelStoreService::new();
+        dismiss_incomplete_local(&service, "old").unwrap();
+        receipt(
+            "new",
+            "download",
+            "2026-10-18T00:00:01Z",
+            json!({"Err":"new failure"}),
+        );
+        let items = summaries(&ActiveCardOps::default()).unwrap();
+        assert_eq!(items.len(), 1, "只有最新一条会出现在面板上");
+        assert_eq!(items[0]["runId"], "new");
+    }
+}

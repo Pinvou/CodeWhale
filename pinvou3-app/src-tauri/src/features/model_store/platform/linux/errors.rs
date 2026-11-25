@@ -28,6 +28,14 @@ impl AppError {
 /// 中文前缀 + 原始简短提示，而不是整段英文。这个函数是所有卡片脚本失败时的通用
 /// 摘要逻辑，不是只给 Ollama 用的，命名/文案不要带 Ollama 字样。
 const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
+    (
+        "curl_multi_notify_enable",
+        "健康检查工具与引擎附带的网络库不兼容，不能据此判断模型是否启动成功。请先停用模型，在模型详情中更新卡片脚本后重新部署；无需重新下载权重",
+    ),
+    (
+        "cuda_error_system_driver_mismatch",
+        "引擎使用的 CUDA 驱动库与系统驱动不匹配。请更新卡片脚本后重新部署；若仍失败，请导出诊断日志检查系统驱动，无需重新下载权重",
+    ),
     // pkexec 的几种结局要分开说，而且必须排在最前面：下面那条笼统的 "unauthorized"
     // 和 "permission denied" 会把它们全盖成「检查凭据配置」，而真正的原因跟凭据毫无
     // 关系，照着那句话排查永远修不好。
@@ -61,6 +69,19 @@ const SCRIPT_ERROR_PATTERNS: &[(&str, &str)] = &[
     (
         "connection refused",
         "无法连接到推理服务，请确认服务正在运行",
+    ),
+    // A startup failure alone says nothing about weight completeness or root
+    // cause. Keep CUDA/ABI signatures above this generic fallback.
+    (
+        "server failed during startup",
+        "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型",
+    ),
+    // 驭光引擎当前版本在完成 `weights ready` 后可能打印
+    // `ERROR startup failed [finalizing target]`。这是同一类“服务初始化阶段退出”，
+    // 不能退回成泛化的脚本错误，更不能误导用户重新下载二十多 GB 权重。
+    (
+        "startup failed",
+        "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型",
     ),
     ("manifest unknown", "在远端找不到该模型/量化版本"),
     ("unauthorized", "没有访问权限，请检查凭据配置"),
@@ -96,7 +117,7 @@ pub fn humanize_script_message(raw: &str) -> String {
         _ => raw.to_string(),
     };
 
-    let lowered = text.to_lowercase();
+    let lowered = diagnostic_text(&text.to_lowercase());
     for (keyword, translation) in SCRIPT_ERROR_PATTERNS {
         if contains_as_word(&lowered, keyword) {
             return translation.to_string();
@@ -122,6 +143,271 @@ pub fn humanize_script_message(raw: &str) -> String {
     format!("脚本返回错误（{short}）")
 }
 
+/// 一眼就是"错误本身"的通用词。命中一条就说明这一行在陈述**发生了什么坏事**。
+///
+/// 跟 [`SCRIPT_ERROR_PATTERNS`] 分开：那张表是"能翻成人话的已知原因"，命中它的行
+/// 价值更高（下面给的分更高）；这张表管的是"翻不出人话、但确实是报错"的行。
+const ERROR_TOKENS: &[&str] = &[
+    "error",
+    "fatal",
+    "failed",
+    "failure",
+    "cannot",
+    "can't",
+    "unable",
+    "no such",
+    "not found",
+    "denied",
+    "refused",
+    "timed out",
+    "timeout",
+    "traceback",
+    "panic",
+    "aborted",
+    "exceeded",
+    "unreachable",
+    "错误",
+    "失败",
+    "无法",
+    "不能",
+    "超时",
+    "不足",
+    "拒绝",
+    "找不到",
+    "不存在",
+    "异常",
+];
+
+/// 这一行是**建议**，不是原因。
+///
+/// # 为什么必须有这一档
+///
+/// 日本客户的截图实锤过：他看到的"失败原因"是
+/// 「也可以在别的机器上拉好后用 docker save/load 拷进来」——那是脚本在报错之后好心
+/// 附上的一句变通办法，而真正的原因（DNS 超时）被埋在它上面几行。摘要原来取的是
+/// **最后一条非空行**，于是越是"失败要说人话"写得认真的脚本（报完错还给建议），
+/// 摘要就越没用。用户照着那句建议排查，永远修不到 DNS。
+///
+/// # 🔴 判据看的是**位置**，不是"含不含"
+///
+/// 这张表里的 `请检查` / `请确认` / `please` 在真正的报错句子**尾部**极其常见：
+/// 「拉取引擎镜像失败，请检查网络或配置镜像加速器」是一句合格的失败原因，只是顺手
+/// 带了下一步。按"含不含"判会把这一整类好句子扣成负分，摘要反而退回去挑那些什么都
+/// 没说的中性行。所以判据是 **marker 落在行首那一小段里**（见 [`ADVICE_LEAD_CHARS`]）：
+/// 通篇是建议的行才从建议词开头。
+const ADVICE_MARKERS: &[&str] = &[
+    "也可以",
+    "你可以",
+    "您可以",
+    "可以尝试",
+    "可尝试",
+    "请尝试",
+    "试试",
+    "建议",
+    "提示：",
+    "提示:",
+    "参考",
+    "或者",
+    "解决办法",
+    "解决方法",
+    "处理办法",
+    "如需",
+    "若需",
+    "请先",
+    "请检查",
+    "请确认",
+    "workaround",
+    "hint:",
+    "note:",
+    "tip:",
+    "see also",
+    "you can",
+    "try ",
+    "please ",
+];
+
+/// 纯装饰/纯噪声行：分隔线、进度条残渣、协议行。
+fn is_noise_line(lowered: &str) -> bool {
+    let t = lowered.trim();
+    if t.is_empty() {
+        return true;
+    }
+    // `====`、`----`、`****` 这类分隔线：没有一个字是信息
+    if t.chars()
+        .all(|c| matches!(c, '=' | '-' | '*' | '#' | '~' | '_' | ' ' | '.'))
+    {
+        return true;
+    }
+    // docker/pip 的逐层进度残渣
+    t.contains("pulling fs layer")
+        || t.contains("verifying checksum")
+        || t.contains("already exists")
+        || t.contains("download complete")
+        || t.contains("pull complete")
+        || t.contains("waiting")
+        || t.contains("extracting")
+}
+
+/// 扒掉 `[安装引擎] ` / `[下载模型] ` 这类阶段前缀。
+///
+/// 手写而不是上正则：这个 crate 没有 `regex` 依赖，而判据本身只有三条（行首是 `[`、
+/// 有配对的 `]`、方括号里不超过 12 个字符）。上限是为了不把日志里真正以 `[` 开头的
+/// 长句子（比如 `[====>] 1.2GB/4.1GB`）当成前缀切掉半截。
+fn strip_stage_prefix(line: &str) -> &str {
+    let t = line.trim_start();
+    if !t.starts_with('[') {
+        return t;
+    }
+    match t.find(']') {
+        Some(close) if t[1..close].chars().count() <= 12 => t[close + 1..].trim_start(),
+        _ => t,
+    }
+}
+
+/// 判"这一整行是建议"时只看行首这么多个字符。
+///
+/// 8 个字的依据：中文建议句的引导词都很短（`也可以` / `建议` / `提示：` / `请先`），
+/// 而合格的报错句在把话说到 `请检查` 之前一定先说了发生什么
+/// （`拉取引擎镜像失败，` 就已经 9 个字）。窗口再宽就会开始吃掉好句子。
+/// 建议词落进窗口但**窗口前半已有错误词**的行不算建议（见 [`is_advice_line`]），
+/// 所以 `下载失败，请检查网络后重试` 这类四字报错 + 建议尾巴的短句不会被误伤。
+const ADVICE_LEAD_CHARS: usize = 8;
+
+/// 这一行是不是**通篇建议**。判据看位置，理由见 [`ADVICE_MARKERS`]。
+///
+/// `has_error_signal` 是"这行含错误词吗"。两条判据：
+/// 1. 建议词落在行首那一小段里、且 marker 之前**没有错误词** —— 整句话从建议开头，
+///    它不是原因。2026-10-20 评审 A3：`下载失败，请检查网络后重试` 这类短句的
+///    建议词也挤得进行首窗口，但它前半句已经把"发生了什么"说完了——回看
+///    marker 之前：已有错误词的是「报错带建议尾巴」，不是通篇建议。
+/// 2. 整行一个错误词都没有、却有建议词 —— 那也只是一句好心的下一步。
+fn is_advice_line(lowered: &str, has_error_signal: bool) -> bool {
+    // 先扒掉 `[安装引擎] ` 这类阶段前缀和 `ERROR:` / `错误：` 这类错误前缀，否则
+    // 「[安装引擎] 也可以……」的建议词会被前缀顶出行首窗口，判据静默失效。
+    //
+    // 现在的唯一调用点（`script_runner` 里脚本非零退出那一支）拿到的是**没加前缀**的
+    // 原始行——前缀是 `lifecycle` 在 `on_progress` 回调里才加的。这里仍然剥一道，是
+    // 因为"输入没有前缀"这个前提写在另一个文件里，而它一旦变了，失效是静默的。
+    let stripped = strip_error_prefix(&strip_stage_prefix(lowered));
+    let lead: String = stripped.chars().take(ADVICE_LEAD_CHARS).collect();
+    if let Some(marker_start) = ADVICE_MARKERS
+        .iter()
+        .filter_map(|marker| lead.find(marker))
+        .min()
+    {
+        return !contains_error_word(&lead[..marker_start]);
+    }
+    !has_error_signal
+        && ADVICE_MARKERS
+            .iter()
+            .any(|marker| stripped.contains(marker))
+}
+
+/// 文本里有没有错误词（[`SCRIPT_ERROR_PATTERNS`] 的关键词或 [`ERROR_TOKENS`]）。
+/// [`is_advice_line`] 回看窗口前半时用——和打分同一把尺子，两个口径才不会各自漂移。
+fn contains_error_word(text: &str) -> bool {
+    SCRIPT_ERROR_PATTERNS
+        .iter()
+        .any(|(keyword, _)| contains_as_word(text, keyword))
+        || ERROR_TOKENS
+            .iter()
+            .any(|token| contains_as_word(text, token))
+}
+
+/// 给一行打分：越大越像"失败的真正原因"。
+fn failure_line_score(line: &str) -> i32 {
+    let lowered = line.to_lowercase();
+    let diagnostic = diagnostic_text(&lowered);
+    let mut score = 0;
+    // 能翻成人话的已知原因，价值最高
+    let known_cause = SCRIPT_ERROR_PATTERNS
+        .iter()
+        .any(|(keyword, _)| contains_as_word(&diagnostic, keyword));
+    if known_cause {
+        score += 6;
+    }
+    let has_error_token = ERROR_TOKENS
+        .iter()
+        .any(|token| contains_as_word(&diagnostic, token));
+    // Progress vocabulary can occur in an actual failure ("failed extracting",
+    // "waiting ... connection refused"). Only signal-free progress is noise.
+    if !known_cause && !has_error_token && is_noise_line(&lowered) {
+        return -12;
+    }
+    if has_error_token {
+        score += 3;
+    }
+    // 建议不是原因。**减得比上面两档加起来还多**：一句建议里完全可能把错误词重复一遍
+    // （「下载失败也可以在别的机器上拉好」），不减过头就还是会被选中。
+    if is_advice_line(&lowered, known_cause || has_error_token) {
+        score -= 12;
+    }
+    score
+}
+
+/// 从失败运行的输出尾部挑出**最像失败原因**的那一行。
+///
+/// # 选行规则
+///
+/// 按 [`failure_line_score`] 取最高分；同分取**更靠后**的那一行（越晚打出来的越接近
+/// 退出点）。全都同分（典型情况：一行都不含错误词，比如脚本静默 `exit 1`）时，
+/// 这条规则自然退化成"最后一条非空行"，也就是原来的行为——**不会比原来更差**。
+///
+/// # 为什么不是"最后一条非空行"
+///
+/// 见 [`ADVICE_MARKERS`]：那正是日本客户那次误导的来源。
+pub fn pick_failure_line<'a>(lines: &'a [String]) -> Option<&'a str> {
+    let mut best: Option<(i32, &str)> = None;
+    for line in lines {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let score = failure_line_score(text);
+        // `>=` 而不是 `>`：同分时让更靠后的行赢。
+        if best.is_none_or(|(best_score, _)| score >= best_score) {
+            best = Some((score, text));
+        }
+    }
+    best.map(|(_, text)| text)
+}
+
+/// Match diagnostic prose, not path/URL/option spellings. Keep the original line
+/// for display and advice detection. This is a lexical filter, not a shell parser:
+/// slash/backslash paths, assignments and dash options are opaque tokens; quoted
+/// paths may contain spaces. A placeholder prevents joining phrases across them.
+fn diagnostic_text(text: &str) -> String {
+    let mut path_quote = None;
+    text.split_whitespace()
+        .map(|part| {
+            if let Some(quote) = path_quote {
+                if part.contains(quote) {
+                    path_quote = None;
+                }
+                return "\u{fffc}";
+            }
+            let token = part.trim_matches(|c: char| {
+                matches!(c, '\'' | '"' | '`' | '[' | ']' | '(' | ')' | ',' | ';')
+            });
+            let path = token.contains('/') || token.contains('\\');
+            if path {
+                let start = part.trim_start_matches(['[', '(']);
+                if let Some(quote @ ('\'' | '"' | '`')) = start.chars().next() {
+                    if !start[quote.len_utf8()..].contains(quote) {
+                        path_quote = Some(quote);
+                    }
+                }
+            }
+            if path || token.contains('=') || token.starts_with('-') {
+                "\u{fffc}"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 关键词必须作为**独立的词**出现，不能是别的单词的一部分。
 ///
 /// 真实踩过的坑：双机卡卸载失败时脚本打出的是
@@ -134,15 +420,8 @@ pub fn humanize_script_message(raw: &str) -> String {
 /// 不算命中，`timeout:` 和 `(timeout)` 算；keyword 本身含空格（如
 /// `no space left on device`）时同样适用。
 ///
-/// **修掉的只有"字母数字粘连"这一类**——`ConnectTimeout`、`StrictHostKeyChecking`、
-/// `timeouts`、`xtimeout`。这条注释原来还写着它能挡住"路径里带 unauthorized 的模型名、
-/// URL 里带 timeout 的查询参数"，那是夸大：`-`、`=`、`/`、`?`、`.` 在这个判据下**都算
-/// 边界**，所以 `models/unauthorized-model`（d 后面是 `-`）和 `?timeout=30`
-/// （`?` 在前、`=` 在后）照样命中，照样被翻成「没有访问权限」/「操作超时」。
-///
-/// 要连这一类一起挡住，就不是收紧边界字符集能了的（`-` 和 `/` 在真实的错误句子里
-/// 本来就是合法的词间分隔），得动"拿整段命令行/URL 当输入去猜原因"这个前提本身。
-/// 那是行为变更，另案处理；在此之前别把这里读成"误伤已经没有了"。
+/// 此处只处理字母数字粘连和 UTF-8 边界；路径、URL 和选项由调用方先经
+/// [`diagnostic_text`] 排除，不把元数据中的标点误当诊断词边界。
 fn contains_as_word(haystack: &str, keyword: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut from = 0;
@@ -154,8 +433,17 @@ fn contains_as_word(haystack: &str, keyword: &str) -> bool {
         if before_ok && after_ok {
             return true;
         }
-        // 没命中就从这次匹配的下一个字节继续找，别漏掉重叠的情况
-        from = start + 1;
+        // 没命中就从这次匹配首字符的下一个字符继续找，别漏掉重叠的情况。
+        // 2026-10-16 评审阻塞项 2：这里原来是 start + 1——按**字节**推进，关键词
+        // 是 CJK（3 字节/字符）时会落在字符内部，下一轮 haystack[from..] 直接
+        // panic（非字符边界切片）。卡片脚本的失败文案是中英混排的人话，这条
+        // 路径在脚本非零退出时逐行必达。按匹配首字符的实际字节长度推进。
+        let advance = haystack[start..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8)
+            .max(1);
+        from = start + advance;
         if from >= haystack.len() {
             break;
         }
@@ -192,6 +480,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metadata_keywords_do_not_outrank_a_real_diagnostic() {
+        for metadata in [
+            "Downloading models/unauthorized-model/weights.gguf",
+            "GET https://example.invalid/models?timeout=30",
+            "+ curl --timeout 30 https://example.invalid",
+            "Options: timeout=30 --unauthorized-cache",
+            r#"Opening "C:\models\unauthorized model\timeout.gguf""#,
+        ] {
+            let lines = vec![
+                "ERROR: tokenizer initialization failed".into(),
+                metadata.into(),
+            ];
+            assert_eq!(
+                pick_failure_line(&lines),
+                Some(lines[0].as_str()),
+                "{metadata}"
+            );
+            assert!(failure_line_score(metadata) <= 0, "{metadata}");
+        }
+    }
+
+    #[test]
+    fn metadata_keywords_do_not_invent_a_humanized_cause() {
+        for metadata in [
+            "models/unauthorized-model",
+            "https://example.invalid/?timeout=30",
+            "--timeout=30",
+            "--unauthorized",
+            "timeout=30",
+            r#""/models/unauthorized cache/timeout""#,
+        ] {
+            let raw = format!("ERROR: 模型初始化失败，输入 {metadata}");
+            assert_eq!(
+                humanize_script_message(&raw),
+                raw.strip_prefix("ERROR: ").unwrap(),
+                "{metadata}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_arguments_do_not_override_the_exit_diagnostic() {
+        let raw = "Worker: Command ['ssh', '--timeout', '30', '/models/unauthorized'] returned non-zero exit status 255";
+        assert_eq!(
+            humanize_script_message(raw),
+            "无法连接到从机，请检查从机是否开机、直连网线和网口是否正常"
+        );
+        assert_eq!(
+            humanize_script_message("GET https://example.invalid/?unauthorized=1: request timeout"),
+            "操作超时，请稍后重试"
+        );
+    }
+
+    #[test]
+    fn progress_words_inside_errors_are_not_noise() {
+        for diagnostic in [
+            "ERROR: failed extracting archive",
+            "ERROR: waiting for worker failed",
+            "ERROR: extracting: no space left on device",
+            "ERROR: waiting for server: connection refused",
+            "ERROR: destination already exists",
+            "错误：等待 extracting 阶段失败",
+        ] {
+            let lines = vec![diagnostic.into(), "7e1f8fb7d4ba: Waiting".into()];
+            assert_eq!(pick_failure_line(&lines), Some(diagnostic), "{diagnostic}");
+            assert!(failure_line_score(diagnostic) > 0, "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_context_keeps_real_causes_priority_and_advice() {
+        for (raw, expected) in [
+            ("request timeout after 30s", "操作超时，请稍后重试"),
+            ("HTTP 401 Unauthorized", "没有访问权限，请检查凭据配置"),
+            (
+                "ERROR: /tmp/model: permission denied",
+                "权限不足，请检查当前用户权限（比如是否需要加入 docker 用户组）",
+            ),
+            (
+                "GET https://example.invalid: dial tcp: i/o timeout",
+                "操作超时，请稍后重试",
+            ),
+        ] {
+            assert_eq!(humanize_script_message(raw), expected);
+        }
+        let lines = vec![
+            "ERROR: extracting: no space left on device".into(),
+            "请检查 timeout 配置后重试".into(),
+        ];
+        assert_eq!(
+            humanize_script_message(pick_failure_line(&lines).unwrap()),
+            "磁盘空间不足"
+        );
+    }
+
+    /// 2026-10-20 评审 A3：短口语句式——错误词和建议词都挤在行首窗口里。
+    /// 「下载失败，请检查网络后重试」此前被判成通篇建议（+3−12=−9），输给 0 分的
+    /// 中性行乃至 `LMM_PROGRESS_BYTES` 协议行，摘要把进度行当"失败原因"呈现。
+    /// 判据修法：marker 落在行首窗口时回看前半——已有错误词的是「报错带建议尾巴」。
+    #[test]
+    fn short_failure_with_advice_tail_beats_neutral_lines() {
+        for sentence in [
+            "下载失败，请检查网络后重试",
+            "启动失败，请确认显存充足",
+            "连接失败，请确认从机已开机",
+        ] {
+            let lines = vec![
+                "LMM_PROGRESS_BYTES=1024/2048".to_string(),
+                "正在清理临时文件".to_string(),
+                sentence.to_string(),
+            ];
+            assert_eq!(pick_failure_line(&lines), Some(sentence), "{sentence}");
+            assert!(failure_line_score(sentence) > 0, "{sentence}");
+        }
+    }
+
+    /// 回看判据只救「报错带建议尾巴」的句子：marker 之前没有错误词的通篇建议
+    /// （从建议词开头、或者整行无错误信号）仍然要被压到负分。
+    #[test]
+    fn pure_advice_lines_still_score_negative() {
+        for advice in [
+            "也可以在别的机器上拉好后用 docker save/load 拷进来",
+            "请检查 timeout 配置后重试",
+            "建议配置镜像加速器",
+        ] {
+            assert!(failure_line_score(advice) < 0, "{advice}");
+        }
+    }
+
+    #[test]
     fn matches_known_keywords() {
         assert_eq!(
             humanize_script_message("Error: no space left on device"),
@@ -200,6 +618,33 @@ mod tests {
         assert_eq!(
             humanize_script_message(r#"{"error": "model not found: xyz"}"#),
             "找不到对应的模型"
+        );
+        assert_eq!(
+            humanize_script_message("2026-10-13 08:56:52 FATAL server failed during startup"),
+            "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型"
+        );
+        assert_eq!(
+            humanize_script_message(
+                "2026-10-13 13:32:38.936 ERROR startup failed [finalizing target]"
+            ),
+            "推理服务启动未完成，尚不能确定原因。请导出诊断日志检查驱动、内存和服务初始化信息；暂不需要重新下载模型"
+        );
+    }
+
+    #[test]
+    fn startup_failure_does_not_invent_weight_or_memory_diagnosis() {
+        let generic = humanize_script_message("startup failed");
+        assert!(!generic.contains("权重已加载完成"));
+        assert!(!generic.contains("内存不足"));
+        assert!(
+            humanize_script_message("startup failed: CUDA_ERROR_SYSTEM_DRIVER_MISMATCH")
+                .contains("驱动库与系统驱动不匹配")
+        );
+        assert!(
+            humanize_script_message(
+                "curl: undefined symbol: curl_multi_notify_enable, version CURL_OPENSSL_4"
+            )
+            .contains("健康检查工具")
         );
     }
 
@@ -375,5 +820,171 @@ mod tests {
             humanize_script_message("ERROR: something odd happened"),
             "脚本返回错误（something odd happened）"
         );
+    }
+
+    /// 🔴 日本客户那张截图的回归测试。
+    ///
+    /// 他看到的"失败原因"是最后那句**建议**（docker save/load 变通办法），真正的原因
+    /// （DNS 解析超时）在它上面。摘要原来取"最后一条非空行"，所以越是报完错还附带
+    /// 变通办法的脚本，摘要越没用。
+    #[test]
+    fn the_summary_is_the_cause_not_the_workaround() {
+        let lines: Vec<String> = [
+            "[安装引擎] + docker pull vllm/vllm-openai:v0.8.5",
+            "[安装引擎] Error response from daemon: Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: i/o timeout",
+            "[安装引擎] ERROR: 拉取引擎镜像失败，请检查网络或配置镜像加速器",
+            "[安装引擎] 也可以在别的机器上拉好后用 docker save/load 拷进来",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let picked = pick_failure_line(&lines).expect("有非空行就该挑出一行");
+        assert!(
+            !picked.contains("docker save/load"),
+            "又挑中了那句建议：{picked}"
+        );
+        assert!(
+            picked.contains("timeout") || picked.contains("拉取引擎镜像失败"),
+            "挑出来的不是原因：{picked}"
+        );
+    }
+
+    /// 一行都不含错误词时，退化成"最后一条非空行"——也就是原来的行为，不会更差。
+    #[test]
+    fn picking_falls_back_to_the_last_nonempty_line() {
+        let lines: Vec<String> = ["第一行", "", "最后一行", "   "]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_failure_line(&lines), Some("最后一行"));
+        assert_eq!(pick_failure_line(&[]), None);
+    }
+
+    /// docker 的逐层刷屏绝不能当成失败原因：它往往正好是退出前的最后几行。
+    #[test]
+    fn layer_noise_never_wins_over_a_real_error() {
+        let lines: Vec<String> = [
+            "no space left on device",
+            "7e1f8fb7d4ba: Verifying Checksum",
+            "7e1f8fb7d4ba: Download complete",
+            "==========================",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(pick_failure_line(&lines), Some("no space left on device"));
+    }
+
+    /// 同分时取更靠后的那一行：越晚打出来的越接近退出点。
+    ///
+    /// 这里挑的两行必须是**真的同分**。`invalid gguf` 和 `manifest unknown` 都只命中
+    /// [`SCRIPT_ERROR_PATTERNS`]（各 +6），谁都不含 [`ERROR_TOKENS`] 里的通用错误词，
+    /// 所以 6 分平手、靠位置分胜负。
+    ///
+    /// 这条测试原来拿的是 `connection refused` 和 `manifest unknown`，而那两行**并不
+    /// 同分**：`refused` 同时在 `ERROR_TOKENS` 里，前者是 9 分、后者 6 分，选前者是
+    /// 对的。挑错样例的测试会反过来逼着实现去迎合一个错的预期——所以下面把"信号更强
+    /// 的行赢过更靠后的行"单独钉一条，两条一起才说清了优先级：**先比分，再比位置**。
+    #[test]
+    fn later_lines_win_on_a_tie() {
+        let lines: Vec<String> = ["invalid gguf", "manifest unknown"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_failure_line(&lines), Some("manifest unknown"));
+    }
+
+    /// 位置只是**平手时**的裁判，压不过更强的错误信号。
+    ///
+    /// `connection refused` 既是已知原因（+6）又含通用错误词 `refused`（+3），
+    /// 而它后面那行只有 +6。更靠后的行输掉了——这正是这套打分想要的：先比分，再比位置。
+    #[test]
+    fn a_stronger_signal_beats_a_later_position() {
+        let lines: Vec<String> = ["connection refused", "manifest unknown"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_failure_line(&lines), Some("connection refused"));
+    }
+
+    /// 🔴 报错句尾巴上的「请检查…」不算建议。
+    ///
+    /// 这条钉的是 [`is_advice_line`] 看**位置**而不是"含不含"。
+    /// 「拉取引擎镜像失败，请检查网络或配置镜像加速器」是一句合格的失败原因，只是顺手
+    /// 带了下一步；按"含不含建议词"判会把这一整类好句子扣成负分，摘要反而退回去挑那些
+    /// 什么都没说的中性行（`+ docker pull …`）——那比原来的缺陷更糟。
+    #[test]
+    fn a_next_step_at_the_end_of_a_real_error_is_not_advice() {
+        let lines: Vec<String> = [
+            "+ docker pull vllm/vllm-openai:v0.8.5",
+            "ERROR: 拉取引擎镜像失败，请检查网络或配置镜像加速器",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            pick_failure_line(&lines),
+            Some("ERROR: 拉取引擎镜像失败，请检查网络或配置镜像加速器")
+        );
+    }
+
+    /// 阶段前缀不能让"通篇是建议"的判据失效。
+    ///
+    /// 当前调用点拿到的是没加前缀的原始行（前缀是 `lifecycle` 在 `on_progress` 里才加
+    /// 的），但那个前提写在另一个文件里；它一旦变了，失效是静默的。
+    #[test]
+    fn a_stage_prefix_does_not_hide_the_advice_marker() {
+        assert_eq!(
+            strip_stage_prefix("[安装引擎] 也可以换个镜像源"),
+            "也可以换个镜像源"
+        );
+        // 方括号里太长的不当前缀切——日志里真以 `[` 开头的长句子不该被砍半截
+        let long = "[这是一段很长的不是阶段名的东西] 正文";
+        assert_eq!(strip_stage_prefix(long), long);
+
+        let lines: Vec<String> = [
+            "[安装引擎] connection refused",
+            "[安装引擎] 也可以在别的机器上拉好后用 docker save/load 拷进来",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            pick_failure_line(&lines),
+            Some("[安装引擎] connection refused")
+        );
+    }
+
+    /// 挑完还要过 `humanize_script_message`：用户看到的是那句中文。
+    #[test]
+    fn the_picked_line_still_goes_through_humanize() {
+        let lines: Vec<String> = [
+            "Error response from daemon: no space left on device",
+            "请检查磁盘剩余空间后重试",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let picked = pick_failure_line(&lines).unwrap();
+        assert_eq!(humanize_script_message(picked), "磁盘空间不足");
+    }
+    #[test]
+    fn contains_as_word_survives_cjk_boundaries() {
+        // 评审阻塞项 2 的回归测试：CJK 关键词 + 按字节推进曾经在这里 panic
+        // （"错"是 3 字节字符，start+1 落进字符内部，下一次切片直接崩）。
+        // 崩溃会被 catch_unwind 接住变成"内部错误"，真实失败原因彻底丢失。
+        assert!(!contains_as_word("curl错误：无法解析", "错误"));
+        // 前一个字节是 ASCII 字母（curl 的 l）→ 不算词边界命中；推进一个字符
+        // 后继续找，不得 panic，也不得误报。
+        assert!(contains_as_word("下载 错误：无法解析主机", "错误"));
+        // CJK 关键词紧贴 ASCII 字母时按词边界语义不命中（与 ASCII 关键词一致），
+        // 关键是不 panic 且不误报。
+        assert!(!contains_as_word("error错误error", "错误"));
+        // 关键词在句中多次出现且第一次不命中的重叠场景。
+        assert!(!contains_as_word("x错x错x错x", "错误"));
+        // 纯 ASCII 行为不变（既有语义回归）。
+        assert!(contains_as_word("dial timeout", "timeout"));
+        assert!(!contains_as_word("connecttimeout", "timeout"));
     }
 }

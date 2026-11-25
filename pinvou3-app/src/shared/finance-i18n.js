@@ -1,5 +1,11 @@
 export const financeCopy = {
   zh: {
+    statusLanguage: 'zh',
+    reviewArchiveUnsupported: '当前渠道不提供确定未支付的终态，无法使用此归档操作。请查询付款结果或安排复核；填写原因不能替代支付证据。',
+    reviewArchiveRequirements: '归档需超过等待期，取得渠道明确的未支付结果，并排除到账、支付冲突及未核实的付款申诉。',
+    reviewArchiveConflict: '暂不能归档。请重新读取详情，核对负责人、归档等待期和渠道未支付证据。',
+    reviewAssignedOther: '案件已分配给其他处理人，当前账号不能认领。',
+    reviewClaimConflict: '案件已被分配或处理，请重新读取详情后确认负责人和状态。',
     unmatchedCallbackHelp: '本地未找到订单。请用以下编号核对渠道交易。结果仍未确认时，保留案件待复核。',
     callbackNotificationID: '支付通知编号', callbackProvider: '验签服务商及版本', callbackMerchantOrder: '商户订单号',
     callbackTransaction: '渠道交易号', callbackProviderOrder: '服务商订单号',
@@ -20,6 +26,7 @@ export const financeCopy = {
     confirmQueryAction: '确认查询',
     cancelQuery: '取消',
     queryRecorded: '本次复核查询及证据已记录；付款状态以实际证据为准。',
+    queryArchiveRecovery: '同一案件最新的显式查询已确认，可重新尝试归档。旧未确认命令仍保留，服务端仍检查当前代次及全部归档条件。',
     reauthenticationRecoveryUnavailable: "原充值请求仍待确认，但当前身份、上下文或权限无法安全重试。请恢复原账号上下文和权限；不要创建新请求。",
     inputInvalid: '输入格式无效，请检查金额或标识后重试。',
     resolutions: { CONFIRM_CHARGEBACK: '确认拒付', CONFIRM_FORCED_REFUND: '确认强制退款', CONFIRM_PAYMENT: '按支付证据确认付款', CONFIRM_PROVIDER_FAILED: '确认服务商付款失败', RECONCILE_REFUND: '查询并对账退款结果', DISMISS: '驳回异常', ESCALATE_FINANCIAL_REPAIR: '移交财务修复' },
@@ -31,6 +38,12 @@ export const financeCopy = {
     title: '充值与权益', products: '充值商品', orders: '支付订单', packages: '权益包', refresh: '刷新', loading: '正在加载…', empty: '暂无记录', product: '商品', channel: '支付渠道', amount: '金额（人民币元）', status: '状态', create: '创建支付订单', retry: '以同一请求重试', unknown: '请求结果尚未确认。请以同一请求重试，不要重新创建。', saved: '操作已确认。', query: '查询付款结果', pay: '打开付款页面', close: '关闭支付订单', confirmClose: '确认关闭这个支付订单？已完成的付款仍会按实际付款事实处理。', claim: '提交付款申诉', statement: '付款情况说明', expires: '付款截止时间', remaining: '剩余积分', used: '已用积分', total: '总积分', validUntil: '有效期至', unavailable: '暂时无法获取真实财务数据，请重试。', invalid: '服务返回的财务回执无效，请刷新确认。', name: '名称', type: '类型', base: '充值积分', bonus: '赠送积分', planNoRefund: 'PLAN 套餐不支持普通退款。', mobileRequired: '请先验证手机号再充值。', noChannel: '当前没有可用支付渠道。', orderID: '订单号', return: '返回', providerQR: '付款二维码', processing: '付款确认或权益发放处理中。', history: '订单详情', finance: '财务管理', approvals: '审批', refunds: '整笔退款', reason: '原因', transaction: '支付流水', package: '权益包', confirmRefund: '确认按所选支付流水和权益包发起整笔退款？', refundUnavailable: '普通退款当前不可用。', permissions: '没有执行此操作的权限。', filters: '筛选', search: '查询', previous: '上一页', next: '下一页', owner: '处理人', severity: '严重级别', nextReview: '下次复核时间', claimCase: '认领', schedule: '安排复核', archive: '归档已确认未付', escalate: '升级人工复核', resolve: '处理异常', resolution: '处理方式', orderRepair: '按付款证据修复', submit: '提交', details: '详情', wallet: '钱包', delta: '调整积分（微积分）', draft: '创建审批草稿', decision: '审批决定', approve: '批准', reject: '拒绝', withdraw: '撤回', version: '版本', command: '操作类型', effects: '执行状态', sla: '处理期限', actions: '操作', productAdmin: '商品管理', providerControls: '支付渠道控制', resume: '恢复收款', more: '更多', confirmAction: '确认提交本次操作？', noActions: '当前没有可执行操作。', reload: '重新读取最新事实', completed: '已完成', sourceChanged: '当前资源或权限已变化，请重新读取。', newInvocation: '开始新的操作', adjustment: '钱包调整'
   },
   en: {
+    statusLanguage: 'en',
+    reviewArchiveUnsupported: 'This provider has no authoritative unpaid terminal result, so this archive action is unavailable. Check payment or schedule a review; a written reason cannot replace payment evidence.',
+    reviewArchiveRequirements: 'Archiving requires the waiting period to end, an authoritative unpaid result, and no payment, conflict, or unverified payment claim.',
+    reviewArchiveConflict: 'The case cannot be archived now. Reload its details and check the owner, archive waiting period, and authoritative unpaid evidence.',
+    reviewAssignedOther: 'This case is assigned to another handler and cannot be claimed by the current account.',
+    reviewClaimConflict: 'The case was assigned or processed. Reload its details to check the current owner and status.',
     unmatchedCallbackHelp: 'No local order was found. Use these references to verify the provider transaction. Keep the case open while the outcome is unresolved.',
     callbackNotificationID: 'Payment notification ID', callbackProvider: 'Verifying provider and version', callbackMerchantOrder: 'Merchant order number',
     callbackTransaction: 'Channel transaction ID', callbackProviderOrder: 'Provider order reference',
@@ -51,6 +64,7 @@ export const financeCopy = {
     confirmQueryAction: 'Confirm query',
     cancelQuery: 'Cancel',
     queryRecorded: 'This review query and its evidence were recorded. Payment status follows the actual evidence.',
+    queryArchiveRecovery: 'The latest explicit query for this case is confirmed, so archiving can be attempted again. Previous unconfirmed commands remain; the server still checks the current generation and every archive condition.',
     reauthenticationRecoveryUnavailable: "The original recharge request is unresolved, but the current identity, context or permissions cannot safely retry it. Restore the original account context and permissions; do not create a new request.",
     inputInvalid: 'Invalid input. Check the amount or identifier and try again.',
     resolutions: { CONFIRM_CHARGEBACK: 'Confirm chargeback', CONFIRM_FORCED_REFUND: 'Confirm forced refund', CONFIRM_PAYMENT: 'Confirm payment from evidence', CONFIRM_PROVIDER_FAILED: 'Confirm provider payment failure', RECONCILE_REFUND: 'Check and reconcile refund outcome', DISMISS: 'Dismiss anomaly', ESCALATE_FINANCIAL_REPAIR: 'Escalate to financial repair' },
@@ -62,6 +76,12 @@ export const financeCopy = {
     title: 'Payments and entitlements', products: 'Recharge products', orders: 'Payment orders', packages: 'Entitlement packages', refresh: 'Refresh', loading: 'Loading…', empty: 'No records', product: 'Product', channel: 'Payment channel', amount: 'Amount (CNY)', status: 'Status', create: 'Create payment order', retry: 'Retry the same request', unknown: 'The result is unconfirmed. Retry the same request instead of creating another.', saved: 'The operation is confirmed.', query: 'Check payment', pay: 'Open payment page', close: 'Close payment order', confirmClose: 'Close this payment order? Completed payments are still handled according to actual payment facts.', claim: 'Submit payment claim', statement: 'Payment statement', expires: 'Payment deadline', remaining: 'Remaining credits', used: 'Used credits', total: 'Total credits', validUntil: 'Valid until', unavailable: 'Financial data is temporarily unavailable. Please retry.', invalid: 'The financial receipt is invalid. Refresh to confirm the result.', name: 'Name', type: 'Type', base: 'Recharge credits', bonus: 'Bonus credits', planNoRefund: 'PLAN packages do not support normal refunds.', mobileRequired: 'Verify your mobile number before recharging.', noChannel: 'No payment channel is currently available.', orderID: 'Order ID', return: 'Back', providerQR: 'Payment QR code', processing: 'Payment confirmation or entitlement delivery is processing.', history: 'Order details', finance: 'Finance', approvals: 'Approvals', refunds: 'Full refund', reason: 'Reason', transaction: 'Payment transaction', package: 'Entitlement package', confirmRefund: 'Request a full refund for the selected payment transaction and entitlement package?', refundUnavailable: 'Normal refunds are currently unavailable.', permissions: 'You do not have permission for this operation.', filters: 'Filters', search: 'Search', previous: 'Previous', next: 'Next', owner: 'Owner', severity: 'Severity', nextReview: 'Next review time', claimCase: 'Claim', schedule: 'Schedule review', archive: 'Archive confirmed unpaid', escalate: 'Escalate review', resolve: 'Resolve anomaly', resolution: 'Resolution', orderRepair: 'Repair using payment evidence', submit: 'Submit', details: 'Details', wallet: 'Wallet', delta: 'Credit adjustment (microcredits)', draft: 'Create approval draft', decision: 'Decision', approve: 'Approve', reject: 'Reject', withdraw: 'Withdraw', version: 'Version', command: 'Command', effects: 'Execution status', sla: 'Deadline', actions: 'Actions', productAdmin: 'Products', providerControls: 'Payment provider controls', resume: 'Resume collection', more: 'More', confirmAction: 'Submit this operation?', noActions: 'No action is currently available.', reload: 'Read current facts again', completed: 'Completed', sourceChanged: 'The resource or permissions changed. Read the current facts again.', newInvocation: 'Start a new operation', adjustment: 'Wallet adjustment'
   },
   ja: {
+    statusLanguage: 'ja',
+    reviewArchiveUnsupported: 'この決済サービスは未払いを確定する最終結果を提供しないため、このアーカイブ操作は利用できません。支払いを照会するか再確認を予約してください。理由の記入だけでは決済の証拠になりません。',
+    reviewArchiveRequirements: 'アーカイブには待機期間の経過、決済サービスによる未払いの確定、および入金・決済競合・未確認の支払い申告がないことが必要です。',
+    reviewArchiveConflict: '現在はアーカイブできません。詳細を再読み込みし、担当者、待機期間、未払いを確定する証拠を確認してください。',
+    reviewAssignedOther: 'この案件は別の担当者に割り当てられているため、現在のアカウントでは引き受けられません。',
+    reviewClaimConflict: '案件は割り当てまたは処理済みです。詳細を再読み込みして、現在の担当者と状態を確認してください。',
     unmatchedCallbackHelp: 'ローカルに注文が見つかりませんでした。以下の番号で決済事業者の取引を照合してください。結果が未確定の間はケースを未解決のままにしてください。',
     callbackNotificationID: '決済通知 ID', callbackProvider: '署名を検証した決済事業者とバージョン', callbackMerchantOrder: '加盟店注文番号',
     callbackTransaction: '決済チャネル取引 ID', callbackProviderOrder: '決済事業者の注文番号',
@@ -82,6 +102,7 @@ export const financeCopy = {
     confirmQueryAction: '照会を確認',
     cancelQuery: 'キャンセル',
     queryRecorded: '今回の照会と証拠を記録しました。支払状態は実際の証拠に従います。',
+    queryArchiveRecovery: 'この案件の最新の明示的な照会が確認されたため、アーカイブを再試行できます。以前の未確認コマンドは保持され、サーバーは現在の世代とすべての条件を引き続き検証します。',
     reauthenticationRecoveryUnavailable: "元のチャージ要求は未確認ですが、現在の本人情報、コンテキストまたは権限では安全に再試行できません。元のアカウントのコンテキストと権限を復元し、新しい要求を作成しないでください。",
     inputInvalid: '入力形式が無効です。金額または識別子を確認して再試行してください。',
     resolutions: { CONFIRM_CHARGEBACK: 'チャージバックを確認', CONFIRM_FORCED_REFUND: '強制返金を確認', CONFIRM_PAYMENT: '支払い証拠で入金を確認', CONFIRM_PROVIDER_FAILED: '決済サービスの支払い失敗を確認', RECONCILE_REFUND: '返金結果を照会して照合', DISMISS: '異常を却下', ESCALATE_FINANCIAL_REPAIR: '財務修復へ引き継ぐ' },

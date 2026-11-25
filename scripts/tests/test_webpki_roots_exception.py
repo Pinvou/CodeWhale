@@ -208,7 +208,8 @@ def cargo_deny_commands(workflow):
     reviewed_pinned_actions = {'actions/setup-go@v6', 'actions/upload-artifact@v7'}
     reviewed_actions = {'actions/checkout', 'actions/setup-node', 'actions/setup-python',
                         'actions/cache/restore', 'actions/cache/save', 'dorny/paths-filter',
-                        'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action'}
+                         'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action',
+                         './.github/actions/linux-rust-cache'}
     for index, line in enumerate(lines):
         if index in scalar_lines or line.lstrip().startswith('#'):
             continue
@@ -279,8 +280,21 @@ class WebpkiCiContractTests(unittest.TestCase):
     def verify_workflow(self, workflow):
         workflow = '\n'.join(line for line in workflow.splitlines()
                              if not line.lstrip().startswith('#')) + '\n'
-        self.assertEqual(len(cargo_deny_commands(workflow)), 2,
+        self.assertEqual(len(cargo_deny_commands(workflow)), 3,
                          'a new cargo-deny entry must join this guarded-entry contract')
+        # r7 P2-6：cmsd-check 的 deny 入口。它审计 components/cmsd 的独立依赖图，
+        # 使用专用 deny.toml（零 ignore，故无需共享豁免守卫脚本）；仍要求钉版
+        # 安装、--locked 与显式登记——新增豁免类 ignore 时必须回到本契约评审。
+        cmsd_block = job_block(workflow, 'cmsd-check')
+        cmsd_steps = cmsd_block.split('\n      - ')
+        cmsd_scan = next(step for step in cmsd_steps
+                         if step.startswith('name: 独立 CMS 依赖门禁（cargo-deny）\n'))
+        self.assertNotIn('continue-on-error', cmsd_scan)
+        normalized = ' '.join(cmsd_scan.split())
+        self.assertIn(
+            'cargo deny --locked --manifest-path components/cmsd/Cargo.toml '
+            '--config components/cmsd/deny.toml check advisories licenses bans sources',
+            normalized)
         cases = [
             ("knowledge-rust", "cargo deny check", "needs.changes.outputs.knowledge_dependencies == 'true'",
              "python3 scripts/guard-webpki-roots-exception.py",
@@ -572,7 +586,9 @@ class WebpkiCiContractTests(unittest.TestCase):
                 # a shell-quoted YAML approximation.
                 changed = workflow + ('\n  unguarded-audit:\n    steps:\n'
                                       f'      - run: {json.dumps(command)}\n')
-                self.assertEqual(len(cargo_deny_commands(changed)), 3)
+                # 3 个已登记入口（knowledge-rust / rust-lint / cmsd-check）+ 1 个
+                # 追加的未守卫扫描 = 4；引号变体必须全部被识别，一个都藏不住。
+                self.assertEqual(len(cargo_deny_commands(changed)), 4)
                 with self.assertRaisesRegex(AssertionError, 'new cargo-deny entry'):
                     self.verify_workflow(changed)
 

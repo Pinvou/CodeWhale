@@ -417,6 +417,15 @@ pub fn instructions_code_md(workspace_hint: &str) -> String {
 const VISUAL_DESIGN_SKILL_MD: &str =
     include_str!("../../../../resources/common/bundle/builtin-skills/visual-design/SKILL.md");
 
+/// `~/.pinvou3/bundle/skills/megacube-admin/SKILL.md`：MegaCube 管理面排障剧本。
+/// 随本机管理配置或安装记录提供，cmsd 离线时仍可用于安装和恢复；
+/// 技能可见性本身不授予模型生命周期管理权。
+const MEGACUBE_ADMIN_SKILL_MD: &str =
+    include_str!("../../../../resources/common/bundle/builtin-skills/megacube-admin/SKILL.md");
+static MEGACUBE_ADMIN_REFERENCES: Dir<'_> = include_dir!(
+    "$CARGO_MANIFEST_DIR/resources/common/bundle/builtin-skills/megacube-admin/references"
+);
+
 /// Test-only view of the embedded builtin-skill resource tree: binds
 /// `Pinvou3Bundle::BUILTIN_RELEASED_SKILL_DIRS` to the actual resources
 /// (same pattern as `wecom_skill_dirs_match_embedded_resources`).
@@ -552,6 +561,14 @@ pub const DEFAULT_MCP_JSON: &str = "{\n  \"servers\": {\n    \"pinvou3\": {\n   
 /// `~/.pinvou3/bundle/mcp-servers/`。底座按 mcp.json 用 `python3 <path>` 拉起它。
 pub const PRESENT_ARTIFACT_SERVER_PY: &str =
     include_str!("../../../../resources/common/bundle/mcp-servers/present_artifact_server.py");
+
+/// megacube-admin MCP server 脚本（零依赖 python stdio），编译期内嵌，解包到
+/// `~/.pinvou3/bundle/mcp-servers/`。注册与否由 ensure_builtin_mcp_servers 按
+/// 本机管理配置或安装记录决定；脚本和工具包始终解包，供后续注册。
+pub const MEGACUBE_ADMIN_SERVER_PY: &str =
+    include_str!("../../../../resources/common/bundle/mcp-servers/megacube_admin_server.py");
+static MEGACUBE_TOOLS_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/common/bundle/mcp-servers/megacube_tools");
 pub const MCP_PYTHON_DEPENDENCY_RUNNER_PY: &str =
     include_str!("../../../../resources/common/bundle/mcp-servers/python_dependency_runner.py");
 
@@ -2065,9 +2082,17 @@ mod tests {
         crate::platform::test_support::with_temp_home(
             "pinvou3-bundle-write_builtin_skills_releases_exactly_the_listed_dirs",
             || {
+                let _env = crate::platform::paths::tests::EnvVarGuard::capture(&["CMSD_SOCKET"]);
+                let socket = paths::pinvou3_home().join("cmsd-test.sock");
+                std::fs::create_dir_all(paths::pinvou3_home()).unwrap();
+                std::fs::write(&socket, b"").unwrap();
+                // SAFETY: with_temp_home holds ENV_LOCK and the guard restores the value.
+                unsafe {
+                    std::env::set_var("CMSD_SOCKET", socket);
+                }
                 let bundle = Pinvou3Bundle::paths();
 
-                // MegaCube（true）：释放面 == 全部内嵌常量。
+                // MegaCube + explicit CMS authority: release all embedded skills.
                 bundle.write_builtin_skills(true).unwrap();
                 let mut written: Vec<String> = std::fs::read_dir(&bundle.skills_dir)
                     .unwrap()
@@ -2086,8 +2111,8 @@ mod tests {
                     "write_builtin_skills 的释放面与 BUILTIN_RELEASED_SKILL_DIRS 不一致"
                 );
 
-                // 非 MegaCube（false）：device-doctor 不释放——技能清单可见性是非
-                // MegaCube 平台的用户可见面，设计 §10 零变化承诺由此成立（五轮评审 P2）。
+                // Non-MegaCube: no device-doctor. Explicit CMS socket authority
+                // independently retains megacube-admin, as before this integration.
                 for dir in listed {
                     let _ = std::fs::remove_dir_all(bundle.skills_dir.join(&dir));
                 }
@@ -2101,8 +2126,8 @@ mod tests {
                 written_non_megacube.sort_unstable();
                 assert_eq!(
                     written_non_megacube,
-                    vec!["visual-design".to_string()],
-                    "非 MegaCube 上 device-doctor 必须不释放"
+                    vec!["megacube-admin".to_string(), "visual-design".to_string()],
+                    "显式 CMS 权限独立于硬件能力；非 MegaCube 不得释放 device-doctor"
                 );
             },
         );
@@ -2422,6 +2447,27 @@ mod tests {
         crate::platform::test_support::with_temp_home(
             "pinvou3-bundle-ensure_builtin_mcp_servers_touches_only_engine_owned_keys",
             || {
+                // The megacube-admin upsert is gated on cmsd authority (a device
+                // receipt or a live socket). Pin those inputs hermetic: a developer
+                // machine running a real user-service cmsd otherwise flips the gate
+                // mid-suite and this footprint assertion sees an extra key.
+                let runtime_dir = std::env::temp_dir().join(format!(
+                    "pinvou3-xdg-runtime-{}-{}",
+                    std::process::id(),
+                    paths::tests::unique_suffix()
+                ));
+                std::fs::create_dir_all(&runtime_dir).unwrap();
+                let _authority_env = crate::platform::test_support::EnvRestore::capture(&[
+                    "XDG_RUNTIME_DIR",
+                    "CMSD_SOCKET",
+                    "PINVOU3_CMSD_UNIT",
+                ]);
+                // SAFETY: this test's with_temp_home holds the ENV_LOCK; env writes serialized in-process.
+                unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir) };
+                // SAFETY: same lock; explicit socket pins must not fake authority.
+                unsafe { std::env::remove_var("CMSD_SOCKET") };
+                // SAFETY: same lock; explicit unit pins must not fake authority.
+                unsafe { std::env::remove_var("PINVOU3_CMSD_UNIT") };
                 paths::ensure_dirs().unwrap();
                 let bundle = Pinvou3Bundle::paths();
                 std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
@@ -2436,6 +2482,8 @@ mod tests {
                 "pinvou":{"command":"python3","args":["/old/present.py"]},
                 "pinvou3":{"command":"/usr/bin/obsolete-python","args":["/old/present.py"]},
                 "browser":{"command":"node","args":["/old/browser-wrapper.mjs"]},
+                "megacube-admin":{"command":"python3","args":["/old/megacube_admin_server.py"]},
+                "megacube_admin":{"command":"python3","args":["/old/megacube_admin_server.py"]},
                 "user-node":{"command":"node","args":["/opt/user-tool/run.js"],"enabled":false,"custom_hint":"keep"},
                 "user-node2":{"command":"node","args":["/opt/user-tool/run2.js"]}
             }}"#,
@@ -2973,6 +3021,110 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test]
+    fn work_mcp_profiles_route_bundled_pptx_to_each_session_artifact_directory() {
+        crate::platform::test_support::with_temp_home("pinvou3-work-pptx-output", || {
+            let bundle = Pinvou3Bundle::paths();
+            std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+            let package = paths::bundle_mcp_package_dir("pptx");
+            let script = package.join("server.py");
+            let site_packages = paths::marketplace_python_envs_dir()
+                .join("a".repeat(64))
+                .join("site-packages");
+            let base = serde_json::json!({"servers": {
+                "pptx": {"command": paths::python_command(), "url": null, "args": ["-I", "-S", "-B", paths::bundle_mcp_python_runner(), site_packages, script], "env": {"OTHER": "preserved"}},
+                "other": {"command": "other", "env": {"PINVOU3_SESSION_ARTIFACTS": "unchanged"}}
+            }});
+            std::fs::write(&bundle.mcp_json, base.to_string()).unwrap();
+
+            let mut configs = Vec::new();
+            for id in ["controlled-chat-a", "controlled-chat-b"] {
+                let profile = bundle.work_mode_mcp_config_path_for_session(id);
+                assert_ne!(profile, bundle.mcp_json);
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&profile).unwrap()).unwrap();
+                let args = config["servers"]["pptx"]["args"].as_array().unwrap();
+                assert_eq!(
+                    &args[..6],
+                    base["servers"]["pptx"]["args"].as_array().unwrap()
+                );
+                assert_eq!(
+                    args[6],
+                    format!(
+                        "--session-artifacts-dir={}",
+                        paths::session_artifacts_dir(id).display()
+                    )
+                );
+                assert_eq!(
+                    config["servers"]["pptx"]["env"],
+                    base["servers"]["pptx"]["env"]
+                );
+                assert_eq!(config["servers"]["other"], base["servers"]["other"]);
+                configs.push(profile);
+            }
+            assert_ne!(configs[0], configs[1]);
+            assert_eq!(
+                std::fs::read_to_string(&bundle.mcp_json).unwrap(),
+                base.to_string()
+            );
+
+            let mut custom = base;
+            custom["servers"]["pptx"]["args"] = serde_json::json!([script]);
+            std::fs::write(&bundle.mcp_json, custom.to_string()).unwrap();
+            let profile = bundle.work_mode_mcp_config_path_for_session("controlled-chat-a");
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(profile).unwrap()).unwrap();
+            assert_eq!(
+                config["servers"]["pptx"]["args"][1],
+                format!(
+                    "--session-artifacts-dir={}",
+                    paths::session_artifacts_dir("controlled-chat-a").display()
+                )
+            );
+
+            custom["servers"]["pptx"]["command"] = serde_json::json!("custom-ppt-launcher");
+            std::fs::write(&bundle.mcp_json, custom.to_string()).unwrap();
+            let profile = bundle.work_mode_mcp_config_path_for_session("controlled-chat-a");
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(profile).unwrap()).unwrap();
+            assert_eq!(config["servers"]["pptx"], custom["servers"]["pptx"]);
+        });
+    }
+
+    #[test]
+    fn work_mcp_rejects_global_pptx_fallback_when_session_profile_is_unwritable() {
+        crate::platform::test_support::with_temp_home("pinvou3-work-pptx-unwritable", || {
+            let bundle = Pinvou3Bundle::paths();
+            std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+            let base = serde_json::json!({"servers": {"pptx": {
+                "command": paths::python_command(),
+                "args": [paths::bundle_mcp_package_dir("pptx").join("server.py")],
+            }}});
+            std::fs::write(&bundle.mcp_json, base.to_string()).unwrap();
+            let profile_dir = paths::browser_session_mcp_dir();
+            std::fs::create_dir_all(profile_dir.parent().unwrap()).unwrap();
+            std::fs::write(&profile_dir, b"blocked profile directory").unwrap();
+            let profile = bundle.work_mode_mcp_config_path_for_session("controlled-chat-a");
+            assert_eq!(profile, bundle.mcp_json);
+            assert!(
+                bundle
+                    .resolve_work_mode_mcp_fallback("controlled-chat-a", &profile)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&bundle.mcp_json).unwrap(),
+                base.to_string()
+            );
+            let mut disabled = base;
+            disabled["servers"]["pptx"]["enabled"] = serde_json::json!(false);
+            std::fs::write(&bundle.mcp_json, disabled.to_string()).unwrap();
+            assert_eq!(
+                bundle.resolve_work_mode_mcp_fallback("controlled-chat-a", &profile),
+                Ok(None)
+            );
+        });
     }
 
     /// Verifies the Browser MCP gate defined by the ADR:

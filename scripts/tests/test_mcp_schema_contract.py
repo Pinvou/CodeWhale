@@ -7,10 +7,10 @@ _walk_tool_schema) runs inside the CI fast-gate's
 mcp-server-contract-smoke.py, shape-checking every bundled server's
 tools/list result against exactly the keyword set those documents list,
 mirroring the T11 engine pipeline (schema_sanitize.rs — the
-document-precise Moonshot face lands on the wire via CodeWhale #143, with
-the provider faces in #144/#145/#146/#147; until the close-out re-pin this
-guard pins the target contract, and the parent's pinned tree still runs
-the pre-T11 sanitizer):
+document-precise Moonshot face landed on the wire via CodeWhale #143, with
+the provider faces in #144/#145/#146/#147; the close-out re-pin consumed
+that batch on this repository's gitlink (2026-11-24, cc2adf8ef9), so the
+pinned tree now runs the T11 face this guard was built to pin):
 
 - the whitelist is the MFJS specification's supported set, exactly — its
   字段定义 (field-definition) sections enumerate description, default, anyOf, properties,
@@ -155,15 +155,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "mcp-server-contract-smoke.py"
-# The pre-T11 engine face the interim window is blessed against; see
-# test_pinned_codewhale_gitlink_is_pre_t11. Blessed 2026-11-16 onto this
-# repository's gitlink 687358f7e (upstream took the deps/lint follow head
-# 8e8d52fdb (#156) first): the pinned sanitizer face (schema_sanitize.rs,
-# MFJS anyOf cap) is byte-identical across both heads (blob bdc0bda33),
-# verified via the layer-2 source assertions on a populated tree before
-# flipping the pin. Any advance of the parent gitlink turns the tripwire
-# red until the new pinned face is reconciled the same way.
-_PINNED_CODEWHALE_GITLINK = "687358f7efde6abd3592737b8ec48adc74ba5a84"
+# The T11 engine face the guard is blessed against; see
+# test_pinned_codewhale_gitlink_is_t11_closeout. Re-blessed 2026-11-24 onto
+# this repository's gitlink cc2adf8ef9 (the close-out re-pin consumed the
+# T11 batch CodeWhale #143–#147): the pinned sanitizer face now carries
+# strip_mfjs_advisory_keywords / remove_empty_mfjs_items_schemas and the
+# walle-aligned budgets (blob db7c19a019a), verified via the layer-2 source
+# assertions on a populated tree before flipping the pin. Any advance of
+# the parent gitlink turns the tripwire red until the new pinned face is
+# reconciled the same way.
+_PINNED_CODEWHALE_GITLINK = "cc2adf8ef927fff072e9493734a0a32f3a044996"
 PPTX_SERVER = ROOT / "pinvou3-app" / "resources" / "mcp-servers" / "pptx" / "server.py"
 
 
@@ -1093,8 +1094,8 @@ class SchemaContractWalkerTest(unittest.TestCase):
         # tracks the constant and stays green under drift, red-proofing
         # nothing. Like every sibling budget pin, both sides are literal —
         # drifting the constant in either direction flips one arm red. If
-        # the constant legitimately changes (close-out re-pin), update
-        # these two literals with it.
+        # the constant legitimately changes in a future face re-bless,
+        # update these two literals with it.
         def schema_at(total):
             probe = json.dumps(
                 {"type": "object",
@@ -1153,21 +1154,21 @@ class SchemaContractWalkerTest(unittest.TestCase):
                             "s": {"type": "string"}},
              "additionalProperties": False}))
 
-    def test_pinned_codewhale_gitlink_is_pre_t11(self):
-        # Tripwire layer 1 — CI-reproducible. The interim window only holds
-        # against the pinned pre-T11 engine, but the CI checkout uses
-        # submodules: false, so a source-reading assertion would silently
-        # skip exactly where the window must stay loud. The parent tree's
-        # CodeWhale gitlink is readable without any submodule checkout, so
-        # pin it: any advance of the pin (a deps-follow or the T11
-        # close-out re-pin) turns this red until the mirror constants and
-        # the interim notes are consciously reconciled with the new pinned
-        # face.
-        # When the re-pin lands, THIS TEST GOES RED BY DESIGN — re-bless
+    def test_pinned_codewhale_gitlink_is_t11_closeout(self):
+        # Tripwire layer 1 — CI-reproducible. The guard's rules converge with
+        # the pinned engine's face only at a consciously re-blessed pin, but
+        # the CI checkout uses submodules: false, so a source-reading
+        # assertion would silently skip exactly where the face must stay
+        # loud. The parent tree's CodeWhale gitlink is readable without any
+        # submodule checkout, so pin it: any advance of the pin (a
+        # deps-follow or a future sanitizer change) turns this red until the
+        # mirror constants and the contract notes are consciously reconciled
+        # with the new pinned face.
+        # When a re-pin lands, THIS TEST GOES RED BY DESIGN — re-bless
         # the pinned face here (and the source assertions in
-        # test_pinned_engine_source_face_is_pre_t11 on a populated tree),
-        # flip the interim notes in the guard header, the contract doc,
-        # and the pptx schema comment, and only then treat the target
+        # test_pinned_engine_source_face_is_t11 on a populated tree),
+        # flip the convergence notes in the guard header, the contract doc,
+        # and the pptx schema comment, and only then treat the new
         # contract as the shipped one.
         try:
             pinned = subprocess.run(
@@ -1179,14 +1180,14 @@ class SchemaContractWalkerTest(unittest.TestCase):
                       f"needs the parent tree): {exc}")
         self.assertEqual(
             pinned, _PINNED_CODEWHALE_GITLINK,
-            "the CodeWhale pin advanced — the close-out re-pin may have "
-            "landed: reconcile the mirror constants with the new pinned "
-            "face, flip the interim notes, and re-bless this gitlink pin")
+            "the CodeWhale pin advanced — reconcile the mirror constants "
+            "with the new pinned face, flip the convergence notes, and "
+            "re-bless this gitlink pin")
 
     @unittest.skipIf(
         not (ROOT / "CodeWhale/crates/tui/src/tools/schema_sanitize.rs").exists(),
         "pinned CodeWhale tree not populated (cannot read schema_sanitize.rs)")
-    def test_pinned_engine_source_face_is_pre_t11(self):
+    def test_pinned_engine_source_face_is_t11(self):
         # Tripwire layer 2 — the deeper source-content face, readable only
         # on a populated submodule tree. Local runs get it; CI (submodules:
         # false) skips this layer and relies on the gitlink pin above,
@@ -1194,16 +1195,20 @@ class SchemaContractWalkerTest(unittest.TestCase):
         source = (ROOT / "CodeWhale/crates/tui/src/tools/schema_sanitize.rs"
                   ).read_text(encoding="utf-8")
         self.assertIn(
-            "MFJS_MAX_ANY_OF_ITEMS: usize = 10", source,
-            "the pinned engine's anyOf cap changed — the close-out re-pin may "
-            "have landed: reconcile the mirror constants with the new pinned "
-            "face, flip the interim notes, and update this tripwire")
-        self.assertNotIn(
-            "strip_mfjs_advisory_keywords", source,
-            "the pinned engine now carries the T11 advisory strip — the "
-            "close-out re-pin may have landed: reconcile the mirror constants "
-            "with the new pinned face, flip the interim notes, and update "
-            "this tripwire")
+            "MFJS_MAX_ANY_OF_ITEMS: usize = 500", source,
+            "the pinned engine's anyOf cap changed — reconcile the mirror "
+            "constants with the new pinned face, flip the convergence notes, "
+            "and update this tripwire")
+        self.assertIn(
+            "fn strip_mfjs_advisory_keywords", source,
+            "the pinned engine no longer carries the T11 advisory strip — "
+            "reconcile the mirror constants with the new pinned face, flip "
+            "the convergence notes, and update this tripwire")
+        self.assertIn(
+            "fn remove_empty_mfjs_items_schemas", source,
+            "the pinned engine no longer carries the empty-items repair — "
+            "reconcile the mirror constants with the new pinned face, flip "
+            "the convergence notes, and update this tripwire")
 
     @unittest.skipIf(pptx_schema is None, "python-pptx not installed (cannot load the pptx server schema)")
     def test_real_pptx_schema_is_green(self):
@@ -1226,9 +1231,9 @@ class SchemaContractWalkerTest(unittest.TestCase):
         self.assertIsInstance(branches, list)
         self.assertEqual(len(branches), 10,
                          "one branch per layout; the count is the layout set, "
-                         "not a target-budget boundary (500) — but the pinned "
-                         "pre-T11 engine caps anyOf at 10, so this sits exactly "
-                         "at the shipped limit")
+                         "not a budget boundary — the pinned engine's anyOf "
+                         "budget (500) leaves the layout count as the only "
+                         "ceiling")
         layouts = []
         for index, branch in enumerate(branches):
             self.assertEqual(branch.get("type"), "object",

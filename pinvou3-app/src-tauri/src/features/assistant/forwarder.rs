@@ -498,6 +498,12 @@ pub(crate) fn spawn_event_forwarder(
                     if let Some(task_id) =
                         turn_lifecycle.take_remote_task_for_submission(submission_id.as_deref())
                     {
+                        let _ = crate::features::assistant::remote_user_input::bind_engine_turn(
+                            &session_id,
+                            &task_id,
+                            turn_lifecycle.current_turn_generation().unwrap_or(0),
+                            &turn_id,
+                        );
                         crate::features::behavior_telemetry::bind_remote_execution_turn(
                             &app,
                             &session_id,
@@ -818,6 +824,12 @@ pub(crate) fn spawn_event_forwarder(
                     });
                     // request_user_input 收口：submit/cancel 已由底座转为工具结果。
                     if name == "request_user_input" {
+                        crate::features::assistant::remote_user_input::finish_question(
+                            &session_id,
+                            turn_lifecycle.current_turn_generation().unwrap_or(0),
+                            current_turn_id.as_deref().unwrap_or(""),
+                            &id,
+                        );
                         crate::features::assistant::pending_user_input::clear(&session_id, &id);
                     }
                     let _ = app.emit("chat:tool_end", payload.clone());
@@ -828,6 +840,24 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::UserInputRequired { id, request } => {
+                    let question_record =
+                        crate::features::assistant::remote_user_input::record_for_turn(
+                            &session_id,
+                            turn_lifecycle.current_turn_generation().unwrap_or(0),
+                            current_turn_id.as_deref().unwrap_or(""),
+                            &id,
+                            json!(request.questions),
+                        );
+                    if question_record.is_err() {
+                        // Never strand an unrepresentable remote question. This
+                        // rejects the question, not the protected tool operation.
+                        let handle = approve_handle.clone();
+                        let id = id.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.cancel_user_input(id).await;
+                        });
+                        continue;
+                    }
                     if scheduled_profile.is_some() && scheduled_unattended.load(Ordering::Acquire) {
                         // 定时任务没有前台操作者；不能把底座卡在等待输入的超时上。
                         let h = approve_handle.clone();
@@ -2015,6 +2045,19 @@ pub(crate) fn spawn_event_forwarder(
                         provider,
                         omitted_tool_count,
                         session_id
+                    );
+                }
+                // 底座 cc2adf8（CodeWhale#141）的有界模型限流恢复回执：引擎在
+                // 429 退避后自行重试并恢复。宿主暂不向前端投影恢复进度条，
+                // 仅记录诊断日志；终态仍由既有 turn/error 事件流承载。
+                Event::ModelRecovery { receipt } => {
+                    log::debug!(
+                        "[pinvou3][chat] model recovery sid={} turn={:?} state={} attempt={}/{}",
+                        session_id,
+                        receipt.turn_id,
+                        receipt.state,
+                        receipt.attempt,
+                        receipt.max_attempts
                     );
                 }
                 Event::Status { message } => {

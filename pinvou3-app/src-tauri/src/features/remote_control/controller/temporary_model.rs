@@ -242,9 +242,10 @@ impl ExportRoute {
             reasoning_effort: self.reasoning_effort.clone(),
             model: self.model.clone(),
             model_store_card_id: None,
+            store_card_id: None,
+            model_store_link_only: false,
             model_store_link_detached: false,
             model_store_link_requested: false,
-            model_store_link_only: false,
             preserve_model_store_route: false,
             preserve_context_window_tokens: false,
             context_window_edit_requested: false,
@@ -833,6 +834,28 @@ pub(crate) struct TemporaryRuntimeModels {
     pub(crate) egress: Arc<super::runtime_egress::RuntimeEgress>,
 }
 
+fn validate_runtime_primary_credential(
+    primary: &ExportRoute,
+    read_env: impl Fn(&str) -> Option<String>,
+) -> Result<()> {
+    use codewhale_config::{
+        CLI_API_KEY_SOURCE_ENV, ConfigApiKeyValueKind, LEGACY_CLI_API_KEY_SOURCE_ENV,
+        classify_config_api_key_value,
+    };
+
+    // Match the foundation's marker precedence without reading the process key.
+    let cli_source = [CLI_API_KEY_SOURCE_ENV, LEGACY_CLI_API_KEY_SOURCE_ENV]
+        .into_iter()
+        .filter_map(read_env)
+        .find(|value| !value.trim().is_empty());
+    if cli_source.as_deref() == Some("cli")
+        || classify_config_api_key_value(primary.secret.expose()) != ConfigApiKeyValueKind::Literal
+    {
+        return Err(error("model_runtime_invalid"));
+    }
+    Ok(())
+}
+
 fn runtime_endpoint_error(code: &'static str) -> TemporaryModelError {
     // Keep the published closed rejection vocabulary: a resolver unable to
     // admit/return a bounded snapshot is an unresolved endpoint for this turn.
@@ -1021,6 +1044,7 @@ impl TemporaryModelStore {
         let vision_id = format!("remote-temporary-{task_id}-vision");
         let (mut primary, vision) =
             self.with_credentials(task_id, live, |primary, vision| {
+                validate_runtime_primary_credential(primary, |name| std::env::var(name).ok())?;
                 Ok::<_, TemporaryModelError>((
                     primary.to_runtime_model(primary_id)?,
                     vision
@@ -1029,18 +1053,12 @@ impl TemporaryModelStore {
                 ))
             })??;
         primary.vision_model_id = vision.as_ref().map(|model| model.id.clone());
-        let primary_endpoint = super::runtime_egress::prepare_endpoint(&primary.base_url)
-            .await
-            .map_err(runtime_endpoint_error)?;
-        let vision_endpoint = match vision.as_ref() {
-            Some(model) => Some(
-                super::runtime_egress::prepare_endpoint(&model.base_url)
-                    .await
-                    .map_err(runtime_endpoint_error)?,
-            ),
-            None => None,
-        };
-        let egress = super::runtime_egress::RuntimeEgress::new(primary_endpoint, vision_endpoint);
+        let egress = super::runtime_egress::RuntimeEgress::prepare(
+            &primary.base_url,
+            vision.as_ref().map(|model| model.base_url.as_str()),
+        )
+        .await
+        .map_err(runtime_endpoint_error)?;
         Ok(TemporaryRuntimeModels {
             primary,
             vision,
@@ -1144,6 +1162,41 @@ mod tests {
             relay_epoch: "relay-epoch-0001".into(),
             remote_control_generation: "generation-0001".into(),
         }
+    }
+
+    #[test]
+    fn temporary_primary_credentials_cannot_fall_back_to_process_sources() {
+        use codewhale_config::{API_KEYRING_SENTINEL, CLI_API_KEY_SOURCE_ENV};
+
+        let primary = route("https://models.example.test/v1", "deepseek", "fixture-key");
+        for (current, legacy, denied) in [
+            (None, None, false),
+            (Some("cli"), None, true),
+            (None, Some("cli"), true),
+            (Some(" "), Some("cli"), true),
+            (Some("file"), Some("cli"), false),
+        ] {
+            let result = validate_runtime_primary_credential(&primary, |name| {
+                if name == CLI_API_KEY_SOURCE_ENV {
+                    current
+                } else {
+                    legacy
+                }
+                .map(str::to_owned)
+            });
+            assert_eq!(
+                result.err().map(|error| error.code),
+                denied.then_some("model_runtime_invalid")
+            );
+        }
+
+        let sentinel = route(
+            "https://models.example.test/v1",
+            "deepseek",
+            API_KEYRING_SENTINEL,
+        );
+        let failure = validate_runtime_primary_credential(&sentinel, |_| None).unwrap_err();
+        assert_eq!(failure.code, "model_runtime_invalid");
     }
 
     fn route(base_url: &str, preset: &str, key: &str) -> ExportRoute {
@@ -1264,6 +1317,7 @@ mod tests {
             reasoning_effort: Some("high".into()),
             model: "deepseek-chat".into(),
             model_store_card_id: None,
+            store_card_id: None,
             model_store_link_detached: false,
             model_store_link_requested: false,
             model_store_link_only: false,

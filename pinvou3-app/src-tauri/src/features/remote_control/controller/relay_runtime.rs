@@ -2520,6 +2520,11 @@ fn remote_action_response(
 
 fn public_remote_action_error(code: &str) -> &'static str {
     match code {
+        "user_input_invalid" => "user_input_invalid",
+        "user_input_stale" => "user_input_stale",
+        "user_input_already_answered" => "user_input_already_answered",
+        "user_input_busy" => "user_input_busy",
+        "user_input_unavailable" => "user_input_unavailable",
         "permission_expired" => "permission_expired",
         "permission_already_decided" => "permission_already_decided",
         "permission_not_found" => "permission_not_found",

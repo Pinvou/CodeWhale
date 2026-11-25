@@ -11,6 +11,25 @@ function Assert-True {
   }
 }
 
+# PINVOU_PYTHON_CONTRACT_DIAGNOSTIC_BEGIN
+$script:pythonContractPhaseTimer = $null
+$script:pythonContractPhaseCount = 0
+function Write-PythonContractPhase {
+  param([string]$Phase, [string]$Edge)
+  try {
+    $allowed = @('fixture_create', 'path_python_lookup', 'native_sanity', 'copy_exe_dlls', 'copy_lib', 'copied_version', 'real_abi_positive', 'real_abi_negative', 'manifest_negatives', 'fresh_and_reuse', 'source_wiring', 'fixture_cleanup')
+    if (-not ($allowed -ccontains $Phase) -or -not (@('enter', 'done') -ccontains $Edge) -or $script:pythonContractPhaseCount -ge 25) { return }
+    if ($null -eq $script:pythonContractPhaseTimer) { $script:pythonContractPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew() }
+    $script:pythonContractPhaseCount += 1
+    $elapsed = [long][Math]::Min([long]1000000000, [Math]::Max([long]0, [long]$script:pythonContractPhaseTimer.ElapsedMilliseconds))
+    $record = [ordered]@{ phase = $Phase; edge = $Edge; sequence = $script:pythonContractPhaseCount; elapsed_ms = $elapsed }
+    $json = $record | ConvertTo-Json -Compress -Depth 3
+    [Console]::Out.WriteLine('[python-dependency-phase] ' + $json)
+  } catch { # Diagnostic stdout failure must never replace the original result.
+  }
+}
+# PINVOU_PYTHON_CONTRACT_DIAGNOSTIC_END
+
 function New-ValidManifestFixture {
   return (@'
 {
@@ -100,22 +119,29 @@ Assert-True -Condition (Test-PythonDependencyTargets -PythonRoot $fakePythonRoot
 Assert-True -Condition ($probeCount -eq 2) -Message "every locked built-in MCP must be ABI-probed"
 Assert-True -Condition (-not (Test-PythonDependencyTargets -PythonRoot $fakePythonRoot -AbiProbe { param($PythonExe, $Target) $false })) -Message "an ABI mismatch must fail closed"
 
+Write-PythonContractPhase -Phase 'fixture_create' -Edge 'enter'
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou-python-manifest-contract-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+Write-PythonContractPhase -Phase 'fixture_create' -Edge 'done'
 
 # Behavioral coverage for the real ABI probe branch (no -AbiProbe injection). Windows
 # cannot fake an executable named python.exe without a real PE image, so copy the PATH
 # python and its standard library, then stub its platform module: the probe prints to stdout with a
 # controllable machine() result, which is exactly the stray-output case the
 # "$null = & $pythonExe" fix guards. Skipped when no runnable PATH python exists.
+Write-PythonContractPhase -Phase 'path_python_lookup' -Edge 'enter'
 $pathPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+Write-PythonContractPhase -Phase 'path_python_lookup' -Edge 'done'
 $realProbeReady = $false
 $realProbeRoot = $null
 $probeVersion = ""
 if ($pathPython) {
   try {
+    Write-PythonContractPhase -Phase 'native_sanity' -Edge 'enter'
     $null = & $pathPython -I -S -B -c "print('sanity')"
+    Write-PythonContractPhase -Phase 'native_sanity' -Edge 'done'
     if ($LASTEXITCODE -eq 0) {
+      Write-PythonContractPhase -Phase 'copy_exe_dlls' -Edge 'enter'
       $realProbeRoot = Join-Path $fixtureRoot "real-probe-python"
       $pathPythonDir = Split-Path -Parent $pathPython
       New-Item -ItemType Directory -Path $realProbeRoot -Force | Out-Null
@@ -123,12 +149,14 @@ if ($pathPython) {
       Copy-Item -LiteralPath $pathPython -Destination (Join-Path $realProbeRoot "python.exe")
       Copy-Item -Path (Join-Path $pathPythonDir "python3*.dll") -Destination $realProbeRoot -ErrorAction SilentlyContinue
       Copy-Item -Path (Join-Path $pathPythonDir "vcruntime140*.dll") -Destination $realProbeRoot -ErrorAction SilentlyContinue
+      Write-PythonContractPhase -Phase 'copy_exe_dlls' -Edge 'done'
       # The production ABI probe uses -I -S -B and imports only sys plus our
       # controlled platform.py. Copying Lib recursively also copied unrelated
       # site-packages (many thousands of files) and could consume the entire
       # CI job before the real assertions ran. Keep a real isolated PE/DLL
       # interpreter and its standard library, excluding third-party packages.
       # Keep the full stdlib: Python releases have different startup imports.
+      Write-PythonContractPhase -Phase 'copy_lib' -Edge 'enter'
       $probeLib = Join-Path $realProbeRoot "Lib"
       New-Item -ItemType Directory -Path $probeLib -Force | Out-Null
       Get-ChildItem -LiteralPath (Join-Path $pathPythonDir "Lib") |
@@ -138,8 +166,11 @@ if ($pathPython) {
       # Pin the copied interpreter to the private library. No registry/CWD
       # fallback or site-packages may make a broken fixture appear runnable.
       [IO.File]::WriteAllText((Join-Path $realProbeRoot "python._pth"), "Lib`n", [Text.UTF8Encoding]::new($false))
+      Write-PythonContractPhase -Phase 'copy_lib' -Edge 'done'
       $realProbePython = Join-Path $realProbeRoot "python.exe"
+      Write-PythonContractPhase -Phase 'copied_version' -Edge 'enter'
       $probeVersion = ([string](& $realProbePython -I -S -B -c "import sys; print('%d.%d' % sys.version_info[:2])")).Trim()
+      Write-PythonContractPhase -Phase 'copied_version' -Edge 'done'
       if ($LASTEXITCODE -ne 0 -or $probeVersion -cnotmatch '^\d+\.\d+$') {
         throw "The isolated real ABI interpreter failed to start."
       }
@@ -184,14 +215,19 @@ if ($realProbeReady) {
 
   $probePassRoot = New-RealProbeManifestRoot -Name "real-probe-pass" -PythonVersion $probeVersion
   Write-StubPlatform -PythonRoot $realProbeRoot -Machine "AMD64"
+  Write-PythonContractPhase -Phase 'real_abi_positive' -Edge 'enter'
   Assert-True -Condition (Test-PythonDependencyTargets -PythonRoot $realProbeRoot -ManifestRoot $probePassRoot) -Message "a matching real ABI probe must stay accepted when it prints to stdout"
+  Write-PythonContractPhase -Phase 'real_abi_positive' -Edge 'done'
 
   $probeFailRoot = New-RealProbeManifestRoot -Name "real-probe-fail" -PythonVersion $probeVersion
   Write-StubPlatform -PythonRoot $realProbeRoot -Machine "i386"
+  Write-PythonContractPhase -Phase 'real_abi_negative' -Edge 'enter'
   Assert-True -Condition (-not (Test-PythonDependencyTargets -PythonRoot $realProbeRoot -ManifestRoot $probeFailRoot)) -Message "a real ABI probe printing to stdout with a non-zero exit must be rejected"
+  Write-PythonContractPhase -Phase 'real_abi_negative' -Edge 'done'
   Write-Host "[test] Real Python ABI probes: matching accepted, mismatch rejected; private library verified."
 }
 
+Write-PythonContractPhase -Phase 'manifest_negatives' -Edge 'enter'
 $wrongSha = New-ValidManifestFixture
 $wrongSha.python_dependencies.targets[0].wheels[0].sha256 = "z" * 64
 Assert-ManifestFixtureRejected -Name "wrong-sha" -Manifest $wrongSha -FixtureRoot $fixtureRoot -PythonRoot $fakePythonRoot
@@ -226,7 +262,9 @@ Assert-ManifestFixtureRejected -Name "missing-windows-target" -Manifest $missing
 $missingLock = New-ValidManifestFixture
 $missingLock.PSObject.Properties.Remove("python_dependencies")
 Assert-ManifestFixtureRejected -Name "pip-without-lock" -Manifest $missingLock -FixtureRoot $fixtureRoot -PythonRoot $fakePythonRoot
+Write-PythonContractPhase -Phase 'manifest_negatives' -Edge 'done'
 
+Write-PythonContractPhase -Phase 'fresh_and_reuse' -Edge 'enter'
 $freshRejected = $false
 try {
   Assert-FreshStagePythonDependencies -PythonRoot $fakePythonRoot -PythonDependencyProbe { param($PythonRoot) $false }
@@ -271,7 +309,9 @@ try {
   $generatedConfigPath = $savedGeneratedConfigPath
   $runtimeDescriptorPath = $savedRuntimeDescriptorPath
 }
+Write-PythonContractPhase -Phase 'fresh_and_reuse' -Edge 'done'
 
+Write-PythonContractPhase -Phase 'source_wiring' -Edge 'enter'
 $resolverSource = Get-Content -LiteralPath $resolverPath -Raw -Encoding UTF8
 $reuseStart = $resolverSource.IndexOf("function Test-VerifiedStageReusable")
 $freshStart = $resolverSource.IndexOf("function Stage-Submodule", $reuseStart)
@@ -281,6 +321,9 @@ $reuseBody = $resolverSource.Substring($reuseStart, $freshStart - $reuseStart)
 $freshBody = $resolverSource.Substring($freshStart, $onnxStart - $freshStart)
 Assert-True -Condition ($reuseBody.Contains("Test-PythonDependencyTargets")) -Message "verified runtime reuse must revalidate Python locks and ABI"
 Assert-True -Condition ($freshBody.Contains("Assert-FreshStagePythonDependencies")) -Message "fresh runtime staging must validate Python locks and ABI before publication"
+Write-PythonContractPhase -Phase 'source_wiring' -Edge 'done'
 
 Write-Host "Windows Python dependency contract: ok"
+Write-PythonContractPhase -Phase 'fixture_cleanup' -Edge 'enter'
 Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+Write-PythonContractPhase -Phase 'fixture_cleanup' -Edge 'done'

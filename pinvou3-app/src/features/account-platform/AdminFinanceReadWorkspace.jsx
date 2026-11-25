@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { accountLayoutCopy, adminLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { formatBalance } from './balance-view.js';
@@ -112,7 +113,7 @@ export function AdminFinanceReadWorkspace({ kind, client, language, route, onVie
     return () => controller.abort();
   }, [client, kind, signature, revision]);
   const visible = state.owner === client && state.signature === signature ? state : { data: null, error: null };
-  const labelStatus = value => words[value] || accountLayoutCopy[language].statuses[value] || value;
+  const labelStatus = value => statusLabel(value, language, { ...accountLayoutCopy[language].statuses, ...words });
   const cell = (key, value) => value == null ? '—' : key.endsWith('_microcredits') ? formatBalance(value, language) : key === 'amount_fen' ? formatFen(value, language) : key.endsWith('_at') ? Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—' : ['status', 'operation_type'].includes(key) ? labelStatus(value) : String(value);
   const adjustmentFacts = kind === 'adjustments' ? adminLayoutCopy[language].adjustmentFacts : null;
   const adjustmentLookup = kind === 'adjustments' ? adminLayoutCopy[language].adjustmentLookup : null;

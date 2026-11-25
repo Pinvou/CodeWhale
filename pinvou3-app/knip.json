@@ -20,6 +20,13 @@
     "tests/account_platform_desktop_reauthentication_ui_smoke.mjs",
     "tests/*.js",
     "tests/remote_archive_smoke.mjs",
+    "tests/megacube_bundled_install_smoke.mjs",
+    "tests/megacube_management_smoke.mjs",
+    "tests/megacube_startup_real.mjs",
+    "tests/fixtures/megacube-startup-real.jsx",
+    "tests/model_store_ownership_smoke.mjs",
+    "tests/remote_permission_state_smoke.mjs",
+    "tests/remote_user_input_smoke.mjs",
     "tests/remote_quarantine_smoke.mjs",
     "tests/controlled_preconnect_smoke.mjs",
     "tests/remote_dispatch_ownership_smoke.mjs",
@@ -66,6 +73,8 @@
   "paths": {
     "/src/*": ["./src/*"],
     "/features/device-manager/DeviceManagerView.jsx": ["./src/features/device-manager/DeviceManagerView.jsx"],
+    "/features/model-store/IncompleteInstallPanel.jsx": ["./src/features/model-store/IncompleteInstallPanel.jsx"],
+    "/features/model-store/DownloadCenterView.jsx": ["./src/features/model-store/DownloadCenterView.jsx"],
     "/features/model-store/ModelStoreOperationResults.jsx": ["./src/features/model-store/ModelStoreOperationResults.jsx"],
     "/features/model-store/operation-results.js": ["./src/features/model-store/operation-results.js"],
     "/features/model-store/StorageSettingsDialog.jsx": ["./src/features/model-store/StorageSettingsDialog.jsx"]

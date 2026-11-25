@@ -38,6 +38,32 @@ const frontendUploadRetryStep = "Upload frontend setup bundle (retry)";
 const frontendUploadRequiredStep = "Require frontend setup bundle upload";
 const uploadPolicyLF = String.fromCharCode(10);
 
+test('Rust cache and download helper-only changes reach their real consumers', () => {
+  for (const name of ['rust_code', 'cli_rust', 'knowledge_rust']) {
+    const paths = filterPaths(workflow.replace(/^ {14}#.*\r?\n/gm, ''), name);
+    for (const changed of ['.github/actions/linux-rust-cache/action.yml',
+      'scripts/ci-rust-cache-paths.cjs', 'scripts/ci-network-environment.py', 'scripts/ci-rust-dist.py']) {
+      assert.ok(paths.some(pattern => !pattern.startsWith('!') && matchesGlob(changed, pattern)), `${name}: ${changed}`);
+    }
+  }
+});
+
+test('LoongArch64 checks share the stable Linux cache and keep cross-build inputs', () => {
+  const job = jobBlock('rust-loongarch64-check').replaceAll('\r\n', '\n');
+  const cache = namedStep(job, 'Cargo cache');
+  assert.match(cache, /^        uses: \.\/\.github\/actions\/linux-rust-cache$/m);
+  assert.doesNotMatch(cache, /^        (?:if|continue-on-error):/m);
+  assert.match(cache, /^          workspaces: \|\n            pinvou3-app\/src-tauri\n            pinvou-knowledge\n            pinvou-cli$/m);
+  assert.match(cache, /^          shared-key: rust-loongarch64-check$/m);
+  assert.match(cache, /^          save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}$/m);
+  assert.doesNotMatch(cache, /^          (?:cache-targets|lookup-only):/m);
+  for (const step of ['Configure verified Rust download source', 'Set up the deepin glibc-2.38 loong64 sysroot']) {
+    assert.ok(job.indexOf(namedStep(job, step)) < job.indexOf(cache), step);
+  }
+  assert.match(namedStep(job, 'Restore loong64 cross toolchain cache'), /uses: actions\/cache\/restore@/);
+  assert.match(namedStep(job, 'Restore loong64 sysroot cache'), /uses: actions\/cache\/restore@/);
+});
+
 test("browser wrapper helper-only changes select both native runtime gates", () => {
   const helpers = [
     "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
@@ -100,6 +126,38 @@ test("Windows runtime regressions follow changes to their process supervisor", (
     assert.ok(paths.some(pattern => matchesGlob(file, pattern)), file);
   }
   assert.ok(!paths.some(pattern => matchesGlob("scripts/check-version.mjs", pattern)));
+});
+
+test("Windows native fixture jobs use medium capacity without trusting fork labels", () => {
+  const names = ["windows-relay-tools-test", "windows-codex-runtime-test", "windows-runtime-test"];
+  const vars = {
+    PINVOU_WINDOWS_LIGHT_RUNNER: '["self-hosted","light"]',
+    PINVOU_WINDOWS_MEDIUM_RUNNER: '["self-hosted","medium"]',
+    PINVOU_WINDOWS_RUNNER: '["self-hosted","legacy"]',
+  };
+  for (const name of names) {
+    const expression = jobBlock(name).match(/^    runs-on: \$\{\{ (.*) \}\}$/m)[1];
+    const select = (event, headRepo = "Pinvou/pinvou3", headId = "123", variables = vars) => Array.from(runInNewContext(expression, {
+      fromJSON: JSON.parse,
+      vars: variables,
+      github: { event_name: event, repository: "Pinvou/pinvou3", repository_id: "123", event: {
+        pull_request: { head: { repo: { full_name: headRepo, id: headId } },
+          base: { repo: { full_name: "Pinvou/pinvou3", id: "123" } } },
+      } },
+    }));
+    for (const event of ["pull_request", "merge_group", "push"]) {
+      assert.deepEqual(select(event), ["self-hosted", "medium"], `${name}/${event}`);
+    }
+    assert.deepEqual(select("pull_request", "fork/pinvou3"), ["windows-latest"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", "999"), ["windows-latest"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", ""), ["windows-latest"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", "123", {
+      ...vars, PINVOU_WINDOWS_MEDIUM_RUNNER: "",
+    }), ["self-hosted", "legacy"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", "123", {
+      ...vars, PINVOU_WINDOWS_MEDIUM_RUNNER: "", PINVOU_WINDOWS_RUNNER: "",
+    }), ["windows-latest"]);
+  }
 });
 
 // Extract the `if:` condition of a named workflow step.
@@ -852,6 +910,33 @@ function assertFiniteAuditPGSetup(job) {
   // F16's two separately bounded suites use only the other ephemeral service.
   // Validate each whole step before removing it from the audit-only env ban;
   // arbitrary env, commands, conditions and extra steps remain rejected.
+  const statistics = namedStep(text, "Retained outbox statistics public PostgreSQL contracts");
+  assert.equal(statistics.trimEnd(), [
+    "      - name: Retained outbox statistics public PostgreSQL contracts",
+    "        timeout-minutes: 10",
+    "        working-directory: account-platform",
+    "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}",
+    "          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}",
+    "          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}",
+    "          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}",
+    "          PINVOU_OUTBOX_STATISTICS_TEST: '1'",
+    "        run: |",
+    "          set -euo pipefail",
+    "          # Build the real previous CLI from this immutable public baseline.",
+    "          git fetch --no-tags --depth=1 origin 4bbf359d8cf3547af401d7cdb561f7bc0477ebd6",
+    "          git fetch --no-tags --depth=1 origin 5d8b45efc31e07299c4024cb5de2cbb58786feb3",
+    "          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 -timeout=7m ./internal/billingschema -run '^TestRetainedOutboxStatisticsPublicPostgres$' | tee \"$RUNNER_TEMP/outbox-statistics.jsonl\"",
+    "          python3 - \"$RUNNER_TEMP/outbox-statistics.jsonl\" <<'PY'",
+    "          import json, pathlib, sys",
+    "          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]",
+    "          terminal = [event for event in events if event.get(\"Test\") and event.get(\"Action\") in (\"pass\", \"fail\", \"skip\")]",
+    "          root = \"TestRetainedOutboxStatisticsPublicPostgres\"",
+    "          assert len(terminal) == 4 and all(event[\"Action\"] == \"pass\" for event in terminal), \"statistics PostgreSQL tests failed or skipped\"",
+    "          assert {event[\"Test\"] for event in terminal} == {root, root+\"/account\", root+\"/billing\", root+\"/token\"}, \"required public migration domains did not execute\"",
+    "          PY",
+  ].join("\n"));
+  assert.ok(text.indexOf(preflight) < text.indexOf(statistics), "identity preflight precedes statistics");
   const stop = namedStep(text, pgStopStepName);
   assert.equal(stop.trimEnd(), [
     `      - name: ${pgStopStepName}`,
@@ -863,7 +948,8 @@ function assertFiniteAuditPGSetup(job) {
   for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName, historyPGStepName]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
-  let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
+  assert.ok(text.indexOf(statistics) < text.indexOf(stop), "statistics precedes service retirement");
+  let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "").replace(statistics, "");
   for (const redisStep of assertPortalRedisSteps(text)) outsidePGSteps = outsidePGSteps.replace(redisStep, "");
   // Admit only this bounded acceptance step before enforcing the job-wide ban
   // on incidental database inputs. The complete step is fixed deliberately.
@@ -1828,8 +1914,9 @@ test("an exact Rust test cache hit skips only the redundant lint restore", () =>
   assert.equal(stepCondition(job, "恢复 Rust lint 暖缓存"), "steps.rust-test-cache-probe.outputs.cache-hit != 'true'");
   assert.equal(stepCondition(job, "恢复被淘汰缓存的 Rust lint 回退"), "steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true'");
   const recovery = job.split("- name: 恢复被淘汰缓存的 Rust lint 回退")[1].split("\n      - name:")[0];
-  assert.match(recovery, /uses: Swatinem\/rust-cache@v2/);
-  assert.match(recovery, /workspaces: pinvou3-app\/src-tauri/);
+  assert.match(recovery, /uses: \.\/\.github\/actions\/linux-rust-cache/);
+  assert.match(recovery, /pinvou3-app\/src-tauri/);
+  assert.match(recovery, /pinvou-knowledge/);
   assert.match(recovery, /shared-key: rust-lint-v2/);
   assert.match(recovery, /cache-on-failure: true/);
   assert.match(recovery, /save-if: false/);

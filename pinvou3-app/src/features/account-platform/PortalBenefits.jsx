@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useState } from 'react';
 import { accountLayoutCopy, accountCenterCopy, financeCopy } from '../../shared/i18n.js';
 import { PortalDialog } from './PortalDialog.jsx';
@@ -11,7 +12,7 @@ export function PortalBenefits({ items, language, now }) {
   const copy = financeCopy[language], words = accountLayoutCopy[language];
   const center = accountCenterCopy[language];
   const [dialog, setDialog] = useState(null);
-  const status = value => words.statuses[value] || value;
+  const status = value => statusLabel(value, language, words.statuses);
   const date = value => formatAccountDate(value, language, center.unspecified);
   const active = items.filter(item => item.status === 'ACTIVE' && integerMoney(item.points_remaining_microcredits) > 0n && (!item.valid_until && !item.expires_at || Date.parse(item.valid_until || item.expires_at) > now))
     .sort((a, b) => Date.parse(a.valid_until || a.expires_at || '9999-01-01') - Date.parse(b.valid_until || b.expires_at || '9999-01-01') || a.package_id.localeCompare(b.package_id));

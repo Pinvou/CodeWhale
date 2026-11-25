@@ -23,6 +23,7 @@ vm.runInContext(
   `this.catalogItemMatchesModel = catalogItemMatchesModel;\n` +
   `this.groupModelsForSelector = groupModelsForSelector;\n` +
   `this.localUserNamed = localUserNamed;\n` +
+  `this.customUserNamed = customUserNamed;\n` +
   `this.selectorMainLabel = selectorMainLabel;\n` +
   `this.selectorSubLabel = selectorSubLabel;\n` +
   `this.MODEL_CATALOG = MODEL_CATALOG;\n` +
@@ -44,7 +45,7 @@ vm.runInContext(
   { filename: srcPath },
 );
 
-const { isPresetModel, catalogItemMatchesModel, MODEL_CATALOG, MODEL_PRESET_DEFS, groupModelsForSelector, localUserNamed, selectorMainLabel, selectorSubLabel, providerLabelForModel, findCloudProviderForModel, reasoningEffortTiersForModel, defaultReasoningEffortForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort, baseUrlUsesLoopback, baseUrlUsesLocalOrPrivate, localProbeTiersForKind, alwaysThinkingSpecForModel, localReasoningTiers, catalogImageCapableForModel, reasoningEffortDisplayForTiers } = ctx;
+const { isPresetModel, catalogItemMatchesModel, MODEL_CATALOG, MODEL_PRESET_DEFS, groupModelsForSelector, localUserNamed, customUserNamed, selectorMainLabel, selectorSubLabel, providerLabelForModel, findCloudProviderForModel, reasoningEffortTiersForModel, defaultReasoningEffortForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort, baseUrlUsesLoopback, baseUrlUsesLocalOrPrivate, localProbeTiersForKind, alwaysThinkingSpecForModel, localReasoningTiers, catalogImageCapableForModel, reasoningEffortDisplayForTiers } = ctx;
 
 // i18n 测试替身:复刻实际字典里会用到的字段
 const t = {
@@ -689,8 +690,28 @@ test('预设行主标签 = name(item.title)', () => {
 test('自定义行主标签 = 模型 ID', () => {
   assert.strictEqual(selectorMainLabel(mk({ name: 'OpenAI 兼容', preset: 'openai_compatible', provider_kind: 'custom', model: 'meta-llama/llama-4-scout' }), t), 'meta-llama/llama-4-scout');
 });
+// 自定义行被改成过真显示名（≠ 供应商兜底标签）：主标签用 name，副标签退回
+// wire id——wire id 可能是引擎自报的容器内路径（/models/target），不是人看
+// 的名字；卡片身份标记被旧版品悟回写剥掉时显示也不退化（真机实证 2026-10-16）
+test('自定义行真显示名时主标签 = name、副标签 = model', () => {
+  const row = mk({ name: 'Qwen3.8-27B (NVFP4 + Native MTP)', preset: 'openai_compatible', provider_kind: 'custom', model: '/models/target', base_url: 'http://127.0.0.1:8000/v1' });
+  assert.strictEqual(customUserNamed(row, t), true);
+  assert.strictEqual(selectorMainLabel(row, t), 'Qwen3.8-27B (NVFP4 + Native MTP)');
+  assert.strictEqual(selectorSubLabel(row, t), '/models/target');
+  // 名字恰好是供应商兜底标签的（没改过的默认行）：无区分度，维持 model 主标签
+  const generic = mk({ name: 'OpenAI 兼容', preset: 'openai_compatible', provider_kind: 'custom', model: 'meta-llama/llama-4-scout' });
+  assert.strictEqual(customUserNamed(generic, t), false);
+  assert.strictEqual(selectorMainLabel(generic, t), 'meta-llama/llama-4-scout');
+  // 预设命中行不受新分支影响（命名另有规则）
+  assert.strictEqual(customUserNamed(mk({ name: '任意', preset: 'deepseek', model: 'deepseek-v4-pro' }), t), false);
+});
 test('cloud model alias takes precedence in the main label', () => {
   assert.strictEqual(selectorMainLabel(mk({ alias: 'Daily assistant', model: 'deepseek-v4-pro' }), t), 'Daily assistant');
+  // 商店接入行（带卡片身份标记）：显示名（含引擎变体）优先于 wire 模型名——
+  // 同名模型多引擎供应时的区分全靠它（MegaCube 真名化，2026-10-13）
+  assert.strictEqual(selectorMainLabel(mk({ name: '本地 · Qwen3.8-27B (NVFP4 · 驭光)', model: 'Qwen3.8-27B-NVFP4', store_card_id: 'qwen38-27b-nvfp4-tachyon' }), t), '本地 · Qwen3.8-27B (NVFP4 · 驭光)');
+  // 无标记行维持原语义（model 优先于 name）
+  assert.strictEqual(selectorMainLabel(mk({ name: 'OpenAI 兼容', preset: 'openai_compatible', provider_kind: 'custom', model: 'meta-llama/llama-4-scout' }), t), 'meta-llama/llama-4-scout');
 });
 test('blank model alias falls back to the existing label', () => {
   assert.strictEqual(selectorMainLabel(mk({ alias: '   ', model: 'meta-llama/llama-4-scout' }), t), 'meta-llama/llama-4-scout');

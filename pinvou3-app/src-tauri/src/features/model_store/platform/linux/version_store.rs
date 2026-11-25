@@ -48,10 +48,9 @@ fn connection() -> Result<rusqlite::Connection, String> {
     Ok(conn)
 }
 
-/// Shared holders retain references throughout preparation, download, deployment
-/// and enablement, including queue waits: scripts may create shared resources at
-/// any of those stages. Destructive operations wait for those holders rather
-/// than failing immediately; all waiting is cancellable before any mutation.
+/// Preparation, downloads, queue waits and enablement hold shared references.
+/// Deployment, local installation, updates and removal hold the exclusive lock.
+/// Conflicting operations wait with cancellation before any resource mutation.
 fn operation_lock_file(name: &str) -> Result<std::fs::File, String> {
     let root = super::config::data_dir();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
@@ -83,7 +82,8 @@ pub(super) fn try_exclusive_resource_operation_lock() -> Result<std::fs::File, S
     }
 }
 
-#[cfg(test)]
+/// Try once for local import and best-effort startup refresh; queued tasks
+/// use the cancellable waiting variant below.
 pub fn resource_operation_lock(exclusive: bool) -> Result<std::fs::File, String> {
     let lock = operation_lock_file("version-operations.lock")?;
     try_resource_lock(&lock, exclusive).map_err(|e| e.to_string())?;
@@ -288,7 +288,8 @@ fn write_active(conn: &rusqlite::Connection, r: &db::StoreModelRecord) -> Result
         downloaded_at=?16,deployed_at=?17,endpoint_url=?18,endpoint_model=?19,scripts_fetched_at=?20,
         deploy_topology=?21,deployed_script_sha256=?22,card_source=?23,card_update_pending=?24,
         container_name=?25,models_root=?26,runtime_card_id=?27,active_version_id=?28,
-        script_install_engine=?29,script_download_model=?30,script_deploy=?31,script_enable=?32,script_stop=?33,script_uninstall=?34
+        script_install_engine=?29,script_download_model=?30,script_deploy=?31,script_enable=?32,script_stop=?33,script_uninstall=?34,
+        resource_requirements_json=?35
         WHERE card_id=?1",params![r.card_id,r.card_name,r.org,r.description,r.engine_name,r.engine_version,
         r.size_bytes,r.quantization,r.source_repo_id,r.source_filename,r.status,
         serde_json::to_string(&r.scripts_content).map_err(|e|e.to_string())?,
@@ -300,7 +301,8 @@ fn write_active(conn: &rusqlite::Connection, r: &db::StoreModelRecord) -> Result
         r.models_root,r.runtime_card_id,r.active_version_id,
         r.scripts.get("install_engine").cloned().flatten(),r.scripts.get("download_model").cloned().flatten(),
         r.scripts.get("deploy").cloned().flatten(),r.scripts.get("enable").cloned().flatten(),
-        r.scripts.get("stop").cloned().flatten(),r.scripts.get("uninstall").cloned().flatten()])
+        r.scripts.get("stop").cloned().flatten(),r.scripts.get("uninstall").cloned().flatten(),
+        serde_json::to_string(&r.resource_requirements).map_err(|e|e.to_string())?])
         .map_err(|e|e.to_string())?;
     Ok(())
 }

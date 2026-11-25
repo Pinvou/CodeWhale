@@ -3,13 +3,15 @@
 // 「供 Agent 应用接入」放在最后一段,并且把 Key 的管理也并进去:模型 ID、API 地址、
 // API Key 本来就是同一件事要凑齐的三样东西,拆开会让 Key 看着像两个不同的东西。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { KeyRound, Plus } from '../../components/icons.jsx';
+import { KeyRound, MoreHorizontal, Plus } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
-import { createApiKey, fetchApiKeys, fetchModelDetail, followDeploymentContext } from './model-store-api.js';
+import { createApiKey, fetchApiKeys, fetchModelDetail, followDeploymentContext, revokeApiKey } from './model-store-api.js';
+import { LanSharingPanel } from './LanSharingPanel.jsx';
+import { lanError } from './lan-access.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { buildSavedModel, checkLinkable, findCardLinkedRows, pickApiKey } from './pinvou-model-link.js';
-import { formatBytes, libraryStatusOf } from './model-store-logic.js';
+import { formatBytes, libraryStateOf } from './model-store-logic.js';
 import {
   HOVER_SURFACE,
   MsButton,
@@ -20,12 +22,20 @@ import {
   TEXT_DANGER,
   TEXT_PRIMARY,
   TEXT_SECONDARY,
-  WeightVerifyNotice,
 } from './model-store-ui.jsx';
 
 const TITLE_ID = 'model-store-detail-title';
 
-const STATUS_LABEL_KEYS = { running: 'statusRunning', deployed: 'statusDeployed', pending: 'statusPending' };
+// 状态行六态映射（评审 P2-1：此前只有三键，incomplete/cleanup_required/
+// downloaded 三态渲染为空白行）。键与 libraryStateOf 的六态一一对应。
+const STATUS_LABEL_KEYS = {
+  running: 'statusRunning',
+  deployed: 'statusDeployed',
+  pending: 'statusPending',
+  downloaded: 'statusDownloaded',
+  incomplete: 'statusIncomplete',
+  cleanup_required: 'statusCleanupRequired',
+};
 
 /**
  * 一行可直接复制的接入信息。值必须是**对方那边原样粘贴就能生效**的东西,
@@ -59,21 +69,28 @@ function CopyRow({ label, value, hint, copyLabel, onCopy, testId }) {
 /**
  * 模型详情弹窗。
  *
- * `card` 是合并后的那张商店卡片，只为了拿权重校验档位。为什么不从 `detail` 里读:
- * `fetchModelDetail` 回的是**库记录**(sqlite)，而档位是卡片元数据，库里没有这一
- * 列。拿不到 card(商店列表还没拉回来、卡片已下架)时,`weightVerificationOf` 会
- * 按 `none` 处理——宁可多出一条黄条,不能少出一条。
+ * `card` 是主线版本的合并商店卡片 prop，主线原用于渲染权重校验档位黄条
+ * （WeightVerifyNotice）。该组件在合并树中已随重构移除，此 prop 眼下没有
+ * 消费者；保留在签名里以维持与主线调用方的 props 兼容。
  * @returns {React.ReactElement} 弹窗。
  */
-function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, onCheckUpdate, onVersions }) {
+function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onToast, savedModels, cardBusy, scriptUpdates, onUninstall, onUpdateWithCleanup, onCheckUpdate, onVersions }) {
   const [detail, setDetail] = useState(null);
   const [keys, setKeys] = useState([]);
+  const [keysKnown, setKeysKnown] = useState(false);
+  const [revokePending, setRevokePending] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   // 重试单独一个忙态,不借用 busy:busy 是「建 Key / 接入品悟」那两个动作的,
   // 借用会让重试转圈时把那两个按钮也一起禁掉(虽然此刻它们并不在屏幕上,
   // 但重试成功后 busy 若未归位就会留下一排灰按钮)。
   const [retrying, setRetrying] = useState(false);
+  // 「更多」次要动作菜单（11-16 用户反馈③：详情底部主+次按钮平铺最多六个，
+  // 用户不知道按哪个）。主按钮永远只有一个（状态机），次要全部收进菜单；
+  // 换卡或弹窗重开时收起。
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [updateConfirmation, setUpdateConfirmation] = useState(null);
+  const updateSubmitted = useRef(false);
 
   // 当前有效的那张卡。换卡时自增，让上一张卡在途的响应落地时能认出自己已经过期。
   //
@@ -94,11 +111,12 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       // Key 拿不到不算致命:模型本身的信息照样该显示出来。
       const [modelDetail, keyList] = await Promise.all([
         fetchModelDetail(cardId),
-        fetchApiKeys(cardId).catch(() => []),
+        fetchApiKeys(cardId).then((items) => ({ items, known: true })).catch(() => ({ items: [], known: false })),
       ]);
       if (stale()) return;
       setDetail(modelDetail);
-      setKeys(Array.isArray(keyList) ? keyList : []);
+      setKeys(Array.isArray(keyList.items) ? keyList.items : []);
+      setKeysKnown(keyList.known);
       // 成功了就把上一次的错误擦掉。load() 不只在打开弹窗时跑——建 Key、接入品悟
       // 之后都会重拉一次。少了这一句,任何一次瞬时失败都会把 error 永久钉住:渲染
       // 分支是 `{error ? … }` / `{!error && detail ? … }`,于是整个详情页(状态、
@@ -117,9 +135,13 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 换一张卡时先把上一张的详情/Key 清空再拉新的;不清会让新卡短暂显示旧卡的运行时和 Key
     setDetail(null);
     setKeys([]);
+    setKeysKnown(false);
+    setRevokePending(null);
     setError(null);
+    setUpdateConfirmation(null);
     setBusy(false);
     setRetrying(false);
+    setMoreMenuOpen(false);
     load();
     return () => { viewTokenRef.current += 1; };
   }, [load]);
@@ -148,6 +170,10 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   };
 
   const addKey = async () => {
+    // r6 P2-4：慢 IPC 期间用户可能已切到另一张卡——过期响应的 toast 和 load()
+    // 会把 A 卡的结果落进 B 卡的弹窗（revokeKey 同款闸门）。请求代际
+    // loadTokenRef 保护不了「完成后又发起下一次请求」的回调，回调一律按
+    // viewTokenRef 归属到当前打开的这张卡。
     const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
@@ -162,12 +188,28 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
     }
   };
 
+  const revokeKey = async (id) => {
+    const viewToken = viewTokenRef.current;
+    setBusy(true);
+    try {
+      await revokeApiKey(id);
+      if (viewToken !== viewTokenRef.current) return;
+      setRevokePending(null);
+      onToast(copy.keyRevoked);
+      await load();
+    } catch (e) {
+      if (viewToken === viewTokenRef.current) onToast(lanError(copy, e));
+    } finally {
+      if (viewToken === viewTokenRef.current) setBusy(false);
+    }
+  };
+
   // 一键把这个模型接进品悟自己的模型列表。
   //
   // **直连推理容器**，不经 API 网关。模型商店改成原生实现之后，品悟和模型在同一台
   // 机器上，`endpoint_url` 就是现成的、可直接调的地址；中间再架一层网关只是多一个
   // 会出故障的环节（sidecar 时代要网关，是因为它同时承担了给**局域网其他应用**
-  // 分发的职责——那件事排在后面的阶段，跟"品悟自己用"是两回事）。
+  // 分发的职责——现在由下方显式开启的 LAN 面板提供）。
   //
   // `model` 要填 `endpoint_model` 而不是 `model_name`：前者是推理服务真正认的 id。
   // 经网关时填 model_name 是对的（网关按它查表再替换），直连时填错就是 404。
@@ -184,6 +226,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       onToast(copy[linkable.reason] || copy.linkFailed);
       return;
     }
+    // r6 P2-4：saveModel 是慢 IPC——期间用户可能切卡，过期结果的 toast/load()
+    // 会落进别的卡（revokeKey 同款闸门，同按 viewTokenRef 归属）。
     setBusy(true);
     try {
       const modelName = record.endpoint_model || record.model_name;
@@ -194,6 +238,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         cardId,
         contextWindow: null,
         // 已经接入过就沿用 id，并由后端窄事务保留最新用户参数与凭据。
+        storeCardId: record.card_id || null,
         //
         // 不查重的话，`makeModelId()` 每次都生成新 id：用户连点两次、或者隔天
         // 再点一次，品悟的模型列表里就多一行指向同一个本地服务的重复项，而且
@@ -242,12 +287,41 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   // 很容易出现"按钮灰着但没给原因"或者反过来。
   const linkable = checkLinkable(detail);
   // 推理服务自己的地址。**这是本机地址**,粘到别的机器上连不通——要给局域网里的
-  // 其他应用用,得先有 API 网关,那一块还没做（见 docs/模型商店-框架与移植基线.md
-  // 的分期表）。这里如实显示本机地址,并在下面那行提示里说清楚。
+  // 其他应用用，走下方 LAN 面板的认证共享地址，不替换本机直连地址。
   const apiUrl = record?.endpoint_url ?? '';
   // 直连推理服务时要填的是它自己认的那个 id。
   const modelId = record?.endpoint_model || record?.model_name || '';
   const runtimeLines = detail?.runtime_lines ?? [];
+
+  if (updateConfirmation === cardId && record?.card_id === cardId) {
+    const cancelUpdate = () => setUpdateConfirmation(null);
+    return (
+      <MsDialog open={!!cardId} onClose={cancelUpdate} theme={theme}
+        labelledBy="model-store-update-confirm-title" testId="model-store-update-confirm">
+        <MsDialogTitle id="model-store-update-confirm-title" onClose={cancelUpdate} closeLabel={copy.cardScriptsCancel}>
+          {copy.actionUpdate}
+        </MsDialogTitle>
+        <p className={`mt-3 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+          {record.running ? copy.updateConfirmRunning : copy.updateConfirmStopped}
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <MsButton tone="neutral" onClick={cancelUpdate} data-testid="model-store-update-cancel">
+            {copy.cardScriptsCancel}
+          </MsButton>
+          <MsButton tone="primary" disabled={cardBusy} data-testid="model-store-update-confirm-submit"
+            onClick={() => {
+              if (cardBusy || updateSubmitted.current) return;
+              updateSubmitted.current = true;
+              setUpdateConfirmation(null);
+              onClose();
+              onUpdateWithCleanup?.(record, record.running);
+            }}>
+            {copy.cardScriptsConfirm}
+          </MsButton>
+        </div>
+      </MsDialog>
+    );
+  }
 
   return (
     <MsDialog open={!!cardId} onClose={onClose} theme={theme} labelledBy={TITLE_ID} wide testId="model-store-detail-dialog">
@@ -289,7 +363,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
       {!error && detail ? (
         <>
           <div className="space-y-1">
-            <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStatusOf(record)]]}</MsRow>
+            <MsRow label={copy.detailStatus}>{copy[STATUS_LABEL_KEYS[libraryStateOf(record)]] || copy.statusPending}</MsRow>
             <MsRow label={copy.detailEngine}>
               {record.engine_name}
               {record.engine_version ? ` ${record.engine_version}` : ''}
@@ -298,9 +372,9 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             {record.endpoint_url ? <MsRow label={copy.detailEndpoint}>{record.endpoint_url}</MsRow> : null}
           </div>
 
-          {/* 紧跟在「这个模型是什么」那几行后面:权重完整性跟引擎、体积是同一类
-              事实,不是一条飘在页尾的免责声明。达标的卡这里什么都不长。 */}
-          <WeightVerifyNotice card={card} copy={copy} />
+          {/* 「检查更新」入口见下方 secondary 按钮区（非 builtin 卡恒可达，
+              自动徽章为主信号、手动为兜底——与正文 r42 修订后的描述一致）。 */}
+
 
           <div className="mt-5">
             <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.runtimeTitle}</h3>
@@ -318,68 +392,147 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             ) : null}
           </div>
 
+          {/* 分享面板（Agent 接入 + 局域网共享 统一，2026-10-27 r2 重排）。
+              外层两张卡片只描边不填充：里面的复制行/Key 行本来就是 SUBTLE_SURFACE
+              填充，外框再填充就糊成一片——上一版「不够好看」一半是这个叠色。 */}
           <div className="mt-5">
-            <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.accessTitle}</h3>
-            <div className="space-y-2">
-              <CopyRow
-                label={copy.accessModelId}
-                value={modelId}
-                copyLabel={copy.copy}
-                onCopy={copyText}
-                testId="model-store-access-model-id"
-              />
-              <CopyRow
-                label={copy.accessApiUrl}
-                value={apiUrl}
-                copyLabel={copy.copy}
-                onCopy={copyText}
-                hint={copy.accessLocalOnly}
-                testId="model-store-access-url"
-              />
+            <h3 className={`mb-2 text-[13px] font-medium ${TEXT_PRIMARY}`}>{copy.shareTitle}</h3>
 
-              <div className="flex items-start gap-3">
-                <span className={`w-20 shrink-0 pt-1.5 text-[13px] ${TEXT_SECONDARY}`}>{copy.accessApiKey}</span>
-                <div className="min-w-0 flex-1">
-                  {keys.length === 0 ? (
-                    <EmptyState
-                      testId="model-store-keys-empty"
-                      className={`rounded-[12px] px-3 py-2 text-left text-[12px] ${SUBTLE_SURFACE} ${TEXT_SECONDARY}`}
-                      title={copy.keysEmpty}
-                    />
-                  ) : (
-                    <div className="space-y-1.5">
-                      {keys.map((key) => (
-                        <div key={key.id} className={`flex items-center gap-2 rounded-[12px] px-3 py-1.5 ${SUBTLE_SURFACE}`}>
-                          <KeyRound size={13} className={TEXT_SECONDARY} />
-                          <code className={`min-w-0 flex-1 break-all text-[12px] ${TEXT_PRIMARY}`}>{key.key_value}</code>
-                          <button
-                            type="button"
-                            className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
-                            onClick={() => copyText(key.key_value)}
-                          >
-                            {copy.copy}
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <p className={`mt-1 text-[11px] ${TEXT_SECONDARY}`}>{copy.keysHint}</p>
+            {/* 子卡 1：Agent 接入。本段的主行动（在品悟里使用）放标题行右侧——
+                卡片头带行动按钮是标准形态；上一版把两个按钮悬在卡片底部，
+                用户反馈「很突兀」，根子就是行动没有挂到它所属的语境上。 */}
+            <div className="rounded-[12px] border border-[#E1E5EA] p-3 dark:border-[#2E3134]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className={`text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareAgentSection}</div>
+                <MsButton
+                  tone="primary"
+                  busy={busy}
+                  disabled={!linkable.ok}
+                  onClick={useInPinvou}
+                  data-testid="model-store-use-in-pinvou"
+                  className="!h-7 !px-3 !text-[12px]"
+                >
+                  {copy.linkUse}
+                </MsButton>
+              </div>
+              {linkable.ok ? null : (
+                <div
+                  className={`mt-1.5 max-w-[420px] text-[11px] leading-4 ${TEXT_SECONDARY}`}
+                  data-testid="model-store-link-blocked-reason"
+                >
+                  {copy[linkable.reason] || copy.linkFailed}
                 </div>
+              )}
+              <div className="mt-2 space-y-2">
+                <CopyRow
+                  label={copy.accessModelId}
+                  value={modelId}
+                  copyLabel={copy.copy}
+                  onCopy={copyText}
+                  testId="model-store-access-model-id"
+                />
+                <CopyRow
+                  label={copy.accessApiUrl}
+                  value={apiUrl}
+                  copyLabel={copy.copy}
+                  onCopy={copyText}
+                  hint={copy.accessLocalOnly}
+                  testId="model-store-access-url"
+                />
+                <div className="flex items-start gap-3">
+                  <span className={`w-20 shrink-0 pt-1.5 text-[13px] ${TEXT_SECONDARY}`}>{copy.accessApiKey}</span>
+                  <div className="min-w-0 flex-1">
+                    {keys.length === 0 ? (
+                      <EmptyState
+                        testId="model-store-keys-empty"
+                        className={`rounded-[12px] px-3 py-2 text-left text-[12px] ${SUBTLE_SURFACE} ${TEXT_SECONDARY}`}
+                        title={keysKnown ? copy.keysEmpty : copy.lanKeyUnknown}
+                      />
+                    ) : (
+                      <div className="space-y-1.5">
+                        {keys.map((key) => (
+                          <div key={key.id} className={`flex items-center gap-2 rounded-[12px] px-3 py-1.5 ${SUBTLE_SURFACE}`}>
+                            <KeyRound size={13} className={TEXT_SECONDARY} />
+                            <div className="min-w-0 flex-1 text-[12px]"><code>••••{key.key_value.slice(-6)}</code><span className={`ml-2 ${TEXT_SECONDARY}`}>{key.card_id ? copy.keyActive : copy.keyLegacy}</span></div>
+                            <button
+                              type="button"
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                              onClick={() => copyText(key.key_value)}
+                            >
+                              {copy.copy}
+                            </button>
+                            {revokePending === key.id ? (
+                              // r18 P1-4：撤销是破坏性操作，走「确认 → 调用」两步。
+                              // 此前只有 setRevokePending 置状态、revokeKey 从未被
+                              // 调用（按钮点了永久卡住），且复数键 keysRevoke/
+                              // keysRevoking 三语字典里根本不存在——按钮渲染的是
+                              // 空标签。现改用既有单数键；取消复用 lanCancel。
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  className="shrink-0 rounded-full px-2 py-0.5 text-[12px] text-rose-600 disabled:opacity-40 dark:text-rose-400"
+                                  onClick={() => revokeKey(key.id)}
+                                  data-testid="model-store-key-revoke-confirm"
+                                >
+                                  {copy.keyRevokeConfirm}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                                  onClick={() => setRevokePending(null)}
+                                  data-testid="model-store-key-revoke-cancel"
+                                >
+                                  {copy.lanCancel}
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className={`shrink-0 rounded-full px-2 py-0.5 text-[12px] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                                onClick={() => setRevokePending(key.id)}
+                                data-testid="model-store-key-revoke"
+                              >
+                                {copy.keyRevoke}
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                        <p className={`mt-1 text-[11px] ${TEXT_SECONDARY}`}>{copy.keysHint}</p>
+                      </div>
+                    )}
+                    {/* 新建 Key 的样子就是「往上面这个列表再加一行」：同宽同圆角的
+                        虚线行，整行可点。一颗孤零零悬在下方的小按钮没有这个语境
+                        （上一版「突兀」的另一半来源）。 */}
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={addKey}
+                      data-testid="model-store-add-key"
+                      className={`mt-1.5 flex w-full items-center justify-center gap-1 rounded-[12px] border border-dashed border-[#C4C7C5] px-3 py-1.5 text-[12px] transition-colors hover:border-current disabled:cursor-not-allowed disabled:opacity-40 dark:border-[#3C4043] ${TEXT_SECONDARY} ${HOVER_SURFACE}`}
+                    >
+                      <Plus size={13} />
+                      {copy.addKey}
+                    </button>
+                  </div>
+                </div>
+                {record.running ? null : (
+                  <p className="text-[11px] text-[#A15C07] dark:text-[#FDD663]">{copy.notRunningHint}</p>
+                )}
               </div>
             </div>
 
-            {record.running ? null : (
-              <p className="mt-2 text-[11px] text-[#A15C07] dark:text-[#FDD663]">{copy.notRunningHint}</p>
-            )}
-
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <MsButton tone="ghost" busy={busy} onClick={addKey} data-testid="model-store-add-key">
-                <Plus size={14} />
-                {copy.addKey}
-              </MsButton>
+            {/* 子卡 2：局域网共享（flat：外壳和标题由本卡片提供，面板只出内容） */}
+            <div className="mt-2 rounded-[12px] border border-[#E1E5EA] p-3 dark:border-[#2E3134]">
+              <div className={`mb-2 text-[12px] font-medium ${TEXT_PRIMARY}`}>{copy.shareLanSection}</div>
+              <LanSharingPanel key={cardId} cardId={cardId} copy={copy} keys={keys} keysKnown={keysKnown} onCopy={copyText} flat />
             </div>
           </div>
 
+          {/* 主线新增：品悟模型列表里指向本卡的行及其上下文窗口档位。
+              「跟随部署上下文」把这些已接入模型的固定档位对齐到本卡当前部署；
+              没有固定档位（自动）的行没有可跟随的东西，不给按钮。 */}
           {linkedModels.length > 0 ? (
             <div className={`mt-4 rounded-[12px] p-3 ${SUBTLE_SURFACE}`} data-testid="model-store-context-settings">
               <p className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.contextFollowHint}</p>
@@ -400,39 +553,6 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             </div>
           ) : null}
 
-          <div className="mt-6 flex items-center justify-between">
-            {/* 修复入口:部署被外部破坏(比如手删了 vendor 目录)时需要能重来一次。
-                运行中的模型要先停用,否则重来一次只会撞上还占着端口的旧容器。 */}
-            {/* 接不进去时按钮禁用，并且**把原因说出来**。只禁用不解释的话，
-                用户面对一个灰掉的按钮只能猜——尤其"这不是对话模型"这种原因，
-                光看界面根本想不到。 */}
-            <div className="min-w-0 flex-1">
-              <MsButton
-                tone="primary"
-                busy={busy}
-                disabled={!linkable.ok}
-                onClick={useInPinvou}
-                data-testid="model-store-use-in-pinvou"
-              >
-                {copy.linkUse}
-              </MsButton>
-              {linkable.ok ? null : (
-                <div
-                  className={`mt-1.5 max-w-[420px] text-[11px] leading-4 ${TEXT_SECONDARY}`}
-                  data-testid="model-store-link-blocked-reason"
-                >
-                  {copy[linkable.reason] || copy.linkFailed}
-                </div>
-              )}
-            </div>
-            {record.card_source !== 'builtin' ? (
-          <>
-              <MsButton tone="ghost" disabled={busy} onClick={() => onCheckUpdate(record)}>
-                {copy.cardUpdateCheck}
-              </MsButton>
-              {onVersions ? <MsButton tone="ghost" onClick={() => onVersions(record)}>{copy.versionHistory}</MsButton> : null}
-          </>
-            ) : null}
             {/* 这个「重新部署」**刻意常驻**，跟列表行那个不是一回事：
                 - 列表行（ModelRow）只在 needs_redeploy 时出现——脚本更新了、跟上次
                   部署用的版本对不上。那是日常路径，不该让用户对着一个常亮的按钮
@@ -442,15 +562,225 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                   确实需要能重来一次。详情页是主动打开、带着上下文的那一面，
                   放一个随时可用的修复动作是合适的。
                 运行中禁用：重新部署会撞上还占着端口的旧容器，必须先停用。 */}
-            <MsButton
-              tone="ghost"
-              disabled={record.status !== 'deployed' || record.running}
-              onClick={() => onRedeploy(record)}
-            >
-              {copy.redeploy}
-            </MsButton>
-            <MsButton tone="ghost" onClick={onClose}>{copy.detailClose}</MsButton>
-          </div>
+            {/* 操作按钮区：一行整齐排列，主按钮+次级入口（r6 P2-4 + r7 P1-3 + 用户排版反馈）。
+                主按钮按状态切换（更新脚本 > 卸载部署 > 部署模型）；次级入口确保
+                所有操作始终可达——有更新时卸载不被主按钮顶掉、重新部署/删除常驻。
+                「在品悟里使用」不属于部署生命周期，已上移到 Agent 子卡头部。 */}
+            <div className="mt-6">
+            {(() => {
+              const hasUpdate = scriptUpdates?.[record.card_id];
+              // 「算不算已部署」必须跟列表行卡用同一把尺子——libraryStateOf（P2-6）。
+              // 此前这里读 raw record.status：status='deployed' 但 weights_ready_at
+              // 缺失（升级前的老库、部署时发现权重缺失被清掉凭据）的记录，行卡判成
+              // incomplete 显示「需继续下载」，弹窗却摆出「卸载部署」+「重新部署」；
+              // 而点「卸载部署」后，卸载确认框又按 libraryStateOf 的 delete-only 只剩
+              // 「彻底删除」——同一份记录两套判据自相矛盾，正是 uninstallOptionsFor
+              // 文档警告过的那个模式。
+              // running 档也计入「已部署」：libraryStateOf 里 running 优先于 deployed，
+              // 运行中的服务当然也是部署过的，「卸载部署/重新部署」对它仍成立
+              // （运行中禁用，行为与原先 raw status==='deployed' 时一致）。
+              const state = libraryStateOf(record);
+              const isDeployed = state === 'deployed' || state === 'running';
+              const isRunning = record.running;
+              const weightsReady = !!record.weights_ready_at;
+              const secondaryDisabled = isRunning || cardBusy;
+
+              // 主按钮
+              // P2-17（r24）：cleanup_required 必须优先于 hasUpdate——否则
+              // 「更新脚本」遮蔽「继续清理」，组合态下清理入口不可达（行卡
+              // 正常、仅此弹窗遮蔽）。清理是管理残留文件的前置，更新脚本
+              // 在未清理完的卡上执行只会把残留带进新一轮部署。
+              let primary;
+              if (state === 'cleanup_required') {
+                // P2-17：cleanup_required 优先——组合态（cleanup+hasUpdate）
+                // 此前被 hasUpdate 遮蔽，清理入口不可达。清理是前置动作，
+                // 更新脚本放次要位置。
+                primary = (
+                  <MsButton
+                    tone="danger"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-action-cleanup"
+                  >
+                    {copy.continueCleanup}
+                  </MsButton>
+                );
+              } else if (hasUpdate) {
+                primary = (
+                  <MsButton
+                    tone="primary"
+                    disabled={cardBusy}
+                    onClick={() => {
+                      updateSubmitted.current = false;
+                      setUpdateConfirmation(record.card_id);
+                    }}
+                    data-testid="model-store-detail-action-update"
+                  >
+                    {copy.actionUpdate}
+                  </MsButton>
+                );
+              } else if (isDeployed) {
+                primary = (
+                  <MsButton
+                    tone="danger"
+                    disabled={secondaryDisabled}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-action-uninstall"
+                  >
+                    {copy.actionUninstall}
+                  </MsButton>
+                );
+              } else if (!weightsReady) {
+                primary = (
+                  <MsButton
+                    tone="ghost"
+                    disabled
+                    data-testid="model-store-detail-action-deploy"
+                    title={copy.statusIncomplete}
+                  >
+                    {copy.actionDeploy}
+                  </MsButton>
+                );
+              } else {
+                primary = (
+                  <MsButton
+                    tone="ghost"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onRedeploy?.(record); }}
+                    data-testid="model-store-detail-action-deploy"
+                  >
+                    {copy.actionDeploy}
+                  </MsButton>
+                );
+              }
+
+              // 次级按钮（与主按钮同一行，排版统一）
+              const secondary = [];
+              // P2-17：cleanup 态下更新脚本放次要位置（主按钮是「继续清理」）
+              if (state === 'cleanup_required' && hasUpdate) {
+                secondary.push(
+                  <MsButton
+                    key="update"
+                    tone="ghost"
+                    disabled={cardBusy}
+                    onClick={() => {
+                      updateSubmitted.current = false;
+                      setUpdateConfirmation(record.card_id);
+                    }}
+                    data-testid="model-store-detail-secondary-update"
+                  >
+                    {copy.actionUpdate}
+                  </MsButton>
+                );
+              }
+              if (isDeployed) {
+                if (hasUpdate) {
+                  secondary.push(
+                    <MsButton
+                      key="uninstall"
+                      tone="ghost"
+                      disabled={secondaryDisabled}
+                      onClick={() => { onClose(); onUninstall?.(record); }}
+                      data-testid="model-store-detail-secondary-uninstall"
+                    >
+                      {copy.actionUninstall}
+                    </MsButton>
+                  );
+                }
+                secondary.push(
+                  <MsButton
+                    key="redeploy"
+                    tone="ghost"
+                    disabled={secondaryDisabled}
+                    title={isRunning ? copy.redeployBlockedByRunning : undefined}
+                    onClick={() => { onClose(); onRedeploy?.(record); }}
+                    data-testid="model-store-detail-secondary-redeploy"
+                  >
+                    {copy.actionRedeploy}
+                  </MsButton>
+                );
+              } else if (state !== 'cleanup_required') {
+                // 非 deployed：删除入口（r7 P1-3）。cleanup_required 除外：它的
+                // 卸载确认框是 cleanup-only（uninstallOptionsFor），里面没有
+                // 「删除」这个选项——摆一个「删除模型」按钮、点开却是「继续清理」
+                // 的确认框，文不对题；行卡同态也只有「继续清理」一个主动作。
+                secondary.push(
+                  <MsButton
+                    key="delete"
+                    tone="danger"
+                    disabled={cardBusy}
+                    onClick={() => { onClose(); onUninstall?.(record); }}
+                    data-testid="model-store-detail-secondary-delete"
+                  >
+                    {copy.actionDelete || copy.actionUninstall}
+                  </MsButton>
+                );
+              }
+
+              // 主线新增：脚本更新检查 / 版本历史入口。builtin 卡的脚本打包在
+              // 应用内、没有远端源头可查，与行卡同判据（card_source !== 'builtin'）。
+              if (record.card_source !== 'builtin') {
+                secondary.push(
+                  <MsButton
+                    key="check-update"
+                    tone="ghost"
+                    disabled={busy}
+                    onClick={() => onCheckUpdate(record)}
+                  >
+                    {copy.cardUpdateCheck}
+                  </MsButton>
+                );
+                if (onVersions) {
+                  secondary.push(
+                    <MsButton
+                      key="versions"
+                      tone="ghost"
+                      onClick={() => onVersions(record)}
+                    >
+                      {copy.versionHistory}
+                    </MsButton>
+                  );
+                }
+              }
+
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  {primary}
+                  {secondary.length > 0 ? (
+                    <div className="relative">
+                      <MsButton
+                        tone="ghost"
+                        aria-haspopup="menu"
+                        aria-expanded={moreMenuOpen}
+                        data-testid="model-store-detail-more"
+                        onClick={() => setMoreMenuOpen((v) => !v)}
+                      >
+                        <MoreHorizontal size={14} />
+                        {copy.moreActions}
+                      </MsButton>
+                      {moreMenuOpen ? (
+                        <>
+                          {/* 点菜单外任意处收起（含主按钮区/遮罩层；z 序压内容） */}
+                          <div
+                            className="fixed inset-0 z-10"
+                            role="presentation"
+                            onClick={() => setMoreMenuOpen(false)}
+                          />
+                          <div
+                            role="menu"
+                            data-testid="model-store-detail-more-menu"
+                            className="absolute right-0 top-full z-20 mt-1 flex min-w-[180px] flex-col gap-1 rounded-xl border border-slate-200 bg-white p-2 shadow-lg dark:border-white/10 dark:bg-slate-900"
+                          >
+                            {secondary}
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()}
+            </div>
         </>
       ) : null}
     </MsDialog>

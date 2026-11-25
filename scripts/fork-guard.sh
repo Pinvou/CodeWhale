@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 100 maintenance commits (EXPECTED_COMMITS), ten maintained themes (r3 closed at pinjou-v0.9.12-r3; inside a transition window the head may lead the tag).
-# PR2472 retains a divergent HTTP-policy candidate; the main integration requirements below remain mandatory and intentionally unsatisfied.
+# CodeWhale v0.9.12 clean re-fork guard: 121 maintenance commits (EXPECTED_COMMITS), ten maintained themes (r3 closed at pinjou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,9 +8,15 @@ APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
 # Public maintenance after CodeWhale#136/#142/#148/#150/#152,
 # CodeWhale#156 (rustc/clippy 1.100 stable lint adaptation),
-# CodeWhale#157 (session-reader read-only classification) merged.
-EXPECTED_HEAD="687358f7efde6abd3592737b8ec48adc74ba5a84"
-EXPECTED_COMMITS=100
+# CodeWhale#157 (session-reader read-only classification) merged,
+# then the 2026-11 batch: #139/#141 (bounded rate-limit recovery, DynamicGate
+# extracted to core/capacity.rs), #143/#144/#145/#146 (TUI schema/union fixes),
+# #149/#155 (engine idle-retire and route budget composition),
+# #151 (host model HTTP policies), #158/#160 (fixture leak, unified read-only
+# classifier lists), #127/#164/#166/#169/#170/#171 and #165/#167/#168
+# (deps hygiene, MSRV-guarded sweep, eslint 10, rusqlite 0.43).
+EXPECTED_HEAD="cc2adf8ef927fff072e9493734a0a32f3a044996"
+EXPECTED_COMMITS=121
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="6f7a3a748f408568468ace45aa5cdbb34f882d73"
 # The immutable r1 closure must remain an ancestor of the registered head.
@@ -73,17 +78,20 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
-  "T1|宿主模型传输约束接口                 |CodeWhale/crates/tui/src/config.rs|pub trait ModelHttpPolicy"
-  "T1|实际主模型与回退客户端继承约束       |CodeWhale/crates/tui/src/client.rs|policy.configure(builder, &base_url)"
-  "T1|实际三客户端出口结果回归             |CodeWhale/crates/tui/src/client/transport_policy_tests.rs|async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision()"
-  "T1|约束拒绝与配置注入关闭回归           |CodeWhale/crates/tui/src/client/transport_policy_tests.rs|async fn forkguard_host_http_policy_denial_fails_primary_and_vision_closed()"
+  "T1|宿主模型传输约束接口|CodeWhale/crates/tui/src/config.rs|pub trait ModelHttpPolicy"
+  "T1|主模型与 HTTP/1 回退应用宿主约束|CodeWhale/crates/tui/src/client.rs|policy.configure(builder, &base_url)"
+  "T1|宿主冻结路线配置独立视觉策略|pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs|.vision_http_policy()"
+  "T1|Host HTTP policy covers primary fallback and vision|CodeWhale/crates/tui/src/client/transport_policy_tests.rs|fn forkguard_host_http_policy_reaches_primary_fallback_and_vision"
+  "T1|Host HTTP policy construction denial is closed|CodeWhale/crates/tui/src/client/transport_policy_tests.rs|fn forkguard_host_http_policy_construction_denial_fails_closed"
+  "T1|Host HTTP policy cannot be installed through TOML|CodeWhale/crates/tui/src/config/host_http_policy_tests.rs|fn forkguard_host_http_policy_cannot_be_supplied_by_toml"
+  "T1|Vision public registry accepts original config fields|CodeWhale/crates/tui/tests/host_http_policy_public_api.rs|fn forkguard_host_http_policy_public_registry_accepts_original_three_field_literal"
   "T1|终态错误来源随真实选中结果传递     |CodeWhale/crates/tui/src/core/events.rs|error_source: Option<TurnErrorSource>,"
   "T1|普通路由本地准备失败保持运行时来源 |CodeWhale/crates/tui/src/core/engine/tests.rs|ordinary_route_preparation_failure_is_runtime_without_sending_http"
   "T1|宿主只消费明确模型来源终态         |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|== Some(deepseek_tui::core::events::TurnErrorSource::Model))"
   "T2|待办缺省状态契约保持内容必填       |CodeWhale/crates/tui/src/tools/todo.rs|todo_item_status_is_optional_with_a_pending_default"
   "T2|待办缺省执行结果保持 pending       |CodeWhale/crates/tui/src/tools/todo.rs|work_update_treats_a_missing_status_as_pending"
-  "T2|会话读取面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_read_session\""
-  "T2|会话列举面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_list_sessions\""
+  "T2|会话读取面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/core/engine/tool_preparation.rs|\"mcp_session-reader_read_session\""
+  "T2|会话列举面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/core/engine/tool_preparation.rs|\"mcp_session-reader_list_sessions\""
   "T1|宿主输出预算复用真实组合导出       |CodeWhale/crates/tui/src/core/engine.rs|pub use context::route_effective_max_output_tokens;"
   "T1|输出预算导出覆盖真实组合结果       |CodeWhale/crates/tui/src/core/engine/context.rs|route_effective_max_output_tokens_matches_the_transport_composition"
   "T1|Terminal error producer is explicit|CodeWhale/crates/tui/src/core/events.rs|pub enum TurnErrorSource"
@@ -330,7 +338,7 @@ fingerprints=(
   "T5|归档全上下文 roundtrip 回归        |CodeWhale/crates/tui/src/session_export.rs|forkguard_session_archive_export_roundtrips_full_context"
   "T5|artifacts 包含/排除回归            |CodeWhale/crates/tui/src/session_export.rs|forkguard_session_archive_includes_artifacts_and_respects_skip"
   "T5|短读 member fail-closed 回归      |CodeWhale/crates/tui/src/session_export.rs|forkguard_session_archive_rejects_artifact_shorter_than_recorded_size"
-  "T6|可缩容 launch gate 模块            |CodeWhale/crates/tui/src/tools/subagent/governor.rs|pub(crate) struct DynamicGate"
+  "T6|可缩容 launch gate 模块            |CodeWhale/crates/tui/src/core/capacity.rs|pub(crate) struct DynamicGate"
   "T6|限流 AIMD 治理器                   |CodeWhale/crates/tui/src/tools/subagent/governor.rs|pub(crate) struct RateLimitGovernor"
   "T6|fleet 治理器接线全部 spawn 路径    |CodeWhale/crates/tui/src/tools/subagent/mod.rs|runtime.governor = Some(Arc::clone(&self.governor));"
   "T6|限流时间自愈行为回归               |CodeWhale/crates/tui/src/tools/subagent/governor.rs|fn forkguard_rate_limit_governor_pauses_and_time_recovers_after_window_drains"

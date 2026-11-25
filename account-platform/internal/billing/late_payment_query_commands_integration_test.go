@@ -190,6 +190,11 @@ func TestLatePaymentQueryCommandPostgres(t *testing.T) {
 		if p.gets.Load() != 1 || lateQueryCount(t, r, ctx, `SELECT count(*) FROM late_payment_query_commands`) != 1 {
 			t.Fatal("same key admitted more than once", p.gets.Load())
 		}
+		if lateQueryCount(t, r, ctx, `SELECT count(*) FROM late_payment_query_generations binding JOIN late_payment_query_commands command USING(idempotency_key)
+			JOIN payment_orders payment ON payment.id=command.payment_order_id
+			WHERE command.idempotency_key=$1 AND command.completed_at IS NOT NULL AND payment.archive_query_generation=binding.generation`, key) != 1 {
+			t.Fatal("same key did not retain one atomic current generation")
+		}
 	})
 	t.Run("actor_case_facts_and_current_owner_cannot_disclose_original_receipt", func(t *testing.T) {
 		r, ctx, s, p, item, actor, input := lateQueryFixture(t)
@@ -203,6 +208,35 @@ func TestLatePaymentQueryCommandPostgres(t *testing.T) {
 			}
 		}
 		newActor := uuid.New()
+		_, otherOrder, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, false)
+		otherCase, err := r.EscalateLatePaymentReview(ctx, otherOrder.ID, "PENDING")
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherCase, err = r.ClaimLatePaymentReview(ctx, otherCase.ID, actor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherInput := LatePaymentQueryInput{1, otherCase.PaymentOrderID, otherCase.ProviderID, otherCase.ProviderVersion, otherCase.MerchantOrderNo}
+		otherFacts := func() string {
+			t.Helper()
+			var snapshot string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('order',(SELECT to_jsonb(o) FROM payment_orders o WHERE o.id=$1),
+				'case',(SELECT to_jsonb(l) FROM late_payment_review_cases l WHERE l.id=$2),
+				'manual',(SELECT to_jsonb(m) FROM manual_review_cases m WHERE m.id=$2),
+				'bindings',(SELECT jsonb_agg(to_jsonb(b) ORDER BY b.idempotency_key) FROM late_payment_query_generations b),
+				'commands',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.idempotency_key) FROM late_payment_query_commands c))::text`, otherCase.PaymentOrderID, otherCase.ID).Scan(&snapshot); err != nil {
+				t.Fatal(err)
+			}
+			return snapshot
+		}
+		beforeOther := otherFacts()
+		for _, readonly := range []bool{true, false} {
+			response := lateQueryHTTP(s, ctx, actor, otherCase.ID, key, otherInput, readonly)
+			if response.Code != 409 || strings.Contains(response.Body.String(), "last_query_at") || beforeOther != otherFacts() || p.gets.Load() != 1 {
+				t.Fatal("another owned case adopted an original command or generation", response.Code)
+			}
+		}
 		if _, err := r.pool.Exec(ctx, `UPDATE manual_review_cases SET owner_id=$2 WHERE id=$1`, item.ID, newActor); err != nil {
 			t.Fatal(err)
 		}
@@ -392,9 +426,55 @@ func TestLatePaymentQueryCommandPostgres(t *testing.T) {
 		r, ctx, s, _, item, actor, input := lateQueryFixture(t)
 		key := "query-" + uuid.NewString()
 		requireLateQueryState(t, lateQueryHTTP(s, ctx, actor, item.ID, key, input, false), "COMPLETED")
+		bindings := func() string {
+			t.Helper()
+			var snapshot string
+			if err := r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(binding) ORDER BY idempotency_key),'[]'::jsonb)::text FROM late_payment_query_generations binding`).Scan(&snapshot); err != nil {
+				t.Fatal(err)
+			}
+			return snapshot
+		}
+		originalBindings := bindings()
+		var originalCommands string
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(c) ORDER BY idempotency_key)::text FROM late_payment_query_commands c`).Scan(&originalCommands); err != nil {
+			t.Fatal(err)
+		}
+		_, err := r.pool.Exec(ctx, `INSERT INTO late_payment_query_generations(idempotency_key,generation) VALUES($1,$2)`, "absent-"+uuid.NewString(), uuid.New())
+		var foreignKey *pgconn.PgError
+		if !errors.As(err, &foreignKey) || foreignKey.Code != "23503" || bindings() != originalBindings {
+			t.Fatal("binding without an original command did not hit the foreign-key boundary", err)
+		}
+		// Use the owned schema actor and a real command insert. Reusing an
+		// existing generation must fail before either row can commit.
+		duplicateKey := "duplicate-generation-" + uuid.NewString()
+		statement := fmt.Sprintf(`BEGIN;
+		 INSERT INTO late_payment_query_commands(idempotency_key,case_id,actor_id,payment_order_id,request_hash,request_snapshot,started_at)
+		 SELECT '%s',case_id,actor_id,payment_order_id,request_hash,request_snapshot,started_at FROM late_payment_query_commands WHERE idempotency_key='%s';
+		 INSERT INTO late_payment_query_generations(idempotency_key,generation)
+		 SELECT '%s',generation FROM late_payment_query_generations WHERE idempotency_key='%s'; COMMIT;`, duplicateKey, key, duplicateKey, key)
+		_, err = retainedFinanceOwnerExec(t, r, ctx, statement)
+		var duplicate *pgconn.PgError
+		if !errors.As(err, &duplicate) || duplicate.Code != "23505" || bindings() != originalBindings {
+			t.Fatal("a second command reused another invocation's generation", err)
+		}
+		var commandsAfter string
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(c) ORDER BY idempotency_key)::text FROM late_payment_query_commands c`).Scan(&commandsAfter); err != nil || commandsAfter != originalCommands {
+			t.Fatal("rejected duplicate generation left an admitted command", err)
+		}
 		for _, statement := range []string{`UPDATE late_payment_query_commands SET actor_id='00000000-0000-0000-0000-000000000001'`, `UPDATE late_payment_query_commands SET result_snapshot='{}'`, `DELETE FROM late_payment_query_commands`, `TRUNCATE late_payment_query_commands`} {
 			if _, err := r.pool.Exec(ctx, statement); err == nil {
 				t.Fatal("runtime changed original identity/receipt", statement)
+			}
+		}
+		for _, statement := range []string{`UPDATE late_payment_query_generations SET generation=gen_random_uuid()`, `DELETE FROM late_payment_query_generations`, `TRUNCATE late_payment_query_generations`} {
+			if _, err := r.pool.Exec(ctx, statement); err == nil {
+				t.Fatal("runtime changed immutable generation binding")
+			}
+			if _, err := retainedFinanceOwnerExec(t, r, ctx, statement); err == nil {
+				t.Fatal("owner mutation bypassed the immutable generation guard")
+			}
+			if bindings() != originalBindings {
+				t.Fatal("rejected mutation changed a complete generation row")
 			}
 		}
 	})

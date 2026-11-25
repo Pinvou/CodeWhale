@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React from 'react';
 import { formatFen, integerMoney } from './finance-contract.js';
 
@@ -42,7 +43,7 @@ export function AdminProductCatalogTable({ page, language, copy, disabled, onOpe
       <tbody>{page.items.map(item => {
         const name = catalogDisplayName(item, language), id = text(item.product_id);
         const state = text(item.lifecycle_status);
-        const status = copy.catalogLifecycle && Object.prototype.hasOwnProperty.call(copy.catalogLifecycle, state) ? copy.catalogLifecycle[state] : state || copy.catalogValueMissing;
+        const status = state ? statusLabel(item.lifecycle_status, language, copy.catalogLifecycle, true) : copy.catalogValueMissing;
         return <tr key={item.catalog_item_id}>
           <th scope="row"><div className="adm-product-identity"><bdi>{name || copy.catalogNameMissing}</bdi><code dir="ltr">{id || copy.catalogValueMissing}</code></div></th>
           <td><ProductAmount mapping={item.mapping} language={language} copy={copy} /></td>

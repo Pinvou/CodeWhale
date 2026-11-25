@@ -1,0 +1,407 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Independent supplier chargeback cash principal evidence",
+    "version": "1"
+  },
+  "paths": {
+    "/internal/v1/chargebacks/confirmed": {
+      "post": {
+        "x-required-permission": "internal.billing.chargeback.record",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "operationId": "recordConfirmedChargebackPrincipal",
+        "description": "Authorized supplier bridge independently verifies a supplier principal receipt before asserting it. Binding checks are not cryptographic supplier verification. Strings are canonical without surrounding whitespace; supplier references have a 256 UTF8-byte bound. principal_evidence requires an object payload_snapshot. Legacy absent/null principal stays MISSING. Duplicate exact evidence is idempotent. Conflicting or over-gross claims are retained and return 200 with CONFLICT, not financial success. No automatic debit, refund or cash-to-points conversion.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable evidence; never permission to execute funds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChargebackCase"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or query"
+          },
+          "401": {
+            "description": "Invalid workload identity"
+          },
+          "403": {
+            "description": "Exact permission missing"
+          },
+          "404": {
+            "description": "Original transaction or case missing"
+          },
+          "409": {
+            "description": "Invalid/foreign evidence; no committed writes"
+          },
+          "422": {
+            "description": "Repository capability unsupported"
+          },
+          "500": {
+            "description": "Storage failure or uncertain transaction outcome; retry same evidence, never infer a funds effect"
+          }
+        }
+      }
+    },
+    "/internal/v1/chargebacks/{case_id}/principal-evidence": {
+      "get": {
+        "x-required-permission": "internal.billing.chargeback.record",
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "operationId": "chargebackPrincipalEvidence",
+        "description": "Read-only keyset page in one repeatable-read snapshot. Metadata and digests only; immutable payload remains in Billing. Pages across calls are not a frozen export: refresh from the beginning for later arrivals.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Durable evidence; never permission to execute funds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidencePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or query"
+          },
+          "401": {
+            "description": "Invalid workload identity"
+          },
+          "403": {
+            "description": "Exact permission missing"
+          },
+          "404": {
+            "description": "Original transaction or case missing"
+          },
+          "409": {
+            "description": "Invalid/foreign evidence; no committed writes"
+          },
+          "422": {
+            "description": "Repository capability unsupported"
+          },
+          "500": {
+            "description": "Storage failure or uncertain transaction outcome; retry same evidence, never infer a funds effect"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "WorkloadBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "PrincipalInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "amount_fen",
+          "currency",
+          "provider_transaction_id",
+          "supplier_evidence_reference"
+        ],
+        "properties": {
+          "amount_fen": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,18}$",
+            "description": "Canonical positive int64 minor units, at most 9223372036854775807. Supplier principal excluding fees; never inferred from points or original gross."
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16
+          },
+          "provider_transaction_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "supplier_evidence_reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "CashPrincipal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "amount_fen",
+          "currency",
+          "observation_count",
+          "evidence_digest",
+          "manual_review_required"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "MISSING",
+              "CONFIRMED",
+              "CONFLICT"
+            ]
+          },
+          "amount_fen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[1-9][0-9]{0,18}$"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "observation_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "manual_review_required": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "CONFIRMED"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "amount_fen": {
+                  "type": "string"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "amount_fen": {
+                  "type": "null"
+                },
+                "manual_review_required": {
+                  "const": true
+                }
+              }
+            }
+          }
+        ]
+      },
+      "RecordRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "payment_transaction_id",
+          "provider_chargeback_id",
+          "payload_snapshot"
+        ],
+        "properties": {
+          "payment_transaction_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_chargeback_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "payload_snapshot": {},
+          "principal_evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrincipalInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ChargebackCase": {
+        "type": "object",
+        "required": [
+          "chargeback_case_id",
+          "payment_transaction_id",
+          "provider_chargeback_id",
+          "status",
+          "cash_principal"
+        ],
+        "properties": {
+          "chargeback_case_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_transaction_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_chargeback_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "cash_principal": {
+            "$ref": "#/components/schemas/CashPrincipal"
+          }
+        }
+      },
+      "Observation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "payment_transaction_id",
+          "provider_id",
+          "provider_version",
+          "provider_chargeback_id",
+          "provider_transaction_id",
+          "amount_fen",
+          "currency",
+          "supplier_evidence_reference",
+          "payload_digest",
+          "observation_digest",
+          "recorded_by_service",
+          "recorded_by_subject",
+          "received_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_transaction_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_version": {
+            "type": "string"
+          },
+          "provider_chargeback_id": {
+            "type": "string"
+          },
+          "provider_transaction_id": {
+            "type": "string"
+          },
+          "amount_fen": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,18}$",
+            "description": "Canonical positive int64 minor units, at most 9223372036854775807. Supplier principal excluding fees; never inferred from points or original gross."
+          },
+          "currency": {
+            "type": "string"
+          },
+          "supplier_evidence_reference": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "observation_digest": {
+            "type": "string"
+          },
+          "recorded_by_service": {
+            "type": "string"
+          },
+          "recorded_by_subject": {
+            "type": "string"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EvidencePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "cash_principal",
+          "observations",
+          "next_after"
+        ],
+        "properties": {
+          "cash_principal": {
+            "$ref": "#/components/schemas/CashPrincipal"
+          },
+          "observations": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Observation"
+            }
+          },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      }
+    }
+  }
+}

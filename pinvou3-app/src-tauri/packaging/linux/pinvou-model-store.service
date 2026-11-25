@@ -1,0 +1,15 @@
+[Unit]
+Description=Pinvou model store background executor
+
+[Service]
+Type=simple
+# Adjust to the installed Pinvou executable; same binary as the desktop app.
+ExecStart=/usr/bin/pinvou3-tauri --model-store-host
+Restart=on-failure
+RestartSec=2
+UMask=0077
+# The host executes download scripts; a small MemoryMax would kill the shared
+# cgroup including those scripts. Model runtime budgets remain cmsd's duty.
+
+[Install]
+WantedBy=default.target

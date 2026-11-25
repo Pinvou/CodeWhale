@@ -142,12 +142,12 @@ GRANT CREATE ON SCHEMA public TO billing_service;
 DO $$ DECLARE object RECORD; BEGIN
  FOR object IN SELECT c.relname,c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='public' AND pg_get_userbyid(c.relowner)='billing_schema_owner' AND c.relkind IN ('r','p','S','v','m')
- AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections','token_account_wallet_provisioning_receipts','usage_hold_admin_commands','usage_waiver_commands','usage_waiver_results','usage_waiver_rejections','product_admission_materials','product_admission_material_ciphertexts','product_admission_material_commands','product_admission_material_audits','product_manual_admission_submissions','product_manual_admission_decisions') LOOP
+ AND c.relname NOT IN ('schema_migrations','billing_runtime_hardening','billing_approval_command_activations','billing_approval_command_activation_history','billing_approval_proof_claims','entitlement_component_corrections','token_account_wallet_provisioning_receipts','usage_hold_admin_commands','usage_waiver_commands','usage_waiver_results','usage_waiver_rejections','product_admission_materials','product_admission_material_ciphertexts','product_admission_material_commands','product_admission_material_audits','product_manual_admission_submissions','product_manual_admission_decisions','late_payment_query_generations') LOOP
  EXECUTE format('ALTER %s public.%I OWNER TO billing_service',CASE object.relkind WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'TABLE' END,object.relname);
  END LOOP;
  FOR object IN SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='public' AND pg_get_userbyid(p.proowner)='billing_schema_owner'
- AND p.proname NOT IN ('harden_billing_runtime_objects','reject_billing_truncate','reject_token_account_wallet_receipt_mutation','guard_product_admission_material','guard_product_admission_ciphertext','purge_product_manual_admission_facts') LOOP
+ AND p.proname NOT IN ('harden_billing_runtime_objects','reject_billing_truncate','reject_token_account_wallet_receipt_mutation','guard_product_admission_material','guard_product_admission_ciphertext','purge_product_manual_admission_facts','guard_late_payment_query_generation','require_late_payment_query_generation') LOOP
  EXECUTE format('ALTER FUNCTION %s OWNER TO billing_service',object.signature);
  END LOOP;
 END $$;
@@ -217,11 +217,17 @@ DO $$ BEGIN
   REVOKE UPDATE(snapshot) ON public.product_manual_admission_submissions FROM billing_service;
   REVOKE UPDATE(reason) ON public.product_manual_admission_decisions FROM billing_service;
  END IF;
+ IF to_regclass('public.chargeback_principal_evidence') IS NOT NULL THEN
+  REVOKE UPDATE,DELETE,TRUNCATE ON public.chargeback_principal_evidence FROM billing_service;
+ END IF;
  IF to_regclass('public.usage_waiver_commands') IS NOT NULL THEN
   REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_waiver_commands,public.usage_waiver_results,public.usage_waiver_rejections FROM billing_service;
  END IF;
  IF to_regclass('public.usage_hold_admin_commands') IS NOT NULL THEN
   REVOKE UPDATE,DELETE,TRUNCATE ON public.usage_hold_admin_commands FROM billing_service;
+ END IF;
+ IF to_regclass('public.late_payment_query_generations') IS NOT NULL THEN
+  REVOKE UPDATE,DELETE,TRUNCATE ON public.late_payment_query_generations FROM billing_service;
  END IF;
  IF to_regclass('public.ledger_repair_cases') IS NOT NULL THEN
   REVOKE UPDATE,DELETE ON TABLE public.ledger_repair_cases FROM billing_service;
@@ -249,5 +255,8 @@ SET ROLE billing_service;`)
 	if err != nil {
 		return err
 	}
-	return verifyWalletReceiptValidationRestored(ctx, tx, migration)
+	if err := verifyWalletReceiptValidationRestored(ctx, tx, migration); err != nil {
+		return err
+	}
+	return verifyLatePaymentQueryGenerationsRestored(ctx, tx)
 }

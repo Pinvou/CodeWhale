@@ -297,6 +297,7 @@ jobs:
     # job used for the identical step set.
     timeout-minutes: 10
     outputs:
+      cmsd: ${{ steps.filter.outputs.cmsd }}
       rust_code: ${{ steps.filter.outputs.rust_code }}
       rust_dependencies: ${{ steps.filter.outputs.rust_dependencies }}
       rust_full: ${{ steps.filter.outputs.rust_full }}
@@ -354,6 +355,17 @@ jobs:
         with:
           predicate-quantifier: some-with-excludes
           filters: |
+            cmsd:
+              - 'components/cmsd/**'
+              - 'scripts/check-cmsd-bundled-package.py'
+              - 'scripts/check-linux-glibc-floor.sh'
+              - 'scripts/check-linux-elf-policy.sh'
+              - 'scripts/release-deb.sh'
+              - 'scripts/tests/test_cmsd_release_policy.py'
+              - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+              - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
+              - '.github/workflows/pr-check.yml'
+              - '.github/workflows/release-packages.yml'
             # Desktop-only behavior notes and generated Portal assets are
             # covered by their frontend checks, not the Go/PostgreSQL suite.
             # All other platform paths stay included, including new ones.
@@ -419,6 +431,12 @@ jobs:
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
+              - '!components/cmsd/**'
+              - '.github/actions/linux-rust-cache/**'
+              - 'scripts/ci-rust-cache-paths.cjs'
+              - 'scripts/ci-rust-network.cjs'
+              - 'scripts/ci-network-environment.py'
+              - 'scripts/ci-rust-dist.py'
               - '**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # Shared Linux memory preparation must reach real dependency
@@ -429,10 +447,18 @@ jobs:
               - '**/build.rs'
               - 'scripts/ci-libpipewire-build.sh'
               - 'scripts/ci-cargo-dev-profile.py'
+              # r21 P2-10：permissions harness 的执行腿跑的是 shell 入口
+              # （tests/model-store-permissions/run.sh）——只改 run.sh/README 的
+              # PR 不触 '**/*.rs' 谓词（crate 根的 src/main.rs 会命中，但 shell
+              # 侧改动不碰它），会跳过执行腿而 required-gate 按 skipped 通过
+              # （本 workflow :271-280 自己记载过这类事故）。LAN harness 不需要
+              # 整目录登记：其 crate 根的 *.rs 天然命中上面的 '**/*.rs'。
+              - 'tests/model-store-permissions/**'
               - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
             rust_dependencies:
+              - '!components/cmsd/**'
               - 'scripts/guard-chrono-maintenance-exception.py'
               - 'scripts/tests/test_chrono_maintenance_exception.py'
               - 'scripts/guard-webpki-roots-exception.py'
@@ -447,6 +473,7 @@ jobs:
             # isolated leaf-feature boundaries are explicitly low risk; changes
             # to their registration or app command surface still run full tests.
             rust_full:
+              - '!components/cmsd/**'
               - 'scripts/ci-memory-setup.sh'
               - 'scripts/ci-cargo-dev-profile.py'
               # Round-1 fix wave (PR #715 review): the loong64 cross-pipeline
@@ -502,6 +529,11 @@ jobs:
               - '!pinvou3-app/src-tauri/src/features/personas/**'
               - '!pinvou3-app/src-tauri/src/features/pet/**'
             cli_rust:
+              - '.github/actions/linux-rust-cache/**'
+              - 'scripts/ci-rust-cache-paths.cjs'
+              - 'scripts/ci-rust-network.cjs'
+              - 'scripts/ci-network-environment.py'
+              - 'scripts/ci-rust-dist.py'
               - 'scripts/ci-memory-setup.sh'
               - 'pinvou-cli/**/*.rs'
               - 'pinvou-cli/**/Cargo.toml'
@@ -595,6 +627,11 @@ jobs:
               # required-gate passing on `skipped`).
               - 'docs/gaia-benchmark.md'
             knowledge_rust:
+              - '.github/actions/linux-rust-cache/**'
+              - 'scripts/ci-rust-cache-paths.cjs'
+              - 'scripts/ci-rust-network.cjs'
+              - 'scripts/ci-network-environment.py'
+              - 'scripts/ci-rust-dist.py'
               - 'pinvou-knowledge/**/*.rs'
               - 'pinvou-knowledge/Cargo.toml'
               - 'pinvou-knowledge/Cargo.lock'
@@ -775,6 +812,11 @@ jobs:
               - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
               - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
               - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+              - 'components/cmsd/**'
+              - 'scripts/check-cmsd-bundled-package.py'
+              - 'scripts/tests/test_cmsd_release_policy.py'
+              - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+              - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
               - 'scripts/package-deb-loongarch64.sh'
               - 'scripts/ci-build-linux-loongarch64.sh'
               - 'scripts/ci-loongarch64-toolchain.sh'
@@ -1320,6 +1362,12 @@ jobs:
       - name: Initialize gate test resource ledger
         run: python3 scripts/ci-resource-ledger.py --init
 
+      # r9 P1-2：jsonschema 的唯一消费者（megacube inventory 契约，经
+      # test_megacube_mcp 子进程运行）在本 suite 内执行，安装必须先行，
+      # 否则 skipIf 静默跳过且退出码为 0。
+      - name: Install gate suite python deps (jsonschema)
+        run: python3 -m pip install --quiet jsonschema
+
       # Full discovery includes cache server/deadline/checkout/npm contracts;
       # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)
@@ -1347,7 +1395,7 @@ jobs:
         # negative result when the list may be truncated or its size is unknown.
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: |
-          python3 -m pip install --quiet python-pptx python-docx
+          python3 -m pip install --quiet python-pptx python-docx jsonschema
           fail=0
           for t in pinvou3-app/resources/mcp-servers/*/test_*.py; do
             [ -f "$t" ] || continue
@@ -2531,6 +2579,29 @@ jobs:
           export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
           npm --prefix account-platform run test:existing-broker
 
+      - name: Retained outbox statistics public PostgreSQL contracts
+        timeout-minutes: 10
+        working-directory: account-platform
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}
+          PINVOU_OUTBOX_STATISTICS_TEST: '1'
+        run: |
+          set -euo pipefail
+          # Build the real previous CLI from this immutable public baseline.
+          git fetch --no-tags --depth=1 origin 4bbf359d8cf3547af401d7cdb561f7bc0477ebd6
+          git fetch --no-tags --depth=1 origin 5d8b45efc31e07299c4024cb5de2cbb58786feb3
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 -timeout=7m ./internal/billingschema -run '^TestRetainedOutboxStatisticsPublicPostgres$' | tee "$RUNNER_TEMP/outbox-statistics.jsonl"
+          python3 - "$RUNNER_TEMP/outbox-statistics.jsonl" <<'PY'
+          import json, pathlib, sys
+          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+          terminal = [event for event in events if event.get("Test") and event.get("Action") in ("pass", "fail", "skip")]
+          root = "TestRetainedOutboxStatisticsPublicPostgres"
+          assert len(terminal) == 4 and all(event["Action"] == "pass" for event in terminal), "statistics PostgreSQL tests failed or skipped"
+          assert {event["Test"] for event in terminal} == {root, root+"/account", root+"/billing", root+"/token"}, "required public migration domains did not execute"
+          PY
       - name: Token outbox publication on owned PostgreSQL and TLS NATS
         timeout-minutes: 4
         shell: bash
@@ -2861,7 +2932,9 @@ jobs:
     name: windows-relay-tools-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-tools-test')) }}
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
+    # Native PowerShell, wrapper and host processes share one instance budget.
+    # Use the medium pool; retain the existing assertions and deadlines.
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -3074,6 +3147,8 @@ jobs:
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+          node --test pinvou3-app/tests/cmsd_bundled_packaging.test.js
+          python3 -m unittest discover -s scripts/tests -p test_cmsd_release_policy.py
 
       - name: Prepare CI transfer runtime (2)
         if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
@@ -3148,6 +3223,60 @@ jobs:
         if: ${{ always() && runner.os == 'Windows' && steps.windows_release_contract_receipts.outcome == 'failure' }}
         run: echo '::warning::Windows release contract receipt upload failed; original receipts remain on the runner. Test and cleanup failures remain failures.'
 
+  # Standalone crate: app/CLI Cargo commands do not compile or test this tree.
+  cmsd-check:
+    name: cmsd-check (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && (github.event_name == 'push' || needs.changes.outputs.cmsd == 'true') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
+      # r7 P2-6：cmsd 依赖图此前完全绕过 cargo-deny（rust_dependencies 过滤
+      # 排除 components/cmsd/**）。钉同版安装器与四类检查，与知识库/主仓同口径。
+      - name: cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: 独立 CMS 格式与严格 lint
+        run: |
+          cargo fmt --manifest-path components/cmsd/Cargo.toml --all -- --check
+          cargo clippy --manifest-path components/cmsd/Cargo.toml --locked --all-targets -- -D warnings
+      - name: 独立 CMS 原生测试与包装回归
+        run: |
+          cargo test --manifest-path components/cmsd/Cargo.toml --locked -- --test-threads=1
+          python3 -m unittest discover -s components/cmsd/tests -p 'test_*.py'
+          python3 -m unittest discover -s scripts/tests -p test_cmsd_release_policy.py
+      - name: 独立 CMS 依赖门禁（cargo-deny）
+        run: |
+          cargo deny --locked --manifest-path components/cmsd/Cargo.toml --config components/cmsd/deny.toml check advisories licenses bans sources
+      - name: 从当前提交构建并验证原生组件
+        run: |
+          package="$RUNNER_TEMP/cmsd-component"
+          python3 components/cmsd/scripts/build-linux-component.py --output "$package"
+          root="$RUNNER_TEMP/cmsd-package-root"
+          mkdir -p "$root/usr/lib/pinvou3/runtime"
+          cp -a "$package" "$root/usr/lib/pinvou3/runtime/cmsd"
+          case "$(uname -m)" in
+            x86_64) architecture=amd64 ;;
+            aarch64) architecture=arm64 ;;
+            *) echo 'Unexpected native CMS runner architecture' >&2; exit 1 ;;
+          esac
+          python3 scripts/check-cmsd-bundled-package.py "$root" "$architecture"
+
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
   # 各项收在同一 job 复用一份缓存，避免过度分拆。
@@ -3212,7 +3341,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3415,7 +3544,7 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3443,6 +3572,14 @@ jobs:
       - name: Controller authentication and local safety regression
         working-directory: pinvou3-app/src-tauri
         run: cargo test --locked --manifest-path tests/controller-crypto-harness/Cargo.toml
+      # 模型商店两条独立门禁 harness（评审 B1，2026-10-21 接线）：lan_gateway 在
+      # 生产 crate 内零 #[cfg(test)]，这两个 crate 是它唯一可执行的测试；不接进
+      # CI，烂了/被测代码改了语义时所有门禁照样全绿。照抄上一条 harness 的先例
+      # （Draft 也跑），二者各自空 [workspace]，与主工程缓存互不污染。
+      - name: Model store LAN gateway security regression
+        run: cargo test --locked --manifest-path tests/model-store-lan/Cargo.toml
+      - name: Model store permissions harness (umask 0002/0022/0077)
+        run: bash tests/model-store-permissions/run.sh
 
       # clippy 需要 Tauri/WebKit 系统库；Draft 不安装，避免每次 push 消耗 ~70s。
       - name: 装 Tauri + pinvou3 Linux 系统依赖
@@ -3540,6 +3677,9 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: |
           cargo check --all-targets --features benchmark-hooks --locked
+          # megacube-handoff-acceptance bin 挂 required-features，上面的
+          # all-targets 不满足特性就不会编译它；单独一条让它进编译覆盖。
+          cargo check --all-targets --features megacube-handoff-acceptance --locked
           CARGO_TARGET_DIR=target cargo check --manifest-path ../../pinvou-cli/Cargo.toml --package pinvou-product-backend --locked
 
       # Cargo.lock drift guard (CodeWhale parity): every cargo invocation in
@@ -3631,6 +3771,14 @@ jobs:
       # RUSTC_WRAPPER 指向 sh 版(wrapper 只作用于编译期 rustc 进程,
       # cargo run / cargo test 目标进程不继承 RUST_MIN_STACK)。
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
+      # 测试线程栈与生产形状对齐:lib.rs 的 GUI async runtime 显式
+      # thread_stack_size(16 MiB)(勿优化回默认),libtest 测试线程默认 2 MiB。
+      # 底座 cc2adf8(2026-11 批次)后,真实引擎 spawn 组合 future 在 2 MiB
+      # 测试线程上栈溢出(multiagent_regression_tests::
+      # code_session_real_spawn_refresh... CI 实证,本地 arm64/x86_64 双复现;
+      # RUST_MIN_STACK=16 MiB 即过)——生产 worker 本就在 16 MiB 上运行同一
+      # future,测试对齐生产形状,并非放宽门禁;超过 16 MiB 的真回归仍会红。
+      RUST_MIN_STACK: 16777216
       # codewhale-tui 恢复依赖级 O2 后,test binary 变大,link 阶段在 ubuntu 16GB
       # runner 上内存峰值越线被 SIGTERM(merge_group run 实证,exit 143)。
       # 实测(CI 对照):thin LTO + lld 能 Finished + 1180 passed(31min);
@@ -3826,7 +3974,7 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: 检查 Rust test 缓存是否精确命中
         id: rust-test-cache-probe
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3847,13 +3995,15 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: 恢复 Rust lint 暖缓存
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          workspaces: pinvou3-app/src-tauri
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
           # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
           shared-key: rust-lint-v2
           save-if: false
@@ -3864,7 +4014,7 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo test cache
         id: rust-test-cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3904,13 +4054,15 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: 恢复被淘汰缓存的 Rust lint 回退
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          workspaces: pinvou3-app/src-tauri
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
           shared-key: rust-lint-v2
           # rust-cache exports CACHE_ON_FAILURE globally; preserve the test
           # cache writer's failure behavior even though this step is read-only.
@@ -4179,7 +4331,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -4420,7 +4572,7 @@ jobs:
         id: cli_lint_cache
         # Pin the reviewed implementation to prevent action behavior drift;
         # the final disk gate enables failure caching only when safe to try.
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -4572,6 +4724,11 @@ jobs:
       # 只在编译期 rustc 注入 RUST_MIN_STACK=16MiB,不泄漏到 cargo test 目标进程。
       # 必须用 ${{ github.workspace }} 绝对路径(避免按 cwd 双拼解析)。
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+      # 测试线程栈与生产形状对齐(同 linux rust-test 腿):生产 runtime 显式
+      # thread_stack_size(16 MiB);底座 cc2adf8(2026-11 批次)后真实引擎
+      # spawn 组合 future 在 libtest 默认 2 MiB 测试线程上栈溢出。RUST_MIN_STACK
+      # 由 libtest 读取、只作用于测试线程,超过 16 MiB 的真回归仍会红。
+      RUST_MIN_STACK: 16777216
       # 2026-10 stable 1.99: the cold `cargo test --lib --no-run` OOM'd the
       # 16 GB hosted runner in the final test-binary link (730 dep crates
       # compile in ~25 minutes, then the link pagefile-thrashes silently for
@@ -5029,6 +5186,8 @@ jobs:
             'multiagent_depth_guard_enforces_two_level_inputs' \
             'features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_contract' \
             'features::marketplace::scope::tests::' \
+            'work_mcp_profiles_route_bundled_pptx_to_each_session_artifact_directory' \
+            'work_mcp_rejects_global_pptx_fallback_when_session_profile_is_unwritable' \
             'before_landing' \
             'before_anything_lands' \
             'preserves_consent_state' \
@@ -5884,7 +6043,9 @@ jobs:
     name: windows-codex-runtime-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-codex-runtime-test')) }}
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
+    # Native PowerShell, wrapper and host processes share one instance budget.
+    # Use the medium pool; retain the existing assertions and deadlines.
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -5991,7 +6152,9 @@ jobs:
     name: windows-runtime-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-runtime-test')) }}
-    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
+    # Native PowerShell, wrapper and host processes share one instance budget.
+    # Use the medium pool; retain the existing assertions and deadlines.
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -6430,7 +6593,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -6489,6 +6652,7 @@ jobs:
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
+      - cmsd-check
       - knowledge-rust
       - rust-lint
       - rust-test
@@ -6548,6 +6712,8 @@ jobs:
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
+          CMSD_RESULT: ${{ needs.cmsd-check.result }}
+          CMSD_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.cmsd == 'true' }}
           KNOWLEDGE_RUST_RESULT: ${{ needs.knowledge-rust.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_RESULT: ${{ needs.rust-test.result }}
@@ -6661,6 +6827,11 @@ jobs:
             exit 1
           fi
 
+          if [[ "$CMSD_REQUIRED_BY_POLICY" == "true" && "$CMSD_RESULT" != success ]]; then
+            echo "CMS 变更要求 x64 与 ARM64 原生检查成功: cmsd=$CMSD_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "runner-pool-guard:$RUNNER_POOL_GUARD_RESULT" \
@@ -6677,6 +6848,7 @@ jobs:
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
+            "cmsd-check:$CMSD_RESULT" \
             "knowledge-rust:$KNOWLEDGE_RUST_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
             "rust-test:$RUST_RESULT" \

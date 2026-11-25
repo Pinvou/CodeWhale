@@ -23,6 +23,10 @@ pub(crate) fn matches_current_model_route(_card_id: &str, _base_url: &str, _mode
 }
 
 impl ModelStoreService {
+    pub fn new() -> Self {
+        Self
+    }
+
     pub fn set_models_changed_handler(&self, _handler: super::super::ModelsChangedHandler) {}
 }
 
@@ -38,7 +42,16 @@ fn nope<T>() -> Result<T, String> {
     Err(UNSUPPORTED_REASON.to_string())
 }
 
-pub async fn list_cards(_test_mode: bool) -> Result<Value, String> {
+pub async fn list_cards() -> Result<Value, String> {
+    nope()
+}
+
+/// 打开运行日志目录。非 Linux 上压根没有运行过任何卡片脚本，所以也没有这个目录。
+pub fn reveal_run_logs_dir() -> Result<Value, String> {
+    nope()
+}
+
+pub fn export_run_log(_run_id: String) -> Result<Value, String> {
     nope()
 }
 
@@ -46,7 +59,65 @@ pub async fn library(_service: Arc<ModelStoreService>) -> Result<Value, String> 
     nope()
 }
 
+pub async fn preview_incomplete(
+    _service: &Arc<ModelStoreService>,
+    _run_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+pub fn retry_incomplete(
+    _service: &Arc<ModelStoreService>,
+    _run_id: String,
+    _expected_sha256: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+/// 非 Linux 上没有未完成安装可放弃：桩与 linux/service.rs 同名同签名。
+pub async fn dismiss_incomplete(
+    _service: &Arc<ModelStoreService>,
+    _run_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+/// 非 Linux 上没有权重目录可扫描：桩与 linux/service.rs 同名同签名。
+pub async fn scan_orphans(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
+    nope()
+}
+
+/// 非 Linux 上没有残留目录可删除：桩与 linux/service.rs 同名同签名。
+pub async fn remove_orphan(
+    _service: &Arc<ModelStoreService>,
+    _path: String,
+) -> Result<Value, String> {
+    nope()
+}
+
 pub async fn model_detail(_card_id: String) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn installed_engines() -> Result<Value, String> {
+    nope()
+}
+
+pub async fn local_resources() -> Result<Value, String> {
+    nope()
+}
+
+pub async fn memory_admission(
+    _card_id: String,
+    _version_id: Option<String>,
+) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn delete_engine(
+    _service: &Arc<ModelStoreService>,
+    _engine_name: String,
+    _engine_version: Option<String>,
+) -> Result<Value, String> {
     nope()
 }
 
@@ -54,6 +125,14 @@ pub async fn follow_deployment_context(
     _service: Arc<ModelStoreService>,
     _card_id: String,
     _model_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+pub fn start_card_scripts(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+    _confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }
@@ -74,6 +153,7 @@ pub fn start_version_action(
     _card_id: String,
     _action: String,
     _version_id: String,
+    _memory_confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }
@@ -89,24 +169,33 @@ pub fn start_card_update(
 pub fn start_download(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
-    _test_mode: bool,
 ) -> Result<Value, String> {
     nope()
 }
 
-pub fn start_deploy(
+/// 本地卡片安装只在 Linux 上有；桩返回同样的「不支持」。
+pub fn start_install_local(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn start_deploy(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
     _profile_id: Option<String>,
+    _memory_confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }
 
-pub fn start_lifecycle(
+pub async fn start_lifecycle(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
     _action: String,
     _purge_weights: bool,
+    _memory_confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }
@@ -116,6 +205,7 @@ pub async fn run_log(
     _run_id: String,
     _from: usize,
     _wait: Option<u64>,
+    _from_byte: Option<usize>,
 ) -> Result<Value, String> {
     nope()
 }
@@ -147,15 +237,19 @@ pub fn create_api_key(_card_id: String, _label: Option<String>) -> Result<Value,
     nope()
 }
 
-pub fn test_store_state() -> Result<Value, String> {
+pub async fn lan_status(_service: &Arc<ModelStoreService>, _card: String) -> Result<Value, String> {
     nope()
 }
-
-pub fn unlock_test_store(_password: String) -> Result<Value, String> {
+pub async fn set_lan_sharing(
+    _service: &Arc<ModelStoreService>,
+    _card: String,
+    _enabled: bool,
+    _address: Option<String>,
+    _port: u16,
+) -> Result<Value, String> {
     nope()
 }
-
-pub fn disable_test_store() -> Result<Value, String> {
+pub fn revoke_api_key(_id: String) -> Result<Value, String> {
     nope()
 }
 
@@ -171,6 +265,13 @@ pub fn storage_settings() -> Result<Value, String> {
     nope()
 }
 
+/// 模块商店在非 Linux 平台没有 config 模块；顶层桥接函数需要一个路径出口。
+pub mod config {
+    pub fn data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::new()
+    }
+}
+
 pub fn set_storage_settings(
     _models_dir: Option<String>,
     _import_scan_dirs: Option<Vec<String>>,
@@ -183,13 +284,21 @@ pub fn set_storage_settings(
 /// 一个平台不支持的功能不该让应用启动时冒出一句错误。
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
 
-/// 非 Linux 上没有内置卡片库可刷，直接返回。同样不报错——这是启动路径。
-pub fn run_startup_refresh(_service: &Arc<ModelStoreService>) {}
+/// 非 Linux 无 linked-models 可对账：no-op 而非报错（同上，启动路径不冒错）。
+pub fn run_startup_linked_sync(_service: &Arc<ModelStoreService>) {}
 
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }
 
+impl ModelStoreService {
+    pub fn for_desktop() -> Self {
+        Self::default()
+    }
+    pub fn is_remote(&self) -> bool {
+        false
+    }
+}
 // ── 商店边界（与 linux/boundary.rs 同名同签名，见 platform/mod.rs 的转发）──
 
 /// 非 Linux 没有商店，恒为未命中（宽松版，登记端用）。

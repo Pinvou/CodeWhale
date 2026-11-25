@@ -557,6 +557,26 @@ command_protocol!(
     ]
 );
 command_protocol!(
+    cms_protocol,
+    "cms.rs",
+    [
+        "cms_status",
+        "cms_models",
+        "cms_engines",
+        "cms_capacity",
+        "cms_tasks",
+        "cms_task",
+        "cms_model_action",
+        "cms_cancel_task",
+        "cms_service_status",
+        "cms_service_action",
+        "cms_service_bundled_package",
+        "cms_service_inspect_package",
+        "cms_service_logs",
+        "cms_device_status"
+    ]
+);
+command_protocol!(
     monitor_protocol,
     "monitor.rs",
     [

@@ -22,6 +22,9 @@ use tauri::Manager;
 
 pub use features::assistant::attachments::stage_file_in_workspace;
 
+#[cfg(feature = "megacube-handoff-acceptance")]
+pub use app::commands::megacube_handoff_acceptance::run as run_megacube_handoff_acceptance;
+
 #[cfg(feature = "benchmark-hooks")]
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
@@ -338,10 +341,13 @@ fn ensure_release_env() {
 
 /// 进程级选定并安装 rustls 的 CryptoProvider(aws-lc-rs)。
 ///
-/// 幂等:`install_default` 返回 `Err` 表示已装过(本次或之前的 reqwest/tungstenite 调用),
-/// 用 `drop` 吞掉即可,不会二次注册。装在 `run()` 最前,保证后续 reqwest / relay 的
-/// `connect_async` 都用已确定的 provider,避开「aws-lc-rs + ring 同时启用时无参
-/// ClientConfig::builder().expect() panic」(见 Cargo.toml rustls 注释)。
+/// 注意(2026-10-30 评审勘误):应用侧 reqwest 已切 native-tls(见 Cargo.toml 的
+/// TLS 底座记录),这行**不再**覆盖 reqwest;仍需要它的是图里残留的 rustls 腿——
+/// tokio-tungstenite 的 `connect_async`。幂等:`install_default` 返回 `Err` 表示
+/// 已装过(本次或之前的 tungstenite 调用),用 `drop` 吞掉即可,不会二次注册。
+/// 装在 `run()` 最前,保证 relay 的 connect_async 用已确定的 provider,避开
+/// 「aws-lc-rs + ring 同时启用时无参 ClientConfig::builder().expect() panic」
+/// (见 Cargo.toml rustls 注释)。
 fn install_rustls_provider() {
     drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }
@@ -924,7 +930,131 @@ pub(crate) fn remove_agents_index_entry(
     }
 }
 
+/// 进程入口的命令行分发（评审 R2：判定提成纯函数，钉住四种形态）。
+#[derive(Debug, PartialEq, Eq)]
+enum EntryRoute {
+    /// `model-store-worker <子命令>`——双机从机控制助手，走 CLI 出口。
+    WorkerCli,
+    /// `$LMM_WORKER` 环境在场 + argv[1] 是别的子命令——错误契约调用，拒绝启动。
+    WorkerGuard,
+    /// 正常 GUI 启动（含环境变量残留但无参启动——那是用户在拉界面，不是脚本）。
+    Gui,
+}
+
+fn route_args(argv1: Option<&str>, lmm_worker_set: bool) -> EntryRoute {
+    match argv1 {
+        Some("model-store-worker") => EntryRoute::WorkerCli,
+        // 闸只拦「带子命令但契约不对」：错误契约的调用必然带 argv[1]（裸 exe
+        // 被当老式 LMM 调子命令）；「环境变量残留 + 无参启动」更可能是用户正常
+        // 拉起 GUI——原先只要 env 在场就拒绝，误伤半径大（评审 R2）。
+        Some(_) if lmm_worker_set => EntryRoute::WorkerGuard,
+        _ => EntryRoute::Gui,
+    }
+}
+
+/// Headless modes are separate CLI processes selected before desktop startup.
+/// Their error status must reach the caller; no GUI/runtime state exists here.
+#[allow(clippy::exit)]
+fn fail_headless_cli(message: impl std::fmt::Display, code: i32) -> ! {
+    eprintln!("{message}");
+    std::process::exit(code);
+}
+
 pub fn run() {
+    // `pinvou3-tauri model-store-worker <子命令>`：双机卡片脚本调用的从机控制
+    // 助手（model_store::platform::linux::worker，经 $LMM_WORKER 注入）。必须在
+    // 碰任何 GUI/TLS/异步运行时之前分流出去——它跑在卡片脚本的 pty 里，等不起
+    // 一整个应用的启动链，而且同进程里那些全局副作用（rustls provider、环境
+    // 变量）对它只有干扰。
+    // CLI 分流进程本就要以子命令的退出码结束进程（与旧 LMM main.rs 的 worker
+    // 分流同构）；crate 里另一处豁免（build_tauri_context）是宏行为，这里是
+    // 我们自己的 CLI 语义，都属 exit 语义上正确的位置。
+    let route = route_args(
+        std::env::args().nth(1).as_deref(),
+        std::env::var_os("LMM_WORKER").is_some(),
+    );
+    match route {
+        EntryRoute::WorkerCli => {
+            #[allow(clippy::exit)]
+            {
+                let rest: Vec<String> = std::env::args().skip(2).collect();
+                std::process::exit(features::model_store::platform::worker_cli(&rest));
+            }
+        }
+        // 防呆闸（10-28 双机验证 P0 的教训）：本进程若是在卡片脚本环境里被以
+        // 错误契约拉起的（$LMM_WORKER 已设 + argv[1] 不是 model-store-worker，
+        // 比如拿裸 exe 当老式 LMM 二进制调子命令），此前会一路启动整个 GUI，
+        // 再被单实例插件静默 exit 0——调用方只看到空输出，死因完全不可见。
+        // 快速报错退出，把正确用法说在错误里。
+        EntryRoute::WorkerGuard => {
+            let arg1 = std::env::args().nth(1).unwrap_or_default();
+            eprintln!(
+                "ERROR: 检测到本进程在 $LMM_WORKER 环境下以参数「{arg1}」被调用。\
+                 从机控制助手需要子命令层：请调 `\"$LMM_WORKER\" <子命令>`（wrapper 已注入），\
+                 或 `pinvou3-tauri model-store-worker <子命令>`。不启动 GUI。"
+            );
+            #[allow(clippy::exit)]
+            std::process::exit(2);
+        }
+        EntryRoute::Gui => {}
+    }
+    let component_args: Vec<String> = std::env::args().skip(1).collect();
+    if component_args == ["--cmsd-store-inventory"] {
+        match features::model_store::cmsd_inventory() {
+            Ok(value) => println!("{value}"),
+            Err(error) => {
+                fail_headless_cli(error, 1);
+            }
+        }
+        return;
+    }
+    if component_args
+        .first()
+        .is_some_and(|arg| arg == "--cmsd-component-cli")
+    {
+        let result = match component_args.get(1).map(String::as_str) {
+            Some("status") if component_args.len() == 2 => features::megacube::service::status(),
+            Some("device-status") if component_args.len() == 2 => features::megacube::device::status(false),
+            Some("device-inspect") if component_args.len() == 2 => features::megacube::device::status(true),
+            Some("logs") if component_args.len() == 2 => features::megacube::service::logs(),
+            Some("inspect") if component_args.len() == 3 => {
+                features::megacube::service::inspect_package(&component_args[2])
+            }
+            Some("bundled") if component_args.len() == 2 => features::megacube::service::bundled_package(),
+            Some("action") if (3..=5).contains(&component_args.len()) => {
+                features::megacube::service::submit(
+                    &component_args[2], component_args.get(3).cloned(), component_args.get(4).cloned(),
+                )
+            }
+            _ => Err("usage: --cmsd-component-cli status|device-status|device-inspect|logs|bundled|inspect PACKAGE|action ACTION [PACKAGE SHA256]".into()),
+        };
+        match result {
+            Ok(value) => println!("{value}"),
+            Err(error) => {
+                fail_headless_cli(error, 1);
+            }
+        }
+        return;
+    }
+    if component_args
+        .first()
+        .is_some_and(|arg| arg == "--cmsd-component-worker")
+    {
+        if component_args.len() != 2 {
+            fail_headless_cli("invalid cmsd component worker arguments", 2);
+        }
+        if let Err(error) = features::megacube::service::run_worker(&component_args[1]) {
+            fail_headless_cli(format!("[cmsd-component] {error}"), 1);
+        }
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--model-store-host") {
+        install_rustls_provider();
+        if let Err(error) = features::model_store::run_background() {
+            fail_headless_cli(format!("[model-store] {error}"), 1);
+        }
+        return;
+    }
     // WebKitGTK reads its RemoteInspector endpoint while constructing the first
     // WebContext, so the browser feature must reserve it before Tauri starts.
     features::browser::prepare_process_environment();
@@ -1291,7 +1421,7 @@ pub fn run() {
             // 模型商店：全进程唯一的一份。它持有卡片级互斥表和下载队列，那是
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
             let model_store =
-                std::sync::Arc::new(features::model_store::ModelStoreService::default());
+                std::sync::Arc::new(features::model_store::ModelStoreService::for_desktop());
             model_store.set_models_changed_handler(
                 app::model_store_events::live_models_changed_handler(app.handle().clone()),
             );
@@ -1300,10 +1430,16 @@ pub fn run() {
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
             // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
             features::model_store::run_startup_cleanup(&model_store);
-            // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
-            // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
-            // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
-            features::model_store::run_startup_refresh(&model_store);
+            // 这里原来还有一句 `run_startup_refresh()`：把已下载的**内置测试卡片**
+            // 的固化脚本刷到当前应用版本。内置测试商店 2026-09-30 整体拿掉，刷新
+            // 没有了对象（老内置卡的一次性迁移见
+            // `migrate_legacy_builtin_scripts`）。r36 P2-1：原函数还顺带做了一次
+            // linked-models 后台对账（sync_linked_models），随函数整体删除而丢失。
+            // 这里补一句 fire-and-forget 启动同步——启动后不依赖用户打开商店视图
+            // 就能完成路由/上下文修复对账；失败只记日志不弹（打开视图时会重试）。
+            // 经服务入口而不是裸函数：这笔启动偏好事务要持有宿主受控的请求
+            // 守卫，cmsd 请求宿主退出时必须等它做完（见 run_startup_linked_sync）。
+            features::model_store::run_startup_linked_sync(&model_store);
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -2159,10 +2295,34 @@ pub fn run() {
             commands::device::device_remove_external_model,
             commands::device::device_doctor_prompt,
             commands::monitor::discover_local_vllm,
+            commands::cms::cms_status,
+            commands::cms::cms_service_status,
+            commands::cms::cms_device_status,
+            commands::cms::cms_service_action,
+            commands::cms::cms_service_inspect_package,
+            commands::cms::cms_service_bundled_package,
+            commands::cms::cms_service_logs,
+            commands::cms::cms_model_action,
+            commands::cms::cms_cancel_task,
+            commands::cms::cms_models,
+            commands::cms::cms_engines,
+            commands::cms::cms_capacity,
+            commands::cms::cms_tasks,
+            commands::cms::cms_task,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
+            commands::model_store::model_store_preview_incomplete,
+            commands::model_store::model_store_retry_incomplete,
+            commands::model_store::model_store_dismiss_incomplete,
+            commands::model_store::model_store_scan_orphans,
+            commands::model_store::model_store_remove_orphan,
             commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_installed_engines,
+            commands::model_store::model_store_local_resources,
+            commands::model_store::model_store_memory_admission,
+            commands::model_store::model_store_delete_engine,
+            commands::model_store::model_store_start_card_scripts,
             commands::model_store::model_store_follow_deployment_context,
             commands::model_store::model_store_check_card_update,
             commands::model_store::model_store_startup_update_check,
@@ -2174,14 +2334,16 @@ pub fn run() {
             commands::model_store::model_store_start_lifecycle,
             commands::model_store::model_store_force_remove,
             commands::model_store::model_store_run_log,
+            commands::model_store::model_store_reveal_run_logs_dir,
+            commands::model_store::model_store_export_run_log,
             commands::model_store::model_store_cancel_run,
             commands::model_store::model_store_answer_run,
             commands::model_store::model_store_active_runs,
             commands::model_store::model_store_api_keys,
             commands::model_store::model_store_create_api_key,
-            commands::model_store::model_store_test_store_state,
-            commands::model_store::model_store_unlock_test_store,
-            commands::model_store::model_store_disable_test_store,
+            commands::model_store::model_store_lan_status,
+            commands::model_store::model_store_set_lan_sharing,
+            commands::model_store::model_store_revoke_api_key,
             commands::model_store::model_store_take_startup_cleanup,
             commands::model_store::model_store_storage_settings,
             commands::model_store::model_store_set_storage_settings,
@@ -4177,6 +4339,46 @@ mod knowledge_service_failure_tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod entry_route_tests {
+    use super::{EntryRoute, route_args};
+
+    /// 评审 R2 钉住的四种形态 + 基线：错误契约的调用必带 argv[1]，
+    /// 「环境变量残留 + 无参启动」是用户在拉 GUI，不得误伤。
+    #[test]
+    fn worker_cli_route_wins_even_with_env_set() {
+        // wrapper 注入环境下 `"$LMM_WORKER" connect` 展开后的合法调用形态
+        assert_eq!(
+            route_args(Some("model-store-worker"), true),
+            EntryRoute::WorkerCli
+        );
+    }
+
+    #[test]
+    fn wrong_subcommand_with_env_is_guarded() {
+        // 裸 exe 被当老式 LMM 二进制调子命令——10-28 双机 P0 的原始形态
+        assert_eq!(route_args(Some("connect"), true), EntryRoute::WorkerGuard);
+        assert_eq!(
+            route_args(Some("model-store-workerx"), true),
+            EntryRoute::WorkerGuard
+        );
+    }
+
+    #[test]
+    fn env_residue_without_args_still_launches_gui() {
+        // R2 核心：$LMM_WORKER 残留（比如从卡片脚本的 shell 里继承）+ 用户
+        // 双击图标/桌面启动——这是正常 GUI，闸不得拦。
+        assert_eq!(route_args(None, true), EntryRoute::Gui);
+    }
+
+    #[test]
+    fn no_env_unknown_args_fall_through_to_gui() {
+        // 无 env 时未知参数不归这道闸管，交给后续 GUI 逻辑
+        assert_eq!(route_args(Some("anything"), false), EntryRoute::Gui);
+        assert_eq!(route_args(None, false), EntryRoute::Gui);
     }
 }
 

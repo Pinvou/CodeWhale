@@ -64,6 +64,15 @@ ARCH="${ARCH#pinvou3_"${VERSION}"_}"
 # 先重打包再算 sha256/latest.json,校验和与清单覆盖最终产物。
 "$REPO_ROOT/scripts/repack-deb-xz.sh" "$DEB"
 
+# Verify the exact final package before reading or writing the production source.
+# x64 is a filename convention; Debian's actual architecture remains amd64.
+case "$ARCH" in
+  amd64|x64) PACKAGE_ARCH=amd64 ;;
+  arm64) PACKAGE_ARCH=arm64 ;;
+  *) echo "Unsupported native Linux release architecture: $ARCH" >&2; exit 1 ;;
+esac
+"$REPO_ROOT/scripts/check-linux-glibc-floor.sh" "$DEB" "$PACKAGE_ARCH"
+
 # ── 3. 合并 latest.json(保留其它平台条目,只更新顶层 Linux 字段) ──────
 # 修复「Linux 发版抹掉 platforms.macos-arm64」:此前用 `jq -n` 从零生成 latest.json,
 # 会清掉 platforms 下所有非 Linux 条目 → Mac 客户端回退到顶层(此时是 Linux deb)→

@@ -90,6 +90,73 @@ fn is_prompt_line(line: &str) -> bool {
     t.starts_with(PROMPT_MARKER) || t.starts_with(PROMPT_FORM_MARKER)
 }
 
+/// 进度标记：`LMM_PROGRESS_BYTES=<已下载字节>/<总字节>`。
+///
+/// 分母由脚本自己决定：下权重时是卡片元数据里的真实体积（宿主经
+/// `LMM_MODEL_SIZE_BYTES` 注进去），装引擎时是这一阶段的包总量。**宿主一个字节都
+/// 不解析**，它只把行原样中继给界面 —— docker / pip / curl 的输出格式各不相同而且
+/// 随版本变，把它们的进度条在宿主里反解出来，等于把一条会随外部工具升级而静默失效
+/// 的链路焊进应用。
+pub const PROGRESS_MARKER: &str = "LMM_PROGRESS_BYTES=";
+
+/// 阶段标记：`LMM_STAGE=<人话阶段名>`。
+///
+/// 界面把它当任务卡的副标题（「正在拉取引擎镜像…」「正在安装依赖…」）。在这之前
+/// 副标题退化成"最后一行日志"，于是用户看到的是 docker 自己的多层并行进度在原地
+/// 乱跳 —— 截图里那十几行 `ae5a106b6076: Pulling fs layer` 就是这么来的。
+pub const STAGE_MARKER: &str = "LMM_STAGE=";
+
+/// 步骤标记：`LMM_STEP=<第几步>/<共几步>`。
+///
+/// **给拿不到字节分母的阶段用**。`pip install` 的依赖总量要等依赖解析完才知道，
+/// 在那之前不存在任何可信的分母；宁可给一个诚实的"第 2 步 / 共 4 步"，也不要编一个
+/// 假分母让进度条先冲到 90% 再倒退。
+pub const STEP_MARKER: &str = "LMM_STEP=";
+
+/// 卡片脚本与界面之间的协议行命名空间。
+pub const CONTROL_PREFIX: &str = "LMM_";
+
+/// 这一行是不是**协议行**（给界面解析的控制信息），而不是给人看的日志。
+///
+/// 判据是 `LMM_<大写名字>=`，也就是脚本协议占用的整个命名空间（`LMM_PROMPT=`、
+/// `LMM_PROGRESS_BYTES=`、`LMM_STAGE=`、`LMM_ENGINE_IMAGE=`……）。按命名空间判而不是
+/// 逐个列举，是因为**漏掉一个的代价是静默的**：那一行会被当普通日志加上阶段前缀，
+/// 界面锚定的解析器再也认不出它，而界面上不会出现任何错误 —— 见 [`prefix_log_line`]。
+pub fn is_control_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.strip_prefix(CONTROL_PREFIX)
+        .and_then(|rest| rest.split_once('='))
+        .is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        })
+}
+
+/// 给日志行加阶段前缀（`[安装引擎] ` 之类），**协议行原样透传**。
+///
+/// # 为什么必须有这个函数
+///
+/// `lifecycle` 原来直接 `format!("[安装引擎] {line}")`。于是 `install_engine` 里
+/// 脚本打出的 `LMM_PROMPT=password|请输入密码` 变成了
+/// `[安装引擎] LMM_PROMPT=password|请输入密码`，而**两边的解析器都是从行首匹配的**：
+/// 后端 `service::is_prompt_line` 用 `starts_with`，前端 `parsePromptLine` 用锚定的
+/// `^LMM_PROMPT=`。结果是 install_engine 里的提问永远弹不出输入框、`awaiting_input`
+/// 永远是 false，脚本阻塞在 `read` 上直到 `PROMPT_TIMEOUT`（600 秒）把整次运行判死。
+/// 双机卡看起来没事，只是因为 deploy 那条路径压根没加前缀。
+///
+/// 反过来，进度行的前端正则**刻意没有锚定**（`model-store-logic.js` 的
+/// `parseProgressLine`），正是为了吃得下历史上带前缀的进度行；那边不能"顺手"加 `^`。
+/// 两处注释互为对照，改任何一处都要看另一处。
+pub fn prefix_log_line(prefix: &str, line: &str) -> String {
+    if is_control_line(line) {
+        line.to_string()
+    } else {
+        format!("{prefix}{line}")
+    }
+}
+
 // Rust 侧到此为止：只需要知道"这一行在要输入"，好在这里阻塞去读 stdin。
 // 把 `<kind>|<提示语>` 真正拆开、决定弹什么控件，是**界面**的事——
 // LMM 自己的 TaskCenter.jsx 和宿主应用（品悟）的 model-store-logic.js 各有一份
@@ -135,6 +202,8 @@ impl PromptSlot {
 pub struct RunControl {
     pub cancel: Option<Arc<AtomicBool>>,
     pub prompt: Option<Arc<PromptSlot>>,
+    pub run_id: Option<String>,
+    pub execution_fence: Option<super::execution_fence::ExecutionFence>,
 }
 
 impl RunControl {
@@ -166,22 +235,41 @@ pub fn materialize_assets(
     dir: &Path,
     files: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), ScriptError> {
+    let root = crate::platform::filesystem::open_private_file_directory(dir)
+        .map_err(|e| ScriptError::new(format!("无法安全打开卡片目录：{e}")))?;
     for (rel, content) in files {
         let safe = sanitize_relative_path(rel)?;
-        let target = dir.join(&safe);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ScriptError::new(format!("创建目录 {} 失败：{e}", parent.display()))
-            })?;
+        let mut child = None;
+        if let Some(path) = safe.parent() {
+            for part in path.components() {
+                let parent = child.as_ref().unwrap_or(&root);
+                child = Some(
+                    parent
+                        .create_private_child_directory(part.as_os_str())
+                        .map_err(|e| ScriptError::new(format!("无法安全创建卡片子目录：{e}")))?,
+                );
+            }
         }
-        std::fs::write(&target, content)
-            .map_err(|e| ScriptError::new(format!("写入 {} 失败：{e}", target.display())))?;
+        let parent = child.as_ref().unwrap_or(&root);
+        let name = safe
+            .file_name()
+            .ok_or_else(|| ScriptError::new("卡片文件名无效"))?;
+        // Reject an existing symlink/special file rather than silently replacing
+        // user-managed entries. The following rename is anchored to the same
+        // directory handle and cannot follow a swapped-in symlink either.
+        parent
+            .open_plain_file(name)
+            .map_err(|e| ScriptError::new(format!("卡片目标文件不安全：{e}")))?;
+        parent
+            .atomic_write_private_file(name, content.as_bytes())
+            .map_err(|e| ScriptError::new(format!("安全写入卡片文件失败：{e}")))?;
         if safe.extension().and_then(|e| e.to_str()) == Some("sh") {
-            let mut perms = std::fs::metadata(&target)
-                .map_err(|e| ScriptError::new(format!("读取 {} 权限失败：{e}", target.display())))?
-                .permissions();
-            perms.set_mode(perms.mode() | 0o111);
-            let _ = std::fs::set_permissions(&target, perms);
+            let file = parent
+                .open_plain_file(name)
+                .map_err(|e| ScriptError::new(format!("安全打开卡片脚本失败：{e}")))?
+                .ok_or_else(|| ScriptError::new("卡片脚本落盘后消失，请重试"))?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| ScriptError::new(format!("设置脚本权限失败：{e}")))?;
         }
     }
     Ok(())
@@ -197,7 +285,7 @@ const SECRET_ENV_KEYS: [&str; 1] = ["LMM_HF_TOKEN"];
 ///
 /// 拒绝绝对路径、`..`、以及 Windows 风格的盘符——卡片内容来自网络，路径直接
 /// 拿来拼接就等于把「往任意位置写文件」的能力交给了卡片作者（或中间人）。
-pub(super) fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
+pub(crate) fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
     let rel = rel.trim().replace('\\', "/");
     if rel.is_empty() {
         return Err(ScriptError::new("卡片里有一个空的文件路径"));
@@ -306,6 +394,19 @@ pub fn sha256_hex(content: &str) -> String {
 /// 「下载脚本失败：error decoding response body」，把跑到一半的下载整个打断。
 const SCRIPT_FETCH_ATTEMPTS: u32 = 3;
 
+/// 脚本 / 附属文件正文的体积上限。
+///
+/// 上一轮只给 `store_client::get_json` 加了上限，这里漏了，而两处的威胁模型完全
+/// 一样：商店地址虽已是编译期常量（STORE_URL，2026-09-30 起不可配；r36 P2-7
+/// 统一三方口径），威胁模型不变——无界 `.text()` 等于把「往我的内存里灌多少」这个
+/// 决定权交给对端。这一处其实更要紧——正文是在 `sha256_hex` 校验**之前**整体进
+/// 内存的，哈希拦得住伪造，拦不住 OOM。
+///
+/// 64 MiB 与 `store_client::MAX_STORE_RESPONSE_BYTES`、
+/// `features/marketplace/python_dependencies.rs` 的 `MAX_WHEEL_BYTES` 同一个量级，
+/// 免得仓库里三处各定一个数。真实脚本是几 KB 到几十 KB，离这条线很远。
+const MAX_SCRIPT_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// 这一跳重定向要不要拒绝。
 ///
 /// 两条：目标必须仍然是 https，跳数不超过 10（reqwest 默认上限，照抄
@@ -356,13 +457,40 @@ fn http_get_text(url: &str) -> Result<String, ScriptError> {
 
     let mut last_err = String::new();
     for attempt in 1..=SCRIPT_FETCH_ATTEMPTS {
-        match client
-            .get(url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.text())
-        {
-            Ok(text) => return Ok(text),
+        match client.get(url).send().and_then(|r| r.error_for_status()) {
+            Ok(resp) => {
+                // 这里刻意不用 `.text()`：它是无界的。判据和两道防线的写法见
+                // `store_client::read_capped_body`，两处共用同一份实现。
+                let declared = resp.content_length();
+                match super::store_client::read_capped_body(
+                    declared,
+                    resp,
+                    MAX_SCRIPT_RESPONSE_BYTES,
+                ) {
+                    // `.text()` 在没有 charset 时按 UTF-8 且遇到坏字节做替换，
+                    // 这里用 `from_utf8_lossy` 与之对齐：脚本正文的 sha256 算的是
+                    // **网络上的原始字节**（`fetch_script_content` 拿到的是这个
+                    // String，再交给 sha256_hex），换成严格 UTF-8 报错会把原先
+                    // 能跑的边缘情况变成硬失败，不在这一条的范围里。
+                    Ok(body) => return Ok(String::from_utf8_lossy(&body).into_owned()),
+                    // 超限：对端下次还会给同样大的东西，重试只是把内存压力乘以
+                    // 次数。立刻报错。
+                    Err(super::store_client::CappedReadError::TooLarge(max)) => {
+                        return Err(ScriptError::new(format!(
+                            "下载脚本失败：正文超过 {} MiB 上限，已中止",
+                            max / 1024 / 1024
+                        )));
+                    }
+                    // 读到一半断了：这正是 SCRIPT_FETCH_ATTEMPTS 存在的理由
+                    // （真机上的 `error decoding response body`），照旧重试。
+                    Err(super::store_client::CappedReadError::Io(e)) => {
+                        last_err = e;
+                        if attempt < SCRIPT_FETCH_ATTEMPTS {
+                            std::thread::sleep(Duration::from_secs(2 * attempt as u64));
+                        }
+                    }
+                }
+            }
             Err(e) => {
                 // 4xx 是商店真的没有这个脚本，重试多少次结果都一样，立刻报错。
                 if e.status().map(|s| s.is_client_error()).unwrap_or(false) {
@@ -428,14 +556,17 @@ pub struct FetchPolicy {
     pub may_run_as_root: bool,
     /// 允许把 `url` 当本地文件路径读。
     ///
-    /// 只有内置测试商店会这样：它没有服务器，卡片详情里的"URL"就是应用自己
-    /// 刚写到 `data_dir()/test_store_scripts/` 下的那个文件路径。真实商店一律
-    /// 不给这个开关——否则一张被改过的卡片只要把 URL 写成任意一个本地路径，
-    /// 就能让应用去读它、再把读到的内容当脚本执行。
+    /// **生产上永远是 false。** 内置测试商店（没有服务器，卡片详情里的"URL"就是
+    /// 应用自己写到 `data_dir()/test_store_scripts/` 下的文件路径）2026-09-30 拿掉
+    /// 之后，唯一还会把它置真的地方是 lifecycle 的下载编排测试——那一位怎么来的、
+    /// 为什么生产代码碰不到它，见 `lifecycle::ModelManager::local_script_paths`。
+    ///
+    /// 它挡的事从来没变：一张被改过的卡片只要把 URL 写成任意一个本地路径，就能
+    /// 让应用去读它、再把读到的内容当脚本执行（install_engine 还经 pkexec 提权）。
     pub allow_local_path: bool,
 }
 
-/// 从 URL（或测试商店的本地路径）取正文，先按 `policy` 校验来源、再校验哈希。
+/// 从 URL 取正文，先按 `policy` 校验来源、再校验哈希。
 /// 调用方拿到正文可以直接固化进数据库，不用再重复下载。
 ///
 /// 这三道来源校验不是各自独立的洁癖，是一条链上的三个环节：任何一环放行，
@@ -449,10 +580,9 @@ pub fn fetch_script_content(
     // ① 要以 root 跑的脚本，没有登记哈希就不跑。
     //
     // 这个参数以前是纯 Option：商店不下发就跳过校验、"保持兼容"。兼容的是
-    // 一个并不存在的老后台——生产商店的 card_scripts 表每一行都带 sha256，
-    // 内置测试商店的哈希是应用自己算的，两边都给。而代价是：真有一天哪张卡片
-    // 少了这个字段（或者有人把它删了），install_engine 会**不声不响**地以 root
-    // 执行一份没人校验过的内容。
+    // 一个并不存在的老后台——生产商店的 card_scripts 表每一行都带 sha256。而代价
+    // 是：真有一天哪张卡片少了这个字段（或者有人把它删了），install_engine 会
+    // **不声不响**地以 root 执行一份没人校验过的内容。
     if policy.may_run_as_root && expected_sha256.is_none() {
         return Err(ScriptError::new(format!(
             "{UNTRUSTED_SOURCE_PREFIX}：这一步要以管理员权限执行，但商店没有下发该脚本的 \
@@ -470,8 +600,7 @@ pub fn fetch_script_content(
         // install_engine 紧接着就是 pkexec。
         return Err(ScriptError::new(format!(
             "{UNTRUSTED_SOURCE_PREFIX}：脚本地址不是 https（{url}）。明文链路上内容和\
-             校验值会被一起篡改，而这些脚本要在本机执行，已中止；请把设置里的模型商店\
-             地址改成 https 开头的地址"
+             校验值会被一起篡改，而这些脚本要在本机执行，已中止"
         )));
     } else if policy.allow_local_path {
         std::fs::read_to_string(url)
@@ -484,7 +613,7 @@ pub fn fetch_script_content(
         // 的能力交了出去。
         return Err(ScriptError::new(format!(
             "{UNTRUSTED_SOURCE_PREFIX}：商店给的脚本地址不是 https 链接（{url}）。\
-             只有打包在应用里的测试商店才允许用本地文件路径，已中止"
+             本地文件路径一律不收，已中止"
         )));
     };
 
@@ -495,7 +624,9 @@ pub fn fetch_script_content(
             let actual_prefix: String = actual.chars().take(12).collect();
             return Err(ScriptError::new(format!(
                 "脚本完整性校验失败：实际内容与商店登记的不一致（期望 sha256={expected_prefix}…，\
-                 实际 {actual_prefix}…），可能是传输被篡改或后台数据被改动，已中止执行"
+                 实际 {actual_prefix}…）。多数情况是网络抖动或缓存脏读导致下载不完整：请稍后\
+                 重试一次；若持续失败，请通过任务卡「更多→复制详情」附上此 sha 前缀反馈，\
+                 传输被篡改或后台数据被改动的可能性也会一并排查"
             )));
         }
     }
@@ -507,8 +638,8 @@ pub fn fetch_script_content(
 /// **目前零调用点**：lifecycle 走的是 `ScriptsSource::prepare`——它还要处理多
 /// 文件卡片的整棵文件树和持久工作目录，不能只落一个临时文件。
 ///
-/// `url` 是商店服务器下发的 https 地址；测试模型商店没有服务器，直接给的是本地
-/// 脚本文件路径——哪一种算合法由 `policy` 决定，见 [`FetchPolicy`]。
+/// `url` 是商店服务器下发的 https 地址——什么算合法由 `policy` 决定，
+/// 见 [`FetchPolicy`]。
 ///
 /// `expected_sha256` 是商店卡片详情里登记的脚本哈希，下发了就必须匹配；
 /// `policy.may_run_as_root` 为真时它还是**必填**的。
@@ -614,17 +745,183 @@ fn decode_utf8_stream(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
     }
 }
 
+/// `output_lines` 的上限。
+///
+/// 在这之前它是**无上限、非环形**的 `Vec`：一次 168GB 的下载能打出几万行，全程
+/// 常驻，而调用方（`lifecycle`）只用它做两件事——找 `LMM_*` 标记、出错时取末尾
+/// 二十行 tail。
+const MAX_OUTPUT_LINES: usize = 5_000;
+
+/// 失败时附在错误信息里给用户/给我们看的输出尾巴有多少行。
+const ERROR_TAIL_LINES: usize = 20;
+
+/// 挑"失败原因那一行"时往回看多少行。
+///
+/// 比 [`ERROR_TAIL_LINES`] 宽：原因行常常在脚本自己的收尾说明（清理、建议、变通办法）
+/// 之前，而收尾说明可以有十几行。窗口太窄的话挑不到原因，就又退回"最后一条非空行"
+/// 那个被日本客户实锤过的缺陷上了。
+const SUMMARY_SEARCH_LINES: usize = 60;
+
+/// 超上限时丢掉最老的一半，但**协议行一行都不丢**——唯一的例外是
+/// [`PROGRESS_MARKER`]：高频单调计数器没有历史价值，同前缀只留最后一条。
+///
+/// 不能简单丢最老的：`LMM_ENGINE_IMAGE=` 可能在第一百行就打出来了，而
+/// `lifecycle::extract_marker` 是在整个 Vec 上找它的。丢掉它的后果是"已安装引擎"
+/// 的删除功能再也精确 `docker rmi` 不了——盘上留下一个几 GB 的孤儿镜像，而且没有
+/// 任何界面管得到它。
+///
+/// 2026-10-20 评审 P2：`LMM_PROGRESS_BYTES` 若与其他协议行同等待遇，168GB 下载
+/// 按 1MB 粒度 ≈ 16.8 万行会全部留在环里（15-20MB 常驻整个运行期）；界面要的
+/// 只是最新一条。
+fn cap_output_lines(output_lines: &mut Vec<String>, scanned_lines: &mut usize) {
+    if output_lines.len() <= MAX_OUTPUT_LINES {
+        return;
+    }
+    let drop_before = MAX_OUTPUT_LINES / 2;
+    let cursor = *scanned_lines;
+    let last_progress = output_lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with(PROGRESS_MARKER));
+    // P2-3（r24）：控制行（LMM_STAGE= 等）也要按名去重——只保留**同名最后一
+    // 条非空**。此前 is_control_line 豁免使同名控制行无限堆积（循环输出的脚本
+    // 轻松撑穿环顶），且每 push 全量重建扫描窗已是平方 CPU。
+    // r28 P2-3（r27#8）：去重改「同名最后一条**非空**」——与 extract_marker
+    // （lifecycle.rs:3927 取最后非空）对齐。此前保留最后一条**含空值**，尾随
+    // 空 LMM_ENGINE_PRESENT= 会把先前的 =1 从环里抹掉，marker 变 None。
+    let last_control: std::collections::HashMap<String, usize> = output_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            if is_control_line(line) {
+                let trimmed = line.trim_start();
+                // 跳过空值控制行（`LMM_ENGINE_PRESENT=` 无值）——它们的
+                // 存在不应使先前非空值被去重掉。
+                let after_eq = trimmed.split_once('=').map(|(_, v)| v).unwrap_or("");
+                if after_eq.trim().is_empty() {
+                    return None;
+                }
+                let name = trimmed.split('=').next().unwrap_or("").to_string();
+                Some((name, i))
+            } else {
+                None
+            }
+        })
+        .fold(std::collections::HashMap::new(), |mut acc, (name, i)| {
+            acc.insert(name, i); // later non-empty index wins
+            acc
+        });
+    let mut kept: Vec<String> = Vec::with_capacity(output_lines.len() - drop_before);
+    let mut dropped_before_cursor = 0usize;
+    for (index, line) in output_lines.drain(..).enumerate() {
+        // 进度行只保留最后一条（单调计数器，历史值无诊断价值）。
+        if Some(index) != last_progress && line.trim_start().starts_with(PROGRESS_MARKER) {
+            if index < cursor {
+                dropped_before_cursor += 1;
+            }
+            continue;
+        }
+        if is_control_line(&line) {
+            // 控制行只保留同名最后一条非空——历史值无诊断价值且会撑穿环顶。
+            // 空值控制行（`LMM_ENGINE_PRESENT=`）也直接丢弃：它们不承载信息，
+            // 且保留会与 extract_marker 的「最后非空」语义冲突。
+            let trimmed = line.trim_start();
+            let after_eq = trimmed.split_once('=').map(|(_, v)| v).unwrap_or("");
+            if after_eq.trim().is_empty() {
+                if index < cursor {
+                    dropped_before_cursor += 1;
+                }
+                continue;
+            }
+            let name = trimmed.split('=').next().unwrap_or("").to_string();
+            if last_control.get(&name) != Some(&index) {
+                if index < cursor {
+                    dropped_before_cursor += 1;
+                }
+                continue;
+            }
+            kept.push(line);
+            continue;
+        }
+        if index >= drop_before {
+            kept.push(line);
+        } else if index < cursor {
+            dropped_before_cursor += 1;
+        }
+    }
+    // 2026-10-16 评审阻塞项 1：cap 丢掉最老一半后 Vec 整体前移，提示扫描用的是
+    // 绝对下标游标——不回退的话 scanned_lines 永远大于 len()，之后到达的
+    // LMM_PROMPT= 行永不被识别，交互提示静默失效，脚本最终被当"无输出卡死"
+    // 杀掉（docker pull 这类轻松打出 5000+ 行的输出必踩）。
+    //
+    // 回退量必须是「**游标之前**的丢弃数」，不是总丢弃数（2026-10-30 评审
+    // P1-2 实锤）：进度行去重在任意下标生效、协议行在任意下标保留，游标之后
+    // 同样有被丢的行——按总数回退会把游标退过头、落回已扫描区间，已应答的
+    // LMM_PROMPT= 行重新入窗被无条件重挂 600 秒提示超时，用户明明早已作答仍
+    // 被 SIGKILL；反向地，真卡死的 idle 判死也被推迟。游标前的丢弃数恰好等于
+    // 游标位置的前移量，回退后游标仍指向第一条未扫描行，已应答提示不可能
+    // 重现（扫描窗口自然幂等）。
+    if dropped_before_cursor > 0 {
+        *scanned_lines -= dropped_before_cursor;
+    }
+    debug_assert!(*scanned_lines <= kept.len());
+    *output_lines = kept;
+}
+
+/// 单行入环前的字节顶（r21 评审 P2-3）。
+///
+/// 落盘侧有 `run_log_store::MAX_LINE_CHARS` 的 clamp，但内存环（output_lines →
+/// on_progress → 前端 → 失败 tail）里的行此前没有任何长度上限：脚本打出一行
+/// 几 MB 的 base64/JSON，全链路原样放大。真实协议行（LMM_PROMPT= /
+/// LMM_PROGRESS_BYTES）都是短行，16 KiB 只有病态输出才会碰到。
+const MAX_RING_LINE_BYTES: usize = 16 * 1024;
+
+/// 无终止符滞留缓冲（`buf`）的字节顶（同上）。
+///
+/// 脚本 `cat` 一个无换行的大文件时，整段输出作为「半行」滞留在 buf 里直到
+/// 6h 绝对超时——此前没有上限，失控/恶意卡片可直指 OOM。触顶即把滞留段作为
+/// 一条截断行入环（按上面的单行顶截），丢弃的字节数写进标记，后续字节从新行
+/// 开始累计。
+const MAX_PENDING_LINE_BYTES: usize = 1024 * 1024;
+
+/// 按字节上限截断到 UTF-8 字符边界，并带截断标记（超长本身也是一条诊断信息）。
+fn truncate_line(line: &str, max_bytes: usize) -> String {
+    if line.len() <= max_bytes {
+        return line.to_string();
+    }
+    let mut cut = max_bytes;
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let dropped = line.len() - cut;
+    format!("{}…[输出超长，已截断并丢弃 {dropped} 字节]", &line[..cut])
+}
+
 fn drain_lines(
     buf: String,
     output_lines: &mut Vec<String>,
     on_progress: &mut Option<&mut ProgressCallback<'_>>,
+    scanned_lines: &mut usize,
 ) -> String {
     let mut rest = buf;
     loop {
         let idx_n = rest.find('\n');
         let idx_r = rest.find('\r');
         let (idx, skip) = match (idx_n, idx_r) {
-            (None, None) => return rest,
+            (None, None) => {
+                // r21 P2-3：无终止符的滞留段也要有顶——见 MAX_PENDING_LINE_BYTES。
+                if rest.len() > MAX_PENDING_LINE_BYTES {
+                    let truncated = truncate_line(&rest, MAX_RING_LINE_BYTES);
+                    if !truncated.trim().is_empty() {
+                        output_lines.push(truncated.clone());
+                        cap_output_lines(output_lines, scanned_lines);
+                        if let Some(cb) = on_progress.as_deref_mut() {
+                            cb(ScriptProgress::line(truncated));
+                        }
+                    }
+                    return String::new();
+                }
+                return rest;
+            }
             // 回车在换行之前（或者压根没有换行）就按回车切。用 is_none_or 而不是
             // `is_none() || … unwrap()`：后者要读的人自己去确认两个分支互斥。
             (idx_n, Some(idx_r)) if idx_n.is_none_or(|n| idx_r < n) => {
@@ -638,10 +935,11 @@ fn drain_lines(
             (Some(idx_n), _) => (idx_n, 1),
             _ => unreachable!(),
         };
-        let line = strip_ansi(&rest[..idx]);
+        let line = truncate_line(&strip_ansi(&rest[..idx]), MAX_RING_LINE_BYTES);
         rest = rest[idx + skip..].to_string();
         if !line.trim().is_empty() {
             output_lines.push(line.clone());
+            cap_output_lines(output_lines, scanned_lines);
             if let Some(cb) = on_progress.as_deref_mut() {
                 cb(ScriptProgress::line(line));
             }
@@ -749,13 +1047,28 @@ pub fn run_script(
         None
     };
 
+    let mut fenced_env = env_vars.clone();
+    let fenced_script = if let Some(fence) = opts.control.execution_fence.as_ref() {
+        if need_root {
+            return Err(ScriptError::new("维护卸载脚本不能通过提权绕过执行围栏"));
+        }
+        for (key, value) in fence.environment(script_path) {
+            fenced_env.insert(key.to_string(), value);
+        }
+        Some(fence.wrapper())
+    } else {
+        None
+    };
     let (master, mut cmd) = build_command(
-        script_path,
-        env_vars,
+        fenced_script.as_deref().unwrap_or(script_path),
+        &fenced_env,
         need_root,
         cancel_file.as_deref(),
         opts.cwd.as_deref(),
     )?;
+    if opts.control.execution_fence.is_some() {
+        cmd.env_remove("BASH_ENV").env_remove("ENV");
+    }
 
     if opts.download_lease.is_some() && need_root {
         return Err(ScriptError::new("下载租约不能传给提权脚本"));
@@ -812,11 +1125,12 @@ pub fn run_script(
     // 登记这次派生的进程。应用要是被强杀/覆盖安装、没走到下面的销号逻辑，
     // 下次启动时 core::orphans 会照着这份登记把残留进程收掉——否则它会一直
     // 占着 huggingface_hub 的文件锁，把用户下一次点的下载堵死在那儿。
-    let mut run_guard = super::orphans::RunGuard::register_for_card(
+    let mut run_guard = super::orphans::RunGuard::register_association(
         child_pid,
         need_root,
         opts.label.as_deref().unwrap_or("后台脚本"),
         env_vars.get("LMM_CARD_ID").map(String::as_str),
+        opts.control.run_id.as_deref(),
     );
 
     let stop_process_tree = |sig: Signal| {
@@ -967,7 +1281,12 @@ pub fn run_script(
                 Ok(n) => {
                     idle_deadline = Instant::now() + idle_timeout;
                     buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
-                    buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
+                    buf = drain_lines(
+                        buf,
+                        &mut output_lines,
+                        &mut opts.on_progress,
+                        &mut scanned_lines,
+                    );
                     // pty 是回显的：我们写回去的答案会原样再读回来一遍，所以
                     // 扫描只看新增的行，不会把自己写的东西当成新的提示。
                     while scanned_lines < output_lines.len() {
@@ -1022,7 +1341,12 @@ pub fn run_script(
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     buf.push_str(&decode_utf8_stream(&mut pending, &chunk[..n]));
-                    buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
+                    buf = drain_lines(
+                        buf,
+                        &mut output_lines,
+                        &mut opts.on_progress,
+                        &mut scanned_lines,
+                    );
                     grace_until = (Instant::now() + EXIT_GRACE_IDLE).min(hard_deadline);
                 }
             }
@@ -1033,13 +1357,21 @@ pub fn run_script(
     // 到这里没有"下一块"了，按损坏处理吐出去，总比整段丢掉强。
     if !pending.is_empty() {
         buf.push_str(&String::from_utf8_lossy(&pending));
-        buf = drain_lines(buf, &mut output_lines, &mut opts.on_progress);
+        buf = drain_lines(
+            buf,
+            &mut output_lines,
+            &mut opts.on_progress,
+            &mut scanned_lines,
+        );
     }
 
     if !buf.trim().is_empty() {
-        output_lines.push(buf.clone());
+        // 收尾残行同样过单行顶（r21 P2-3）：走到这里 buf 已经过 drain_lines 的
+        // 滞留顶约束，但正常路径的最后一行（脚本退出前的收尾长输出）此前没有。
+        let line = truncate_line(&buf, MAX_RING_LINE_BYTES);
+        output_lines.push(line.clone());
         if let Some(cb) = opts.on_progress.as_deref_mut() {
-            cb(ScriptProgress::line(buf));
+            cb(ScriptProgress::line(line));
         }
     }
 
@@ -1080,8 +1412,22 @@ pub fn run_script(
     if timed_out {
         reap_child(child);
         cleanup_temp_files(&cancel_file, script_path);
+        // 死因要带上"死前最后在说什么"（.48 真机案例：脚本在等 pkexec 授权、
+        // 30 分钟无人输入被 idle 判死，错误只说"判定为卡死"，用户无从知道
+        // 该去看授权弹窗）。这里取最后一条非空行——停摆语境下"最后说过的话"
+        // 就是它当时在做的事；失败摘要那套 pick_failure_line 的教训不适用
+        // （那边要跳过好心附加的变通建议，这边恰恰要原样呈现停摆现场）。
+        let last_line = output_lines
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.chars().take(120).collect::<String>());
+        let suffix = match last_line {
+            Some(line) => format!("；最后输出：{line}"),
+            None => String::new(),
+        };
         return Err(ScriptError::new(format!(
-            "脚本执行超时：{}（{timeout_reason}）",
+            "脚本执行超时：{}（{timeout_reason}{suffix}）",
             script_path
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -1096,11 +1442,20 @@ pub fn run_script(
 
     let code = status.code().unwrap_or(-1);
     if code != 0 {
-        let last_line = output_lines.iter().rev().find(|l| !l.trim().is_empty());
-        let summary = last_line
-            .map(|l| humanize_script_message(l))
+        // 摘要在**尾部窗口里挑最像错误的那一行**，不是取最后一条非空行。
+        //
+        // 取最后一条非空行的后果被日本客户的截图实锤过：他看到的"失败原因"是
+        // 「也可以在别的机器上拉好后用 docker save/load 拷进来」——那是脚本报完错好心
+        // 附上的一句变通办法，真正的原因（DNS 超时）被埋在它上面几行。于是"失败要说
+        // 人话"写得越认真的脚本，摘要越没用。选行规则见 `errors::pick_failure_line`。
+        //
+        // 选行窗口（60）比展示的 tail（20）宽：原因行常常在脚本自己的收尾说明之前，
+        // 而收尾说明可以有十几行。挑出来的行本身一定也在完整日志里，不会无处可查。
+        let search_start = output_lines.len().saturating_sub(SUMMARY_SEARCH_LINES);
+        let summary = super::errors::pick_failure_line(&output_lines[search_start..])
+            .map(humanize_script_message)
             .unwrap_or_else(|| "未知错误".to_string());
-        let tail_start = output_lines.len().saturating_sub(20);
+        let tail_start = output_lines.len().saturating_sub(ERROR_TAIL_LINES);
         let tail = output_lines[tail_start..].join("\n");
         return Err(ScriptError::new(format!(
             "脚本执行失败（退出码 {code}）：{summary}\n{tail}"
@@ -1342,6 +1697,34 @@ mod tests {
         assert_eq!(lines, vec!["qwen38".to_string()]);
     }
 
+    #[test]
+    fn maintenance_fence_runs_through_the_real_pty_executor() {
+        with_isolated_data_dir(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let path = write_script("#!/bin/bash\necho fenced-uninstall\n");
+            let fence = super::super::execution_fence::ExecutionFence::prepare(
+                directory.path().join("execution"),
+            )
+            .unwrap();
+            let control = RunControl {
+                execution_fence: Some(fence.clone()),
+                ..Default::default()
+            };
+            let lines = run_script(
+                &path,
+                &HashMap::new(),
+                RunScriptOptions {
+                    control,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(lines, vec!["fenced-uninstall"]);
+            assert!(fence.directory.join("process.json").is_file());
+            assert!(fence.quiesce().is_ok());
+        });
+    }
+
     /// 提权路径上必须剥掉秘密——pkexec 不透传 env，只能拼进 argv，而 argv
     /// 对本机所有用户可见。
     ///
@@ -1488,11 +1871,24 @@ mod tests {
             timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let (err, elapsed) = with_isolated_data_dir(|| {
+        // 🔴 秒表必须在**锁里面**起，不能在外面。
+        //
+        // `with_isolated_data_dir` 建的是 `config::TempHome`，而它自带一把**进程级**的
+        // `ENV_TEST_LOCK`（要改 HOME / PINVOU3_HOME，同进程里只能一个测试进这段）。
+        // 在外面起表的话，`elapsed` 量到的是「等别的测试放锁 + run_script 真正花的时间」
+        // 两段之和——而前一段跟本条要测的东西（宽限读循环有没有总上限）毫无关系。
+        //
+        // 后果不是抽象的：本条的上限是 12 秒，而同模块里凡是用 TempHome 的测试一多、
+        // 或者其中某一条的临界区一长（`run_log_store` 那几条要建几十个日志文件），
+        // 排在后面的这一条就会**因为排队而变红**，红得还很稳定（每次都是 14.5 秒左右，
+        // 看着特别像真的缺陷）。于是排查会一头扎进宽限循环，而那里根本没问题。
+        // 表挪进锁里之后量到的是 run_script 自己的耗时，也就是断言那句话真正的主语。
+        let (result, elapsed) = with_isolated_data_dir(|| {
             let started = Instant::now();
-            let err = run_script(&path, &HashMap::new(), opts).unwrap_err();
-            (err, started.elapsed())
+            let result = run_script(&path, &HashMap::new(), opts);
+            (result, started.elapsed())
         });
+        let err = result.unwrap_err();
 
         assert!(
             err.to_string().contains("超过安全上限"),
@@ -1852,6 +2248,23 @@ echo hi
     }
 
     #[test]
+    fn materialization_refuses_symlink_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.sh");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("enable.sh")).unwrap();
+        let files = std::collections::BTreeMap::from([("enable.sh".into(), "replacement".into())]);
+        assert!(materialize_assets(dir.path(), &files).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("nested")).unwrap();
+        let files =
+            std::collections::BTreeMap::from([("nested/victim.sh".into(), "replacement".into())]);
+        assert!(materialize_assets(dir.path(), &files).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+    }
+
+    #[test]
     fn strips_terminal_control_sequences_from_log_lines() {
         // docker pull 在 pty 下的典型输出：光标上移 + 清行 + 真正的内容。
         // 转义字符直接以字节形式写进脚本，不走 shell 的  解析——各家 sh
@@ -1867,6 +2280,73 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
         })
         .unwrap();
         assert_eq!(lines, vec!["7e1f8fb7d4ba: Pulling fs layer".to_string()]);
+    }
+
+    /// 阶段前缀绝不能落在协议行上。
+    ///
+    /// 这条测试守的是一个**静默**的真 bug：`lifecycle` 原来无条件
+    /// `format!("[安装引擎] {line}")`，于是 install_engine 里脚本的
+    /// `LMM_PROMPT=` 被改成了 `[安装引擎] LMM_PROMPT=`，而后端 `service::is_prompt_line`
+    /// 和前端 `parsePromptLine` 都是从行首匹配的 —— 输入框永远弹不出来，脚本阻塞在
+    /// `read` 上直到 600 秒超时把整次运行判死，界面上看不到任何错误。
+    /// 标记行的名字是**和前端的契约**：两边各有一份解析器，而且
+    /// 前端那份的正则是字面量。改名必须同时改 `model-store-logic.js` 的
+    /// `parseProgressLine` / `parseStageLine` / `parseStepLine` / `parsePromptLine`。
+    ///
+    /// 把它们铉在这里，是因为改错的后果是**静默的**：界面上不会出现任何错误，
+    /// 只是进度条永远不动、或者输入框永远不弹。
+    #[test]
+    fn marker_names_are_the_contract_with_the_frontend() {
+        assert_eq!(PROGRESS_MARKER, "LMM_PROGRESS_BYTES=");
+        assert_eq!(STAGE_MARKER, "LMM_STAGE=");
+        assert_eq!(STEP_MARKER, "LMM_STEP=");
+        assert_eq!(PROMPT_MARKER, "LMM_PROMPT=");
+        assert_eq!(PROMPT_FORM_MARKER, "LMM_PROMPT_FORM=");
+        for marker in [
+            PROGRESS_MARKER,
+            STAGE_MARKER,
+            STEP_MARKER,
+            PROMPT_MARKER,
+            PROMPT_FORM_MARKER,
+        ] {
+            assert!(
+                is_control_line(&format!("{marker}x")),
+                "{marker} 不被当成协议行，它会被套上阶段前缀而静默失效"
+            );
+        }
+    }
+
+    #[test]
+    fn control_lines_never_get_a_stage_prefix() {
+        for line in [
+            "LMM_PROMPT=password|请输入本机密码",
+            "LMM_PROMPT_FORM={\"fields\":[]}",
+            "LMM_PROGRESS_BYTES=1/2",
+            "LMM_STAGE=正在拉取引擎镜像",
+            "LMM_STEP=2/4",
+            "LMM_ENGINE_IMAGE=vllm/vllm-openai:v0.8.5",
+        ] {
+            assert!(is_control_line(line), "{line} 应当被认成协议行");
+            assert_eq!(prefix_log_line("[安装引擎] ", line), line);
+        }
+    }
+
+    #[test]
+    fn human_lines_still_get_the_stage_prefix() {
+        assert_eq!(
+            prefix_log_line("[安装引擎] ", "7e1f8fb7d4ba: Pulling fs layer"),
+            "[安装引擎] 7e1f8fb7d4ba: Pulling fs layer"
+        );
+        // 小写、缺等号、名字里有非法字符的都不是协议行 —— 判据宽一点会把普通日志
+        // 误当协议行吞掉前缀，那是无害的；判据窄一点才会让控制信息失效。
+        for line in [
+            "lmm_prompt=x",
+            "LMM_PROMPT",
+            "LMM-PROMPT=x",
+            "  提示：LMM_PROMPT=x",
+        ] {
+            assert!(!is_control_line(line), "{line} 不该被认成协议行");
+        }
     }
 
     #[test]
@@ -1934,5 +2414,184 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
             "坏字节后面的内容必须照常出来：{out:?}"
         );
         assert!(pending.is_empty());
+    }
+    /// r21 P2-3：单行入环前截断。无论有没有终止符，环里的行都不许超过
+    /// MAX_RING_LINE_BYTES（截断标记本身略超出算预期），且截断必须落在 UTF-8
+    /// 字符边界上（多字节字符不得被拦腰切开）。
+    #[test]
+    fn oversized_lines_are_truncated_before_entering_the_ring() {
+        let mut lines = Vec::new();
+        let mut scanned = 0usize;
+        let mut progress: Option<&mut ProgressCallback<'_>> = None;
+        // 多字节内容压着上限——边界切点必须自己回退到字符边界。
+        let huge: String = "汉".repeat(MAX_RING_LINE_BYTES / 3 + 100);
+        let rest = drain_lines(
+            format!("{huge}\nrest-of-line",),
+            &mut lines,
+            &mut progress,
+            &mut scanned,
+        );
+        assert_eq!(lines.len(), 1, "一行只入环一次：{lines:?}");
+        assert!(
+            lines[0].len() <= MAX_RING_LINE_BYTES + 128,
+            "截断标记之外不许超顶：{}",
+            lines[0].len()
+        );
+        assert!(lines[0].contains("已截断"), "截断要留标记：{}", lines[0]);
+        assert_eq!(rest, "rest-of-line", "终止符后的内容照常留给下一轮");
+    }
+
+    /// r21 P2-3：无终止符的滞留缓冲触顶即出清。此前 `cat` 一个无换行大文件
+    /// 会让整段输出滞留 buf 直到 6h 绝对超时（内存无上限，完成后还会全链路
+    /// clone 放大）；触顶后滞留段作为一条截断行入环、后续字节从新行开始。
+    #[test]
+    fn unterminated_pending_buffer_is_capped() {
+        let mut lines = Vec::new();
+        let mut scanned = 0usize;
+        let mut progress: Option<&mut ProgressCallback<'_>> = None;
+        let rest = drain_lines(
+            "x".repeat(MAX_PENDING_LINE_BYTES + 4096),
+            &mut lines,
+            &mut progress,
+            &mut scanned,
+        );
+        assert_eq!(rest, "", "触顶后滞留段清空：{rest:?}");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("已截断并丢弃"),
+            "丢弃量要写进标记：{}",
+            lines[0]
+        );
+        // 后续字节从新行开始累计，不再背上一段的内存。
+        let mut lines2 = Vec::new();
+        let mut scanned2 = 0usize;
+        let mut progress2: Option<&mut ProgressCallback<'_>> = None;
+        let rest2 = drain_lines(
+            "tail-without-newline".to_string(),
+            &mut lines2,
+            &mut progress2,
+            &mut scanned2,
+        );
+        assert_eq!(rest2, "tail-without-newline");
+        assert!(lines2.is_empty(), "未触顶的滞留段照常滞留：{lines2:?}");
+    }
+
+    #[test]
+    fn cap_output_lines_keeps_prompt_scan_cursor_in_range() {
+        // 评审阻塞项 1 的回归测试：超上限丢最老一半后，绝对下标游标必须跟着
+        // 回退，否则之后到达的 LMM_PROMPT= 行永不被扫描（docker pull 这类
+        // 5000+ 行输出 + 交互提问的场景必踩）。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES + 10)
+            .map(|i| format!("layer-{i}"))
+            .collect();
+        let mut scanned = MAX_OUTPUT_LINES + 5;
+        cap_output_lines(&mut lines, &mut scanned);
+        assert!(
+            scanned <= lines.len(),
+            "游标 {} 超出 cap 后长度 {}，新提示行将永不被扫描",
+            scanned,
+            lines.len()
+        );
+        // 新到的提示行必须落在未扫描区间内。
+        lines.push("LMM_PROMPT=继续吗？".to_string());
+        assert!(scanned < lines.len());
+        assert!(is_prompt_line(&lines[scanned..].last().unwrap()));
+    }
+
+    #[test]
+    fn cap_never_retreats_cursor_into_scanned_region() {
+        // 2026-10-30 评审 P1-2 回归钉：游标**之后**同样有被丢的行（非最新进度
+        // 行在任意下标被丢），按总丢弃数回退会把游标退回已扫描区间——已应答
+        // 的 LMM_PROMPT= 行重新入窗、被无条件重挂 600 秒提示超时，用户早已
+        // 作答仍被 SIGKILL。游标只允许按「游标之前的真实丢弃数」回退。
+        let mut lines: Vec<String> = Vec::new();
+        // 2500 行普通垫层（< drop_before，必被丢；全在游标前——这是合法的
+        // 回退来源），随后三行控制行（必保留）+ 一条已扫描的进度行（被丢，
+        // 也在游标前）。游标停在第 2504 行：提示行已应答。
+        for i in 0..2500 {
+            lines.push(format!("filler-{i}"));
+        }
+        lines.push("LMM_ENGINE_IMAGE=example/img:tag".to_string());
+        lines.push("LMM_CONTAINER_NAME=app".to_string());
+        lines.push("LMM_PROMPT=确认继续？".to_string()); // 已应答，绝不允许重扫
+        lines.push("LMM_PROGRESS_BYTES=1/999".to_string());
+        // 游标之后：大批量进度行（除最后一条全丢——原缺陷把游标拉回去的力量
+        // 来源，数量远超游标前的丢弃）+ 一条普通尾行。
+        for i in 0..5000 {
+            lines.push(format!("LMM_PROGRESS_BYTES={i}/999999"));
+        }
+        lines.push("tail-plain".to_string());
+        let mut scanned = 2504usize;
+        cap_output_lines(&mut lines, &mut scanned);
+        // 游标前真实丢弃 = 2500 垫层 + 1 条已扫进度行；游标后的几千条丢弃
+        // 不许参与回退。2504 - 2501 = 3。
+        assert_eq!(scanned, 3, "游标只按游标前丢弃回退：{scanned}");
+        // 已应答提示仍在已扫描侧（kept 序 [ENGINE, CONTAINER, PROMPT, 进度,
+        // tail]，提示 index 2 < 游标 3），未被重扫。
+        assert!(is_prompt_line(&lines[2]));
+        assert!(
+            !lines[scanned..].iter().any(|l| is_prompt_line(l)),
+            "游标后不该有任何提示行进入未扫描区（会被重挂 600s 超时）"
+        );
+        // 进度行只剩最后一条 + 尾行保留，协议语义不回归。
+        let progress_count = lines
+            .iter()
+            .filter(|l| l.trim_start().starts_with(PROGRESS_MARKER))
+            .count();
+        assert_eq!(progress_count, 1);
+        assert!(lines.iter().any(|l| l == "tail-plain"));
+        // 游标之后的新提示行仍会被扫描（既有承诺不破坏）。
+        lines.push("LMM_PROMPT=新问题".to_string());
+        assert!(scanned < lines.len());
+        assert!(is_prompt_line(lines.last().unwrap()));
+    }
+
+    #[test]
+    fn cap_output_lines_preserves_control_lines_and_reports_them_as_kept() {
+        // 协议行不丢是既有承诺；被保留的协议行不能计入"丢弃数"把游标多退
+        // （多退最多造成重复扫描一行非提示行，无害但不必）。
+        // 2026-10-20 评审 P2：原先恰好造 MAX_OUTPUT_LINES 行，cap 首行 `<=` 判定
+        // 直接早退——测试从未进入裁剪分支，恒假绿。必须**超过**上限。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES + 5)
+            .map(|i| format!("layer-{i}"))
+            .collect();
+        lines[3] = "LMM_ENGINE_IMAGE=example/img:tag".to_string();
+        let mut scanned = MAX_OUTPUT_LINES - 1;
+        cap_output_lines(&mut lines, &mut scanned);
+        assert!(
+            lines.iter().any(|l| l.starts_with("LMM_ENGINE_IMAGE=")),
+            "协议行被 cap 丢掉了"
+        );
+        assert!(lines.len() < MAX_OUTPUT_LINES + 5, "cap 没有真正裁剪");
+    }
+
+    #[test]
+    fn cap_output_lines_keeps_only_the_latest_progress_line() {
+        // 评审 P2：LMM_PROGRESS_BYTES 是高频单调计数器，同前缀留最后一条；
+        // 一次性协议行（LMM_ENGINE_IMAGE 等）待遇不变。
+        let mut lines: Vec<String> = (0..MAX_OUTPUT_LINES + 20)
+            .map(|i| format!("LMM_PROGRESS_BYTES={i}/1000000"))
+            .collect();
+        lines.insert(4, "LMM_ENGINE_IMAGE=example/img:tag".to_string());
+        let mut scanned = 0;
+        cap_output_lines(&mut lines, &mut scanned);
+        let progress: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("LMM_PROGRESS_BYTES="))
+            .collect();
+        assert_eq!(
+            progress.len(),
+            1,
+            "同前缀只留最后一条，实际留下 {progress:?}"
+        );
+        assert_eq!(
+            progress[0].as_str(),
+            "LMM_PROGRESS_BYTES=5019/1000000",
+            "留下的必须是最新一条"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("LMM_ENGINE_IMAGE=")),
+            "一次性协议行仍保留"
+        );
     }
 }

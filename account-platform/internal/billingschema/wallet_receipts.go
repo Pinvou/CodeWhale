@@ -80,6 +80,9 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 	if err := validateFinancialJSONObjects(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateOutboxStatisticsIndex(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validatePackageExpiryScan(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
@@ -93,6 +96,12 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 		return migrations.Verification{}, err
 	}
 	if err := validateUsageWaiverHistoryDelivery(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateLatePaymentQueryAdmission(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateLatePaymentQueryGenerations(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
 	ctx, err := migrations.PinLedger(ctx, connection)

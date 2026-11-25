@@ -1,0 +1,16 @@
+{
+  "card_id": "surface-card",
+  "created_at": "2026-10-21T08:00:00+00:00",
+  "created_at_epoch": 1792569600,
+  "error": null,
+  "error_truncated": false,
+  "kind": "download",
+  "last_line": "download in progress",
+  "last_line_truncated": false,
+  "progress": {
+    "done": 1024,
+    "total": 4096
+  },
+  "run_id": "run-surface-new",
+  "status": "running"
+}

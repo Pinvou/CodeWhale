@@ -129,6 +129,13 @@ pub fn bundle_skills_dir() -> PathBuf {
 pub fn bundles_root() -> PathBuf {
     pinvou3_home().join("bundles")
 }
+/// Released executable files for one marketplace MCP package.
+pub(crate) fn bundle_mcp_package_dir(id: &str) -> PathBuf {
+    bundles_root().join(id).join("mcp")
+}
+pub(crate) fn marketplace_python_envs_dir() -> PathBuf {
+    pinvou3_home().join("marketplace").join("python-envs")
+}
 pub fn bundle_mcp_json() -> PathBuf {
     bundle_root().join("mcp.json")
 }
@@ -247,6 +254,12 @@ fn bundled_connector_runtime_paths_for(
 /// present_artifact MCP server 脚本绝对路径(mcp.json 的 args 指向它)。
 pub fn bundle_present_artifact_server() -> PathBuf {
     bundle_mcp_servers_dir().join("present_artifact_server.py")
+}
+
+/// `~/.pinvou3/bundle/mcp-servers/megacube_admin_server.py`
+/// MegaCube 管理面只读工具集（engine-owned，socket 存在才注册进 mcp.json）。
+pub fn bundle_megacube_admin_server() -> PathBuf {
+    bundle_mcp_servers_dir().join("megacube_admin_server.py")
 }
 /// Local Python MCP bootstrap that adds the tool's isolated dependency directory before running
 /// its server script.

@@ -366,7 +366,7 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 		if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<=900010`).Scan(&current); err != nil || current != retryPrefixLedger {
 			t.Fatal("complete publication upgrade changed the exact retry-prefix ledger", err)
 		}
-		assertPublishedTokenInventory(t, ctx, admin.Config(), config, 900011)
+		assertPublishedTokenInventory(t, ctx, admin.Config(), config, 900012)
 	}
 	if previousOutboxFacts != "" {
 		var current string

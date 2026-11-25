@@ -1,22 +1,10 @@
 # CodeWhale Fork 修改清单
 
-## 本评审分支同步状态（2026-11-21）
+## T1：临时模型沿用宿主 HTTP 策略
 
-- 父仓同步 main `148904bf2529004339a3563b257bb34e3546974f`，CodeWhale gitlink 保留本分支原有 `55393015d8a4905d47ca1a81ad41aead8c60962f`，没有创建底座组合提交、推进维护分支或移动固定标签。候选在 v0.9.12 之上为 94 个提交；公开维护状态 `687358f7efde6abd3592737b8ec48adc74ba5a84` 的 100 个提交及其验证记录仍单独保留。
-- 本候选没有 main 后续底座 #136/#142/#148/#150/#152/#156/#157。包括模型面文案、终态错误来源、todo 缺省 schema、宿主输出预算导出、底座依赖升级、lint 适配及 session-reader 只读分类等维护改动，均不能宣称已由本分支依赖提供。下文第 0 节及这些提交的登记描述 main 的公开维护事实。
-- **当前不可合并或发布。** 保留的依赖仍有组合兼容阻断。底座的 rusqlite 0.40 与 main 应用、知识库及测试目标的 0.41 无法共享同一 SQLite native links 依赖图。底座还缺少 main 宿主使用的 `TurnComplete.error_source` 及 `route_effective_max_output_tokens`。
-- fork 守卫保留 main 的集成要求（维护头 `687358f7`、100 个提交及 `6f7a3a748` 维护祖先）、全部 main 指纹和 todo 精确执行断言，同时保留本 PR 的四条模型 HTTP policy 指纹。这些是本候选**尚未满足**的要求，不是候选实际具备全部 main 能力的声明；`--fast` 与严格公开维护头检查仍会失败。没有增加候选豁免、放宽断言或把失败改成成功。
-- HTTP policy 的主模型、HTTP/1 回退和独立视觉接线仍按下述 T1 候选登记保留；本轮只完成同步冲突及真实状态登记，不把静态接线、旧 SHA 的验证或本地登记检查升级为新组合的功能、CI、外审或发布通过。
+- [Pinvou/CodeWhale#151](https://github.com/Pinvou/CodeWhale/pull/151) 提供内存专用的宿主策略。PR #2472 使用冻结路线的 `Config.model_http_policy`，主模型、HTTP/1 回退和独立视觉都继承同一策略。视觉模型配置保留原有三个字段。
+- 临时模型公网分类、DNS 工作预算、地址快照及代理、重定向限制留在 App。详见[临时模型的推理出口](remote-control-model-egress.md)。
 
-## T1 候选：宿主冻结模型 HTTP 约束（2026-11-08）
-
-- 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f` 基于公开维护头 `11cba403d`，尚未合入受保护维护分支。新增仅在内存中配置的通用 `ModelHttpPolicy`，实际应用于主模型、HTTP/1 回退和独立视觉 HTTP builder；clone/profile merge 与视觉继承保留该约束，构造拒绝 fail closed。
-- 对应 [Pinvou/CodeWhale#151](https://github.com/Pinvou/CodeWhale/pull/151) 截至 2026-11-21 仍开放，评审头为 `7f727fec09a197e9a18edea70d9396fba6eeb4b9`，与本分支 gitlink 自 `11cba403d` 分叉。构建、格式及行为测试指纹继续按父仓实际引用判断。依赖合入后，更新 gitlink 时需核对 hook 接口，并将原拒绝测试指纹与评审头上的 `forkguard_host_http_policy_construction_denial_fails_closed` 对照复核。
-- #151 的评审头维持三字段 `VisionModelConfig`，而本候选的宿主接线仍填写及读取 `VisionModelConfig.model_http_policy`。对齐依赖时须一并调整视觉策略的注入入口，并重新验证独立视觉客户端。
-- Pinvou 的临时模型公网分类、DNS 工作预算、地址快照、禁止代理/重定向等产品政策留在 App 的 `controller/runtime_egress.rs`。通用底座不包含远控任务、租约、凭据或内部服务语义；不引入第二个模型客户端。
-- 结果式 `forkguard_host_http_policy_reaches_primary_fallback_and_vision`、`forkguard_host_http_policy_denial_fails_primary_and_vision_closed` 覆盖三条实际网络入口及拒绝传播；父仓同模块默认状态测试、独立 TLS/代理/重定向测试和 EnginePool 冻结 handoff 另行验证，具体执行结果随固定版本证据记录，不将源码名存在当运行通过。
-- 已在真实最新上游 main `61e914bfdde385343e409ff1119ad49d753823e0` 的 `runtime/config` 与 `engine` 位置准备通用候选；这是上游重构后的源路径，不能把旧 TUI 补丁机械声称为已适配上游。两候选的提交、编译与审核状态分别记录。
-- 本分支 gitlink 为评审候选；不可变 r3 标签与 `MAINTENANCE_BASE` 仍保留原值。`verify-public-submodule.sh` 的公开维护头相等要求不放宽，维护分支合入与最终父仓引用须取得明确授权并复核；当前不得据此宣称发布依赖已齐。
 
 ## 已集成底座契约与宿主接入：终态错误来源（T1，2026-11-11）
 
@@ -97,19 +85,27 @@
 
 - 每次普通 shell 执行都会叠加 hook/task 环境（包括空映射）。旧 `CommandSpec::with_env` 会替换整个构造器映射，丢弃 `PYTHONIOENCODING=utf-8`，导致 Python 回退到 Windows 本地编码，而 PowerShell 和工具输出读取器仍期望 UTF-8。修复改为合并叠加值，并按 Windows 大小写不敏感规则处理显式覆盖；环境清理器、显式覆盖值及 Python 文件/默认文本编码策略不变。
 - 共用 shell 构造器覆盖前台、后台/PTY、交互式和编码 PowerShell 重试。既有直接 `CommandSpec::program` 消费方（只读命令的直接 argv 路径及 `codew sandbox run`）从未设置此 shell 默认值，不在本修复的覆盖声明内。
-- 已合入：公开维护头 `11cba403d` 已包含 [Pinvou/CodeWhale#115](https://github.com/Pinvou/CodeWhale/pull/115)–[Pinvou/CodeWhale#122](https://github.com/Pinvou/CodeWhale/pull/122)、[Pinvou/CodeWhale#114](https://github.com/Pinvou/CodeWhale/pull/114)/[Pinvou/CodeWhale#125](https://github.com/Pinvou/CodeWhale/pull/125) 与 [Pinvou/CodeWhale#123](https://github.com/Pinvou/CodeWhale/pull/123)/[Pinvou/CodeWhale#124](https://github.com/Pinvou/CodeWhale/pull/124)/[Pinvou/CodeWhale#129](https://github.com/Pinvou/CodeWhale/pull/129)/[Pinvou/CodeWhale#131](https://github.com/Pinvou/CodeWhale/pull/131)/[Pinvou/CodeWhale#133](https://github.com/Pinvou/CodeWhale/pull/133)/[Pinvou/CodeWhale#134](https://github.com/Pinvou/CodeWhale/pull/134)/[Pinvou/CodeWhale#135](https://github.com/Pinvou/CodeWhale/pull/135)，main 的维护 gitlink 见第 0 节，本评审分支实际引用见开头同步状态；原候选提交的测试证据仍按下述执行边界保留。
+- 已合入：公开维护头 `11cba403d` 已包含 [Pinvou/CodeWhale#115](https://github.com/Pinvou/CodeWhale/pull/115)–[Pinvou/CodeWhale#122](https://github.com/Pinvou/CodeWhale/pull/122)、[Pinvou/CodeWhale#114](https://github.com/Pinvou/CodeWhale/pull/114)/[Pinvou/CodeWhale#125](https://github.com/Pinvou/CodeWhale/pull/125) 与 [Pinvou/CodeWhale#123](https://github.com/Pinvou/CodeWhale/pull/123)/[Pinvou/CodeWhale#124](https://github.com/Pinvou/CodeWhale/pull/124)/[Pinvou/CodeWhale#129](https://github.com/Pinvou/CodeWhale/pull/129)/[Pinvou/CodeWhale#131](https://github.com/Pinvou/CodeWhale/pull/131)/[Pinvou/CodeWhale#133](https://github.com/Pinvou/CodeWhale/pull/133)/[Pinvou/CodeWhale#134](https://github.com/Pinvou/CodeWhale/pull/134)/[Pinvou/CodeWhale#135](https://github.com/Pinvou/CodeWhale/pull/135)，当前 gitlink 见第 0 节；原候选提交的测试证据仍按下述执行边界保留。
 - 父仓祖先门禁回归同时隔离 fixture Git 命令与门禁子进程的继承 `GIT_*` 变量；污染环境指向独立临时仓库时，三种真实拓扑条件仍得到预期结果，外部仓库、工作区和索引逐字节不变。明确断言拓扑/指纹分界，避免静默跳过新插入的层。
 - 默认 Windows 子进程环境回归持有进程环境锁，在空/无关叠加测试前设置 GBK 哨兵，防止继承 UTF-8 设置而掩盖缺陷。探测使用实际 shell 语法，仅 PowerShell 执行编码命令，并强制 30 秒超时及子进程清理。此前作者在外层 `PYTHONIOENCODING=utf-8` 下恢复旧替换逻辑，强化回归失败（0 通过、1 失败），恢复最终源码后通过。
 - 原生端到端回归覆盖实际小写 `bash` 工具和后台 ShellManager，在 GBK 父环境下检查 Python stdout/stderr 及 64 KiB 前置输出。需 PATH 中的 Windows Python 和 PowerShell dispatcher；从 PowerShell 或 cmd 运行且取消 `SHELL` 设置。显式命令：`cargo test -p codewhale-tui --lib --locked forkguard_windows_python_stdio -- --ignored --test-threads=1`，可用 `CODEWHALE_TEST_PYTHON` 选择解释器。
 - 既有作者本地 Windows 验证：`cargo test -p codewhale-tui --lib --locked sandbox::tests -- --test-threads=1` 通过 23 项（19 项 `sandbox::tests::*` + 4 项 `repl::sandbox::tests::*`；Linux 因 cfg 差异选择 26 项）。两个显式工具测试分别用系统 Python 3.14 和捆绑 Python 3.13.14 通过（共四次），另一个 Git Bash 环境探测通过一次。此前恢复原构造器时，两个工具测试在两种解释器下均失败，表现为 Python 中文乱码而 PowerShell 中文正常。格式、架构和快速指纹检查通过。这些是既有作者证据，不代表后续文档修订重新执行了原生测试。
 - 父仓 Windows regression 步骤新增执行默认值合并、shell 默认值接线及大小写覆盖三个确定性筛选器；每个筛选器都要求至少执行一项测试。`91e262ba2` 的远端 [Windows regression job](https://github.com/Pinvou/pinvou-agent/actions/runs/39761405525/job/119767350755) 已实际执行并通过这三个筛选器；该证据对应这个旧头及不变的底座，不代替后续提交的 CI。两个需 Python 的显式测试仍为作者本地证据。`pinvou3-clean` CI 仅 Ubuntu，不运行 Windows 限定回归。Linux 上的 `windows_shell_default_env_forces_python_pipe_stdio_utf8` 只验证 helper 返回值，不验证构造器接线；Windows 大小写覆盖逻辑也需原生 Windows 回归。上游 codewhale-hq/Codewhale#7041 是未来上游 Windows CI 的贡献路径，不证明该 CI 已执行。未验证客户设备、PowerShell 7 或安装包发布。
 
-## 0. 当前状态（2026-11-15）
+## 0. 当前状态（2026-11-24）
 
-- main 的公开维护头与其父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157) `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 [Pinvou/CodeWhale#107](https://github.com/Pinvou/CodeWhale/pull/107) `f27672935`、[Pinvou/CodeWhale#116](https://github.com/Pinvou/CodeWhale/pull/116) `e9a7f48da1` 与 [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157) `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
+- 当前公开维护头与父仓 gitlink：`cc2adf8ef927fff072e9493734a0a32f3a044996`（2026-11-24）。在原 `687358f7e` 之上消费已合入的 2026-11 批次 21 个提交（Pinvou/CodeWhale #127/#137/#139/#141/#143/#144/#145/#146/#149/#151/#155/#158/#160/#164/#165/#166/#167/#168/#169/#170/#171）。父仓只消费已公开提交，不推进维护分支、不移动标签。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 121 个提交，r1 `1fafee7e2` 之上 106 个；118 个带 DCO sign-off。未签名的提交为 [Pinvou/CodeWhale#107](https://github.com/Pinvou/CodeWhale/pull/107) `f27672935`、[Pinvou/CodeWhale#116](https://github.com/Pinvou/CodeWhale/pull/116) `e9a7f48da1` 与 [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157) `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinjou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：551 files, +121146/-49817，净增 71329；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+- 实测 drift：583 files, +150708/-54594，净增 96114；384 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+
+### 2026-11-24 公开维护头对齐（2026-11 批次 21 提交，`687358f7`→`cc2adf8`；父仓 PR build/codewhale-gitlink-cc2adf8）
+
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinvou3-clean`。公开维护分支沿 21 个已签署提交推进到 `cc2adf8` 后，本批按既定过渡规则只更新消费点，保留 r3 标签及全部门禁；维护基线 `687358f7` 仍是新头祖先，公开维护头门禁继续生效。
+- 批次内容（全部归既有主题）：T1 性与可靠性——[Pinvou/CodeWhale#127](https://github.com/Pinvou/CodeWhale/pull/127) session 元数据回退缓冲复用、[#141](https://github.com/Pinvou/CodeWhale/pull/141) 有界模型限流恢复（429 退避后按上限自行重试，`DynamicGate` 抽至 `core/capacity.rs` 共享容量模块，引擎新增 `Event::ModelRecovery` 回执事件）、[#149](https://github.com/Pinvou/CodeWhale/pull/149) 空闲引擎退役不丢工作、[#155](https://github.com/Pinvou/CodeWhale/pull/155) 路由输出预算组合共享并钉输入；T1 路由兼容——[#151](https://github.com/Pinvou/CodeWhale/pull/151) host model HTTP policies、[#143](https://github.com/Pinvou/CodeWhale/pull/143)/[#144](https://github.com/Pinvou/CodeWhale/pull/144)/[#145](https://github.com/Pinvou/CodeWhale/pull/145)/[#146](https://github.com/Pinvou/CodeWhale/pull/146) TUI schema/union 修复（Moonshot schema 按 MFJS 文档持有、Anthropic 输入 schema 原样、xAI 根联合、MiniMax reasoning_details 仅网关镜像、kimi k3.1 族识别）；T2 工具面——[#160](https://github.com/Pinvou/CodeWhale/pull/160) MCP 只读分类器清单统一（session-reader 精确名匹配迁至 `core/engine/tool_preparation.rs`）；T2 依赖卫生——[#165](https://github.com/Pinvou/CodeWhale/pull/165)/[#167](https://github.com/Pinvou/CodeWhale/pull/167)/[#168](https://github.com/Pinvou/CodeWhale/pull/168)/[#170](https://github.com/Pinvou/CodeWhale/pull/170)/[#171](https://github.com/Pinvou/CodeWhale/pull/171)（rusqlite 0.43 线及其 soundness 修复、eslint 10、MSRV 感知 sweep）；其余为 T3 文档与夹具（[#139](https://github.com/Pinvou/CodeWhale/pull/139) shell stdin EOF、[#158](https://github.com/Pinvou/CodeWhale/pull/158) Unix 超时夹具子进程泄漏、[#164](https://github.com/Pinvou/CodeWhale/pull/164)、[#166](https://github.com/Pinvou/CodeWhale/pull/166)）。
+- guard 同步：登记头 `687358f7`→`cc2adf8`、提交数 100→121、注释更新；三条源码指纹随迁——`"mcp_session-reader_read_session"` 与 `"mcp_session-reader_list_sessions"` 钉点 `registry.rs`→`core/engine/tool_preparation.rs`（[#160](https://github.com/Pinvou/CodeWhale/pull/160) 清单统一），`pub(crate) struct DynamicGate` 钉点 `tools/subagent/governor.rs`→`core/capacity.rs`（[#141](https://github.com/Pinvou/CodeWhale/pull/141) 模块抽取）；串不变、只随代码搬家。第 2 层 pinned runner 对应既有测试仍按名通过（[#160](https://github.com/Pinvou/CodeWhale/pull/160) 保留测试名）。
+- 父仓适配（[#170](https://github.com/Pinvou/CodeWhale/pull/170) 下游契约）：`libsqlite3-sys` 声明 `links="sqlite3"` 全图唯一，`pinjou3-tauri` 与 `pinjou-knowledge` 的 rusqlite 声明 0.41→0.43（bundled）同窗口跟进，双 lock 重解析（`libsqlite3-sys` 0.39.1→0.40.0、`rsqlite-vfs`/`sqlite-wasm-rs` 随版本域内前移；bundled SQLite 引擎字节不变，[#170](https://github.com/Pinvou/CodeWhale/pull/170) 已核）；rusqlite 0.43 新增空/纯注释 SQL 拒绝（`Error::Empty`）经审计不触达父仓调用面——父仓 SQL 为静态字面量或编译期选择的字面量分支，`execute_batch` 在两版均跳过空段。宿主事件适配：forwarder 穷举 match 补 `Event::ModelRecovery` 显式臂（诊断日志，暂不向前端投影恢复进度；终态仍由既有 turn/error 事件承载，[#141](https://github.com/Pinvou/CodeWhale/pull/141)）。不修改底座源码、公开维护分支或不可变 r3 标签。
+- 验证按父仓门禁与原仓测试证据分开记录：父仓侧 `cargo check --locked`（src-tauri + pinvou-knowledge）、fork-guard 全层（指纹层全过、第 2/3 层 forkguard 回归执行）、fmt/architecture/sync-version 通过；21 个来源提交的原仓回归由其各自 PR 证据覆盖，不代表本批次已重跑父仓 Rust 全量集成测试，完整编译验证由父仓 CI 与合入后最新 `main` 承担。
 
 ### 2026-11-15 公开维护头对齐（[Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157)，随来源 PR [pinjou-agent#875](https://github.com/Pinvou/pinvou-agent/pull/875) 合入主线；父仓 PR #2395 同步消费同一头）
 

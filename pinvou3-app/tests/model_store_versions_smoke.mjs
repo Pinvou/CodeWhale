@@ -89,7 +89,7 @@ try {
     }));
     window.answerVersions = ({ state, error = null }) => window.pendingVersions.shift()([{
       version_id: 'test-version', filename: 'test.weights', state,
-      can_switch: state === 'ready', can_retry: state === 'failed',
+      can_switch: ['ready', 'history'].includes(state), can_retry: state === 'failed',
       can_delete: state !== 'downloading', size_bytes: 128, error,
     }]);
     window.interruptedCopy = dictZh.uiModelStore.versionInterrupted;
@@ -122,6 +122,11 @@ try {
     }
     await page.evaluate(() => window.renderVersions(true));
   }
+  await answer('downloading');
+  await page.evaluate(() => window.renderVersions(false));
+  await answer('history');
+  await expectActions(2); // Explicit history rollback and cleanup remain available.
+  await page.evaluate(() => window.renderVersions(true));
   // A response from the previous busy state cannot overwrite the newer result.
   await waitRequest();
   await page.evaluate(() => {
@@ -249,6 +254,7 @@ try {
       const records = ['qwen38-27b-nvfp4-mtp', 'network-neutral'].map((id) => ({
         card_id: id, card_name: id, model_name: id, status: 'deployed', running: false,
         size_bytes: 128, deploy_topology: 'single', card_update_pending: true,
+        weights_ready_at: '2026-10-01T00:00:00Z',
         default_profile_id: 'production-sampling', profiles: [
           { id: 'benchmark', name: 'Benchmark' }, { id: 'production-sampling', name: 'Production' },
         ],
@@ -257,7 +263,6 @@ try {
         if (command === 'model_store_availability') return { available: true };
         if (command === 'model_store_cards' || command === 'model_store_active_runs' || command === 'model_store_versions') return [];
         if (command === 'model_store_library') return { models: records, corrected: [] };
-        if (command === 'model_store_test_store_state') return { enabled: false };
         if (command === 'model_store_take_startup_cleanup') return null;
         throw Error(`Unexpected command: ${command}`);
       } } };
@@ -530,16 +535,23 @@ try {
     const { dictZh } = await import('/shared/i18n/zh.js');
     /* eslint-enable import-x/no-unresolved, n/no-missing-import */
     const record = { card_id: 'isolated-card', card_name: 'Test', model_name: 'test-wire',
-      status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' };
+      status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single',
+      weights_ready_at: '2026-10-01T00:00:00Z' };
+    const modelDetailMock = (cmd, payload) => {
+      if (cmd === 'model_store_model_detail') return { record };
+      if (cmd === 'model_store_api_keys') return [];
+      return undefined;
+    };
     window.cleanupFinished = false;
     window.uninstallFinished = false;
     window.__TAURI__ = { core: { invoke: async (command, payload) => {
       if (command === 'model_store_availability') return { available: true };
       if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
       if (command === 'model_store_library') return { models: window.uninstallFinished ? [] : [record], corrected: [] };
+      const detail = modelDetailMock(command, payload);
+      if (detail !== undefined) return detail;
       if (command === 'list_models') return { models: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id,
         base_url: 'http://127.0.0.1:8911/v1' }] };
-      if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: 'isolated-uninstall' };
       if (command === 'model_store_run_log') {
@@ -560,8 +572,13 @@ try {
       bs: { savedModels: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id, base_url: 'http://127.0.0.1:8911/v1' }] },
     }));
   });
-  await page.waitForSelector('[data-testid="model-store-uninstall"]');
-  await page.click('[data-testid="model-store-uninstall"]');
+  // 合并后卸载入口在详情弹窗（PR 重设计）；部分态下收在「更多」菜单里。
+  await page.waitForSelector('[data-testid="model-store-open-detail"]');
+  await page.click('[data-testid="model-store-open-detail"]');
+  const more = await page.$('[data-testid="model-store-detail-more"]');
+  if (more) await page.click('[data-testid="model-store-detail-more"]');
+  await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
+  await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
   await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
   await page.click('[data-testid="model-store-uninstall-keep"]');
   await page.waitForFunction(() => window.cleanupFinished);
@@ -582,7 +599,17 @@ try {
     const createRoot = client.createRoot || client.default?.createRoot;
     const root = createRoot(document.getElementById('root'));
     const records = ['alpha', 'beta'].map((id) => ({ card_id: id, card_name: id,
-      model_name: id, status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' }));
+      model_name: id, status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single',
+      weights_ready_at: '2026-10-01T00:00:00Z' }));
+    const detailByCard = new Map(records.map((r) => [r.card_id, r]));
+    const modelDetailMock = (cmd, payload) => {
+      if (cmd === 'model_store_model_detail') {
+        const record = detailByCard.get(payload?.cardId);
+        return record ? { record } : undefined;
+      }
+      if (cmd === 'model_store_api_keys') return [];
+      return undefined;
+    };
     const completed = new Map();
     const pending = new Map();
     let serial = 0;
@@ -608,8 +635,9 @@ try {
         window.versionLibraryLoads += 1;
         return { models: records, corrected: [] };
       }
+      const detail = modelDetailMock(command, payload);
+      if (detail !== undefined) return detail;
       if (command === 'list_models') return { models: [] };
-      if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_check_card_update') return { changed: true, revision: 'new',
         compatibility: { kind: 'weights_changed', can_stage: true, can_update: false } };
@@ -718,7 +746,13 @@ try {
   assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
     (items) => items.map((item) => item.textContent)), ['/beta/retained.weights']);
   const beginForceRemove = async (cardId) => {
-    await page.click(`[data-card-id="${cardId}"] [data-testid="model-store-uninstall"]`);
+    // 合并后行卡无卸载按钮：先开该卡详情，再走弹窗卸载入口。
+    await page.click(`[data-card-id="${cardId}"] [data-testid="model-store-open-detail"]`);
+    // 卸载在部分态下是收进「更多」菜单的次要动作（11-16 反馈③）：先开菜单。
+    const more = await page.$('[data-testid="model-store-detail-more"]');
+    if (more) await page.click('[data-testid="model-store-detail-more"]');
+    await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
+    await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
     await page.click('[data-testid="model-store-uninstall-keep"]');
     await page.waitForSelector('[data-testid="model-store-task-force-remove"]');
@@ -859,7 +893,7 @@ try {
     const root = createRoot(document.getElementById('root'));
     const record = { card_id: 'isolated-card', card_name: 'Test', model_name: 'old-wire',
       endpoint_model: 'old-wire', endpoint_url: 'http://127.0.0.1:8911/v1',
-      running: true, status: 'deployed' };
+      running: true, status: 'deployed', weights_ready_at: '2026-10-01T00:00:00Z' };
     window.savedDetailPayloads = [];
     window.detailActiveCalls = 0;
     window.detailToast = null;
@@ -968,7 +1002,7 @@ try {
     window.__TAURI__ = { core: { invoke: async (command, payload) => {
       if (command === 'model_store_model_detail') {
         window.detailLoads.push(payload.cardId);
-        return { record: { card_id: payload.cardId, card_name: payload.cardId, model_name: payload.cardId,
+        return { api_key_enforced: true, record: { card_id: payload.cardId, card_name: payload.cardId, model_name: payload.cardId,
           endpoint_model: payload.cardId, endpoint_url: 'http://127.0.0.1:8911/v1', running: true, status: 'deployed' } };
       }
       if (command === 'model_store_api_keys') return [];
@@ -1117,6 +1151,141 @@ try {
     assert.equal(explicitChoice.context_window_edit_requested, true);
     assert.equal(explicitChoice.preserve_context_window_tokens, false);
   }
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const { IncompleteInstallPanel } = await import('/features/model-store/IncompleteInstallPanel.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    const root = createRoot(document.getElementById('root'));
+    let items = ['a', 'b'].map(id => ({ cardId: `card-${id}`, runId: `run-${id}`, terminal: true, canPreview: false }));
+    window.maintenanceCalls = [];
+    window.pendingDismissals = [];
+    window.maintenanceRefreshes = 0;
+    window.retryingMaintenanceCard = null;
+    window.__TAURI__ = { core: { invoke: (command, args) => {
+      window.maintenanceCalls.push({ command, args });
+      if (command !== 'model_store_dismiss_incomplete') throw Error(`Unexpected command: ${command}`);
+      return new Promise((resolve, reject) => window.pendingDismissals.push({ resolve, reject, runId: args.runId }));
+    } } };
+    window.renderMaintenance = () => root.render(createElement(IncompleteInstallPanel, {
+      installations: items, copy: dictZh.uiModelStore,
+      isRetrying: cardId => cardId === window.retryingMaintenanceCard,
+      onRefresh() {
+        window.maintenanceRefreshes += 1;
+        const dismissed = window.maintenanceCalls.at(-1).args.runId;
+        items = items.filter(item => item.runId !== dismissed);
+        window.renderMaintenance();
+      },
+    }));
+    window.replaceMaintenanceItems = next => { items = next; window.renderMaintenance(); };
+    window.renderMaintenance();
+  });
+  await page.waitForSelector('[data-testid="incomplete-dismiss-button"][data-run-id="run-a"]');
+  await page.click('[data-testid="incomplete-dismiss-button"][data-run-id="run-a"]');
+  await page.waitForSelector('[data-testid="incomplete-dismiss-confirm"]');
+  const target = await page.$eval('[data-testid="incomplete-dismiss-confirm"]', el => el.textContent);
+  assert.ok(target.includes('card-a') && target.includes('run-a'), 'confirmation must identify both the card and exact attempt');
+  assert.equal(await page.$eval('[data-run-id="run-b"]', el => el.disabled), true);
+  await page.click('[data-run-id="run-b"]');
+  assert.equal(await page.$eval('[data-testid="incomplete-dismiss-confirm"]', el => el.textContent), target, 'another row cannot silently retarget an open confirmation');
+  await page.click('[data-testid="incomplete-dismiss-confirm-button"]');
+  await page.waitForFunction(() => window.pendingDismissals.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.maintenanceCalls), [{ command: 'model_store_dismiss_incomplete', args: { runId: 'run-a' } }]);
+  assert.equal(await page.evaluate(() => window.maintenanceRefreshes), 0, 'refresh must wait for backend success');
+  await page.evaluate(() => window.pendingDismissals.shift().resolve({ ok: true }));
+  await page.waitForFunction(() => window.maintenanceRefreshes === 1 && !document.querySelector('[data-testid="incomplete-dismiss-confirm"]'));
+  assert.equal(await page.$('[data-run-id="run-a"]'), null);
+  assert.ok(await page.$('[data-run-id="run-b"]'));
+
+  await page.click('[data-run-id="run-b"]');
+  await page.evaluate(() => { window.retryingMaintenanceCard = 'card-b'; window.renderMaintenance(); });
+  await page.waitForFunction(() => document.querySelector('[data-testid="incomplete-dismiss-confirm-button"]')?.disabled);
+  await page.click('[data-testid="incomplete-dismiss-confirm-button"]');
+  assert.equal(await page.evaluate(() => window.maintenanceCalls.length), 1, 'a concurrent retry cannot discard its original receipt');
+  await page.evaluate(() => window.replaceMaintenanceItems([{ cardId: 'card-c', runId: 'run-c', terminal: true, canPreview: false }]));
+  await page.waitForSelector('[data-run-id="run-c"]');
+  assert.equal(await page.$eval('[data-testid="incomplete-dismiss-confirm-button"]', el => el.disabled), true, 'a removed target cannot become a different receipt');
+  await page.click('[data-testid="incomplete-dismiss-confirm"] button');
+  await page.click('[data-run-id="run-c"]');
+  await page.click('[data-testid="incomplete-dismiss-confirm-button"]');
+  await page.waitForFunction(() => window.pendingDismissals.length === 1);
+  await page.evaluate(() => window.pendingDismissals.shift().reject(Error('installation_dismiss_persist_failed')));
+  await page.waitForFunction(() => document.querySelector('[data-testid="incomplete-installations"] [role="alert"]')?.textContent.includes('installation_dismiss_persist_failed'));
+  assert.equal(await page.evaluate(() => window.maintenanceRefreshes), 1, 'a rejected dismissal must not report a refresh or remove the receipt');
+  assert.ok(await page.$('[data-run-id="run-c"]'));
+
+  await page.reload();
+  await page.evaluate(async () => {
+    /* eslint-disable import-x/no-unresolved, n/no-missing-import */
+    const reactModule = await import('/@id/react');
+    const { createElement } = reactModule.default || reactModule;
+    const client = await import('/@id/react-dom/client');
+    const createRoot = client.createRoot || client.default?.createRoot;
+    const { DownloadCenterView } = await import('/features/model-store/DownloadCenterView.jsx');
+    const { dictZh } = await import('/shared/i18n/zh.js');
+    /* eslint-enable import-x/no-unresolved, n/no-missing-import */
+    window.orphanCalls = [];
+    window.orphanEntries = [{ name: 'partial-fixture', path: '/fixture/models/partial-fixture', bytes: 16 }];
+    window.failOrphanRescan = false;
+    window.orphanScanFailure = false;
+    window.unresolvedLibraryCards = [];
+    window.__TAURI__ = { core: { invoke: async (command, args) => {
+      window.orphanCalls.push({ command, args });
+      if (command === 'model_store_scan_orphans') {
+        if (window.orphanScanFailure) throw Error('fixture rescan unavailable');
+        return { entries: window.orphanEntries, partial: false, unresolvedInFlight: 0, unresolvedLibraryCards: window.unresolvedLibraryCards };
+      }
+      if (command === 'model_store_remove_orphan') {
+        window.orphanEntries = [];
+        window.orphanScanFailure = window.failOrphanRescan;
+        return { freedBytes: 16 };
+      }
+      throw Error(`Unexpected command: ${command}`);
+    } } };
+    createRoot(document.getElementById('root')).render(createElement(DownloadCenterView, {
+      tasks: [], installations: [], copy: dictZh.uiModelStore,
+    }));
+  });
+  await page.waitForSelector('[data-testid="model-store-orphan-scan"]');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.deepEqual(await page.evaluate(() => window.orphanCalls), [], 'mounting the view must not automatically scan');
+  await page.click('[data-testid="model-store-orphan-scan"]');
+  await page.waitForSelector('[data-testid="model-store-orphan-delete"]');
+  await page.click('[data-testid="model-store-orphan-delete"]');
+  assert.deepEqual(await page.evaluate(() => window.orphanCalls.map(x => x.command)), ['model_store_scan_orphans'], 'opening a confirmation must not delete');
+  await page.click('[data-testid="model-store-orphan-confirm-button"]');
+  await page.waitForSelector('[data-testid="model-store-orphans-empty"]');
+  assert.deepEqual(await page.evaluate(() => window.orphanCalls.map(x => x.command)), ['model_store_scan_orphans', 'model_store_remove_orphan', 'model_store_scan_orphans']);
+  assert.equal(await page.$('[data-testid="model-store-orphan-delete"]'), null, 'post-delete results cannot keep a ghost entry');
+  await page.evaluate(() => {
+    window.orphanEntries = [{ name: 'partial-fixture', path: '/fixture/models/partial-fixture', bytes: 16 }];
+    window.failOrphanRescan = true;
+  });
+  await page.click('[data-testid="model-store-orphan-scan"]');
+  await page.waitForSelector('[data-testid="model-store-orphan-delete"]');
+  await page.click('[data-testid="model-store-orphan-delete"]');
+  await page.click('[data-testid="model-store-orphan-confirm-button"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="model-store-orphans"] [role="alert"]')?.textContent.includes('fixture rescan unavailable'));
+  assert.equal(await page.$('[data-testid="model-store-orphan-delete"]'), null);
+  assert.equal(await page.$('[data-testid="model-store-orphans-empty"]'), null, 'a failed rescan returns to unscanned, not a false empty result');
+  await page.evaluate(() => {
+    window.orphanScanFailure = false;
+    window.unresolvedLibraryCards = ['unproven-card'];
+    // Even a stale/mixed response must not offer an unproven directory.
+    window.orphanEntries = [{ name: 'Registered-Weights', path: '/fixture/models/Registered-Weights', bytes: 16 }];
+  });
+  await page.click('[data-testid="model-store-orphan-scan"]');
+  await page.waitForSelector('[data-testid="model-store-orphans-ownership"]');
+  assert.match(await page.$eval('[data-testid="model-store-orphans-ownership"]', el => el.textContent), /unproven-card/);
+  assert.equal(await page.$('[data-testid="model-store-orphan-delete"]'), null, 'unproven library ownership cannot offer any deletion candidate');
+  assert.equal(await page.$('[data-testid="model-store-orphans-empty"]'), null, 'paused cleanup must not claim an empty root');
+
+
   // Exercise the actual hook and lazy module in Chrome, including resource
   // loading boundaries that pure scheduler/controller tests cannot observe.
   async function waitForStartupProbe(predicate) {
@@ -1295,6 +1464,9 @@ try {
   await broken.page.close();
   console.log('PASS: startup hook lazy loading preserves unavailable-state acknowledgement, library reconciliation, cancellation, deadlines and private failure handling in real Chrome');
   assert.deepEqual(errors, []);
+  console.log('PASS: dismissal identifies and pins its target, calls the exact run only after confirmation, refreshes only on success, and handles retry/removal races');
+  console.log('PASS: orphan cleanup never scans automatically, rescans after removal, and clears stale results when that rescan fails');
+  console.log('PASS: unknown library ownership identifies blocking cards and hides deletion candidates without claiming an empty root');
   console.log('PASS: versions refresh after success/failure/cancellation and ignore stale responses');
   console.log('PASS: MTP deployment and version dialogs disclose network defaults and retained .env in all three languages without changing the 256K default');
   console.log('PASS: existing settings forms preserve untouched routes after migration; edited routes and new drafts opt out');

@@ -35,8 +35,10 @@ a plugin-center plugin, carried mainly over MCP (mirroring the Codex desktop app
    a second server rather than growth of session-reader.
    New members are registered in §9 of this document.
 3. **Bundle built-in = bootstrap form**; the toolset's structure (manifest, tool list,
-   enabled state) is organized to plugin-center listing standards; marketplace listing
-   support follows separately.
+   enabled state) is organized to plugin-center listing standards. Marketplace
+   listing landed 2026-10-13 (megacube-admin is the first: catalog manifest with
+   `builtin: true, visibility: "system"`, conditional listing keyed on cmsd socket
+   presence; engine-side conditional mcp.json registration unchanged).
 4. **Code-mode front door reserved**: tool definitions must be modular, enumerable, and
    concentrated in a single registry, so a future "execute code" entry point can replace
    full-schema exposure.
@@ -126,13 +128,12 @@ a plugin-center plugin, carried mainly over MCP (mirroring the Codex desktop app
   `scripts/tests/test_mcp_schema_contract.py`): the wire follows the published
   Moonshot documents strictly — the documents are the sole shipping basis, and a
   live probe may only ever tighten the contract, never widen it. **Landing
-  status (2026-11-12)**: the guard pins the T11 engine pipeline
-  (`schema_sanitize.rs`), which lands on the Moonshot wire via CodeWhale #143
-  with the provider faces in #144/#145/#146/#147; until the close-out re-pin
-  lands that batch on this repository's gitlink, the parent's pinned tree
-  still runs the pre-T11 sanitizer, so this section describes the target
-  contract the pinned tree converges to, not the pinned tree's current
-  behavior. The MFJS
+  status (2026-11-24, closed out)**: the guard pins the T11 engine pipeline
+  (`schema_sanitize.rs`), which landed on the Moonshot wire via CodeWhale #143
+  with the provider faces in #144/#145/#146/#147; the close-out re-pin
+  consumed that batch on this repository's gitlink (cc2adf8ef9), so the
+  parent's pinned tree now runs the T11 sanitizer and this section
+  describes the pinned tree's current behavior. The MFJS
   specification (https://raw.githubusercontent.com/MoonshotAI/walle/main/docs/mfjs-spec.zh.md,
   fetched 2026-11-05) enumerates its supported keywords exactly: `description`,
   `default`, `anyOf`, `properties`, `additionalProperties`, `items`, `type`,
@@ -274,27 +275,22 @@ a plugin-center plugin, carried mainly over MCP (mirroring the Codex desktop app
   fully compliant 10-page deck, at +6% bytes, against an
   all-fields-required control falsified at +76% tokens with `strict:false`
   having no effect) is an observation recorded alongside, not the shipping
-  basis. The resource budgets stop bounding the union only once the T11
-  batch lands: they are aligned to the walle conf.go source defaults
-  (2026-11-05 — 500 branches / 3000 properties / depth 30), so after the
-  close-out re-pin the union's ceiling is the layout count and an 11th
-  layout is an ordinary branch addition. Until that re-pin, the pinned
-  engine still runs the pre-T11 sanitizer whose anyOf cap is 10 — the
-  union sits exactly at that cap, so a new layout added before the re-pin
-  puts make_pptx over it and the pinned engine omits that one tool from
-  the request (per-tool degradation, warn-logged) instead of failing the
-  build: the remaining tools still ship, an emptied tool set omits the
-  `tools` key, and the build fails outright only when an explicit
-  `tool_choice` forces the omitted tool (verified against the pinned
-  child's `sanitize_moonshot_chat_tools` and its chat request builder,
-  2026-11-14; the guard's unit tests pin the pre-T11 face precisely so
-  this window stays loud). The nested union itself is legal on the pinned
-  engine today: it
-  keeps nested multi-branch anyOf verbatim (flattening is a
-  root-composition-only pass) and its validator accepts the union, so the
-  shape does not wait on the re-pin. The schema guard mirrors the T11
-  engine pipeline; its rules converge with that pipeline when the
-  close-out re-pin lands it on this repository's gitlink, not
+  basis. The resource budgets are aligned to the walle conf.go source
+  defaults (2026-11-05 — 500 branches / 3000 properties / depth 30), and
+  since the close-out re-pin (2026-11-24, cc2adf8ef9) the pinned engine
+  runs the T11 sanitizer with those budgets: the union's ceiling is the
+  layout count and an 11th layout is an ordinary branch addition. The
+  historical pre-T11 window (anyOf cap 10, an added layout silently
+  omitted make_pptx from the request — per-tool degradation, warn-logged;
+  an emptied tool set omitted the `tools` key; the build failed outright
+  only when an explicit `tool_choice` forced the omitted tool, verified
+  against the pinned child's `sanitize_moonshot_chat_tools` and its chat
+  request builder, 2026-11-14) is closed; the guard's unit tests keep the
+  pinned face loud for future advances. The nested union itself stays
+  legal: the engine keeps nested multi-branch anyOf verbatim (flattening
+  is a root-composition-only pass) and its validator accepts the union.
+  The schema guard mirrors the T11 engine pipeline; its rules converge
+  with that pipeline at the consciously re-blessed gitlink pin, not
   independently.
 - **Request-shape strips carry their own documentation** (2026-11-05
   posture): the engine's fixed-sampling strip on the Kimi Code membership
@@ -670,6 +666,11 @@ a plugin-center plugin, carried mainly over MCP (mirroring the Codex desktop app
 |---|---|---|---|
 | `read_session` | session-reader (marketplace package, built-in) | L0 | landed (built-in registration: #585) |
 | `list_sessions` | session-reader (marketplace package, built-in) | L0 | landed (built-in registration: #585) |
+| `cube_get_status` / `cube_list_models` / `cube_get_capacity` / `cube_get_logs` / `cube_get_task` / `cube_plan_switch` / `cube_list_store_models` / `cube_check_model_repo` | megacube-admin (marketplace builtin system plugin, listed when cmsd exists or the device has installation records; independent tools survive cmsd outages) | L0 | landed (MegaCube P1/P2) |
+| `cube_start_model` / `cube_stop_model` / `cube_switch_model` / `cube_set_default_model` / `cube_install_model` / `cube_cancel_task` | megacube-admin (mcp.json key keeps the underscore spelling after the tool-name hyphen ambiguity) | L1 (user-authorized scope; confirmation for newly introduced impacts) | landed (MegaCube P1/P2, per user directive 2026-10-13) |
+| `cube_search_models` / `cube_inspect_source` / `cube_inspect_environment` / `cube_validate_artifact` | megacube_admin | L0 | source facts and local artifact observation, independent of standard admission |
+| `cube_fetch_files` / `cube_fetch_repo` / `cube_resume_task` / `cube_verify_artifacts` / `cube_validate_runtime` / `cube_register_artifact` / `cube_install_local_card` | megacube_admin | L1 | atomic acquisition, validation/records and opt-in local card execution; experimental installation uses existing foundation terminal/file tools |
+| `cube_list_incomplete_installs` / `cube_preview_install_retry` / `cube_retry_install` | megacube_admin | L0 | landed (r7 P2-4 补登记)：incomplete-install 观察与重试三件套——列出未进库的商店失败、预览重试计划、按原句柄重试安装 |
 | read_session extensions (entry_range/branch/index) | session-reader | L0 | planning (long-term memory mode) |
 | `send_message_to_session` | session-reader (marketplace package, built-in) | L1 | landed (2026-10; hosted in session-reader per §2 — one family = one server; gated by layered validation + audit log; a typed execpolicy Ask rule is registered as the latent approval-mode-split pin and does not prompt under the current full-auto approval; sched-/eval_/aux-/agentic_ rejected as targets and senders by the server and the watcher; the delivery path's gate is the ACP/code class — round-9 minor 3: the old text claimed a third checkpoint that does not exist) |
 | `create_session` | session-reader (marketplace package, built-in) | L1 | landed (2026-09→10, split into its own PR per review; hosted in session-reader per §2 — session-domain writes stay in the session family, completing the delegation pair "create a session, then message it"; design `docs/session-reader-session-creation-tool-design-and-acceptance.md`. Same spool + app-side watcher + result-marker short-wait machinery as the app-automations family (watcher: features/session_creation/mod.rs); creation goes through the panel's own `create_session_record` semantics — app-default model and workspace unless `model_id`/`workspace_path` pin them (the workspace path is canonicalized before spooling and the canonical path is carried in the success audit's `workspace_path` detail; round-23/#657: the pinvou3 home and filesystem volume roots are REFUSED as workspaces at both validation layers — privileged state is never an unattended opening turn's project — round-9: the spool record that used to be its only home is removed on success), explicit title, **never `set_active`** (a tool-created session must not steal focus) — and `first_message` is delivered as the opening plain user turn via `deliver_messaging_turn`; defaults inherit the app's new-session config, never the calling session's runtime state; `from_session` is required and prefix-checked — but it is a model-supplied claim (same unauthenticated-sender posture as the send arm: direct spool writes bypass the checks, and the audit append fails open for an EXISTING sender whose audit-root directory does not exist (round-58 R6c: a NONEXISTENT sender is refused outright by the existence probe, so the residual corner is the missing audit root on an existing sender) — the line lands only when the claimed sender's workspace exists; round-35 minor 5, joined by a fourth in round-38: the disclosed fail-open corners are FOUR (the design doc §2/§4(1) enumeration is the authority — it adds the round-65 R2-2 silent-skip triggers) — an existing sender whose audit-root directory does not exist (round-58 R6c reword of the former "charset-valid nonexistent sender directory" corner: nonexistent senders are refused outright by the existence probe), a non-UTF-8-name quarantine, a persistently failing audit sink, and a crash between the create and the audit append (that span replays on watcher restart — the record is consumed only after the marker write; the log line is the trace for the middle two)); a typed Ask rule is registered for the approval-mode split but does not prompt under the current full-auto approval — the working gates are the required-sender validation, the watcher-side isolation re-checks (sched-/eval_/aux-/agentic_ rejected as SENDER by the server and the watcher (round-23: headless runs join the isolated set — the target re-scope of read_session/list_sessions/send_message_to_session landed via #752, which this tree sits on)), the engine-side unattended-turn deny channel (the deterministic recursion shield — applied to the watcher-delivered opening turn as well since round-9 M6, closing attended→created recursion; round-21/#657: the shield list also denies the `agent` delegation tool — a model-supplied `inherit_disallowed_tools=false` would otherwise shed the preference denies in a spawned subagent, so the shed route is closed at the named-tool channel too), the payload digest (`request_digest` in the result marker; a divergent same-key resend answers `payload_mismatch:true` with a use-a-new-key note and is not applied — completed keys are terminal), and the audit kinds `session_create`/`session_create_failed` + `session:list_changed` emit. the watcher gates every create on the plain-chat retention budget (`plain_chat_budget_full()`): at the 50-chat cap it refuses with the honest "session budget full" error — a looping model cannot evict pre-existing conversations (round-17/#657; a listing failure spends a retry instead of poisoning); Failure semantics (round-54 wording): creation is at-least-once for the CRASH span only — the result marker is written after binding/title/first-message delivery (up to 30s), so a crash in that span can duplicate the session on the watcher's restart (the spool record is consumed after the marker write). A persistent MARKER-WRITE failure no longer duplicates in-process (round-45 M3, the scheduled sibling's ReceiptPending disposition): the applied outcome parks as a pending receipt, later polls re-publish the receipt and consume the record without re-applying, and duplication then requires a process restart before publication succeeds. Transient CREATOR failures keep the 3-attempts-per-episode budget (the budget clears on every terminal disposition and a terminal failure marker re-arms the key on the next call, so one key can see multiple 3-attempt episodes in one process; two corners qualify that re-arm (round-29 M2): a materially-replaced body at an exhausted name re-arms via the request-digest mismatch without any restart, while the sticky-quarantine corner keeps the exhausted budget stuck until the rename can succeed; the restart-rebuy is separate); permanent validation classes poison on the first attempt. A workspace-binding failure rolls back and deletes the empty session |

@@ -138,6 +138,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiBuiltinFeatures',
     'uiSessionMention',
     'uiSessionMessage',
+    'uiMegacube',
     'uiScheduledTaskTool',
   ]) {
     assert.ok(dict[language][section], `${language}.${section} must exist`);

@@ -1141,6 +1141,16 @@
         },
         "prometheusRulesEnabled": {
           "type": "boolean"
+        },
+        "retainedOutboxWarningBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "retainedHealthWarningBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         }
       }
     },

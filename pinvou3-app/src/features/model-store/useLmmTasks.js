@@ -55,6 +55,10 @@ const activeKeys = new Set();
 const cancelWanted = new Set();
 /** 已经有轮询循环挂着的 run_id。再附着时靠它去重,不会给同一次运行建两张卡。 */
 const attachedRuns = new Set();
+/** 用户在本会话内主动关掉的任务卡对应的 run_id——reattach 不得复活它们
+ * （r29 P2：关掉=不要了）。只在内存里，页面刷新后自动清空（全新会话
+ * 重新接回所有活跃运行是正确行为）。 */
+const dismissedRuns = new Set();
 
 let nextTaskId = 1;
 
@@ -131,8 +135,20 @@ function createTask({ key, kind, title, cardName, reattached = false }) {
       reattached,
       lines: [],
       status: 'running',
+      // `error` 是后端原文,`errorKey`/`errorDetail` 是前端这边回灌的结构化错误
+      // (由面板过 i18n 词典)。两套都在初始态列出来,免得「字段不存在」和
+      // 「字段被清成 null」在下游看起来是两回事。
       error: null,
+      errorKey: null,
+      errorDetail: null,
       progress: null,
+      // 阶段名(`LMM_STAGE=`)、粗粒度步骤(`LMM_STEP=`)、docker 层聚合表。
+      // 三样都由 reduceLogChunk 维护,见 model-store-logic.js。在这里一并列出初始值,
+      // 免得「字段不存在」和「字段是 null」在下游看起来是两回事。
+      stage: null,
+      step: null,
+      layers: null,
+      retainedNativeProcess: false,
       speed: null,
       prompt: null,
       samples: [],
@@ -158,19 +174,20 @@ function delay(ms) {
 /**
  * 把一次运行从头读到尾。
  * @param {string} runId - 运行 ID。
- * @param {{onChunk:(lines:Array<string>, meta:{awaitingInput:boolean|undefined})=>void, isAlive:()=>boolean, replayLimit?:number|null}} hooks - 行回调、存活判定与回放上限。
+ * @param {{onChunk:(lines:Array<string>, meta:{awaitingInput:boolean|undefined, retainedNativeProcess:boolean|undefined, backendPending:boolean|undefined, unconfirmed:boolean|undefined, historyTruncated:boolean|undefined})=>void, isAlive:()=>boolean, replayLimit?:number|null}} hooks - 行回调、存活判定与回放上限。
  * @returns {Promise<{ok?:boolean, cancelled?:boolean, result?:unknown, error?:unknown, aborted?:boolean}>} 终态。
  */
 async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
   let cursor = 0;
+  let fromByte = 0;
+  let partialLine = null;
   let failures = 0;
-  // 第一批可能是整段回放(再附着时游标从 0 起)。只有这一批要裁。
   let pendingReplayTrim = replayLimit !== null;
   for (;;) {
     if (!isAlive()) return { aborted: true };
     let chunk;
     try {
-      chunk = await pollRunLog(runId, cursor);
+      chunk = await pollRunLog(runId, cursor, undefined, fromByte);
       failures = 0;
     } catch (error) {
       failures += 1;
@@ -180,14 +197,48 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
       await delay(POLL_RETRY_MS);
       continue;
     }
-    cursor = Number(chunk?.next ?? cursor);
+    const retainedFrom = Number(chunk?.retained_from);
+    if (chunk?.history_truncated === true && Number.isSafeInteger(retainedFrom)
+      && retainedFrom > cursor && Number(chunk?.from) === retainedFrom) {
+      // The server explicitly retired this prefix. Start a fresh fragment at
+      // its absolute cursor rather than joining it onto an evicted line.
+      cursor = retainedFrom;
+      fromByte = 0;
+      partialLine = null;
+    }
+    const next = Number(chunk?.next ?? cursor);
+    const nextByte = Number(chunk?.next_byte ?? 0);
     let lines = chunk?.lines || [];
-    if (pendingReplayTrim) {
+    const fragment = chunk?.fragment;
+    if (fragment) {
+      if (fragment.line !== cursor + lines.length || fragment.offset !== fromByte
+        || (partialLine && partialLine.line !== fragment.line)) {
+        return { ok: false, error: 'invalid_log_fragment_cursor' };
+      }
+      partialLine ??= { line: fragment.line, parts: [] };
+      partialLine.parts.push(fragment.text);
+      if (fragment.complete) {
+        lines = [...lines, partialLine.parts.join('')];
+        partialLine = null;
+      }
+    } else if (partialLine) {
+      return { ok: false, error: 'missing_log_fragment' };
+    }
+    const more = next < Number(chunk?.total ?? next) || nextByte > 0;
+    if ((fragment || more) && next === cursor && nextByte <= fromByte) {
+      return { ok: false, error: 'log_cursor_did_not_advance' };
+    }
+    cursor = next;
+    fromByte = nextByte;
+    if (pendingReplayTrim && lines.length > 0) {
       pendingReplayTrim = false;
       if (lines.length > replayLimit) lines = lines.slice(-replayLimit);
     }
-    onChunk(lines, { awaitingInput: chunk?.awaiting_input });
-    if (chunk?.done) {
+    // A past prompt from a backlog page cannot be the current input request.
+    onChunk(lines, { awaitingInput: more ? false : chunk?.awaiting_input,
+      retainedNativeProcess: chunk?.retained_native_process === true,
+      backendPending: chunk?.backend_pending === true, unconfirmed: chunk?.unconfirmed === true, historyTruncated: chunk?.history_truncated === true });
+    if (chunk?.done && !more && !partialLine) {
       // done 之后再补一次零等待的轮询,把可能漏掉的收尾几行捞回来。
       //
       // 服务端取日志快照时,是先拿 lines 的锁、算完行数放掉,再去拿 outcome 的锁。
@@ -196,13 +247,20 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
       // 那几行从此拿不到——偏偏它们通常就是真正的错误原文。
       //
       // 窗口很窄,代价也只是一次本机调用,而且整个任务只发这一次。
-      try {
-        const tail = await pollRunLog(runId, cursor, 0);
-        if (tail?.lines?.length) onChunk(tail.lines, { awaitingInput: tail.awaiting_input });
-      } catch {
-        // 补捞失败不影响结论——结论在上一次响应里已经拿到了。
+      // Legacy servers can take the line snapshot before publishing outcome.
+      // New servers snapshot outcome first and expose total, so all terminal
+      // pages have already been consumed when this branch is reached.
+      if (chunk?.total == null) {
+        try {
+          const tail = await pollRunLog(runId, cursor, 0);
+          if (tail?.lines?.length) onChunk(tail.lines, { awaitingInput: tail.awaiting_input, retainedNativeProcess: tail.retained_native_process === true });
+        } catch {
+          // The already observed terminal outcome remains valid.
+        }
       }
-      return { ok: !!chunk.ok, cancelled: !!chunk.cancelled, result: chunk.result, error: chunk.error };
+      return { ok: !!chunk.ok, cancelled: !!chunk.cancelled, result: chunk.result, error: chunk.error,
+        ...(chunk.result_truncated ? { resultTruncated: true } : {}),
+        ...(chunk.error_truncated ? { errorTruncated: true } : {}) };
     }
   }
 }
@@ -225,7 +283,7 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
   // 用户可能在 run_id 回来之前就点了取消。那一刻 cancelRun 无处可发,意图被记在
   // cancelWanted 里,这里补发——否则作业会照跑到底,而卡片永远停在"取消中…"。
   if (cancelWanted.delete(id)) {
-    cancelRun(runId).catch(() => {});
+    sendCancellation(id, runId);
   }
   return drainRun(runId, {
     replayLimit,
@@ -233,14 +291,19 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
     // 几十 GB 的下载失去进度和取消入口。用户在面板上关掉任务卡才算真的不要了。
     isAlive: () => taskList.some((task) => task.id === id),
     onChunk: (lines, meta) => {
-      if (lines.length === 0) return;
+      if (lines.length === 0 && !meta?.historyTruncated && !meta?.backendPending && !meta?.unconfirmed && !findTask(id)?.backendPending && !findTask(id)?.unconfirmed) return;
       patch(id, (task) => {
-        const next = reduceLogChunk(task, lines, Date.now());
+        const next = { ...(lines.length ? reduceLogChunk(task, lines, Date.now()) : task), historyTruncated: task.historyTruncated || meta?.historyTruncated === true, backendPending: meta?.backendPending === true, unconfirmed: meta?.unconfirmed === true };
         // 服务端说现在没人在等输入,那日志里这条提示就是**上一轮已经答过的**。
         // 回放时再弹一次不只是多点一下:用户填的答案会写进一个没人来取的应答槽,
         // 等脚本下一次真的提问时被这份陈答案顶掉(双机部署里那就是拿旧 IP 去连
         // 从机)。只在服务端明确说"没在等"时清掉,不因为它说"在等"而凭空弹出来。
-        return meta?.awaitingInput === false ? { ...next, prompt: null } : next;
+        const answered = meta?.awaitingInput === false ? { ...next, prompt: null } : next;
+        // 「保留原生进程」的结构化声明只升不降:回放裁剪会丢掉声明行,而这个入口
+        // (二次确认停用)恰恰要在任务过期后仍然常驻——行可以裁,声明不能裁。
+        return meta?.retainedNativeProcess === true
+          ? { ...answered, retainedNativeProcess: true }
+          : answered;
       });
     },
   });
@@ -265,7 +328,12 @@ function settleTask(id, outcome) {
   // 用户点的取消在底层也是一个 Err,但对用户是两回事:一个是"你自己停的",
   // 一个是"它炸了"。界面不该把两者显示成一样,更不该把取消的任务展开日志吓唬人。
   if (outcome.cancelled) {
-    patch(id, () => ({ status: 'cancelled', error: null, prompt: null }));
+    // 三个错误字段一起清。`errorKey`/`errorDetail` 是取消 / 作答那次 IPC 自己
+    // 失败时回灌的**临时**错误(见 cancelTask、answerTask):它说的是「那一条命令
+    // 没送到」,不是这次运行的结局。只清 `error` 的话,终态卡会挂着一条陈旧的
+    // 「取消没有生效」红字——而这会儿恰恰是真取消成功了——顺带把「已取消」这个
+    // 副标题顶掉,用户看到的是自相矛盾的两句话。
+    patch(id, () => ({ status: 'cancelled', error: null, errorKey: null, errorDetail: null, prompt: null }));
     const result = { ok: false, cancelled: true };
     notifySettled(task, result);
     return result;
@@ -273,15 +341,22 @@ function settleTask(id, outcome) {
   if (outcome.ok) {
     // 成功的任务直接从面板上移除,由调用方用一条 toast 报喜。
     dropTask(id);
-    const result = { ok: true, result: outcome.result };
+    const result = { ok: true, result: outcome.result,
+      ...(outcome.resultTruncated ? { resultTruncated: true } : {}) };
     rememberTaskOperationResult(task, result);
     notifySettled(task, result);
     return result;
   }
   const message = outcome.error ? String(outcome.error) : '';
   // 失败的任务留在面板上并自动展开日志,用户可以看清原因再手动关掉。
-  patch(id, () => ({ status: 'error', error: message, prompt: null, expanded: true }));
-  const result = { ok: false, error: message };
+  // 同样要清掉临时的 `errorKey`:真正的失败原因已经写进 `error` 了,残留的
+  // 「取消没有生效」会在词典优先级下盖掉它,让红字行和展开日志各说一套。
+  // errorTruncated 要保留:它驱动「错误说明已摘要」提示,与上面的清理正交。
+  patch(id, () => ({ status: 'error', error: message, errorKey: null, errorDetail: null,
+    ...(outcome.errorTruncated ? { errorTruncated: true } : {}),
+    prompt: null, expanded: true }));
+  const result = { ok: false, error: message,
+    ...(outcome.errorTruncated ? { errorTruncated: true } : {}) };
   notifySettled(task, result);
   return result;
 }
@@ -295,7 +370,8 @@ function settleTask(id, outcome) {
 function failTask(id, error) {
   const message = String(error?.message || error);
   const task = findTask(id);
-  patch(id, () => ({ status: 'error', error: message, prompt: null, expanded: true }));
+  // 与 settleTask 的失败分支同理:临时的 `errorKey` 不能盖住真正的失败原因。
+  patch(id, () => ({ status: 'error', error: message, errorKey: null, errorDetail: null, prompt: null, expanded: true }));
   notifySettled(task, { ok: false, error: message });
   return message;
 }
@@ -346,6 +422,8 @@ function reattachRuns(runs, describe) {
   for (const run of runs || []) {
     const runId = run?.run_id;
     if (!runId || attachedRuns.has(runId)) continue;
+    // r29 P2：用户本会话关掉的任务卡不再接回（关掉=不要了）。
+    if (dismissedRuns.has(runId)) continue;
     const meta = describe(run);
     // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了取消
     // 的任务卡。
@@ -389,11 +467,40 @@ async function reattachActiveRuns(describe) {
  * @param {number} id - 任务 id。
  * @returns {void} 无返回。
  */
+function sendCancellation(id, runId) {
+  // **取消命令自己失败了**，不是「运行已结束」那种正常落空。被拒绝/未确认的取消
+  // 不等于取消成功:继续轮询已受理的任务,让用户重试取消。
+  //
+  // 此刻卡片已经被 patch 成 `cancelling`、取消按钮已经禁用。不把这件事回灌
+  // 上去的话，一次几十分钟到十几小时的下载会顶着「正在取消」一路跑完：用户
+  // 既取消不了，也看不到任何报错，只能以为界面卡住了。
+  //
+  // 不能走 `failTask`——那会把整张卡判死并广播 settled，而运行大概率还在继续，
+  // 轮询循环仍然会送回它真正的结果，两边会打架。这里只做两件事：把状态退回
+  // `running` 让按钮重新可点，并把原因显示出来。双出口：`cancelError` 是卡片上
+  // 的常驻 alert（taskCancelUnconfirmed），`errorKey`/`errorDetail` 走任务卡的
+  // 错误行（taskCancelFailed 三语表）。
+  cancelRun(runId).catch((error) => {
+    patch(id, (task) => {
+      // r43 P2：轮询可能已经把任务落成终态（error/cancelled）——这时回灌
+      // 「取消失败」会把真正的结局盖掉。终态一概不动。
+      if (task.status === 'error' || task.status === 'cancelled') return {};
+      return {
+        status: task.status === 'cancelling' ? 'running' : task.status,
+        cancelError: String(error?.message || error),
+        expanded: true,
+        errorKey: 'taskCancelFailed',
+        errorDetail: String(error?.message || error),
+      };
+    });
+  });
+}
+
 function cancelTask(id) {
   const runId = runIds.get(id);
-  patch(id, () => ({ status: 'cancelling', prompt: null }));
+  patch(id, () => ({ status: 'cancelling', prompt: null, cancelError: null }));
   if (runId) {
-    cancelRun(runId).catch(() => {});
+    sendCancellation(id, runId);
   } else {
     // run_id 还没回来。记下意图,等它落地时补发(见 pumpRun)。
     cancelWanted.add(id);
@@ -408,8 +515,46 @@ function cancelTask(id) {
  */
 function answerTask(id, value) {
   const runId = runIds.get(id);
+  // 先把这条提示存下来再清空：送达失败时要原样放回去，而下面那行 patch 一执行
+  // 就再也读不到它了。
+  const pendingPrompt = findTask(id)?.prompt ?? null;
   patch(id, () => ({ prompt: null, status: value === null ? 'cancelling' : 'running' }));
-  if (runId) answerRun(runId, value).catch(() => {});
+  if (runId) {
+    // 成败两支都要落状态,所以用两参数的 `then` 而不是 `.then().catch()`——后者
+    // 会让成功支里的异常掉进失败支,把一张好卡渲染成「作答没送达」。
+    answerRun(runId, value).then(
+      () => {
+        // 重试成功了,把上一次「这次作答没有送达」的红字撤掉。没有这一步,一张
+        // 还在跑的卡会一路挂着那句已经不成立的话,直到终态才被清掉。
+        //
+        // **只在 key 仍然是它本人时才清**:这中间用户完全可能点过取消、而那次
+        // 取消又失败了(errorKey 已经变成 taskCancelFailed),无条件清会把那条
+        // 更晚、更要紧的错误一起抹掉。
+        patch(id, (task) => {
+          if (task.status === 'error' || task.status === 'cancelled') return {};
+          return task.errorKey === 'taskAnswerFailed' ? { errorKey: null, errorDetail: null } : {};
+        });
+      },
+      (e) => {
+        // 答案没送到，而脚本还阻塞在它那次 `read` 上——600 秒后会被
+        // `PROMPT_TIMEOUT` 判死。上面已经把 `prompt` 清掉了，不回灌的话用户看到的
+        // 是「输入框消失了，然后十分钟后任务莫名失败」。
+        //
+        // 把提示原样放回去（让用户能再答一次）并显示原因。同样不走 `failTask`：
+        // 判死这张卡的权力属于轮询循环。
+        patch(id, (task) => {
+          // r43 P2：同 cancelTask——终态后不再回灌输入框/错误，结局优先。
+          if (task.status === 'error' || task.status === 'cancelled') return {};
+          return {
+            prompt: task.prompt ?? pendingPrompt,
+            status: task.status === 'cancelling' ? 'running' : task.status,
+            errorKey: 'taskAnswerFailed',
+            errorDetail: String(e?.message || e),
+          };
+        });
+      }
+    );
+  }
 }
 
 /**
@@ -418,6 +563,9 @@ function answerTask(id, value) {
  * @returns {void} 无返回。
  */
 function dismissTask(id) {
+  // r29 P2：记下 run_id，reattach 不再复活这张已关掉的卡。
+  const runId = runIds.get(id);
+  if (runId) dismissedRuns.add(runId);
   dropTask(id);
 }
 

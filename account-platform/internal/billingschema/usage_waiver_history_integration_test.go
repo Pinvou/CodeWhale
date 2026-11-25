@@ -114,10 +114,14 @@ func TestUsageWaiverHistoricalSchemaPostgres(t *testing.T) {
 	}
 	t.Run("fresh-exact-history-append-only-runtime-and-forward-only", func(t *testing.T) {
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
-		if err := Up(ctx, c, loaded); err != nil {
+		prefix := statisticsRollbackPrefix(loaded)
+		if err := Up(ctx, c, prefix); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := VerifyApplied(ctx, c, loaded); err != nil {
+		if err := migrations.Unlock(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyApplied(ctx, c, prefix); err != nil {
 			t.Fatal(err)
 		}
 		var original string
@@ -140,14 +144,11 @@ func TestUsageWaiverHistoricalSchemaPostgres(t *testing.T) {
 				}
 			}
 		}
-		before := stageShape(t, ctx, c)
-		ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
-		assertHistoricalBillingRollback(t, ctx, f.database(t, ctx, "billing", "billing_schema_owner"), loaded, 900024, "P0001", "administrator waiver commands and outcomes are forward-only")
-		assertBillingCurrentReplay(t, ctx, c, loaded)
-		migrations.Unlock(ctx, c)
-		if before != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) {
-			t.Fatal("failed rollback changed shape/ledger")
-		}
+		testStatisticsHeadRoundTrip(t, ctx, c, loaded, usageWaiverEvidenceFacts)
+	})
+	t.Run("historical-900024-forward-only", func(t *testing.T) {
+		c := f.database(t, ctx, "billing", "billing_schema_owner")
+		testHistoricalEvidenceRefusal(t, ctx, c, loaded, usageWaiverVersion, "administrator waiver commands and outcomes are forward-only", usageWaiverEvidenceFacts)
 	})
 	for _, kind := range []string{"old-LF", "old-CRLF", "unknown-checksum", "wrong-legacy-shape"} {
 		t.Run(kind, func(t *testing.T) {

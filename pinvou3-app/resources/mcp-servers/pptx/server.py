@@ -14,7 +14,9 @@ pinvou_pptx —— spec 驱动的本地 PPT 渲染器（Phase A：10 版式 + 3 
 import copy
 import json
 import os
+import stat
 import sys
+import tempfile
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -540,7 +542,6 @@ def _inject_thumbnail(pptx_path, jpeg_bytes):
     剥离时连 .rels 里的 thumbnail 关系一起删(悬空关系会让严格解析器报错),
     前端读不到缩略图即回退紧凑图标态。两种模式共用同一次包重写。"""
     import zipfile
-    import shutil
     import re
     tmp = pptx_path + ".tmp"
     with zipfile.ZipFile(pptx_path, "r") as zin:
@@ -567,7 +568,7 @@ def _inject_thumbnail(pptx_path, jpeg_bytes):
             zout.writestr("_rels/.rels", rels)
             if jpeg_bytes:
                 zout.writestr("docProps/thumbnail.jpeg", jpeg_bytes)
-    shutil.move(tmp, pptx_path)
+    os.replace(tmp, pptx_path)
 
 
 def render(spec, out_path):
@@ -622,7 +623,7 @@ def _safe_join(base, name):
         full = os.path.join(base_abs, "演示文稿.pptx")
     stem, ext = os.path.splitext(full)
     i = 1
-    while os.path.exists(full):                          # 重名加序号
+    while os.path.lexists(full):                         # 重名加序号
         full = "%s(%d)%s" % (stem, i, ext)
         i += 1
     return full
@@ -678,6 +679,24 @@ def _coerce_slides(slides):
     return out
 
 
+_session_artifacts_dir = None
+
+
+def _prepare_session_artifacts_dir(directory):
+    if not os.path.isabs(directory):
+        raise OSError("Invalid session output directory")
+    session = os.path.dirname(directory)
+    # The application can relocate its sessions root. Reject redirects below
+    # that trust anchor, where each session and its artifacts have one owner.
+    for path in (session, directory):
+        os.makedirs(path, exist_ok=True)
+        metadata = os.lstat(path)
+        if not stat.S_ISDIR(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise OSError("Redirected session output directory")
+
+
 def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
     # 模型常把 slides 序列化成 JSON 字符串传入,且大纲一长就容易生成非法 JSON。
     # _coerce_slides 严格失败时逐个抢救顶层 {...}(坏页跳过);彻底空则下面 loud error,
@@ -693,15 +712,33 @@ def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
     # 绝不用 os.getcwd() —— MCP server 的 cwd 是 app 安装目录(release 下是 Program Files,
     # 写入会因无权限直接失败,且文件也不该落进程序目录)。
     _default_art = os.path.join(os.path.expanduser("~"), ".pinvou3", "sessions", "default", "artifacts")
-    art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or _default_art
+    if _session_artifacts_dir is not None:
+        art = _session_artifacts_dir
+        try:
+            _prepare_session_artifacts_dir(art)
+        except OSError:
+            return {"ok": False, "error": "无法创建已配置的 PPT 产物目录。"}
+    else:
+        art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or _default_art
+        try:
+            os.makedirs(art, exist_ok=True)
+        except OSError:
+            art = os.path.join(os.path.expanduser("~"), ".pinvou3")
+            os.makedirs(art, exist_ok=True)
+    name = _sanitize_filename(filename) + ".pptx"
+    spec = {"theme": theme, "slides": slides}
     try:
-        os.makedirs(art, exist_ok=True)
-    except Exception:
-        art = os.path.join(os.path.expanduser("~"), ".pinvou3")
-        os.makedirs(art, exist_ok=True)
-    out = _safe_join(art, _sanitize_filename(filename) + ".pptx")
-    try:
-        n = render({"theme": theme, "slides": slides}, out)
+        if _session_artifacts_dir is None:
+            out = _safe_join(art, name)
+            n = render(spec, out)
+        else:
+            # The remote inventory scans this directory as soon as the turn
+            # succeeds. Publish only a completed deck, on the same filesystem.
+            with tempfile.TemporaryDirectory(prefix=".pptx-", dir=art) as stage:
+                pending = os.path.join(stage, "deck.tmp")
+                n = render(spec, pending)
+                out = _safe_join(art, name)
+                os.replace(pending, out)
         return {"ok": True, "path": out, "slides": n, "theme": theme}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -738,19 +775,19 @@ def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
 # ≤30, enum values ≤1000, enum literals ≤75000 bytes; encoded bytes 120000
 # and the enum-length check threshold 250 unchanged; source comparison, not
 # a documented clause). Loosening them means changing the CodeWhale
-# constants and syncing the parent-repo mirror scripts. Note: the aligned
-# budgets only take effect once the T11 engine batch (CodeWhale #143–#147)
-# lands on the parent gitlink through the close-out re-pin PR; the currently
-# pinned engine is still the pre-T11 face whose anyOf branch cap is in fact
-# 10 — this schema's 10 branches sit exactly at that cap, so adding a layout
-# before the re-pin hits the 10-branch cap first (the pinned engine's
-# sanitizer then omits the make_pptx tool from that request with a warning
-# while the remaining tools still ship, and the build fails outright only
-# when an explicit tool_choice forces the omitted tool); only after the
-# re-pin is it "just add a branch". The union
-# itself is already legal on the current engine: nested multi-branch anyOf
+# constants and syncing the parent-repo mirror scripts. The T11 engine batch
+# (CodeWhale #143–#147) landed on the parent gitlink through the close-out
+# re-pin (2026-11-24, cc2adf8ef9), so the pinned engine now enforces these
+# aligned budgets directly: the union's ceiling is the layout count and
+# adding a layout is "just add a branch". (Historical pre-T11 window: the
+# engine's anyOf branch cap was 10 and this schema's 10 branches sat exactly
+# at that cap, so a new layout made the pinned engine omit the make_pptx
+# tool from that request with a warning while the remaining tools still
+# shipped; the build failed outright only when an explicit tool_choice
+# forced the omitted tool.) The union
+# itself is legal on the current engine: nested multi-branch anyOf
 # is kept and accepted as-is (flattening happens only at the root
-# combination level), with no need to wait for the re-pin.
+# combination level).
 def _slides_item_branch(layout, layout_label, required, blurb, fields):
     """Build one per-layout branch of slides.items: explicit type:object
     plus that layout's own required.
@@ -1023,6 +1060,11 @@ def _handle(msg):
 
 
 def main():
+    global _session_artifacts_dir
+    prefix = "--session-artifacts-dir="
+    _session_artifacts_dir = next(
+        (arg[len(prefix):] for arg in sys.argv[1:] if arg.startswith(prefix)), None
+    )
     for line in sys.stdin:
         line = line.lstrip("﻿").strip()
         if not line:

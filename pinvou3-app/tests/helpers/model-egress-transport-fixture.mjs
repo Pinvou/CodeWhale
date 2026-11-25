@@ -29,7 +29,7 @@ try {
     '-keyout', join(root, 'test-root.key'), '-out', join(root, 'test-root.pem')], {stdio: 'ignore'});
   execFileSync(openssl, ['req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=primary.invalid',
     '-keyout', join(root, 'test-only.key'), '-out', join(root, 'test-only.csr')], {stdio: 'ignore'});
-  await writeFile(join(root, 'leaf.ext'), 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:primary.invalid,DNS:vision.invalid,IP:127.0.0.1\n');
+  await writeFile(join(root, 'leaf.ext'), 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:primary.invalid,DNS:vision.invalid\n');
   execFileSync(openssl, ['x509', '-req', '-in', join(root, 'test-only.csr'), '-CA', join(root, 'test-root.pem'),
     '-CAkey', join(root, 'test-root.key'), '-CAcreateserial', '-days', '1', '-extfile', join(root, 'leaf.ext'),
     '-out', join(root, 'test-only.pem')], {stdio: 'ignore'});
@@ -39,6 +39,8 @@ try {
   proxy.on('connect', (_req, socket) => {counts.proxy++; socket.destroy();});
   const proxyPort = await listen(proxy);
   const model = role => https.createServer(tls, (req, res) => {
+    assert.equal(req.socket.servername, role + '.invalid');
+    assert.equal(req.headers.host, role + '.invalid:' + req.socket.localPort);
     if (req.url.endsWith('/redirect')) {
       counts.redirect++; res.writeHead(302, {Location: `https://127.0.0.1:${trapPort}/trap`}).end();
     } else {counts[role]++; res.end('owned TLS response');}

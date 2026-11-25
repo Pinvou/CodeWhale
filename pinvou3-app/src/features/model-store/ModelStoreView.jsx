@@ -15,33 +15,33 @@ import { dismissModelStoreOperationResult, rememberForceRemoveResult } from './o
 //
 // 依赖方向 features -> components/shared/platform,不得反向引用 app/。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Database, Package, RefreshCw } from '../../components/icons.jsx';
+import { AlertTriangle, Package, RefreshCw } from '../../components/icons.jsx';
 import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { IosSearchField } from '../../components/IosControls.jsx';
 import {
-  startVersionAction,
-  disableTestStore,
   fetchLibrary,
+  fetchMemoryAdmission,
+  startVersionAction,
   fetchSavedModels,
   fetchStoreCards,
-  fetchTestStoreState,
   forceRemoveModel,
   startDeploy,
   startCardUpdate,
   startDownload,
+  retryIncomplete,
   startEnable,
   startStop,
   startUninstall,
+  startMaintenanceRecovery,
   storeAvailability,
   takeStartupCleanup,
-  unlockTestStore,
 } from './model-store-api.js';
 import {
-  advanceUnlockClicks,
   selectedDeployProfile,
   deployProfileLabel,
   cardIdFromLifecycleKey,
+  canStopRetainedProcess,
   downloadTaskKey,
   filterModels,
   formatBytes,
@@ -56,6 +56,7 @@ import {
 } from './model-store-logic.js';
 import { tryGetTauriBridge } from '../../platform/tauri/client.js';
 import { findCardLinkedRows } from './pinvou-model-link.js';
+import { updateScriptsWithCleanup } from './update-scripts-workflow.js';
 // 发起/取消/应答/关闭都是模块级函数,身份恒定。直接引用而不是从 hook 的返回值上
 // 取,这样下面那些 useCallback 的依赖数组才是稳的——挂在 hook 返回对象上的话,
 // 每来一批日志行都会让它们全部重建。
@@ -70,16 +71,22 @@ import {
   useLmmTasks,
 } from './useLmmTasks.js';
 import { StoreGuide } from './ModelStoreCards.jsx';
-import { ModelRow } from './ModelRow.jsx';
+import { MemoizedModelRow as ModelRow } from './ModelRow.jsx';
 import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
+import { DownloadCenterView, floatingDownloadTasks, downloadBadgeCount } from './DownloadCenterView.jsx';
+import { MaintenanceRecoveryPanel } from './MaintenanceRecoveryPanel.jsx';
+import { IncompleteInstallPanel, describeIncompleteError } from './IncompleteInstallPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
 import { StoreCardDialog } from './StoreCardDialog.jsx';
 import { StorageSettingsDialog } from './StorageSettingsDialog.jsx';
+import { EngineManagementDialog } from './EngineManagementDialog.jsx';
+import { LocalResourcesDialog } from './LocalResourcesDialog.jsx';
+import { ResourceManagerDialog } from './ResourceManagerDialog.jsx';
+import { MemoryAdmissionDialog } from './MemoryAdmissionDialog.jsx';
 import {
   BTN_NEUTRAL,
   HOVER_SURFACE,
-  INPUT_CLASS,
   MsButton,
   MsDialog,
   MsDialogTitle,
@@ -90,9 +97,11 @@ import {
 
 const TOAST_MS = 3200;
 
-// 顶部那一行胶囊按钮的规格。筛选和数据源切换共用 —— 它们在同一行里并排出现,
-// 差一档字重或一像素高度都会被看出来。
-// 口令框刻意不给关闭回调:见下面用到它的地方。提到模块级是为了保持引用稳定,
+// 顶部那一行筛选胶囊的规格。
+//
+// 这一行原来还并排着一组「数据源」胶囊(正式商店 / 测试商店),内置测试商店
+// 2026-09-30 拿掉之后只剩筛选了。
+// 强制移除那个框刻意不给关闭回调(忙的时候不许关):提到模块级是为了保持引用稳定,
 // 否则 MsDialog 里那个按 Escape 的监听会跟着每次重渲染反复装卸。
 const NOOP = () => {};
 
@@ -148,19 +157,17 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   // 「存储与导入」设置框。权重目录跟用户实际存放位置对不上时，下载会白跑几十
   // 个小时而界面上看不出异常,所以这个入口是常驻的,不藏。
   const [storageOpen, setStorageOpen] = useState(false);
+  // 两个资源管理入口必须常驻：模型商店不只是下载页，用户也要能看见并处理本机
+  // 已有的引擎和外部权重。它们各自按打开时刷新，避免首页加载被慢扫描拖住。
+  const [enginesOpen, setEnginesOpen] = useState(false);
+  const [localResourcesOpen, setLocalResourcesOpen] = useState(false);
+  const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
+  // 二次内存确认只在“已有模型运行且风险/预算未知”时出现。首个模型不拦截。
+  const [memoryConfirm, setMemoryConfirm] = useState(null);
+  const [retainedStop, setRetainedStop] = useState(null);
 
-  // 测试模型商店:卡片和脚本打包在 LMM 内、不依赖商店服务器,只给开发验证脚本
-  // 本身用。所以它默认关着,而且开关是**隐藏**的 —— 见下面 handleSecretUnlockClick。
-  const [testStoreEnabled, setTestStoreEnabled] = useState(false);
-  // 数据源。开启测试商店只是多一个数据源,界面还是同一套。
-  const [source, setSource] = useState('official');
-  const [unlockOpen, setUnlockOpen] = useState(false);
-  const [unlockInput, setUnlockInput] = useState('');
-  // 连点计数放 ref 不放 state:它不该触发重渲染,而且必须能在同一次事件序列里
-  // 立刻读到最新值 —— 用 state 的话闭包里拿到的是上一次的旧值。
-  const unlockClicksRef = useRef(null);
-
-  const testMode = source === 'test';
+  // 这里原来有一整套「测试模型商店」的状态:开关、数据源胶囊、口令框、以及连点
+  // 计数的 ref。内置测试商店 2026-09-30 整体拿掉,数据源只剩生产商店一个。
 
   const { tasks, runningTask } = useLmmTasks();
   const toastTimerRef = useRef(null);
@@ -169,6 +176,8 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   // 那个判成过期。
   const cardsTokenRef = useRef(0);
   const libraryTokenRef = useRef(0);
+  const libraryInFlight = useRef(0);
+  const linkSyncErrorRef = useRef(null);
 
   const showToast = useCallback((text) => {
     setToast({ text });
@@ -193,33 +202,36 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   // 加载商店在架卡片。
   //
   // 序号那道闸门:慢的旧响应落地时能认出自己已经过期,直接丢掉。没有它的话,
-  // 切数据源胶囊(testMode 变化 → effect 重跑)、加载中点刷新、后台任务完成触发的
-  // 刷新跟用户操作撞在一起,都会产生并发请求;先发的那个若后回来,就会把新数据
-  // 覆盖成旧数据——界面显示的卡片跟当前数据源对不上,而转圈早被先落地的那个关掉了。
+  // 加载中点刷新、后台任务完成触发的刷新跟用户操作撞在一起,都会产生并发请求;
+  // 先发的那个若后回来,就会把新数据覆盖成旧数据,而转圈早被先落地的那个关掉了。
   // 同 PR 的 ModelDetailDialog 用的是同一个套路。
   const loadCards = useCallback(async () => {
     const token = (cardsTokenRef.current += 1);
     const stale = () => token !== cardsTokenRef.current;
     setStoreLoading(true);
     try {
-      const cardList = await fetchStoreCards(testMode);
+      const cardList = await fetchStoreCards();
       if (stale()) return;
       setCards(Array.isArray(cardList) ? cardList : []);
       setStoreError(null);
     } catch (error) {
-      // 过期请求的失败也要丢掉:否则切到测试商店之后,正式商店那次的超时
-      // 会把已经加载好的测试商店列表打成错误态。
+      // 过期请求的失败也要丢掉:否则一次已经被取代的超时会把后来加载好的列表
+      // 打成错误态。
       if (!stale()) setStoreError(String(error?.message || error));
     } finally {
       if (!stale()) setStoreLoading(false);
     }
-  }, [testMode]);
+  }, []);
 
   /** 加载本地模型库。纯本进程查询,不该跟着远端商店一起失败,所以单独一条路。 */
-  const loadLibrary = useCallback(async () => {
+
+  const loadLibrary = useCallback(async (options) => {
+    const quiet = options?.quiet === true;
+    if (quiet && libraryInFlight.current > 0) return;
+    libraryInFlight.current += 1;
     const token = (libraryTokenRef.current += 1);
     const stale = () => token !== libraryTokenRef.current;
-    setLibraryLoading(true);
+    if (!quiet) setLibraryLoading(true);
     try {
       const libraryList = await fetchLibrary();
       if (stale()) return;
@@ -230,10 +242,24 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // 已经不在了,不说一声他会以为模型还在服务。
       const corrected = libraryList?.corrected ?? [];
       if (corrected.length > 0) showToast(copy.corrected(corrected[0]));
-      if (libraryList?.link_sync_error) showToast(copy.linkSyncFailed(libraryList.link_sync_error));
+      // MegaCube 管理面融合纠正单独提示：事实源是 cmsd 实况而非容器探测
+      const cmsdCorrected = libraryList?.cmsd_corrected ?? [];
+      if (cmsdCorrected.length > 0) showToast(copy.cmsdCorrected(cmsdCorrected[0]));
+      // r11 P2-11：持久 link_sync_error 在 5s 轮询下每轮重弹同一条 toast，
+      // 故障持续时无法关闭。轮询路径按错误文本去重（仅弹一次）。
+      if (libraryList?.link_sync_error) {
+        const message = String(libraryList.link_sync_error);
+        if (!quiet || linkSyncErrorRef.current !== message) {
+          linkSyncErrorRef.current = message;
+          showToast(copy.linkSyncFailed(libraryList.link_sync_error));
+        }
+      } else {
+        linkSyncErrorRef.current = null;
+      }
     } catch (error) {
       if (!stale()) setLibraryError(String(error?.message || error));
     } finally {
+      libraryInFlight.current -= 1;
       if (!stale()) setLibraryLoading(false);
     }
   }, [copy, showToast, onLibrarySnapshot]);
@@ -247,6 +273,41 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     await Promise.all([loadCards(), loadLibrary()]);
   }, [loadCards, loadLibrary]);
 
+  // 自动检测脚本更新：卡片列表的 script_sha256（服务器当前版）vs 本地
+  // local_script_hashes（上次缓存的版本）。有差异 → 该卡有可用更新。
+  // 前端做比对而不是后端：两个数据源（远程卡片列表 + 本地库）本来就分开加载。
+  const scriptUpdates = useMemo(() => {
+    const map = {};
+    if (!Array.isArray(cards) || !library?.models) return map;
+    for (const model of library.models) {
+      const card = cards.find((c) => c.id === model.card_id);
+      if (!card?.script_sha256) continue;
+      const local = model.local_script_hashes || {};
+      const server = card.script_sha256;
+      // 服务端空 map 必须整卡跳过（P2-2）。老后台不下发 script_sha256 时，
+      // 后端 serde 缺省成 `{}`（store_client.rs 的注释也承诺「比对逻辑会跳过」），
+      // 而 `{}` 是 truthy，上面那句判空挡不住它；一旦放行进比对，本地任何非空
+      // 哈希都会被算成「服务器版本不同」→ 该卡全部已装模型挂上假「有可用更新」。
+      // 用户确认更新后流程先停运行中模型、再去服务端拉新脚本——服务端根本没有
+      // 脚本，只能失败收场，留下一个被无谓停掉的模型。
+      // 只跳过服务端空的一侧：本地空 map（升级前的老安装没记过哈希）且服务端
+      // 也没下发时，两侧本就无差异、仍按无更新处理；服务端真有脚本时照常比对。
+      if (Object.keys(server).length === 0) continue;
+      const types = new Set([...Object.keys(local), ...Object.keys(server)]);
+      for (const t of types) {
+        // P2-16（r24）：SHA-256 是十六进制串，大小写不影响值但影响严格等值。
+        // 后端 verify 侧已用 eq_ignore_ascii_case；前端严格 !== 会在服务端
+        // 下发大写 digest 时把同版脚本误判为「有可用更新」→ 确认更新后
+        // updateScriptsWithCleanup 先停运行中模型再拉一个零变化更新。
+        if (String(local[t] || '').toLowerCase() !== String(server[t] || '').toLowerCase()) {
+          map[model.card_id] = true;
+          break;
+        }
+      }
+    }
+    return map;
+  }, [cards, library]);
+
   const guide = storeGuideState(status);
 
   useEffect(() => {
@@ -258,6 +319,21 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 确认这个平台有模型商店之后才去拉商店和本地库
     if (guide === 'ready') loadAll();
   }, [guide, loadAll]);
+
+  // MCP and other windows can change the runtime without a store task in this renderer.
+  useEffect(() => {
+    if (guide !== 'ready') return undefined;
+    const refresh = () => { if (document.visibilityState !== 'hidden') loadLibrary({ quiet: true }); };
+    const timer = setInterval(refresh, 5000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      libraryTokenRef.current += 1;
+    };
+  }, [guide, loadLibrary]);
 
   // 启动清理的结果：上次应用被强杀/崩溃后残留的脚本进程，这一轮启动时收掉了哪些。
   //
@@ -284,68 +360,6 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       alive = false;
     };
   }, [copy, guide, showToast]);
-
-  // 进页面读一次测试商店开关。sidecar 没起来时不问 —— 那只会拿到一个连接错误。
-  //
-  // 拿不到就当它关着:老版本 LMM 没有这条接口,而"问不出来"和"没开"在界面上
-  // 应该是同一个样子 —— 一点痕迹都不留。
-  useEffect(() => {
-    if (guide !== 'ready') return undefined;
-    let cancelled = false;
-    fetchTestStoreState()
-      .then((state) => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- 开关存在 LMM 那边(另一个进程),只能这样同步进来
-        if (!cancelled) setTestStoreEnabled(!!state?.enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [guide]);
-
-  // 隐藏入口:连点页面标题 7 次(间隔不超过 1.5 秒)才弹口令框,见 advanceUnlockClicks。
-  //
-  // 全程不给任何提示 —— 提示等于把入口告诉了所有人,那这个入口就白藏了。
-  const handleSecretUnlockClick = useCallback(() => {
-    if (testStoreEnabled) return; // 已经开着,不用再点
-    const next = advanceUnlockClicks(unlockClicksRef.current, Date.now());
-    unlockClicksRef.current = next;
-    if (next.reached) setUnlockOpen(true);
-  }, [testStoreEnabled]);
-
-  const closeUnlock = useCallback(() => {
-    setUnlockOpen(false);
-    setUnlockInput('');
-  }, []);
-
-  const submitUnlock = useCallback(async () => {
-    try {
-      const result = await unlockTestStore(unlockInput);
-      // 口令错回的是 ok:false 而不是 HTTP 错误,所以走的是这条正常路径:只提示
-      // 一句、把框留着让用户重输,而不是当成故障把框关掉。
-      if (!result?.ok) {
-        showToast(copy.testStoreWrongPassword);
-        return;
-      }
-      closeUnlock();
-      setTestStoreEnabled(true);
-      showToast(copy.testStoreUnlocked);
-    } catch (error) {
-      showToast(String(error?.message || error));
-    }
-  }, [closeUnlock, copy, showToast, unlockInput]);
-
-  const handleDisableTestStore = useCallback(async () => {
-    try {
-      await disableTestStore();
-      setTestStoreEnabled(false);
-      // 数据源切回正式商店:测试卡片这时已经拉不到了,留在测试源上只会得到一片空。
-      setSource('official');
-      showToast(copy.testStoreDisabled);
-    } catch (error) {
-      showToast(String(error?.message || error));
-    }
-  }, [copy, showToast]);
 
   // 这里原来有一整套「拉起 sidecar」的流程：handleStart、starting/startError 两个
   // 状态、一个"只自动试一次"的 autoStartedRef，以及引导区那个「启动」按钮。
@@ -378,7 +392,11 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       if (!cardId) return null;
       const model = mergedModels.find((item) => item.id === cardId) || null;
       const name = model?.name || model?.record?.card_name || cardId;
-      switch (run.kind) {
+      // 本地下载服务（service.sock）发起的安装（AI/MCP 代办经管理面委托的
+      // 执行）按下载类归一：与 UI 下载同 key 同标题——同一张卡任何入口都只有
+      // 一张任务卡
+      const runKind = run.kind === 'install_local' ? 'download' : run.kind;
+      switch (runKind) {
         case 'download':
           return { title: copy.taskDownload(name), key: downloadTaskKey(cardId) };
         case 'deploy':
@@ -395,6 +413,10 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           return { title: copy.taskStop(name), key: lifecycleTaskKey(cardId) };
         case 'uninstall':
           return { title: copy.taskUninstall(name), cardName: name, key: lifecycleTaskKey(cardId) };
+        case 'uninstall_recovery':
+          return { title: copy.maintenanceTask(name), key: lifecycleTaskKey(cardId) };
+        case 'card_scripts':
+          return { title: copy.cardScriptsTask(name), key: lifecycleTaskKey(cardId) };
         // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了
         // 取消的任务卡。卡片脚本和应用可以不同版本,这条兜底不能省。
         default:
@@ -422,8 +444,14 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   // 接回来的任务没有等在 await 上的调用方(它是上一次挂载、甚至上一次页面加载
   // 发起的),跑完之后得有人去刷模型库——否则任务卡消失了,列表还停在「下载中」
   // 的那一版。自己发起的那些由各自的 handler 收尾,这里不重复刷。
-  useEffect(() => subscribeTaskSettled((task) => {
-    if (task?.reattached) loadLibrary();
+  //
+  // r27 P2-6（r28）：本挂载发起、原挂载已卸载的任务 settle 时 reattached=false
+  // （reattach 因 attachedRuns 跳过），旧挂载的 loadLibrary() 落在已卸载树上，
+  // 新挂载的订阅又被 reattached 门住——完成的下载要等手动刷新才出现。
+  // 修法：任务 settle 时一律刷库（loadLibrary 是本地 sqlite 查询，幂等且廉价，
+  // 双刷的代价远小于漏刷）。
+  useEffect(() => subscribeTaskSettled(() => {
+    loadLibrary();
   }), [loadLibrary]);
 
   /**
@@ -486,13 +514,14 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     [copy, showToast]
   );
 
+
   const handleDownload = useCallback(
     async (card) => {
       const result = await runTask({
         title: copy.taskDownload(card.name),
         kind: 'download',
         key: downloadTaskKey(card.id),
-        start: () => startDownload(card.id, testMode),
+        start: () => startDownload(card.id),
       });
       if (result.duplicate || result.aborted) return;
       if (result.ok) showToast(copy.downloadDone(card.name));
@@ -500,7 +529,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // 中断的下载可能已经改变了本地状态。
       loadAll();
     },
-    [copy, loadAll, showToast, testMode]
+    [copy, loadAll, showToast]
   );
 
   // `doneText` 可以是一句现成的话，也可以是 `(outcome) => string`：卸载要按服务端
@@ -519,16 +548,29 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     [copy, loadAll, showToast]
   );
 
-  const deployWithProfile = useCallback(
-    (record, profileId) => runLifecycle({
+  const executeDeploy = useCallback(
+    (record, profileId, memoryConfirmed = false) => runLifecycle({
       record,
       kind: 'deploy',
       title: copy.taskDeploy(record.card_name),
-      start: () => startDeploy(record.card_id, profileId),
+      start: () => startDeploy(record.card_id, profileId, memoryConfirmed),
       doneText: copy.deployDone(record.card_name),
     }),
     [copy, runLifecycle]
   );
+
+  const deployWithProfile = useCallback(async (record, profileId) => {
+    try {
+      const admission = await fetchMemoryAdmission(record.card_id);
+      if (admission?.requires_confirmation) {
+        setMemoryConfirm({ record, admission, action: 'deploy', profileId });
+        return;
+      }
+      await executeDeploy(record, profileId, false);
+    } catch (error) {
+      showToast(copy.memoryCheckFailed(String(error?.message || error)));
+    }
+  }, [copy, executeDeploy, showToast]);
 
   const handleCardUpdate = useCallback(
     (record, revision) => runLifecycle({
@@ -541,14 +583,33 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     [copy, runLifecycle]
   );
 
-  const handleVersionAction = useCallback(async (record, action, versionId) => {
-    const result = await runLifecycle({ record, kind: `version_${action}`,
+  const executeVersionAction = useCallback(
+    (record, action, versionId, memoryConfirmed = false) => runLifecycle({ record, kind: `version_${action}`,
       title: copy.versionTask(record.card_name),
-      start: () => startVersionAction(record.card_id, action, versionId),
+      start: () => startVersionAction(record.card_id, action, versionId, memoryConfirmed),
       doneText: (outcome) => action === 'delete' ? copy.versionDeleted((outcome?.freed_bytes || 0) / 1024 ** 3) : (action === 'stage' ? copy.versionStaged : copy.versionSwitched),
-    });
-    return result;
-  }, [copy, runLifecycle]);
+    }),
+    [copy, runLifecycle]
+  );
+
+  const handleVersionAction = useCallback(async (record, action, versionId) => {
+    // r42 P1-1：switch 会走到 deploy（部署脚本可能自行启动运行时）——与
+    // 部署/启用同一把内存准入尺，需要确认时弹同一个确认框。预检只是 UX
+    // 尽力而为：失败不拦截（放行后由服务端同一准入给出规范报错），权威
+    // 门在 Rust 侧 start_version_action。
+    if (action === 'switch') {
+      try {
+        const admission = await fetchMemoryAdmission(record.card_id, versionId);
+        if (admission?.requires_confirmation) {
+          setMemoryConfirm({ record, admission, action: 'switch', versionId });
+          return;
+        }
+      } catch {
+        // 预检不可用（如测试桩未覆盖）：交给服务端准入。
+      }
+    }
+    return executeVersionAction(record, action, versionId, false);
+  }, [executeVersionAction]);
 
   const handleDeploy = useCallback(
     (record) => {
@@ -563,16 +624,39 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     [deployWithProfile]
   );
 
-  const handleEnable = useCallback(
-    (record) => runLifecycle({
+  const startEnabledModel = useCallback(
+    (record, memoryConfirmed = false) => runLifecycle({
       record,
       kind: 'enable',
       title: copy.taskEnable(record.card_name),
-      start: () => startEnable(record.card_id),
+      start: () => startEnable(record.card_id, memoryConfirmed),
       doneText: copy.enableDone(record.card_name),
     }),
     [copy, runLifecycle]
   );
+
+  const handleEnable = useCallback(async (record) => {
+    try {
+      const admission = await fetchMemoryAdmission(record.card_id);
+      if (admission?.requires_confirmation) {
+        setMemoryConfirm({ record, admission });
+        return;
+      }
+      await startEnabledModel(record, false);
+    } catch (error) {
+      showToast(copy.memoryCheckFailed(String(error?.message || error)));
+    }
+  }, [copy, showToast, startEnabledModel]);
+
+  const confirmMemoryEnable = useCallback(async () => {
+    const pending = memoryConfirm;
+    setMemoryConfirm(null);
+    if (pending?.record) {
+      if (pending.action === 'deploy') await executeDeploy(pending.record, pending.profileId, true);
+      else if (pending.action === 'switch') await executeVersionAction(pending.record, 'switch', pending.versionId, true);
+      else await startEnabledModel(pending.record, true);
+    }
+  }, [executeDeploy, executeVersionAction, memoryConfirm, startEnabledModel]);
 
   const handleStop = useCallback(
     (record) => runLifecycle({
@@ -584,6 +668,41 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     }),
     [copy, runLifecycle]
   );
+
+  const requestRetainedStop = useCallback((task) => {
+    if (!canStopRetainedProcess(task)) return;
+    const cardId = cardIdFromLifecycleKey(task.key);
+    const record = library.models.find((item) => item.card_id === cardId);
+    if (!record || record.status !== 'deployed') {
+      showToast(copy.stopRetainedUnavailable);
+      loadAll();
+      return;
+    }
+    setRetainedStop({ record, taskId: task.id });
+  }, [copy, library.models, loadAll, showToast]);
+
+  const confirmRetainedStop = useCallback(async () => {
+    const pending = retainedStop;
+    setRetainedStop(null);
+    if (!pending) return;
+    const result = await handleStop(pending.record);
+    if (result?.ok) dismissTask(pending.taskId);
+  }, [handleStop, retainedStop]);
+
+  /** 智能操作按钮的「更新脚本」：停止 → 卸载部署 → 更新脚本 → 刷新。
+   * 更新后卡片回到「已下载」状态，按钮显示「部署模型」。 */
+  const handleUpdateWithCleanup = useCallback(async (record, wasRunning) => {
+    try {
+      // 链=停止→更新脚本（2026-10-22 根治：不再卸载，死锁之源；见
+      // update-scripts-workflow.js 注释）。品悟模型列表不清行——部署态与服务
+      // 都保留，重新部署后自然延续。
+      await updateScriptsWithCleanup({ record, wasRunning, copy });
+    } catch (cause) {
+      showToast(String(cause?.message || cause));
+    } finally {
+      loadAll();
+    }
+  }, [copy, loadAll, showToast]);
 
   /**
    * 卸载 / 删除。`purgeWeights` 就是用户在对话框上按的那个按钮：
@@ -737,17 +856,22 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     deployWithProfile(record, selectedId);
   }, [deployWithProfile, profilePick]);
 
-  /** 筛选胶囊。「已安装」= 本机有权重的（下载过就算），这是用户最常问的那个问题。 */
+  /**
+   * 筛选胶囊。「已安装」= 本机有权重的（下载过就算），这是用户最常问的那个问题。
+   *
+   * 「下载」是四个里唯一的例外：它筛的不是卡片列表而是**操作实例**（进行中的
+   * 下载 + 已中断的安装），renderModels 按它整页切到 DownloadCenterView，不走
+   * filterModels 管道。徽标是横幅之外的主动提醒：未完成安装是耐久事实，用户
+   * 不点进任何视图都该知道它存在。
+   */
+  // 徽标计数在 downloadBadgeCount 里按卡片去重：续传进行中时，同一张卡的
+  // 活跃任务和它依据的失败回执只算一次。
+  const downloadBadge = downloadBadgeCount(tasks, library.incompleteInstallations);
   const FILTERS = [
     { key: 'all', label: copy.filterAll },
     { key: 'installed', label: copy.filterInstalled },
     { key: 'running', label: copy.filterRunning },
-  ];
-
-  /** 数据源切换。只在测试商店开着时出现;界面是同一套,换的只是卡片从哪来。 */
-  const SOURCES = [
-    { key: 'official', label: copy.sourceOfficial },
-    { key: 'test', label: copy.sourceTest },
+    { key: 'downloads', label: copy.filterDownloads, badge: downloadBadge },
   ];
 
   /**
@@ -755,10 +879,12 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
    * 两个弹窗承载的信息不一样，不能合并——库详情要的字段商店卡片根本没有。
    * @param {object} model - 合并后的模型项。
    */
-  const openDetail = (model) => {
+  // r29 P2：useCallback 稳定引用——此前内联函数经 onOpen 传入 ModelRow
+  // （React.memo），每次父重渲染都是新函数引用击穿浅比较，memo 无效。
+  const openDetail = useCallback((model) => {
     if (model.record) setDetailCardId(model.id);
     else setDetailCard(model);
-  };
+  }, []);
 
   /**
    * 一个分区：标题 + 计数 + 两列行卡。
@@ -773,15 +899,16 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           {copy[titleKey]}
           <span className="ml-1.5 font-semibold opacity-60">{items.length}</span>
         </h3>
-        <div className="grid grid-cols-1 gap-x-6 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {items.map((model) => (
             <ModelRow
               key={model.id}
               model={model}
               hasUpdate={startupUpdates.some((update) => update.card_id === model.id && update.local_revision === model.record?.card_revision)}
               copy={copy}
+              scriptUpdate={!!scriptUpdates[model.record?.card_id || model.card_id]}
               busyKind={
-                model.state === 'available'
+                model.state === 'available' || model.state === 'incomplete'
                   ? (runningTask(downloadTaskKey(model.id))?.kind || null)
                   : (runningTask(lifecycleTaskKey(model.id))?.kind || null)
               }
@@ -799,7 +926,58 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     );
   };
 
+  const handleMaintenanceRecovery = async (transaction) => {
+    const result = await runTask({
+      kind: 'uninstall_recovery',
+      key: lifecycleTaskKey(transaction.cardId),
+      title: copy.maintenanceTask(transaction.cardName || transaction.cardId),
+      start: () => startMaintenanceRecovery(transaction.cardId),
+    });
+    if (result?.ok) showToast(copy.maintenanceRecovered);
+    await loadLibrary();
+  };
+
+  const handleIncompleteRetry = async preview => {
+    const result = await runTask({
+      kind: preview.kind,
+      key: lifecycleTaskKey(preview.cardId),
+      title: copy.incompleteRetryTask(preview.cardName || preview.cardId),
+      start: async () => {
+        try {
+          const accepted = await retryIncomplete(preview.runId, preview.previewSha256);
+          void loadLibrary();
+          return accepted;
+        } catch (error) {
+          throw new Error(describeIncompleteError(copy, error), { cause: error });
+        }
+      },
+    });
+    if (result?.ok) showToast(copy.incompleteCompleted);
+    await loadLibrary();
+  };
+
   const renderModels = () => {
+    // 「下载」筛的是操作实例不是卡片，整页切走，不进下面的卡片列表管道。
+    // 数据没加载完也照常渲染——任务表在模块级、未完成列表为空数组都是合法状态。
+    if (filter === 'downloads') {
+      return (
+        <DownloadCenterView
+          tasks={tasks}
+          installations={library.incompleteInstallations}
+          incompleteError={library.incompleteError}
+          copy={copy}
+          onToast={showToast}
+          onCancel={cancelTask}
+          onDismiss={dismissTask}
+          onToggle={toggleTaskExpand}
+          onAnswer={answerTask}
+          onForceRemove={requestForceRemove}
+          onRetry={handleIncompleteRetry}
+          onRefresh={loadLibrary}
+          isRetrying={(cardId) => Boolean(runningTask(lifecycleTaskKey(cardId)) || runningTask(downloadTaskKey(cardId)))}
+        />
+      );
+    }
     if (cards === null && (library.models || []).length === 0) return null;
     if (visibleModels.length === 0) {
       return (
@@ -904,6 +1082,26 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
             onRetry: loadLibrary,
           })
           : null}
+        <MaintenanceRecoveryPanel
+          transactions={library.maintenanceTransactions || []}
+          error={library.maintenanceError}
+          copy={copy}
+          onRecover={handleMaintenanceRecovery}
+          isRecovering={(cardId) => Boolean(runningTask(lifecycleTaskKey(cardId)))}
+          onRefresh={loadLibrary}
+        />
+        {/* 横幅保留常驻提醒；「下载」筛选里它已作为「已中断」分区并入
+            DownloadCenterView，这里让位，避免同一份列表一页出现两次。 */}
+        {filter === 'downloads' ? null : (
+          <IncompleteInstallPanel
+            installations={library.incompleteInstallations || []}
+            error={library.incompleteError}
+            copy={copy}
+            onRetry={handleIncompleteRetry}
+            onRefresh={loadLibrary}
+            isRetrying={cardId => Boolean(runningTask(lifecycleTaskKey(cardId)) || runningTask(downloadTaskKey(cardId)))}
+          />
+        )}
         {renderModels()}
       </>
     );
@@ -921,43 +1119,41 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           商店放在一起看，这里差一点都显眼。 */}
       <header className="z-30 bg-white/80 backdrop-blur-2xl dark:bg-[#131314]/80">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3 border-b border-slate-200/50 pb-6 dark:border-white/10">
-          {/* 标题就是测试商店的隐藏入口：连点 7 次（间隔不超过 1.5 秒）才弹口令框。
-              原来挂在列表底部那行「本地模型管理 vX.Y.Z」上，但模型商店并入品悟之后
-              不该再有自己的版本号——它是品悟的一部分，不是一个搭在里面的独立应用。
-              标题是页面上唯一一直都在、又不承担任何点击语义的元素，挪到这儿最合适。
-              全程不给任何提示：提示等于把入口告诉所有人，那藏它就没意义了。
-              cursor-default + select-none：连点时既不像按钮，也不会把标题选成高亮。 */}
-          {/* 两条规则都要压:仓库里所有「只响应指针、不进 tab 序」的元素都是这么写的
-              （见 components/ComposerPopover.jsx、features/chat/ChatView.jsx）。
-              只写一条的话另一条照样会报。 */}
-          {/* biome-ignore lint/a11y/useKeyWithClickEvents: 隐藏入口，刻意不给键盘路径 */}
-          {/* biome-ignore lint/a11y/noStaticElementInteractions: 隐藏入口，刻意不进 tab 序、不暴露为按钮 */}
+          {/* 标题上原来挂着测试商店的隐藏入口（连点 7 次弹口令框），随内置测试商店
+              一起去掉了，所以这里不再有任何点击语义、也不用压 a11y 规则。
+              cursor-default + select-none 留着：它就是一行标题，不该看着像按钮、
+              也不该被拖选成一片高亮。 */}
           <h1
             data-testid="model-store-title"
             className="shrink-0 cursor-default select-none text-[26px] font-normal tracking-tight"
-            onClick={handleSecretUnlockClick}
           >
             {copy.title}
           </h1>
           {guide === 'ready' ? (
             <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-3 sm:ml-8 sm:flex-nowrap">
-              <IosSearchField
-                value={query}
-                compact
-                className="min-w-[220px] flex-1 sm:max-w-[520px]"
-                placeholder={copy.search}
-                clearLabel={copy.clearSearch}
-                inputTestId="model-store-search"
-                onChange={(event) => setQuery(event.target.value)}
-              />
+              {/* 「下载」视图筛的是操作实例不是模型，搜索对它没有意义——藏掉
+                  而不是禁用：留着一个输入框却什么也筛不动，用户只会以为坏了。 */}
+              {filter === 'downloads' ? null : (
+                <IosSearchField
+                  value={query}
+                  compact
+                  className="min-w-[220px] flex-1 sm:max-w-[520px]"
+                  placeholder={copy.search}
+                  clearLabel={copy.clearSearch}
+                  inputTestId="model-store-search"
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              )}
+              {/* 存储设置不再单列顶栏按钮（11-16 用户反馈②：与「资源管理」菜单里的
+                  存储项双入口重复）——唯一入口=资源管理菜单，见 ResourceManagerDialog。 */}
               <button
                 type="button"
-                data-testid="model-store-storage"
+                data-testid="model-store-resources"
                 className={BTN_NEUTRAL}
-                onClick={() => setStorageOpen(true)}
+                onClick={() => setResourceManagerOpen(true)}
               >
-                <Database size={14} className="opacity-70" />
-                {copy.storageButton}
+                <Package size={14} className="opacity-70" />
+                {copy.resourceManager}
               </button>
               <button
                 type="button"
@@ -976,19 +1172,8 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
 
       <main className="flex-1">
         <div className="mx-auto max-w-[1400px] pb-8 pt-5">
-          {/* 测试商店开着时必须一直说出来:它的卡片和脚本都是打包在应用内的假数据,
-              用户要是忘了自己开过,会把测试卡片当成正式上架的模型。 */}
-          {guide === 'ready' && testStoreEnabled ? (
-            <div
-              data-testid="model-store-test-banner"
-              className="mb-4 mx-3 flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-amber-50 px-3 py-2 dark:bg-amber-500/10"
-            >
-              <span className="text-[12px] text-amber-800 dark:text-amber-300">{copy.testStoreBanner}</span>
-              <MsButton tone="ghost" onClick={handleDisableTestStore} data-testid="model-store-test-disable">
-                {copy.testStoreDisable}
-              </MsButton>
-            </div>
-          ) : null}
+          {/* 这里原来有一条「测试模型商店已开启」的琥珀色提示条,以及一个关闭按钮。
+              内置测试商店拿掉之后不存在这个状态了,也就不需要再提醒用户。 */}
           {guide === 'ready' ? (
             <div className="mb-5 flex flex-wrap items-center gap-2 px-3" data-testid="model-store-filters">
               {FILTERS.map((item) => (
@@ -1001,24 +1186,18 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
                   onClick={() => setFilter(item.key)}
                 >
                   {item.label}
+                  {/* 徽标只在有内容时出现：零状态多一个 "0" 是噪音；有内容时
+                      它是横幅之外唯一的主动提醒，用户不切视图也看得见。 */}
+                  {item.badge ? (
+                    <span
+                      data-testid={`model-store-filter-${item.key}-badge`}
+                      className="ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[#0B57D0] px-1.5 text-[11px] font-semibold text-white dark:bg-[#A8C7FA] dark:text-black"
+                    >
+                      {item.badge}
+                    </span>
+                  ) : null}
                 </button>
               ))}
-              {testStoreEnabled ? (
-                <div className="ml-auto flex items-center gap-2" data-testid="model-store-source">
-                  {SOURCES.map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      data-testid={`model-store-source-${item.key}`}
-                      aria-pressed={source === item.key}
-                      className={`${PILL_BASE} ${source === item.key ? PILL_ON : PILL_OFF}`}
-                      onClick={() => setSource(item.key)}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
             </div>
           ) : null}
           <ModelStoreOperationResults copy={copy} hiddenResultId={forceRemove?.stage === 'result' ? forceRemove.resultId : null} />
@@ -1033,6 +1212,38 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         theme={theme}
         onSaved={showToast}
       />
+
+      <ResourceManagerDialog
+        open={resourceManagerOpen}
+        onClose={() => setResourceManagerOpen(false)}
+        copy={copy}
+        theme={theme}
+        onOpenEngines={() => setEnginesOpen(true)}
+        onOpenLocalResources={() => setLocalResourcesOpen(true)}
+        onOpenStorage={() => setStorageOpen(true)}
+      />
+
+      <EngineManagementDialog
+        open={enginesOpen}
+        onClose={() => setEnginesOpen(false)}
+        onChanged={loadAll}
+        theme={theme}
+        copy={copy}
+      />
+
+      <LocalResourcesDialog
+        open={localResourcesOpen}
+        copy={copy}
+        onClose={() => setLocalResourcesOpen(false)}
+        onStorageSettings={() => {
+          setLocalResourcesOpen(false);
+          setStorageOpen(true);
+        }}
+        theme={theme}
+      />
+
+      <MemoryAdmissionDialog pending={memoryConfirm} onClose={() => setMemoryConfirm(null)}
+        onConfirm={confirmMemoryEnable} copy={copy} theme={theme} />
 
       <StoreCardDialog
         card={detailCard}
@@ -1068,6 +1279,10 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         // 只为了权重校验档位：那是卡片元数据，库记录（弹窗自己 fetch 的那份）里
         // 没有这一列。找不到时传 null，弹窗会按最不安全那一档出提示。
         card={mergedModels.find((m) => m.id === detailCardId) ?? null}
+        scriptUpdates={scriptUpdates}
+        onUninstall={requestUninstall}
+        cardBusy={!!runningTask(lifecycleTaskKey(detailCardId)) || !!runningTask(downloadTaskKey(detailCardId))}
+        onUpdateWithCleanup={handleUpdateWithCleanup}
         copy={copy}
         theme={theme}
         // 接入前要拿它查重：同一个本地模型重复接入会在品悟的模型列表里多出
@@ -1099,7 +1314,17 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         {confirmUninstall ? (
           <>
             <MsDialogTitle id="model-store-uninstall-title">{copy.uninstallTitle}</MsDialogTitle>
-            {uninstallOptionsFor(confirmUninstall) === 'delete-only' ? (
+            {uninstallOptionsFor(confirmUninstall) === 'cleanup-only' ? (
+              <>
+                <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+                  {copy.cleanupIntro(confirmUninstall.card_name)}
+                </p>
+                <ul className={`mt-3 list-disc space-y-1.5 pl-5 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+                  <li>{copy.cleanupScopeModel(formatBytes(confirmUninstall.size_bytes))}</li>
+                  <li>{copy.cleanupScopeEngine}</li>
+                </ul>
+              </>
+            ) : uninstallOptionsFor(confirmUninstall) === 'delete-only' ? (
               // 只下载过、没部署过：没有服务可卸，摆两个按钮只会让用户在一个空动作
               // 上犹豫。这里退成单选项，文案也换成不提"停止服务"的那一句。
               <p className={`text-[13px] leading-6 ${TEXT_SECONDARY}`}>
@@ -1116,9 +1341,15 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
                 </ul>
               </>
             )}
+            {uninstallOptionsFor(confirmUninstall) === 'delete-only' ? (
+              <ul className={`mt-3 list-disc space-y-1.5 pl-5 text-[13px] leading-6 ${TEXT_SECONDARY}`}>
+                <li>{copy.cleanupScopeModel(formatBytes(confirmUninstall.size_bytes))}</li>
+                <li>{copy.cleanupScopeEngine}</li>
+              </ul>
+            ) : null}
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <MsButton tone="ghost" onClick={() => setConfirmUninstall(null)}>{copy.detailClose}</MsButton>
-              {uninstallOptionsFor(confirmUninstall) === 'delete-only' ? null : (
+              {uninstallOptionsFor(confirmUninstall) === 'uninstall-or-delete' ? (
                 <MsButton
                   tone="neutral"
                   onClick={() => handleUninstall(false)}
@@ -1126,13 +1357,13 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
                 >
                   {copy.uninstallKeep}
                 </MsButton>
-              )}
+              ) : null}
               <MsButton
                 tone="danger"
                 onClick={() => handleUninstall(true)}
                 data-testid="model-store-uninstall-confirm"
               >
-                {copy.uninstallPurge}
+                {uninstallOptionsFor(confirmUninstall) === 'cleanup-only' ? copy.continueCleanup : copy.uninstallPurge}
               </MsButton>
             </div>
           </>
@@ -1258,47 +1489,32 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
         ) : null}
       </MsDialog>
 
-      {/* 测试商店口令框。
-          onClose 给一个空函数 = 点遮罩和按 Escape 都不关闭,只能点「取消」:
-          误触把已经输了一半的口令清掉体验很糟,而这个框本来就是刻意难打开的。 */}
-      <MsDialog
-        open={unlockOpen}
-        onClose={NOOP}
-        theme={theme}
-        labelledBy="model-store-unlock-title"
-        testId="model-store-unlock-dialog"
-      >
-        <MsDialogTitle id="model-store-unlock-title">{copy.testStoreUnlockTitle}</MsDialogTitle>
-        <p className={`mb-3 text-[13px] leading-6 ${TEXT_SECONDARY}`}>{copy.testStoreUnlockHint}</p>
-        <input
-          type="password"
-          // biome-ignore lint/a11y/noAutofocus: 这个框是连点七次专门叫出来的,焦点不给它就得让用户再点一下才能输
-          autoFocus
-          className={INPUT_CLASS}
-          placeholder={copy.testStorePasswordPlaceholder}
-          data-testid="model-store-unlock-input"
-          value={unlockInput}
-          onChange={(event) => setUnlockInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && unlockInput) submitUnlock();
-          }}
-        />
-        <div className="mt-5 flex justify-end gap-2">
-          <MsButton tone="ghost" onClick={closeUnlock}>{copy.testStoreUnlockCancel}</MsButton>
-          <MsButton disabled={!unlockInput} onClick={submitUnlock} data-testid="model-store-unlock-confirm">
-            {copy.testStoreUnlockConfirm}
-          </MsButton>
-        </div>
+            <MsDialog open={!!retainedStop} onClose={() => setRetainedStop(null)} theme={theme} labelledBy="model-store-retained-stop-title">
+        {retainedStop ? (
+          <>
+            <MsDialogTitle id="model-store-retained-stop-title">{copy.stopRetainedProcess}</MsDialogTitle>
+            <p className={`mt-3 text-[13px] leading-6 ${TEXT_SECONDARY}`}>{copy.stopRetainedConfirm(retainedStop.record.card_name)}</p>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <MsButton tone="ghost" onClick={() => setRetainedStop(null)}>{copy.detailClose}</MsButton>
+              <MsButton onClick={confirmRetainedStop}>{copy.stopRetainedProcess}</MsButton>
+            </div>
+          </>
+        ) : null}
       </MsDialog>
 
+      {/* 普通活跃下载只在中心渲染；等待输入的卡只在抬高的浮层渲染，
+          避免弹窗遮罩挡住表单，也避免一项任务出现两份应答状态。 */}
       <ModelStoreTaskPanel
-        tasks={tasks}
+        tasks={filter === 'downloads'
+          ? floatingDownloadTasks(tasks)
+          : tasks}
         copy={copy}
         onCancel={cancelTask}
         onDismiss={dismissTask}
         onToggle={toggleTaskExpand}
         onAnswer={answerTask}
         onForceRemove={requestForceRemove}
+        onStopRetained={requestRetainedStop}
       />
 
       <MsToast toast={toast} />

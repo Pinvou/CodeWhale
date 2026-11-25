@@ -1,7 +1,9 @@
+mod windows_open;
 mod windows_path;
 mod windows_permission;
 mod windows_system;
 
+pub use windows_open::open_target;
 pub(crate) use windows_path::bundled_python_path;
 pub use windows_path::{
     apply_user_npm_prefix, configure_onnxruntime_dylib, connector_cli_command,
@@ -20,11 +22,11 @@ pub use windows_system::{
     email_dependency_packages, email_manual_hint, email_tool_exists, libreoffice_missing_message,
     libreoffice_open_fallback_needed, libreoffice_tool_path, make_private_dir,
     msg_converter_required, nvidia_smi_candidates, ocr_dependency_packages, ocr_tessdata_dir,
-    ocr_tool_exists, ocr_tool_path, open_target, pandoc_dependency_packages,
-    pandoc_missing_message, pandoc_tool_exists, pandoc_tool_path, pdf_dependency_packages,
-    pdf_ocr_missing_message, pdf_render_missing_message, pdf_text_missing_message, pdf_tool_exists,
-    pdf_tool_path, presentation_pdf_missing_message, process_alive, read_clipboard_image,
-    reveal_target, show_archive_dependency_check, show_ocr_dependency_check,
-    show_pandoc_dependency_check, show_pdf_dependency_check, startup_platform_env,
-    system_default_open_supported, try_make_private_dir,
+    ocr_tool_exists, ocr_tool_path, pandoc_dependency_packages, pandoc_missing_message,
+    pandoc_tool_exists, pandoc_tool_path, pdf_dependency_packages, pdf_ocr_missing_message,
+    pdf_render_missing_message, pdf_text_missing_message, pdf_tool_exists, pdf_tool_path,
+    presentation_pdf_missing_message, process_alive, read_clipboard_image, reveal_target,
+    show_archive_dependency_check, show_ocr_dependency_check, show_pandoc_dependency_check,
+    show_pdf_dependency_check, startup_platform_env, system_default_open_supported,
+    try_make_private_dir,
 };

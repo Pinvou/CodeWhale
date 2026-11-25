@@ -1,6 +1,6 @@
 [package]
 name = "pinvou-knowledge"
-version = "0.10.18"
+version = "1.0.2"
 description = "Pinvou 可复用知识库核心与自包含服务器"
 authors = ["pinvou"]
 license = "MIT"
@@ -75,7 +75,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 encoding_rs = { version = "0.8", optional = true }
 parking_lot = { version = "0.12", optional = true }
 rand = "0.10"
-rusqlite = { version = "0.41.0", features = ["bundled"], optional = true }
+# rusqlite 0.43 与底座 cc2adf8 对齐：libsqlite3-sys links="sqlite3" 全图唯一，
+# 必须与 pinjou3-tauri 同窗口跟进（CodeWhale#170 下游契约）。
+rusqlite = { version = "0.43.0", features = ["bundled"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 sha2 = "0.11"

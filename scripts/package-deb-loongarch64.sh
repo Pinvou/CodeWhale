@@ -115,7 +115,7 @@ RESOURCE_ROOT="usr/lib/$PACKAGE_NAME"   # debian.rs copy_resource_files
 
 # Must stay in sync with config/platforms/linux/tauri.conf.json
 # (bundle.linux.deb.depends / recommends).
-DEPENDS="libwebkit2gtk-4.1-0 (>= 2.40), webkit2gtk-driver, libpipewire-0.3-0, libgbm1, libegl1"
+DEPENDS="libwebkit2gtk-4.1-0 (>= 2.40), webkit2gtk-driver, libpipewire-0.3-0, libgbm1, libegl1, libssl3"
 RECOMMENDS="poppler-utils, tesseract-ocr, tesseract-ocr-chi-sim, pandoc, p7zip-full, python3, libreoffice, libemail-outlook-message-perl"
 
 help() {
