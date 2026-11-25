@@ -133,10 +133,18 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
 	subject, bound, err := s.mobileAuth.verifyLogin(ctx, body.Mobile, body.ChallengeID, body.Code, r.Header.Get("X-Pinvou-SMS-Binding") == "v1")
 	if err != nil {
-		if errors.Is(err, ErrRegistrationRecovering) {
+		switch {
+		case errors.Is(err, ErrRegistrationRestart):
 			w.Header().Set("X-Pinvou-SMS-Outcome", "REGISTRATION_RECOVERING")
-		}
-		if errors.Is(err, errMobileSignupReview) {
+			w.Header().Set("X-Pinvou-SMS-Restart-Required", "true")
+			w.Header().Set("Cache-Control", "no-store")
+			// Older browser clients clear all SMS state on a restart code.
+			if values := r.Header.Values("X-Pinvou-SMS-Restart-Aware"); len(values) != 1 || values[0] != "v1" {
+				err = ErrRegistrationRecovering
+			}
+		case errors.Is(err, ErrRegistrationRecovering):
+			w.Header().Set("X-Pinvou-SMS-Outcome", "REGISTRATION_RECOVERING")
+		case errors.Is(err, errMobileSignupReview):
 			w.Header().Set("X-Pinvou-SMS-Outcome", "REGISTRATION_MANUAL_REVIEW_REQUIRED")
 		}
 		s.writeMobileAuthError(w, r, err)
@@ -155,6 +163,8 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 	switch {
 	case errors.Is(err, errMobileSignupConsent):
 		status, code, message = http.StatusBadRequest, "SIGNUP_CONSENT_INVALID", "invalid mobile signup consent"
+	case errors.Is(err, ErrRegistrationRestart):
+		status, code, message = http.StatusConflict, "REGISTRATION_RESTART_REQUIRED", "the registration operation can no longer continue"
 	case errors.Is(err, ErrRegistrationRecovering):
 		status, code, message = http.StatusConflict, "REGISTRATION_RECOVERING", "registration could not finish; continue the original registration or retry later"
 	case errors.Is(err, errMobileSignupReview):

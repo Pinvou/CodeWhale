@@ -294,6 +294,9 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			response.StatusCode == http.StatusServiceUnavailable &&
 			upstreamError == "temporarily_unavailable" &&
 			(upstreamDescription == "REGISTRATION_RECOVERING" || upstreamDescription == "REGISTRATION_MANUAL_REVIEW_REQUIRED") {
+			if values := response.Header.Values("X-Pinvou-SMS-Restart-Required"); upstreamDescription == "REGISTRATION_RECOVERING" && len(values) == 1 && values[0] == "true" {
+				w.Header().Set("X-Pinvou-SMS-Restart-Required", "true")
+			}
 			writeOAuthErrorDescription(w, http.StatusServiceUnavailable, "temporarily_unavailable", upstreamDescription, 1)
 		} else {
 			writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)

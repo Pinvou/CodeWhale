@@ -76,7 +76,7 @@ func (r *signupCompensationRetryRepository) CompensatePreIdentityRegistration(ct
 	return r.PostgresRepository.CompensatePreIdentityRegistration(ctx, id, code, version)
 }
 
-func testConsentedSignupRestartsAfterDispatchProof(t *testing.T, f *retainedWalletFenceFixture) {
+func testConsentedSignupRestartsAfterDispatchProof(t *testing.T, f *retainedWalletFenceFixture, restartAware bool) {
 	t.Helper()
 	t.Setenv("APP_ENV", "test")
 	ctx := context.Background()
@@ -160,8 +160,41 @@ func testConsentedSignupRestartsAfterDispatchProof(t *testing.T, f *retainedWall
 	r.now = func() time.Time { return liveClock().Add(-time.Minute - time.Second) }
 	first := issueChallenge()
 	r.now = liveClock
-	if subject, err := auth.VerifyLogin(ctx, mobile, first, "123456"); subject != "" || !errors.Is(err, ErrRegistrationRecovering) {
-		t.Fatal("failed signup issued an identity or did not return the retry response", err)
+	const serviceToken = "internal-service-token-for-tests-123456"
+	t.Setenv("APP_ENV", "test")
+	for _, key := range []string{"WORKLOAD_IDENTITY_ISSUER", "WORKLOAD_IDENTITY_JWKS_URL", "WORKLOAD_IDENTITY_AUDIENCE", "WORKLOAD_IDENTITY_RULES_JSON", "WORKLOAD_IDENTITY_CA_FILE"} {
+		t.Setenv(key, "")
+	}
+	service := NewService(nil, nil).WithMobileAuth(auth, serviceToken)
+	requestBody, err := json.Marshal(map[string]string{
+		"mobile": mobile, "challenge_id": first.String(), "code": "123456",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/auth/sms/verify", bytes.NewReader(requestBody))
+	verifyRequest.Header.Set("Content-Type", "application/json")
+	verifyRequest.Header.Set("Authorization", "Bearer "+serviceToken)
+	verifyRequest.Header.Set("X-Pinvou-SMS-Binding", "v1")
+	wantCode := "REGISTRATION_RECOVERING"
+	if restartAware {
+		verifyRequest.Header.Set("X-Pinvou-SMS-Restart-Aware", "v1")
+		wantCode = "REGISTRATION_RESTART_REQUIRED"
+	}
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, verifyRequest)
+
+	var verificationError struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&verificationError); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusConflict || verificationError.Code != wantCode ||
+		response.Header().Get("X-Pinvou-SMS-Outcome") != "REGISTRATION_RECOVERING" ||
+		response.Header().Get("X-Pinvou-SMS-Restart-Required") != "true" ||
+		response.Header().Get("X-Pinvou-Identity-Subject") != "" {
+		t.Fatalf("compensated signup returned status=%d code=%q, want %q", response.Code, verificationError.Code, wantCode)
 	}
 	var firstOperation uuid.UUID
 	var status string
@@ -204,7 +237,12 @@ FROM registration_operations WHERE sms_challenge_id=$1`, first).Scan(&firstOpera
 func TestRegistrationCreateDispatchRuntimePostgres(t *testing.T) {
 	f := retainedWalletFenceActors(t)
 	t.Run("consented-signup-restarts-after-dispatch-proof", func(t *testing.T) {
-		testConsentedSignupRestartsAfterDispatchProof(t, f)
+		t.Run("restart-aware-browser", func(t *testing.T) {
+			testConsentedSignupRestartsAfterDispatchProof(t, f, true)
+		})
+		t.Run("legacy-client", func(t *testing.T) {
+			testConsentedSignupRestartsAfterDispatchProof(t, f, false)
+		})
 	})
 	t.Run("consented-sms-creates-account-before-wallet", func(t *testing.T) {
 		testConsentedMobileSignup(t, f)

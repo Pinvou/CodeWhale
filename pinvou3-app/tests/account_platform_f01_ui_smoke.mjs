@@ -250,6 +250,7 @@ try {
   for (const [code, role, message] of [
     ['REGISTRATION_RECOVERING', 'status', accountAuthCopy.en.smsSignupRecovering],
     ['REGISTRATION_MANUAL_REVIEW_REQUIRED', 'status', accountAuthCopy.en.smsSignupManualReview],
+    ['REGISTRATION_RESTART_REQUIRED', 'status', accountAuthCopy.en.smsSignupRestartRequired],
     ['SMS_UNAVAILABLE', 'alert', accountPlatformCopy.en.smsUnavailable],
   ]) await caseRun('desktop SMS signup feedback ' + code + ' requires a new code', async () => {
     await desktopGuest();

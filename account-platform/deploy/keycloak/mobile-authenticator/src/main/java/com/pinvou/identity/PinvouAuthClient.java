@@ -71,7 +71,8 @@ final class PinvouAuthClient {
     SMSLogin verifySMS(String mobile, String challenge, String code, String source, String device) throws AuthClientException {
         Response result = post(requiredURL("PINVOU_SMS_VERIFY_URL"),
             Map.of("mobile", mobile, "challenge_id", challenge, "code", code),
-            Map.of("Authorization", "Bearer " + workloadToken(), "X-Pinvou-Client-Source", source, "X-Device-ID", device, "X-Pinvou-SMS-Binding", "v1"), 204);
+            Map.of("Authorization", "Bearer " + workloadToken(), "X-Pinvou-Client-Source", source, "X-Device-ID", device,
+                "X-Pinvou-SMS-Binding", "v1", "X-Pinvou-SMS-Restart-Aware", "v1"), 204);
         String subject = result.header("X-Pinvou-Identity-Subject");
         if (result.status() != 204 || !subject.matches("[A-Za-z0-9._:-]{1,128}")) throw new AuthClientException(401, "SMS_CODE_INVALID");
         return new SMSLogin(subject, result.header("X-Pinvou-SMS-Binding").equals("v1"));

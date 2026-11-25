@@ -184,15 +184,17 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
         catch (reason) {
           const codes = accountPlatformErrorCodes(reason);
           const manualReview = codes.includes('REGISTRATION_MANUAL_REVIEW_REQUIRED');
+          const restartRequired = codes.includes('REGISTRATION_RESTART_REQUIRED');
           if (current() && codes.includes('SMS_UNAVAILABLE')) {
             setChallenge('');
             setCode('');
           }
-          if (!manualReview && !codes.includes('REGISTRATION_RECOVERING')) throw reason;
+          if (!manualReview && !restartRequired && !codes.includes('REGISTRATION_RECOVERING')) throw reason;
           if (current()) {
             setChallenge('');
             setCode('');
-            setNotice(manualReview ? words.smsSignupManualReview : words.smsSignupRecovering);
+            const nextStep = restartRequired ? words.smsSignupRestartRequired : words.smsSignupRecovering;
+            setNotice(manualReview ? words.smsSignupManualReview : nextStep);
           }
           return;
         }

@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -30,6 +31,7 @@ import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
 public final class MobileDirectGrantAuthenticator implements Authenticator {
+    private static final String RESTART_HEADER = "X-Pinvou-SMS-Restart-Required";
     private static final Logger LOG = Logger.getLogger(MobileDirectGrantAuthenticator.class);
     private static final Pattern MOBILE = Pattern.compile("^1[3-9][0-9]{9}$");
     private static final Pattern CHALLENGE = Pattern.compile("^[0-9a-fA-F-]{36}$");
@@ -129,15 +131,20 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         private static final SMSVerification INVALID = new SMSVerification(null, false, null);
         private static final SMSVerification UNAVAILABLE = new SMSVerification(null, false, "");
         private static final SMSVerification RECOVERING = new SMSVerification(null, false, "REGISTRATION_RECOVERING");
+        private static final SMSVerification RESTART = new SMSVerification(null, false, "REGISTRATION_RESTART_REQUIRED");
         private static final SMSVerification MANUAL_REVIEW = new SMSVerification(null, false, "REGISTRATION_MANUAL_REVIEW_REQUIRED");
     }
 
     private static void smsServiceFailure(AuthenticationFlowContext context, String reason) {
-        Map<String, String> body = reason.isEmpty()
+        boolean restart = SMSVerification.RESTART.serviceFailure().equals(reason);
+        String description = restart ? SMSVerification.RECOVERING.serviceFailure() : reason;
+        Map<String, String> body = description.isEmpty()
             ? Map.of("error", "temporarily_unavailable")
-            : Map.of("error", "temporarily_unavailable", "error_description", reason);
-        context.challenge(Response.status(Response.Status.SERVICE_UNAVAILABLE)
-            .type(MediaType.APPLICATION_JSON_TYPE).entity(body).build());
+            : Map.of("error", "temporarily_unavailable", "error_description", description);
+        Response.ResponseBuilder response = Response.status(Response.Status.SERVICE_UNAVAILABLE)
+            .type(MediaType.APPLICATION_JSON_TYPE).entity(body);
+        if (restart) response.header(RESTART_HEADER, "true");
+        context.challenge(response.build());
     }
 
     private SMSVerification verifySMS(AuthenticationFlowContext context, String mobile, String challenge, String code) {
@@ -172,7 +179,10 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
             }
             if (response.statusCode() == 409) {
                 String outcome = response.headers().firstValue("X-Pinvou-SMS-Outcome").orElse("");
-                if (SMSVerification.RECOVERING.serviceFailure().equals(outcome)) return SMSVerification.RECOVERING;
+                if (SMSVerification.RECOVERING.serviceFailure().equals(outcome)) {
+                    return response.headers().allValues(RESTART_HEADER).equals(List.of("true"))
+                        ? SMSVerification.RESTART : SMSVerification.RECOVERING;
+                }
                 if (SMSVerification.MANUAL_REVIEW.serviceFailure().equals(outcome)) return SMSVerification.MANUAL_REVIEW;
             }
             LOG.warnf("SMS verification was rejected by the account service with HTTP %d", response.statusCode());

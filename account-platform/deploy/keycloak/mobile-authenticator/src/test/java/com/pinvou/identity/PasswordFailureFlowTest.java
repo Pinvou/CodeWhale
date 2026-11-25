@@ -364,12 +364,13 @@ final class PasswordFailureFlowTest {
     }
 
     @Test void browserSignupReportsRecoveryAndInvalidConsentAndClearsStaleSMS() throws Exception {
-        for (String outcome : List.of("REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED", "SIGNUP_CONSENT_INVALID")) {
+        for (String outcome : List.of("REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED", "REGISTRATION_RESTART_REQUIRED", "SIGNUP_CONSENT_INVALID")) {
             Fixture f = new Fixture();
             f.notes.put("pinvou.browser.mobile", "+8613800000000");
             f.notes.put("pinvou.browser.device", "fixture-device");
             f.notes.put("pinvou.browser.sms_challenge", "fixture-challenge");
             f.notes.put("pinvou.browser.sms_sent", "true");
+            f.notes.put("pinvou.browser.retry_after", "57");
             f.form.putSingle("mode", "sms");
             f.form.putSingle("sms_code", "000000");
             String expected;
@@ -382,12 +383,17 @@ final class PasswordFailureFlowTest {
                 expected = "pinvouMobileSignupConsentChanged";
             } else {
                 when(f.client.verifySMS(anyString(), anyString(), anyString(), anyString(), anyString())).thenThrow(new PinvouAuthClient.AuthClientException(409, outcome));
-                expected = "REGISTRATION_RECOVERING".equals(outcome) ? "pinvouMobileSignupRecovering" : "pinvouMobileSignupManualReview";
+                expected = switch (outcome) {
+                    case "REGISTRATION_RECOVERING" -> "pinvouMobileSignupRecovering";
+                    case "REGISTRATION_RESTART_REQUIRED" -> "pinvouMobileSignupRestartRequired";
+                    default -> "pinvouMobileSignupManualReview";
+                };
             }
             f.attempt(true);
             assertEquals(expected, f.lastMessage);
             assertFalse(f.notes.containsKey("pinvou.browser.sms_challenge"));
             assertFalse(f.notes.containsKey("pinvou.browser.sms_sent"));
+            assertEquals("57", f.notes.get("pinvou.browser.retry_after"));
             assertNull(f.authenticated.get());
         }
     }
@@ -414,7 +420,9 @@ final class PasswordFailureFlowTest {
 
     @Test void directGrantSendsBindingAndHandlesBoundSuccessAndRegistrationOutcomes() throws Exception {
         String challenge = "018f0f76-3f5d-7d43-b630-163e3f635e5a";
-        for (String outcome : List.of("", "REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED")) {
+        for (String outcome : List.of("", "REGISTRATION_RECOVERING", "REGISTRATION_RESTART_REQUIRED", "REGISTRATION_MANUAL_REVIEW_REQUIRED")) {
+            boolean restart = "REGISTRATION_RESTART_REQUIRED".equals(outcome);
+            String legacyOutcome = restart ? "REGISTRATION_RECOVERING" : outcome;
             Fixture f = new Fixture();
             HttpHeaders headers = mock(HttpHeaders.class);
             when(headers.getHeaderString("X-Device-ID")).thenReturn("fixture-device");
@@ -431,7 +439,10 @@ final class PasswordFailureFlowTest {
                     exchange.getResponseHeaders().set("X-Pinvou-Identity-Subject", "fixture-user");
                     exchange.getResponseHeaders().set("X-Pinvou-SMS-Binding", "v1");
                 } else {
-                    exchange.getResponseHeaders().set("X-Pinvou-SMS-Outcome", outcome);
+                    exchange.getResponseHeaders().set("X-Pinvou-SMS-Outcome", legacyOutcome);
+                    if (restart || "REGISTRATION_MANUAL_REVIEW_REQUIRED".equals(outcome)) {
+                        exchange.getResponseHeaders().set("X-Pinvou-SMS-Restart-Required", "true");
+                    }
                 }
                 exchange.sendResponseHeaders(outcome.isEmpty() ? 204 : 409, -1);
                 exchange.close();
@@ -451,7 +462,8 @@ final class PasswordFailureFlowTest {
                     assertEquals(FlowStatus.CHALLENGE, result.getStatus());
                     try (Response response = result.getChallenge()) {
                         assertEquals(503, response.getStatus());
-                        assertEquals(Map.of("error", "temporarily_unavailable", "error_description", outcome), response.getEntity());
+                        assertEquals(Map.of("error", "temporarily_unavailable", "error_description", legacyOutcome), response.getEntity());
+                        assertEquals(restart ? "true" : null, response.getHeaderString("X-Pinvou-SMS-Restart-Required"));
                     }
                     assertNull(f.authenticated.get());
                 }

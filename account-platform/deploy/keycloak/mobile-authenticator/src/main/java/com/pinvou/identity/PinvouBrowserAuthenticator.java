@@ -68,14 +68,17 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 context.getAuthenticationSession().removeAuthNote(note("password_handle"));
                 context.getAuthenticationSession().removeAuthNote(note("password_policy"));
             }
-            if ("REGISTRATION_RESTART_REQUIRED".equals(error.code())) clearState(context);
-            if ("sms".equals(requestedMode) && ("REGISTRATION_RECOVERING".equals(error.code())
+            boolean signupRestart = "REGISTRATION_RESTART_REQUIRED".equals(error.code());
+            if (signupRestart && !"sms".equals(requestedMode)) clearState(context);
+            if ("sms".equals(requestedMode) && (signupRestart || "REGISTRATION_RECOVERING".equals(error.code())
                 || "REGISTRATION_MANUAL_REVIEW_REQUIRED".equals(error.code()) || "SIGNUP_CONSENT_INVALID".equals(error.code()))) {
                 context.getAuthenticationSession().removeAuthNote(note("sms_challenge"));
                 context.getAuthenticationSession().removeAuthNote(note("sms_sent"));
             }
             if (shouldRestartPasswordReset(requestedMode, error.code())) clearState(context);
-            render(context, requestedMode, messageFor(error.code()));
+            String message = signupRestart && "sms".equals(requestedMode)
+                ? "pinvouMobileSignupRestartRequired" : messageFor(error.code());
+            render(context, requestedMode, message);
         } catch (RuntimeException error) {
             LOG.errorf("Pinvou browser authentication failed safely: %s", error.getClass().getSimpleName());
             render(context, requestedMode, "pinvouServiceUnavailable");

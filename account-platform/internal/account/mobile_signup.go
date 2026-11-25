@@ -91,6 +91,9 @@ func (s *MobileAuthService) verifyMobileSignup(ctx context.Context, repository m
 	if result.UserID == nil && result.Status == "REPAIR_REQUIRED" {
 		return "", errMobileSignupReview
 	}
+	if errors.Is(err, ErrRegistrationRestart) {
+		return "", ErrRegistrationRestart
+	}
 	if err != nil || result.UserID == nil {
 		return "", ErrRegistrationRecovering
 	}

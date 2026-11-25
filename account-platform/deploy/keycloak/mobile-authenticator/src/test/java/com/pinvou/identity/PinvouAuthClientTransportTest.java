@@ -275,11 +275,13 @@ final class PinvouAuthClientTransportTest {
         s = server(200, "{}");
         try { HttpServer current = s; assertThrows(PinvouAuthClient.AuthClientException.class, () -> client(current).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
     }
-    @Test void browserSMSNegotiatesBindingOverHTTP() throws Exception {
+    @Test void browserSMSNegotiatesBindingAndRestartOverHTTP() throws Exception {
         var binding = new AtomicReference<String>();
+        var restartAware = new AtomicReference<String>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/verify", exchange -> {
             binding.set(exchange.getRequestHeaders().getFirst("X-Pinvou-SMS-Binding"));
+            restartAware.set(exchange.getRequestHeaders().getFirst("X-Pinvou-SMS-Restart-Aware"));
             exchange.getResponseHeaders().set("X-Pinvou-Identity-Subject", "controlled-subject");
             exchange.getResponseHeaders().set("X-Pinvou-SMS-Binding", "v1");
             exchange.sendResponseHeaders(204, -1);
@@ -289,11 +291,12 @@ final class PinvouAuthClientTransportTest {
         try {
             var result = client(server).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device");
             assertEquals("v1", binding.get());
+            assertEquals("v1", restartAware.get());
             assertEquals(new PinvouAuthClient.SMSLogin("controlled-subject", true), result);
         } finally { server.stop(0); }
     }
     @Test void browserSMSPreservesOnlyTheExpectedSignupErrorCodes() throws Exception {
-        for (String code : new String[]{"REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED", "SIGNUP_CONSENT_INVALID", "fixture-untrusted-value"}) {
+        for (String code : new String[]{"REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED", "REGISTRATION_RESTART_REQUIRED", "SIGNUP_CONSENT_INVALID", "fixture-untrusted-value"}) {
             boolean send = "SIGNUP_CONSENT_INVALID".equals(code);
             int status = send ? 400 : 409;
             HttpServer server = server(status, "{\"code\":\"" + code + "\"}", !send);

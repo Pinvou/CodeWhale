@@ -1198,8 +1198,16 @@ impl AccountPlatformState {
             .await
             .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
         let status = response.status();
-        let sms_rate_limited =
-            matches!(flow, TokenFlow::Sms) && status == StatusCode::TOO_MANY_REQUESTS;
+        let sms_flow = matches!(flow, TokenFlow::Sms);
+        let sms_rate_limited = sms_flow && status == StatusCode::TOO_MANY_REQUESTS;
+        let sms_restart_required = sms_flow
+            && status == StatusCode::SERVICE_UNAVAILABLE
+            && response
+                .headers()
+                .get_all("x-pinvou-sms-restart-required")
+                .iter()
+                .map(|value| value.as_bytes())
+                .eq([b"true".as_slice()]);
         let retry_after_seconds = sms_rate_limited
             .then(|| response_retry_after_seconds(&response))
             .flatten();
@@ -1213,14 +1221,16 @@ impl AccountPlatformState {
                     .unwrap_or_default();
                 return Err(format!("mobile_auth_failed: RATE_LIMITED{retry}"));
             }
-            return Err(classify_token_error(
-                flow,
-                status,
-                code,
-                oauth_error
-                    .as_ref()
-                    .and_then(|body| body.error_description.as_deref()),
-            ));
+            let description = oauth_error
+                .as_ref()
+                .and_then(|body| body.error_description.as_deref());
+            if sms_restart_required
+                && code == Some("temporarily_unavailable")
+                && description == Some("REGISTRATION_RECOVERING")
+            {
+                return Err("mobile_auth_failed: REGISTRATION_RESTART_REQUIRED".to_string());
+            }
+            return Err(classify_token_error(flow, status, code, description));
         }
         serde_json::from_slice::<TokenResponse>(&bytes)
             .map_err(|_| "oidc_token_response_invalid: token response is invalid".to_string())
@@ -2527,6 +2537,77 @@ mod tests {
             let mut form = vec![("grant_type", "password")];
             if is_sms {
                 form.extend([("sms_challenge_id", "fixture-id"), ("sms_code", "123456")]);
+            }
+            let result = state.token_request(&config, &form, flow).await;
+            server.join().unwrap();
+            assert_eq!(result.err().as_deref(), Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn token_restart_requires_trusted_sms_recovery_response() {
+        const RECOVERING: &str =
+            r#"{"error":"temporarily_unavailable","error_description":"REGISTRATION_RECOVERING"}"#;
+        const REVIEW: &str = r#"{"error":"temporarily_unavailable","error_description":"REGISTRATION_MANUAL_REVIEW_REQUIRED"}"#;
+        const RESTART: &str = "X-Pinvou-SMS-Restart-Required: true\r\n";
+        const AMBIGUOUS: &str =
+            "X-Pinvou-SMS-Restart-Required: true\r\nX-Pinvou-SMS-Restart-Required: false\r\n";
+        for (flow, status, body, header, expected) in [
+            (
+                TokenFlow::Sms,
+                503,
+                RECOVERING,
+                RESTART,
+                "mobile_auth_failed: REGISTRATION_RESTART_REQUIRED",
+            ),
+            (
+                TokenFlow::Sms,
+                503,
+                RECOVERING,
+                "",
+                "mobile_auth_failed: REGISTRATION_RECOVERING",
+            ),
+            (
+                TokenFlow::Sms,
+                503,
+                RECOVERING,
+                AMBIGUOUS,
+                "mobile_auth_failed: REGISTRATION_RECOVERING",
+            ),
+            (
+                TokenFlow::Sms,
+                503,
+                REVIEW,
+                RESTART,
+                "mobile_auth_failed: REGISTRATION_MANUAL_REVIEW_REQUIRED",
+            ),
+            (
+                TokenFlow::Sms,
+                429,
+                RECOVERING,
+                RESTART,
+                "mobile_auth_failed: RATE_LIMITED",
+            ),
+            (
+                TokenFlow::Password,
+                503,
+                RECOVERING,
+                RESTART,
+                "oidc_token_exchange_failed: token endpoint returned 503",
+            ),
+        ] {
+            let (base, server) = spawn_portal_fixture_with_headers(1, move |request| {
+                assert!(request.starts_with("POST /token "));
+                (status, body, header)
+            });
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let mut config = config();
+            config.token_url = base.join("token").unwrap();
+            let mut form = vec![("grant_type", "password")];
+            if matches!(flow, TokenFlow::Sms) {
+                form.extend([("sms_challenge_id", "fixture-id"), ("sms_code", "123456")]);
+            } else {
+                form.push(("password", "fixture"));
             }
             let result = state.token_request(&config, &form, flow).await;
             server.join().unwrap();
