@@ -9,13 +9,18 @@ const fingerprint = "a".repeat(64);
 function dashboard(role = "operations_admin", timelineContext) {
   const requests = [];
   let detailGate = null;
+  let refreshTimer;
   const dom = new JSDOM(html, { runScripts: "dangerously", url: "https://stats.invalid/pinvou3/stats", beforeParse(window) {
-    window.setInterval = () => 1; window.clearInterval = () => {};
+    window.setInterval = callback => { refreshTimer=callback; return 1; }; window.clearInterval = () => {};
     window.fetch = async (url, options = {}) => {
       const path = String(url); requests.push({path,options});
       let value = { rows: [], metrics: {}, devices: [] };
       if (path.endsWith("/session")) value = { role };
-      if (path.includes("/behavior/failures")) value = { detail_allowed: role === "operations_admin", rows: [{ fingerprint,code:"stream_unexpected_eof",component:"model",stage:"model",count:21,installations:21,versions:{"0.10.12":21},first_seen:Date.now(),last_seen:Date.now(),status:"open",fixed_version:"" }] };
+      if (path.includes("/behavior/overview?")) value = {
+        range:new URL(path,"https://stats.invalid").searchParams.get("range"),
+        metrics:{}, error_categories:{model_error:31},
+      };
+      if (path.includes("/behavior/failures")) value = { detail_allowed: role === "operations_admin", export_groups:{code:["stream_unexpected_eof"],component:["model"],stage:["model","output"]}, rows: [{ fingerprint,code:"stream_unexpected_eof",component:"model",stage:"model",count:21,installations:21,versions:{"0.10.12":21},first_seen:Date.now(),last_seen:Date.now(),status:"open",fixed_version:"" }] };
       if (path.includes("/diagnostics/samples")) value = { incidents:[{id:"case_fixture",at:Date.now(),version:"0.10.12",code:"stream_unexpected_eof"}] };
       if (path.includes("/diagnostics/incident")) {
         if (detailGate) await detailGate;
@@ -25,7 +30,7 @@ function dashboard(role = "operations_admin", timelineContext) {
       return {ok:true,status:200,json:async()=>value};
     };
   }});
-  return {dom,requests,delayDetail:gate=>{detailGate=gate;}};
+  return {dom,requests,delayDetail:gate=>{detailGate=gate;},refresh:()=>refreshTimer()};
 }
 
 test("admin filters drill down safely, save status, and fence delayed evidence after logout", async () => {
@@ -35,6 +40,24 @@ test("admin filters drill down safely, save status, and fence delayed evidence a
     document.querySelector("#failureVersion").value="0.10.12";
     document.querySelector("#failureFilters").dispatchEvent(new Event("submit",{cancelable:true})); await tick();
     assert(requests.some(r=>r.path.includes("app_version=0.10.12")));
+    assert(document.querySelector("#diagnosticsView #errorRows"));
+    const group=document.querySelector("#failureExportGroup");
+    group.value="component";group.dispatchEvent(new Event("change"));
+    const value=document.querySelector("#failureExportValue");
+    value.value="model";value.dispatchEvent(new Event("change"));
+    let download=new URL(document.querySelector("#failureDownload").href);
+    assert.equal(download.searchParams.get("include_fixed"),"0");
+    assert.equal(download.searchParams.get("group_value"),"model");
+    assert.equal(download.searchParams.get("app_version"),"0.10.12");
+    assert.equal(download.searchParams.has("include_evidence"),false);
+    group.value="stage";group.dispatchEvent(new Event("change"));
+    assert([...value.options].some(option=>option.value==="output"));
+    value.value="output";value.dispatchEvent(new Event("change"));
+    const evidence=document.querySelector("#failureExportEvidence");
+    evidence.checked=true;evidence.dispatchEvent(new Event("change"));
+    download=new URL(document.querySelector("#failureDownload").href);
+    assert.equal(download.searchParams.get("group_value"),"output");
+    assert.equal(download.searchParams.get("include_evidence"),"1");
     document.querySelector("[data-failure-group]").click(); await tick();
     assert(requests.some(r=>r.path.includes("/diagnostics/samples")&&r.path.includes("app_version=0.10.12")));
     document.querySelector("[data-failure-incident]").click(); await tick();
@@ -50,6 +73,7 @@ test("admin filters drill down safely, save status, and fence delayed evidence a
     assert.equal(document.querySelector("#failureEvidence").textContent,"");
     assert.equal(document.querySelector("#failureRows").children.length,0);
     assert.equal(document.querySelector("#failureAdmin").classList.contains("hidden"),true);
+    assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
   } finally {dom.window.close();}
 });
 
@@ -77,6 +101,8 @@ test("analysts receive aggregates and cannot trigger admin evidence through a fo
     document.querySelector("#failureFilters").dispatchEvent(new Event("submit",{cancelable:true})); await tick();
     assert.equal(document.querySelector("[data-failure-group]"),null);
     const button=document.createElement("button");button.dataset.failureGroup=fingerprint;document.querySelector("#failureRows").append(button);button.click();await tick();
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureExport")).display,"none");
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureFixedFilter")).display,"none");
     assert.equal(requests.some(r=>r.path.includes("/diagnostics/")),false);
     assert.equal(document.querySelector("#failureAdmin").classList.contains("hidden"),true);
   }finally{dom.window.close();}
@@ -203,13 +229,29 @@ for (const role of ["operations_admin", "behavior_analyst"]) {
       const {document}=dom.window;await tick();
       document.querySelector('[data-view="diagnostics"]').click();await tick();
       const original=dom.window.fetch;
-      dom.window.fetch=(url,options)=>String(url).includes('/behavior/failures')||String(url).endsWith('/session')
-        ? original(url,options) : Promise.resolve({ok:false,status:503});
+      let errorsUnavailable=false;
+      dom.window.fetch=(url,options)=>{
+        if(String(url).includes('/behavior/overview?')){
+          if(errorsUnavailable)return Promise.resolve({ok:false,status:503});
+          return Promise.resolve({ok:true,status:200,json:async()=>({
+            range:new URL(String(url),"https://stats.invalid").searchParams.get("range"),
+            metrics:{},error_categories:{model_error:57},
+          })});
+        }
+        return String(url).includes('/behavior/failures')||String(url).endsWith('/session')
+          ? original(url,options) : Promise.resolve({ok:false,status:503});
+      };
       const before=requests.filter(row=>row.path.includes('/behavior/failures')).length;
       document.querySelector('#refreshButton').click();await tick();
       assert.equal(requests.filter(row=>row.path.includes('/behavior/failures')).length,before+1);
       assert.equal(document.querySelector('#refreshButton').textContent,'✓ 已更新');
       assert(document.querySelector('#failureRows').children.length>0);
+      assert.match(document.querySelector('#errorRows').textContent,/57/);
+      errorsUnavailable=true;
+      document.querySelector('#refreshButton').click();await tick();
+      assert.equal(document.querySelector('#refreshButton').textContent,'↻ 部分失败，重试');
+      assert.match(document.querySelector('#diagnosticsErrorStatus').textContent,/继续显示上次成功数据/);
+      assert.match(document.querySelector('#errorRows').textContent,/57/);
     } finally {dom.window.close();}
   });
 
@@ -239,3 +281,91 @@ for (const role of ["operations_admin", "behavior_analyst"]) {
     } finally {dom.window.close();}
   });
 }
+
+test("logging out clears administrator-only diagnostic export options", async () => {
+  const {dom,requests}=dashboard("operations_admin");
+  try {
+    const { document, Event }=dom.window;
+    await tick();
+    document.querySelector('[data-view="diagnostics"]').click();
+    await tick();
+    const dimension=document.querySelector("#failureExportGroup");
+    const value=document.querySelector("#failureExportValue");
+    dimension.value="stage";
+    dimension.dispatchEvent(new Event("change"));
+    assert(Array.from(value.options).some(option => option.value==="output"));
+    const fetch=dom.window.fetch;
+    let releaseLogout;
+    const logout=new Promise(resolve=>{releaseLogout=resolve;});
+    dom.window.fetch=async (url,options)=>{
+      if(String(url).endsWith("/logout"))await logout;
+      return fetch(url,options);
+    };
+    const before=requests.filter(request=>request.path.includes("/behavior/failures")).length;
+    document.querySelector("#logout").click();
+    document.querySelector("#failureFilters").dispatchEvent(new Event("submit",{cancelable:true}));
+    await tick();
+    assert.equal(requests.filter(request=>request.path.includes("/behavior/failures")).length,before);
+    releaseLogout();
+    await tick();
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureExport")).display,"none");
+    assert.equal(value.options.length,0);
+    assert.equal(document.querySelector("#failureExportValueLabel").hidden,true);
+    assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
+  } finally {dom.window.close();}
+});
+
+test("a session role downgrade immediately clears diagnostic filters and export controls", async () => {
+  const {dom,refresh}=dashboard("operations_admin");
+  try {
+    const {document}=dom.window;
+    await tick();
+    document.querySelector('[data-view="diagnostics"]').click();
+    await tick();
+    const filter=document.querySelector("#failureFixedFilter");
+    const checkbox=document.querySelector("#failureIncludeFixed");
+    assert.notEqual(dom.window.getComputedStyle(filter).display,"none");
+    checkbox.checked=true;
+    const fetch=dom.window.fetch;
+    dom.window.fetch=async (url,options)=>String(url).endsWith("/session")
+      ? {ok:true,status:200,json:async()=>({role:"behavior_analyst"})}
+      : fetch(url,options);
+    await refresh();
+    assert.equal(checkbox.checked,false);
+    assert.equal(dom.window.getComputedStyle(filter).display,"none");
+    assert.equal(dom.window.getComputedStyle(document.querySelector("#failureExport")).display,"none");
+    assert.equal(document.querySelector("#failureDownload").hasAttribute("href"),false);
+  } finally {dom.window.close();}
+});
+
+test("manual diagnostics refresh waits for the active error range result", async () => {
+  const {dom}=dashboard();
+  try {
+    const {document}=dom.window;
+    await tick();
+    document.querySelector('[data-view="diagnostics"]').click();
+    await tick();
+    let release, rangeRequests=0;
+    const pending=new Promise(resolve=>{release=resolve;});
+    const fetch=dom.window.fetch;
+    dom.window.fetch=async (url,options)=>{
+      if(String(url).includes("/behavior/overview?range=7")){
+        rangeRequests++;
+        await pending;
+        return {ok:false,status:503,json:async()=>({})};
+      }
+      return fetch(url,options);
+    };
+    document.querySelector('[data-behavior-section="errors"] [data-range="7"]').click();
+    await tick();
+    const header=document.querySelector("#refreshButton");
+    header.click();
+    await tick();
+    assert.equal(rangeRequests,1);
+    assert.equal(header.textContent,"↻ 刷新");
+    release();
+    await tick();
+    assert.match(header.textContent,/部分失败/);
+    assert.match(document.querySelector("#diagnosticsErrorStatus").textContent,/刷新失败/);
+  } finally {dom.window.close();}
+});

@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { diagnosticRedactor } from "./diagnostic-redaction.js";
 
 const DAY = 86400000;
@@ -34,12 +35,31 @@ export const diagnosticFingerprint = event => hash([event.diagnostic_component, 
 /** A bounded incident window, plus the latest terminal for that same lifecycle.
  * Correlation IDs remain private; this projection only returns registered facts.
  */
-export function failureTimeline(events, incident) {
+function diagnosticExecutionKey(incident) {
   const executionKey = incident.execution_task_key || incident.remote_task_key;
-  const remote = typeof executionKey === "string" && /^[a-f0-9]{64}$/.test(executionKey);
-  const remoteTerminal = event => event.event_name === "remote_control_event"
-    && event.remote_role === "controlled" && event.remote_stage === "task_terminal"
-    && ["success", "failed", "interrupted", "cancelled"].includes(event.remote_task_status);
+  return typeof executionKey === "string" && /^[a-f0-9]{64}$/.test(executionKey) ? executionKey : null;
+}
+
+const TIMELINE_LIMIT = 32;
+const compareEventTime = (a, b) => a.occurred_at - b.occurred_at;
+
+function orderFailureHistory(events, remote) {
+  const ordered = [...events].sort(compareEventTime);
+  const isTerminal = event => remote
+    ? event.event_name === "remote_control_event" && event.remote_role === "controlled"
+      && event.remote_stage === "task_terminal"
+      && ["success", "failed", "interrupted", "cancelled"].includes(event.remote_task_status)
+    : event.event_name === "task_finished";
+  return {
+    ordered,
+    positions: new Map(ordered.map((event, index) => [event, index])),
+    lastTerminal: ordered.findLast(isTerminal),
+  };
+}
+
+function collectFailureHistory(events, incident) {
+  const executionKey = diagnosticExecutionKey(incident);
+  const remote = executionKey !== null;
   const sameLifecycle = event => event.device_id === incident.device_id
     && event.collection_period_id === incident.collection_period_id
     && (remote ? Boolean(incident.device_id && incident.collection_period_id)
@@ -54,15 +74,18 @@ export function failureTimeline(events, incident) {
     if (sameLifecycle(event)) unique.set(event.event_id, event);
   }
   unique.set(incident.event_id, incident);
-  const ordered = [...unique.values()].sort((a,b) => a.occurred_at - b.occurred_at);
-  const anchor = ordered.indexOf(incident);
-  const terminal = ordered.findLast(event => (remote ? remoteTerminal(event) : event.event_name === "task_finished")
-    && event.occurred_at >= incident.occurred_at);
-  const budget = 32;
-  const start = Math.max(0, Math.min(anchor - 15, ordered.length - budget));
-  const selected = new Set(ordered.slice(start, start + budget));
+  return orderFailureHistory(unique.values(), remote);
+}
+
+function timelineStart(anchor, count) {
+  return Math.max(0, Math.min(anchor - 15, count - TIMELINE_LIMIT));
+}
+
+function projectTimelineWindow(window, count, lastTerminal, incident) {
+  const terminal = lastTerminal?.occurred_at >= incident.occurred_at ? lastTerminal : undefined;
+  const selected = new Set(window);
   if (terminal) selected.add(terminal);
-  if (selected.size > budget) {
+  if (selected.size > TIMELINE_LIMIT) {
     const furthest = [...selected].filter(event => event !== incident && event !== terminal)
       .sort((a,b) => Math.abs(b.occurred_at - incident.occurred_at) - Math.abs(a.occurred_at - incident.occurred_at))[0];
     selected.delete(furthest);
@@ -72,12 +95,21 @@ export function failureTimeline(events, incident) {
     "diagnostic_code", "diagnostic_exit_code", "diagnostic_http_status",
     "remote_role", "remote_stage", "remote_task_status", "remote_outcome", "remote_reason"];
   return {
-    timeline: [...selected].sort((a,b) => a.occurred_at - b.occurred_at)
+    timeline: [...selected].sort(compareEventTime)
       .map(event => Object.fromEntries(fields.filter(key => event[key] !== undefined).map(key => [key,event[key]]))),
-    timeline_context: { total_events: ordered.length, returned_events: selected.size,
-      truncated: selected.size < ordered.length, incident_included: selected.has(incident),
+    timeline_context: { total_events: count, returned_events: selected.size,
+      truncated: selected.size < count, incident_included: selected.has(incident),
       task_terminal_included: Boolean(terminal && selected.has(terminal)) },
   };
+}
+
+function projectFailureTimeline({ ordered, positions, lastTerminal }, incident) {
+  const start = timelineStart(positions.get(incident), ordered.length);
+  return projectTimelineWindow(ordered.slice(start, start + TIMELINE_LIMIT), ordered.length, lastTerminal, incident);
+}
+
+export function failureTimeline(events, incident) {
+  return projectFailureTimeline(collectFailureHistory(events, incident), incident);
 }
 
 // Only for comparing retries of pre-field-redaction stored reports. Never stores material.
@@ -104,18 +136,25 @@ function boundedText(value, max, bytes = false, redact = redactDiagnosticText) {
   return result+suffix;
 }
 
-export function failureGroups(events, filters = {}, minimumSubjects = 1) {
+function selectedFailureEvents(events, filters, include = () => true) {
   const now = Number.isSafeInteger(filters.now) && filters.now >= 0 ? filters.now : Date.now();
   const days = [1, 7, 30].includes(Number(filters.days)) ? Number(filters.days) : 7;
-  const groups = new Map();
   const seen = new Set();
-  for (const event of events) {
-    if (!event.diagnostic_id || !DIAGNOSTIC_CODES.includes(event.diagnostic_code)) continue;
-    if (Number(event.occurred_at) < now - days * DAY || Number(event.occurred_at) > now) continue;
-    if (["app_version", "platform", "mode", "provider_key", "diagnostic_code"].some(key => filters[key] && (event[key] ?? event.diagnostic_environment?.[key]) !== filters[key])) continue;
+  return events.filter(event => {
+    if (!event.diagnostic_id || !DIAGNOSTIC_CODES.includes(event.diagnostic_code)
+      || event.occurred_at < now - days * DAY || event.occurred_at > now
+      || ["app_version", "platform", "mode", "provider_key", "diagnostic_code"].some(key => filters[key] && (event[key] ?? event.diagnostic_environment?.[key]) !== filters[key])
+      || !include(event)) return false;
     const unique = `${event.device_id}:${event.diagnostic_id}`;
-    if (seen.has(unique)) continue;
+    if (seen.has(unique)) return false;
     seen.add(unique);
+    return true;
+  });
+}
+
+export function failureGroups(events, filters = {}, minimumSubjects = 1, include, limit = 200) {
+  const groups = new Map();
+  for (const event of selectedFailureEvents(events, filters, include)) {
     const fingerprint = diagnosticFingerprint(event);
     const group = groups.get(fingerprint) || { fingerprint, code: event.diagnostic_code,
       component: event.diagnostic_component, stage: event.stage || "unknown", count: 0, sampled_details: 0,
@@ -133,20 +172,189 @@ export function failureGroups(events, filters = {}, minimumSubjects = 1) {
   return [...groups.values()].filter(g => g.subjects.size >= minimumSubjects)
     .map(({ subjects, versions, versionSubjects, ...g }) => ({ ...g, installations: subjects.size,
       versions: Object.fromEntries([...versions].filter(([version])=>versionSubjects.get(version).size>=minimumSubjects)) }))
-    .sort((a, b) => b.count - a.count || b.last_seen - a.last_seen).slice(0, 200);
+    .sort((a, b) => b.count - a.count || b.last_seen - a.last_seen).slice(0, limit);
 }
 
-export function failureSamples(events, fingerprint, filters = {}) {
-  const days = [1, 7, 30].includes(Number(filters.days)) ? Number(filters.days) : 7;
-  const now = Date.now();
-  const seen = new Set();
-  return events.filter(event => {
-    const id = `${event.device_id}:${event.diagnostic_id}`;
-    if (!event.diagnostic_id || seen.has(id) || diagnosticFingerprint(event) !== fingerprint
-      || event.occurred_at < now - days * DAY || event.occurred_at > now
-      || ["app_version", "platform", "mode", "provider_key", "diagnostic_code"].some(key => filters[key] && (event[key] ?? event.diagnostic_environment?.[key]) !== filters[key])) return false;
-    seen.add(id); return true;
-  }).sort((a, b) => Number(b.diagnostic_sampled !== false) - Number(a.diagnostic_sampled !== false) || b.occurred_at - a.occurred_at).slice(0, 50);
+export function failureSamples(events, fingerprint, filters = {}, include = () => true) {
+  return selectedFailureEvents(events, filters, event => diagnosticFingerprint(event) === fingerprint && include(event))
+    .sort((a, b) => Number(b.diagnostic_sampled !== false) - Number(a.diagnostic_sampled !== false) || b.occurred_at - a.occurred_at).slice(0, 50);
+}
+
+function timelineScope(event) {
+  const execution = diagnosticExecutionKey(event);
+  if (execution) return event.device_id && event.collection_period_id ? ["execution", execution] : null;
+  if (event.turn_id) return event.attempt_id
+    ? ["turn-attempt", event.turn_id, event.attempt_id] : ["turn", event.turn_id];
+  if (event.attempt_id) return ["attempt", event.attempt_id];
+  if (event.operation_id) return ["operation", event.operation_id];
+  return null;
+}
+
+function projectJoinedTimeline(exact, common, incident, compare) {
+  const exactEvents = exact.ordered, commonEvents = common.ordered;
+  let exactIndex = exact.positions.get(incident);
+  // Locate the incident in the merge without repeatedly expanding common rows.
+  let low = 0, high = commonEvents.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (compare(commonEvents[middle], incident) < 0) low = middle + 1;
+    else high = middle;
+  }
+  let commonIndex = low;
+  const anchor = exactIndex + commonIndex;
+  const count = exactEvents.length + commonEvents.length;
+  const start = timelineStart(anchor, count);
+  for (let index = anchor; index > start; index--) {
+    const fromExact = commonIndex === 0 || (exactIndex > 0
+      && compare(exactEvents[exactIndex - 1], commonEvents[commonIndex - 1]) > 0);
+    if (fromExact) exactIndex--;
+    else commonIndex--;
+  }
+  const window = [];
+  while (window.length < Math.min(TIMELINE_LIMIT, count - start)) {
+    const fromExact = commonIndex === commonEvents.length || (exactIndex < exactEvents.length
+      && compare(exactEvents[exactIndex], commonEvents[commonIndex]) < 0);
+    window.push(fromExact ? exactEvents[exactIndex++] : commonEvents[commonIndex++]);
+  }
+  const a = exact.lastTerminal, b = common.lastTerminal;
+  const lastTerminal = b && (!a || compare(a, b) < 0) ? b : a;
+  return projectTimelineWindow(window, count, lastTerminal, incident);
+}
+
+function diagnosticHistory(events, groupedSamples) {
+  const keyFor = (event, scope) => JSON.stringify([typeof event.collection_period_id, event.collection_period_id, ...scope]);
+  const sharedScope = scope => scope[0] === "turn-attempt" ? ["turn-unscoped", scope[1]] : null;
+  const byDevice = new Map();
+  for (const samples of groupedSamples.values()) for (const event of samples) {
+    const scope = timelineScope(event);
+    if (!scope) continue;
+    if (!byDevice.has(event.device_id)) byDevice.set(event.device_id, new Map());
+    const buckets = byDevice.get(event.device_id);
+    const addBucket = scope => {
+      const key = keyFor(event, scope);
+      if (!buckets.has(key)) buckets.set(key, []);
+    };
+    addBucket(scope);
+    const shared = sharedScope(scope);
+    if (shared) addBucket(shared);
+  }
+  const sourceOrder = new Map();
+  for (const [index, event] of events.entries()) {
+    const buckets = byDevice.get(event.device_id);
+    if (!buckets) continue;
+    const add = scope => buckets.get(keyFor(event, scope))?.push(event);
+    const { turn_id: turn, attempt_id: attempt, operation_id: operation } = event;
+    if (turn) {
+      add(["turn", turn]);
+      add(attempt ? ["turn-attempt", turn, attempt] : ["turn-unscoped", turn]);
+    }
+    if (attempt) add(["attempt", attempt]);
+    if (operation) add(["operation", operation]);
+    if (event.execution_task_key) add(["execution", event.execution_task_key]);
+    if (event.remote_role === "controlled" && event.remote_task_key && event.remote_task_key !== event.execution_task_key) {
+      add(["execution", event.remote_task_key]);
+    }
+    sourceOrder.set(event, index);
+  }
+  const prepared = new WeakMap(), sharedHistories = new WeakMap();
+  const sharedHistoryFor = (rows, remote) => {
+    let history = sharedHistories.get(rows);
+    if (!history) {
+      history = {
+        projection: orderFailureHistory(rows, remote),
+        ids: new Set(rows.map(event => event.event_id)),
+      };
+      sharedHistories.set(rows, history);
+    }
+    return history;
+  };
+  const compare = (a, b) => compareEventTime(a, b) || sourceOrder.get(a) - sourceOrder.get(b);
+  return incident => {
+    const scope = timelineScope(incident);
+    const buckets = byDevice.get(incident.device_id);
+    const exact = scope && buckets?.get(keyFor(incident, scope));
+    if (!exact) return failureTimeline([], incident);
+    if (scope[0] === "execution" && incident.execution_task_key !== scope[1] && incident.remote_role !== "controlled") {
+      // A controller incident is always included in its own view. It is
+      // outside the indexed execution context for other incidents.
+      const context = sharedHistoryFor(exact, true);
+      if (context.ids.size !== exact.length || context.ids.has(incident.event_id)) return failureTimeline(exact, incident);
+      // Single-incident detail adds this anchor after collecting all matching
+      // context, so timestamp ties put it after that context.
+      const compareAnchorLast = (a, b) => compareEventTime(a, b)
+        || (Number(a === incident) - Number(b === incident)) || compare(a, b);
+      return projectJoinedTimeline(orderFailureHistory([incident], true), context.projection, incident, compareAnchorLast);
+    }
+    const shared = sharedScope(scope);
+    const common = shared && buckets.get(keyFor(incident, shared));
+    let saved = prepared.get(exact);
+    if (!saved?.history.positions.has(incident)) {
+      const history = collectFailureHistory(exact, incident);
+      let sharedHistory, canMerge = false;
+      if (common?.length) {
+        sharedHistory = sharedHistoryFor(common, false);
+        canMerge = sharedHistory.ids.size === common.length && history.ordered.length === exact.length
+          && !exact.some(event => sharedHistory.ids.has(event.event_id));
+      }
+      saved = { history, canMerge, sharedHistory };
+      prepared.set(exact, saved);
+    }
+    if (!common?.length) return projectFailureTimeline(saved.history, incident);
+    if (saved.canMerge) return projectJoinedTimeline(saved.history, saved.sharedHistory.projection, incident, compare);
+    // Preserve de-duplication for old or duplicate rows spanning both buckets.
+    return failureTimeline([...exact, ...common].sort((a, b) => sourceOrder.get(a) - sourceOrder.get(b)), incident);
+  };
+}
+
+const EXPORT_GROUP_VALUES = { code: DIAGNOSTIC_CODES, component: DIAGNOSTIC_COMPONENTS, stage: DIAGNOSTIC_STAGES };
+
+export function failureExportGroups(groups) {
+  return Object.fromEntries(Object.entries(EXPORT_GROUP_VALUES).map(([dimension, values]) => [
+    dimension,
+    [...new Set(groups.map(group => group[dimension]))].filter(value => values.includes(value)).sort(),
+  ]));
+}
+
+export function failureExport(events, filters, { groupBy, groupValue, includeEvidence, includeFixed }, reports, actor, caseId, include) {
+  const groupField = { code: "diagnostic_code", component: "diagnostic_component", stage: "stage" };
+  if (groupBy !== "all" && !Object.hasOwn(groupField, groupBy)) fail("invalid_diagnostic_export_group");
+  if (groupValue && !EXPORT_GROUP_VALUES[groupBy]?.includes(groupValue)) fail("invalid_diagnostic_export_group");
+  const groups = new Map();
+  for (const event of selectedFailureEvents(events, filters, include)) {
+    const key = groupBy === "all" ? "all" : event[groupField[groupBy]] || "unknown";
+    if (groupValue && key !== groupValue) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+  }
+  const incidentHistory = diagnosticHistory(events, groups);
+  const scope = hash(JSON.stringify([includeFixed === true, Object.entries(filters).sort()])).slice(0, 16);
+  reports.audit("samples_read", ["export", groupBy, groupValue, includeEvidence && "authorized-material", scope]
+    .filter(Boolean).join(":"), actor);
+  const evidenceByIncident = includeEvidence ? reports.exportEvidence() : new Map();
+
+  return (async function* () {
+    yield `{"schema_version":1,"group_by":${JSON.stringify(groupBy)},"groups":[`;
+    let firstGroup = true;
+    let exported = 0;
+    for (const [key, samples] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+      yield `${firstGroup ? "" : ","}{"key":${JSON.stringify(key)},"samples":[`;
+      firstGroup = false;
+      let firstSample = true;
+      for (const event of samples) {
+        const item = {
+          id: caseId(event), occurred_at: event.occurred_at, version: event.app_version, platform: event.platform,
+          mode: event.mode, code: event.diagnostic_code, component: event.diagnostic_component, stage: event.stage || "unknown",
+          ...incidentHistory(event),
+          reports: evidenceByIncident.get(`${event.device_id}:${event.diagnostic_id}`) || [],
+        };
+        yield (firstSample ? "" : ",") + JSON.stringify(item);
+        firstSample = false;
+        if (++exported % 128 === 0) await setImmediate();
+      }
+      yield "]}";
+    }
+    yield "]}";
+  })();
 }
 
 function validateReport(input, redact = redactDiagnosticText) {
@@ -343,7 +551,22 @@ export class FailureReportStore {
   audit(action, target, actor) {
     this.saveMetadata({ ...this.state, audit: [...this.state.audit, { at: Date.now(), action, target, actor }].slice(-2000) });
   }
-  issue(fingerprint) { this.ensureHealthy(); return this.state.issues[fingerprint] || { status: "open", fixed_version: "" }; }
+  issue(fingerprint) { return this.issueLookup()(fingerprint); }
+  issueLookup() {
+    this.ensureHealthy();
+    const { issues } = this.state;
+    return fingerprint => issues[fingerprint] || { status: "open", fixed_version: "" };
+  }
+  exportEvidence() {
+    this.ensureHealthy();
+    const byIncident = new Map();
+    for (const { device_id, incident_id, confirmed_at, received_at, notes, attachments } of this.state.reports) {
+      const id = `${device_id}:${incident_id}`;
+      if (!byIncident.has(id)) byIncident.set(id, []);
+      byIncident.get(id).push({ confirmed_at, received_at, notes, attachments });
+    }
+    return byIncident;
+  }
   update(fingerprint, value, actor) {
     if (!/^[a-f0-9]{64}$/.test(fingerprint) || !value || Object.keys(value).some(k => !["status", "fixed_version"].includes(k))
       || !["open", "reproduced", "fixed"].includes(value.status) || typeof value.fixed_version !== "string"
