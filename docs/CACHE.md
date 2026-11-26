@@ -99,6 +99,43 @@ change, a project-file change) into the prefix — append it as a user-role
 message instead. A later request must be `previous ⊕ suffix` unless a logged
 header change or a history reset explains the difference.
 
+DeepSeek strict-mode tool shaping (`prepare_tools_for_strict_mode`) states its
+effect here per that rule: it is **frozen-prefix-compatible**. The removal
+note appended to a tool's description is a deterministic pure function of the
+pinned catalog and the route — the note names are sorted and deduplicated,
+the counts are order-independent, and the per-request pair-judge budget
+resets at every preparation over a stable catalog order — so on a stable
+strict route the tools bytes are identical every step after the first
+preparation; the shaping runs on a per-request clone and never mutates the
+registry, and the pair-judge budget pools per tool (round 28) so no
+catalog order can change a later tool's verdict. One boundary is
+deliberate (round 25): the pattern-compile memo persists across requests
+while the per-request compile budget resets (the memo is entry-bounded at
+512 sources ≈ 8 MB of keys per thread, refuses rather than evicts at the
+bound, and the cached automata are the unaccounted part), so a
+pattern that abstained on a budget-refused first pass can be judged on a
+later pass and flip its tool's verdict — the bytes then differ between the
+first preparation and a warm one without a declared change. (The memo is
+per OS thread, so the boundary is per thread: two preparations on
+different threads hold independent memos; every stability claim above
+holds per thread.) Catalogs within
+the compile budget (the default catalog is far below it) never see the
+boundary. The engine's declared change reasons are `model`, `mode`,
+`goal`, `system`, `resume`, and `tool_surface` (plus the
+`mcp-session-boot` install edge) — there is no `provider` or `route`
+declared reason, and no translation or verbosity field. A provider
+retype or a re-planned route does not flip the gate in place: either
+change respawns the engine, and the new session re-pins its prefix as
+`initial` (round 29 — this paragraph previously invented
+`change:provider`/`change:route` fields the tree has never had, and
+described provider flips as in-place re-declarations). A gate flip a
+declared reason genuinely accompanies — a model switch that moves the
+route with it — re-declares through `model`; the one transition with no
+declared reason is a config-file endpoint edit between sessions, which
+the respawn absorbs. A flip inside the same scope (the canonical beta ↔
+non-beta path) leaves the shaped bytes identical and produces no drift
+at all.
+
 ## Permissions fragment budget compatibility
 
 Configured `instructions = [...]` files have an existing 100 KiB per-file
