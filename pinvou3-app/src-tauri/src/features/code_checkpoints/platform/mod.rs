@@ -10,9 +10,16 @@ use anyhow::{Context, Result};
 use super::{checkpoints_dir, git_ok};
 
 /// A Windows checkpoint operation still holds the workspace or metadata lock.
-#[derive(Debug, thiserror::Error)]
-#[error("检查点影子仓库正在使用")]
+#[derive(Debug)]
 pub struct CheckpointWorkspaceBusy;
+
+impl std::fmt::Display for CheckpointWorkspaceBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("检查点影子仓库正在使用")
+    }
+}
+
+impl std::error::Error for CheckpointWorkspaceBusy {}
 
 pub(super) fn lock_workspace(ledger_root: &Path) -> Result<Option<File>> {
     lock_repository(ledger_root, "workspace.lock", Duration::ZERO)
