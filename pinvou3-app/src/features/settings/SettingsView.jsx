@@ -309,7 +309,10 @@ function hasStoredCredential(record) {
       if (!canManageWebAccess) return null;
 
       return (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/45" onClick={onClose}>
+        // biome-ignore lint/a11y/useKeyWithClickEvents: background click-to-close layer; keyboard path handled by the Escape listener and the close button
+        <div role="dialog" aria-modal="true" aria-label={remoteCopy.title} className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/45" onClick={onClose}>
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: click-bubbling stop layer; keyboard events need no bubbling */}
+          {/* biome-ignore lint/a11y/noStaticElementInteractions: click-bubbling stop layer; non-interactive container */}
           <div onClick={e => e.stopPropagation()} className={`relative w-full max-w-[420px] rounded-[22px] shadow-2xl p-5 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E3E3E3]`}>
             <div className="flex items-start justify-between gap-3 mb-4">
               <div>

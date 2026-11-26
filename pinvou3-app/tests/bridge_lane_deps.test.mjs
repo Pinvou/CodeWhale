@@ -190,6 +190,12 @@ const snapshot = {
 const clusterRe = /"([\w:]+)": function \(deps\) \{\n\s*const b = sharedBridgeBase\(ensureCells\(deps\)\);\n\s*return Object\.freeze\(\{([^}]*)\}\);/g;
 let m;
 while ((m = clusterRe.exec(helpers)) !== null) {
+  // Malformed-entry guard (r5 review): the matchAll below silently skips
+  // entries not spelled `name: b.name` (e.g. a bare shorthand), and a bare
+  // identifier in a freeze body throws ReferenceError at create() time
+  // instead of landing in this snapshot — assert every entry is mapped.
+  const unmapped = m[2].split(',').map((entry) => entry.trim()).filter((entry) => entry && !/^[\w$]+: b\.[\w$]+$/.test(entry));
+  assert.equal(unmapped.length, 0, `cluster ${m[1]} freeze body has non-mapped entries: ${unmapped.join('; ')}`);
   snapshot.clusters[m[1]] = [...m[2].matchAll(/([\w$]+): b\.([\w$]+)/g)].map((p) => `${p[1]}:${p[2]}`);
 }
 // Combined main adds the two internal-message classifiers; Account retains
@@ -197,6 +203,18 @@ while ((m = clusterRe.exec(helpers)) !== null) {
 // raisePinvouSummonHighwater reads only `state`, which every consuming cluster
 // literal already provides, so it adds no cluster dependency key.
 const EXPECTED_SURFACE = {
+  // The replay result mutator is private and parameter-only. AST scope audit:
+  // updateToolItem adds only that helper; replay adds it plus standard Map.
+  // No new cluster deps, exports or forwarders; REQUIRED stays unchanged.
+  // isInternalUserMessage + isKnownInternalMetadataBlock read only the
+  // window.PinvouBridgeMessages classic global and their parameters, so no
+  // cluster literal gains a dep; userMessageDisplayText calls them as
+  // base-local declarations. raisePinvouSummonHighwater (zhuowp round-2 P2-2:
+  // the review-sidecar highwater commit) reads only `state`, which every
+  // consuming cluster literal already provides — no literal gains a dep.
+  // Debtsweep L4 (+9): normalizeVoiceError, the five chat event payload
+  // handlers, discardPlan + exitPlanToYolo, and commitReconciledWorkingSet
+  // joined the base.
   // cancelKbModel (kb_model_cancel chain) reads only `invoke`; the sole
   // consuming cluster (tauriKnowledgeModel) already passes it, so only the
   // count moves. raisePinvouSummonHighwater (community #841 summon-seq
@@ -218,7 +236,7 @@ const EXPECTED_SURFACE = {
   // window.PinvouBridgeMessages readers above; its sole caller
   // rerenderFromMessagesCore resolves it as a base-local declaration —
   // count only.
-  sharedFnCount: 325,
+  sharedFnCount: 334,
 };
 
 assert.equal(
@@ -308,15 +326,23 @@ const EXPECTED_CLUSTER_KEYS = {
   'tauriChat:31666': ['sid', 'state'],
   'tauriChatEvents': [
     'addChatItem',
+    'addOrMergePruneCompaction',
+    'addSystemItem',
+    'applyAuthoritativeModeState',
     'autoCreateScheduledTaskDraft',
     'bt',
     'finalizeAssistantStreamBeforeReasoning',
     'flushPendingTextBlock',
+    'getBuffer',
     'itemIdSeq',
+    'notify',
     'pendingAssistantBlocks',
     'pendingAssistantText',
     'pendingStreamNotifications',
+    'runSyncOnSession',
     'state',
+    'timeStr',
+    'turnUsageDirty',
   ],
   'tauriDependencies': ['invoke', 'notify', 'state'],
   'tauriInteraction': [
@@ -338,20 +364,32 @@ const EXPECTED_CLUSTER_KEYS = {
     'BT_TABLE',
     'PINVOU_SCENE_EVENTS_STORAGE_PREFIX',
     'addChatItem',
+    'currentStreamId',
+    'currentStreamText',
     'extractArtifactPaths',
     'getBuffer',
     'invoke',
     'isDeliverable',
+    'itemIdSeq',
+    'mergeHydratedChatItems',
     'notify',
+    'pendingAssistantBlocks',
+    'pendingAssistantText',
     'personaPlaceholderTitles',
     'recordAuthoritySyncDiagnostic',
     // Official：官方独有符号（#2030 面随簇注入，见 t0-ledger T0-b/T0-fix）。
     'reportSidecarReadFailure',
+    // 回流 debtsweep L4：tauriMain cluster 新增 deps（见回流 PR 说明）。
+    'rerenderFromMessages',
+    'resetPendingAssistant',
+    'restoreSteeredWorkingSet',
     'runSyncOnSession',
+    'saveSteeredWorkingSet',
     'scheduledRunSessionOwners',
     'sessionStates',
     'startThinking',
     'state',
+    'toolMeta',
   ],
   'tauriMain:99856': ['addChatItem', 'bt', 'pe'],
   'tauriMemory': [
@@ -567,6 +605,7 @@ const EXPECTED_CLUSTER_KEYS = {
     'latestShellToolIsWaitObserver',
     'loadSessionModel',
     'memoryOverviewSeq',
+    'mergeHydratedChatItems',
     'modelsLoadSeq',
     'monitorBaseline',
     'monitorIntervalId',
@@ -591,6 +630,8 @@ const EXPECTED_CLUSTER_KEYS = {
     'recordAuthoritySyncDiagnostic',
     'refreshHistoryList',
     'reportSidecarReadFailure',
+    'rerenderFromMessages',
+    'resetPendingAssistant',
     'restoreEvictedSessionDraft',
     'runSyncOnSession',
     'scheduledRecentRunsRequestToken',
@@ -619,6 +660,7 @@ const EXPECTED_CLUSTER_KEYS = {
     'stopMediaTracks',
     'switchToSessionInternal',
     'toolMeta',
+    'turnUsageDirty',
     'voiceOperations',
   ],  'web:158313': ['state'],
   'web:189622': ['addChatItem', 'bt', 'pe'],
@@ -629,6 +671,7 @@ const EXPECTED_CLUSTER_KEYS = {
 // pollMonitor/saveWorkingSetTo/summonPinvou）：官方 web lane 大 C 面未壳化，仍以
 // 本地实现为路由目标；收缩与 web create 字面量瘦身同批（web C 面批次）落地。
 const EXPECTED_FORWARDER_DEP_NAMES = [
+  'addOrMergePruneCompaction',
   'addSystemItem',
   'autoCreateScheduledTaskDraft',
   'basename',

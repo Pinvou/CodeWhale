@@ -1023,11 +1023,13 @@ assert.match(
 );
 assert.match(chatEventsSource, /turnErrorNotice && item\.text === notice/);
 assert.match(chatEventsSource, /addSystemItem\(notice, \{ turnErrorNotice: true \}\)/);
-// T0-b: the live-hydration filter moved into the shared payload; pin the lane
-// delegation plus the shared predicate body instead of the old inline copy.
+// T0-b: the live-hydration filter moved into the shared payload; the
+// debtsweep L4 backflow further moved the whole reconcile body there, so the
+// lane delegation is now the shared commitReconciledWorkingSet call — pin
+// that plus the shared predicate body instead of any inline copy.
 assert.match(
   desktopBridgeSource,
-  /return pinvouSharedtauriMain\(\)\.liveChatItemKeptForHydration\(item\)/,
+  /commitReconciledWorkingSet\(sid, buf, saved\)/,
 );
 assert.match(
   read('src', 'shared', 'bridge-shared-helpers.js'),
@@ -1072,11 +1074,13 @@ assert.match(
 assert.match(chatEventsSource, /sweepUnpairedToolMeta\(\);/);
 
 assert.match(webBridgeSource, /turnErrorNotice && item\.text === notice/);
-// T0-b: the live-hydration filter moved into the shared payload; pin the lane
-// delegation plus the shared predicate body instead of the old inline copy.
+// T0-b: the live-hydration filter moved into the shared payload; the
+// debtsweep L4 backflow further moved the whole reconcile body there, so the
+// lane delegation is now the shared commitReconciledWorkingSet call — pin
+// that plus the shared predicate body instead of any inline copy.
 assert.match(
   webBridgeSource,
-  /return pinvouSharedweb\(\)\.liveChatItemKeptForHydration\(item\)/,
+  /commitReconciledWorkingSet\(sid, buf, saved\)/,
 );
 assert.match(
   read('src', 'shared', 'bridge-shared-helpers.js'),

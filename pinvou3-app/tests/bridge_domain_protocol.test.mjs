@@ -256,11 +256,11 @@ const expectedProtocolHashes = {
   // rebase 至 main e828f68fe6 重算：#2735（手动压缩入口）对
   // bridge-shared-helpers.js 的 compaction 状态切片与 in-flight 缓冲豁免
   // 与本分支 <context_update> vintage 重置叠加进哈希面，此钉=并集树实算值。
-  chat: '0a1ed5b87dcb42672256370ea5cdbd266da011164f3770b14d37363450860712',
+  chat: '206b9cc674de0c1ae8d8e0131eb94f869a5dd6cd31d17002ecb4193cfcc041db',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
-  interaction: '0665060ac9dcb1cb487c1a8521ad7b539c3638c65bb5f2c336423741f40f685e',
+  interaction: 'e27b6858b0d9c369c9673db55a80eb80865eccdcea690cfdd4a2505321ed6c8b',
   knowledge: '5d84a1ea660205ae2d13c85643b07b1feeebb0c3e99fb23214fc7d1cc3c16cdc',
   // memory recomputed for the backflowed memory-maintenance feature
   // (Community #419): organize_memory + get_memory_organize_history invokes
@@ -388,7 +388,7 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // 参数化入口），合计 74 个签名。
 // kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
 // Recomputed for the merged main and keyless shared invoke/listen surface.
-const expectedSharedBaseHash = '21d0aec57949ee28e4f14d39762a0398eab246f19e405f071006dfbb9ace2945';
+const expectedSharedBaseHash = 'a2fa32cfa991e038d638e4740d13f34e2f006bc0150e99adedbb2c66ae0ebccf';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

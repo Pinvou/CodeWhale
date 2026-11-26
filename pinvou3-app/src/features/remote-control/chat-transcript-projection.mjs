@@ -31,7 +31,7 @@ export function remotePermissionFailureText(code, copy = {}) {
     model_package_missing: 'taskRejectedModel',
     model_not_exportable: 'taskRejectedModel',
   };
-  return typeof code === 'string' && Object.hasOwn(keys, code)
+  return typeof code === 'string' && Object.prototype.hasOwnProperty.call(keys, code)
     ? copy[keys[code]] || null : null;
 }
 

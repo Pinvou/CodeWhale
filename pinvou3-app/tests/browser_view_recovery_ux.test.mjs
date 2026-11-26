@@ -450,7 +450,7 @@ test('app lifecycle snapshots cannot resurrect state after activated or stopped 
   assert.match(appMain, /browserLifecycleStatusRequestEpochRef\.current = createBrowserSessionEpochTracker\(\)/);
   assert.match(
     appMain,
-    /listen\('browser:stopped'[\s\S]*?browserLifecycleEventEpochRef\.current\.advance\(sessionId \|\| null\)/,
+    /listen\('browser:stopped'[\s\S]*?browserLifecycleEventEpochRef\.current\??\.advance\(sessionId \|\| null\)/,
   );
   assert.match(
     appMain,

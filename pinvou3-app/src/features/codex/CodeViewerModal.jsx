@@ -72,6 +72,7 @@ export function CodeViewerModal({
   copy,
 }) {
   const dialogRef = useRef(null);
+  /** @type {import('react').MutableRefObject<(() => void) | null>} */
   const resizeCleanupRef = useRef(null);
   const [size, setSize] = useState(savedViewerSize);
   const [fontSize, adjustViewerFontSize] = useViewerFontSize();
@@ -106,14 +107,14 @@ export function CodeViewerModal({
   }, [onClose]);
 
   useEffect(() => () => {
-    if (resizeCleanupRef.current) resizeCleanupRef.current();
+    if (resizeCleanupRef.current) resizeCleanupRef.current?.();
   }, []);
 
   function startViewerResize(direction, event) {
     event.preventDefault();
     const dialog = dialogRef.current;
     if (!dialog) return;
-    if (resizeCleanupRef.current) resizeCleanupRef.current();
+    if (resizeCleanupRef.current) resizeCleanupRef.current?.();
 
     const startX = event.clientX;
     const startY = event.clientY;
@@ -230,6 +231,7 @@ export function CodeViewerModal({
           copy={copy}
         />
 
+        {/* biome-ignore lint/a11y/useSemanticElements: drag splitter needs div semantics (role=separator is a smoke-test contract) */}
         <div
           role="separator"
           aria-label={copy.resizeWidth}
@@ -239,6 +241,7 @@ export function CodeViewerModal({
           className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize hover:bg-[#0B57D0]/40 dark:hover:bg-[#A8C7FA]/50 transition-colors"
           title={copy.resizeWidth}
         />
+        {/* biome-ignore lint/a11y/useSemanticElements: drag splitter needs div semantics (role=separator is a smoke-test contract) */}
         <div
           role="separator"
           aria-label={copy.resizeHeight}
@@ -248,6 +251,7 @@ export function CodeViewerModal({
           className="absolute inset-x-0 bottom-0 z-10 h-1.5 cursor-row-resize hover:bg-[#0B57D0]/40 dark:hover:bg-[#A8C7FA]/50 transition-colors"
           title={copy.resizeHeight}
         />
+        {/* biome-ignore lint/a11y/useSemanticElements: drag splitter needs div semantics (role=separator is a smoke-test contract) */}
         <div
           role="separator"
           aria-label={copy.resizeCorner}

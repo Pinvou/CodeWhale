@@ -30,7 +30,21 @@ import sonarjs from 'eslint-plugin-sonarjs';
 import nPlugin from 'eslint-plugin-n';
 import eslintReact from '@eslint-react/eslint-plugin';
 
+// Browser-context sources. .mjs siblings are ESM modules bundled by vite into
+// the same webview runtime as the .js/.jsx sources (pure-logic modules plus
+// DOM-adjacent helpers), so they share the ES2021 floor and browser globals.
 const srcFiles = [
+  'src/app/**/*.{js,jsx,mjs}',
+  'src/components/**/*.{js,jsx,mjs}',
+  'src/features/**/*.{js,jsx,mjs}',
+  'src/hooks/**/*.{js,jsx,mjs}',
+  'src/platform/**/*.{js,jsx,mjs}',
+  'src/shared/**/*.{js,jsx,mjs}',
+];
+// React-specific blocks stay on the JSX-bearing globs: no src/**/*.mjs file
+// imports React or contains JSX (verified while wiring .mjs coverage), and
+// react-hooks rules should not gate plain-logic modules that never mount UI.
+const srcJsxFiles = [
   'src/app/**/*.{js,jsx}',
   'src/components/**/*.{js,jsx}',
   'src/features/**/*.{js,jsx}',
@@ -61,7 +75,7 @@ export default defineConfig([
       globals: { ...globals.browser },
     },
     plugins: { compat, 'import-x': importX, jsdoc, unicorn, sonarjs },
-    settings: { 'import-x/resolver': { node: { extensions: ['.js', '.jsx'] } } },
+    settings: { 'import-x/resolver': { node: { extensions: ['.js', '.jsx', '.mjs'] } } },
     rules: {
       ...js.configs.recommended.rules,
 
@@ -191,7 +205,7 @@ export default defineConfig([
     },
   },
   {
-    files: srcFiles,
+    files: srcJsxFiles,
     plugins: { react },
     settings: { react: { version: '19.2' } },
     rules: {
@@ -203,7 +217,7 @@ export default defineConfig([
     },
   },
   {
-    files: srcFiles,
+    files: srcJsxFiles,
     plugins: { 'react-hooks': reactHooks },
     rules: {
       ...reactHooks.configs.flat['recommended-latest'].rules,
@@ -220,7 +234,7 @@ export default defineConfig([
   // plugin (e.g. no-implicit-key) is actually adopted. The ES2021 webview floor
   // and globals carry over unchanged from the first block.
   {
-    files: srcFiles,
+    files: srcJsxFiles,
     plugins: { '@eslint-react': eslintReact },
     rules: {
       '@eslint-react/no-nested-component-definitions': 'error',
@@ -307,6 +321,10 @@ export default defineConfig([
   // below stay enabled as warnings until the affected modules are migrated.
   {
     files: srcFiles,
+    // 回流： Official 的 rules-of-hooks 强制门禁保留在 src 块（含 .mjs），
+    // 因此该块也必须注册 react-hooks 与 react 插件（community 重构删了这条
+    // 门禁与 react 门禁面，Official 不得弱化；.mjs 均为纯逻辑模块，零命中）。
+    plugins: { 'react-hooks': reactHooks, react },
     rules: {
       ...Object.fromEntries(
         Object.keys(sonarjs.configs.recommended.rules).map((rule) => [rule, 'warn'])
