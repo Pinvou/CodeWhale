@@ -18,6 +18,9 @@ test('manual-repair messages in all three languages do not promise automatic com
   for (const language of ['zh', 'en', 'ja']) {
     const copy = accountPlatformCopy[language];
     assert.ok(copy.registrationManualReview?.trim());
+    assert.ok(copy.registrationManualReviewUnknown?.trim());
+    assert.notEqual(copy.registrationManualReviewUnknown, copy.registrationManualReview);
+    assert.notEqual(copy.registrationManualReviewUnknown, copy.registrationDoNotRepeat);
     assert.notEqual(copy.registrationManualReview, copy.registrationDoNotRepeat);
     assert.ok(copy.usernameAlreadyRegistered?.trim());
     assert.ok(copy.mobileAlreadyRegistered?.trim());

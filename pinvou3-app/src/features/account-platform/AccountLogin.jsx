@@ -59,6 +59,9 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
     return () => { stopped = true; clearTimeout(timer); };
   }, [client, recovery?.registration_operation_id, reauthentication]);
   const manualReviewReason = registrationManualReviewReason(progress);
+  const manualReviewMessage = manualReviewReason === 'IDENTITY_CREATE_OUTCOME_UNKNOWN'
+    ? copy.registrationManualReviewUnknown
+    : copy.registrationManualReview;
   const pending = Boolean(progress && !progress.user_id && ['REGISTRATION_IN_PROGRESS', 'IDENTITY_CREATING', 'IDENTITY_CREATED', 'ACCOUNT_COMMITTING', 'REPAIR_REQUIRED', 'RECOVERY_UNAVAILABLE'].includes(progress.status));
   const run = async (action, authenticationAttempt = false) => {
     const generation = owner.current;
@@ -229,7 +232,7 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
       {['password', 'sms'].includes(mode) ? [['password', copy.authModes.password], ['sms', copy.authModes.sms]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>) : <button type="button" disabled={busy || pending} onClick={() => changeMode('password')}>{words.backToLogin}</button>}
     </nav>
     {error && <div className="ap-alert error" role="alert">{error}</div>}{notice && <div className="ap-alert" role="status">{notice}</div>}
-    {pending ? <div role="status"><p>{manualReviewReason ? copy.registrationManualReview : copy.registrationDoNotRepeat}</p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' && <p>{copy.usernameAlreadyRegistered}</p>}{manualReviewReason === 'MOBILE_ALREADY_REGISTERED' && <p>{copy.mobileAlreadyRegistered}</p>}<p>{statusLabel(progress.status, copy.statusLanguage)}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-auth-form" onSubmit={submit}>
+    {pending ? <div role="status"><p>{manualReviewReason ? manualReviewMessage : copy.registrationDoNotRepeat}</p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' && <p>{copy.usernameAlreadyRegistered}</p>}{manualReviewReason === 'MOBILE_ALREADY_REGISTERED' && <p>{copy.mobileAlreadyRegistered}</p>}<p>{statusLabel(progress.status, copy.statusLanguage)}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-auth-form" onSubmit={submit}>
       {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.username : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} />{mode === 'register' && <small>{words.usernameHint}</small>}</label>}
       {mode !== 'password' && <label>{copy.mobile}<input type="tel" required value={mobile} inputMode="tel" autoComplete="tel-national" disabled={busy || Boolean(challenge)} onChange={changeFacts(setMobile)} /></label>}
       {mode === 'sms' && !reauthentication && <label className="ap-auth-signup-consent"><input type="checkbox" checked={signupConsent} disabled={busy || Boolean(captcha)} onChange={changeSignupConsent} />{words.smsSignupConsent}</label>}

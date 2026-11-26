@@ -42,6 +42,59 @@ func TestRegistrationUnknownInspectionPostgres(t *testing.T) {
 	userCodeLookupTestGuard(t)
 	f := retainedWalletFenceActors(t)
 	registrationManualQueryCases(t, f)
+	t.Run("overdue-creating-with-recorded-subject-is-not-escalated", func(t *testing.T) {
+		t.Setenv("APP_ENV", "test")
+		ctx := context.Background()
+		r := f.repository(t)
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		r.now = func() time.Time { return now }
+		id := inspectionRegistrationReady(t, r, "recordedsubject", "+8613800140197")
+		// Normal writes record the subject and advance status together. Seed
+		// the defensive boundary independently of the normal transition.
+		const subject = "public-already-created-identity"
+		if _, err := r.pool.Exec(ctx, `UPDATE registration_operations
+SET identity_subject=$2,identity_create_attempted_at=$3,next_retry_at=$4 WHERE id=$1`,
+			id, subject, now.Add(-31*time.Minute), now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		leased, err := r.LeaseRegistrationRecoveries(ctx, 20, 30*time.Second)
+		if err != nil || len(leased) != 0 {
+			t.Fatal("fixture unexpectedly entered normal retry", err, len(leased))
+		}
+		op, err := r.RegistrationOperation(ctx, id)
+		if err != nil || op.Status != "IDENTITY_CREATING" || op.IdentitySubject != subject || op.IdentityCreatedAt != nil {
+			t.Fatal("already recorded subject was treated as unknown", op.Status, err)
+		}
+		var cases int
+		if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM manual_review_cases WHERE resource_id=$1`, id).Scan(&cases); err != nil || cases != 0 {
+			t.Fatal("already recorded subject created an unknown review case", cases, err)
+		}
+	})
+	t.Run("periodic-scan-recovers-a-missing-review-case-once", func(t *testing.T) {
+		t.Setenv("APP_ENV", "test")
+		ctx := context.Background()
+		r := f.repository(t)
+		id := inspectionRegistrationReady(t, r, "missingreview", "+8613800140198")
+		if _, err := r.pool.Exec(ctx, `UPDATE registration_operations
+SET status='REPAIR_REQUIRED',identity_create_attempted_at=$2,last_error_code=$3 WHERE id=$1`,
+			id, time.Now().UTC().Add(-time.Hour), registrationIdentityOutcomeUnknown); err != nil {
+			t.Fatal(err)
+		}
+		if count, err := r.SyncManualReviewCases(ctx, 100); err != nil || count != 1 {
+			t.Fatal("missing review case was not restored", count, err)
+		}
+		var state string
+		var deliveries int
+		if err := r.pool.QueryRow(ctx, `SELECT review.status,
+  (SELECT count(*) FROM outbox_events WHERE aggregate_id=review.id AND event_type='account.manual-review.created.v1')
+FROM manual_review_cases review WHERE review.case_type='REGISTRATION_REPAIR' AND review.resource_id=$1`, id).Scan(&state, &deliveries); err != nil ||
+			state != "OPEN" || deliveries != 1 {
+			t.Fatal("periodic restore did not publish a single open review", state, deliveries, err)
+		}
+		if count, err := r.SyncManualReviewCases(ctx, 100); err != nil || count != 0 {
+			t.Fatal("periodic restore duplicated the review", count, err)
+		}
+	})
 	t.Run("overdue-unknown-stops-worker-and-opens-one-case", func(t *testing.T) {
 		t.Setenv("APP_ENV", "test")
 		ctx := context.Background()

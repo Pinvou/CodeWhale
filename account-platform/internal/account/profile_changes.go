@@ -856,7 +856,8 @@ func (r *PostgresRepository) ClaimProfileSMSDelivery(ctx context.Context, reques
 	}
 	defer tx.Rollback(ctx)
 	// A direct UPDATE can evaluate its deadline before waiting on the
-	// challenge. Lock it first so the write uses a fresh deadline check.
+	// challenge. Lock it first and evaluate the deadline in the subsequent
+	// UPDATE, whose request predicate uses that statement's snapshot.
 	var lockedID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT challenge.id FROM profile_change_requests request
 JOIN sms_challenges challenge ON challenge.id=request.sms_challenge_id

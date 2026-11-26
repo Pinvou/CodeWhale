@@ -88,14 +88,18 @@ try {
     await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE');
     assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method');
   });
-  for (const language of ['zh','en','ja']) await caseRun(`${language}: unknown identity manual query uses original retry route without compensation`, async () => {
+  for (const language of ['zh','en','ja']) for (const status of ['IDENTITY_CREATING', 'REPAIR_REQUIRED']) await caseRun(`${language}: ${status} unknown identity manual query uses original retry route without compensation`, async () => {
     await fresh('admin'); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
-    await page.evaluate(() => { globalThis.f01.unknownRegistration=true;globalThis.f01.calls.length=0; });
+    await page.evaluate(value => { globalThis.f01.unknownRegistration = value; globalThis.f01.calls.length = 0; }, status);
     await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair));
-    const row='tr[data-operation-status="IDENTITY_CREATING"]'; await page.waitForSelector(`${row} button`);
+    const row = `tr[data-operation-status="${status}"]`;
+    await page.waitForSelector(`${row} button`);
     const text=await page.$eval(`${row} button`,node=>node.textContent);
     assert(text===registrationRepairCopy[language].stages.IDENTITY_CREATING,'unknown action is not a localized identity query');
     assert(await page.$$eval(`${row} button`,nodes=>nodes.length)===1,'unknown offered compensation');
+    const nextQueryVisible = await page.$eval(`${row} > td:nth-child(5)`, cell => Boolean(cell.querySelector('time')));
+    assert(nextQueryVisible === (status === 'IDENTITY_CREATING'), 'next automatic lookup did not match the operation state');
+    assert(await page.$eval(row, (element, copy) => element.textContent.includes(copy), registrationRepairCopy[language].identityUnknown), 'unknown operation lost its lookup guidance');
     await page.evaluate(() => { globalThis.f01.calls.length = 0; });
     await page.click(`${row} button`); await page.waitForFunction(()=>globalThis.f01.calls.some(call=>call.url.endsWith('/actions/retry')));
     await page.waitForNetworkIdle({ idleTime: 100 });
@@ -105,6 +109,23 @@ try {
       const posts = globalThis.f01.calls.filter(call => call.method === 'POST' && call.url !== '/api/account/v1/account/bootstrap');
       return posts.length === 1 && posts[0].url === `/api/admin/account/admin/v1/registration-operations/${globalThis.f01.id}/actions/retry`;
     }), 'query duplicated a command, requested compensation, or sent a new or foreign operation');
+  });
+  for (const language of ['zh','en','ja']) for (const reason of ['IDENTITY_CREATE_OUTCOME_UNKNOWN', 'USERNAME_ALREADY_REGISTERED']) await caseRun(`${language}: registration review receipt renders ${reason}`, async () => {
+    await fresh();
+    await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
+    const copy = accountPlatformCopy[language];
+    const unknown = reason === 'IDENTITY_CREATE_OUTCOME_UNKNOWN';
+    await page.evaluate(value => {
+      globalThis.f01.authenticated = false;
+      globalThis.f01.registration = { registration_operation_id: globalThis.f01.id, status: 'REPAIR_REQUIRED', manual_review_required: true, reason: value };
+      globalThis.f01.render('desktop');
+    }, reason);
+    const target = '.ap-auth-card [role=status]';
+    const expected = unknown ? copy.registrationManualReviewUnknown : copy.registrationManualReview;
+    await page.waitForFunction((selector, message) => document.querySelector(selector)?.textContent.includes(message), {}, target, expected);
+    const rendered = await page.$eval(target, element => element.textContent);
+    assert(!rendered.includes(unknown ? copy.registrationManualReview : copy.registrationManualReviewUnknown), 'registration review reported a different outcome');
+    assert(rendered.includes(copy.usernameAlreadyRegistered) === !unknown, 'username rejection detail did not match the receipt');
   });
   await caseRun('registration retry and compensation are actual wired actions', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair)); const operationID = await page.evaluate(() => globalThis.f01.id);
     const row = `tr[data-operation-id="${operationID}"][data-operation-status="REPAIR_REQUIRED"]`;

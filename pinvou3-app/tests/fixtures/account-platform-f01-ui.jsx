@@ -35,10 +35,29 @@ globalThis.fetch = async (url, options = {}) => {
   if (url.includes('/v1/me/profile-change-requests/') && url.endsWith('/actions/complete')) return json({ profile_change_request_id: id, field: 'USERNAME', status: control.completedProfile ? 'COMPLETED' : 'RETRY' });
   if (url.includes('/admin/v1/users?')) return json({ items: [{ user_id: other, username: 'managed-account', status: control.status || 'ACTIVE' }], next_cursor: null });
   if (url.endsWith('/status')) { control.status = JSON.parse(options.body).status; return json(null, 204); }
-  if (url.includes('/admin/v1/registration-operations?')) return json({ items: [control.unknownRegistration ? { registration_operation_id:id, status:'IDENTITY_CREATING', stage:'IDENTITY_CREATING', responsibility:'IDENTITY', identity_create_attempted_at:'2026-10-25T00:00:00Z',account_created:false,compensation_allowed:false } : { registration_operation_id: id, status: 'REPAIR_REQUIRED', stage: 'ACCOUNT_COMMITTING', compensation_allowed: true }] });
+  if (url.includes('/admin/v1/registration-operations?')) {
+    if (!control.unknownRegistration) return json({ items: [{ registration_operation_id: id, status: 'REPAIR_REQUIRED', stage: 'ACCOUNT_COMMITTING', compensation_allowed: true }] });
+    const reviewed = control.unknownRegistration === 'REPAIR_REQUIRED';
+    return json({ items: [{
+      registration_operation_id: id,
+      status: reviewed ? 'REPAIR_REQUIRED' : 'IDENTITY_CREATING',
+      stage: 'IDENTITY_CREATING',
+      responsibility: 'IDENTITY',
+      identity_create_attempted_at: '2026-10-25T00:00:00Z',
+      account_created: false,
+      compensation_allowed: false,
+      next_retry_at: '2026-10-25T00:30:00Z',
+      ...(reviewed ? { reason: 'IDENTITY_CREATE_OUTCOME_UNKNOWN', sla_expires_at: '2026-10-25T00:30:00Z' } : {}),
+    }] });
+  }
   if (url.endsWith('/admin/v1/profile-change-requests')) return control.adminError ? json({ code: 'UPSTREAM_UNAVAILABLE' }, 503) : json({ items: [{ profile_change_request_id: id, status: 'REPAIR_REQUIRED' }] });
   if (url.includes('/admin/v1/profile-change-requests/') && url.endsWith('/actions/retry')) return json({ request_id: id, resource_type: 'profile_change', action: 'RETRY_SCHEDULED', status: 'RETRY' }, control.badRetry ? 200 : 202);
-  if (url.includes('/registration-operations/') && url.endsWith('/actions/retry')) return json({ registration_operation_id: id, status: 'IDENTITY_CREATING' }, 202);
+  if (url.includes('/registration-operations/') && url.endsWith('/actions/retry')) {
+    if (control.unknownRegistration === 'REPAIR_REQUIRED') {
+      return json({ registration_operation_id: id, status: 'REPAIR_REQUIRED', manual_review_required: true, reason: 'IDENTITY_CREATE_OUTCOME_UNKNOWN' }, 202);
+    }
+    return json({ registration_operation_id: id, status: 'IDENTITY_CREATING' }, 202);
+  }
   if (url.endsWith('/actions/compensate')) return json(null, 204);
   if (url.endsWith('/admin/v1/sms-configuration')) {
     if (options.method !== 'PUT') return json(configuration());
