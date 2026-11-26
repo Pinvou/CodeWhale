@@ -42,8 +42,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+mod platform;
 pub(crate) mod turns;
 
+pub use platform::CheckpointWorkspaceBusy;
 pub(crate) use turns::count_user_turns;
 pub use turns::count_user_turns_in_json;
 
@@ -526,6 +528,7 @@ fn git_bounded(
         if let Some(work_tree) = work_tree {
             command.arg(format!("--work-tree={}", work_tree.display()));
         }
+        platform::constrain_git(&mut command);
         command.args(arguments);
         crate::platform::process::output_with_timeout_and_kill_tree(command, GIT_COMMAND_TIMEOUT)
             .map_err(|error| run_error(&error))
@@ -878,6 +881,7 @@ fn ensure_repo(ledger_root: &Path, execution_root: &Path) -> Result<PathBuf> {
     let info_dir = repo.join("info");
     fs::create_dir_all(&info_dir)
         .with_context(|| format!("创建 checkpoint 仓库 info 目录失败: {}", info_dir.display()))?;
+    platform::constrain_attributes(&info_dir)?;
     fs::write(info_dir.join("exclude"), excludes.join("\n") + "\n")
         .with_context(|| "写入 checkpoint 仓库 exclude 失败".to_string())?;
     // 一次性迁移（存量仓库）：exclude 只挡 untracked 文件，升级前已 add -A 进
@@ -899,7 +903,7 @@ fn ensure_repo(ledger_root: &Path, execution_root: &Path) -> Result<PathBuf> {
     Ok(repo)
 }
 
-fn load_index(ledger_root: &Path) -> Result<CheckpointIndex> {
+fn load_index(ledger_root: &Path, quarantine: bool) -> Result<CheckpointIndex> {
     let path = index_path(ledger_root);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -930,13 +934,15 @@ fn load_index(ledger_root: &Path) -> Result<CheckpointIndex> {
             // sidecar persist logs. The ledger root in context already
             // identifies the write, and the evidence stays in the quarantined
             // file for inspection.
-            match crate::platform::filesystem::quarantine_corrupt_file(&path) {
-                Ok(_) => eprintln!(
-                    "[checkpoints] corrupt checkpoint index quarantined; rebuilt from an empty index"
-                ),
-                Err(_) => eprintln!(
-                    "[checkpoints] failed to quarantine the corrupt index (scene not preserved); rebuilt from an empty index"
-                ),
+            if quarantine {
+                match crate::platform::filesystem::quarantine_corrupt_file(&path) {
+                    Ok(_) => eprintln!(
+                        "[checkpoints] corrupt checkpoint index quarantined; rebuilt from an empty index"
+                    ),
+                    Err(_) => eprintln!(
+                        "[checkpoints] failed to quarantine the corrupt index (scene not preserved); rebuilt from an empty index"
+                    ),
+                }
             }
             Ok(CheckpointIndex {
                 version: 1,
@@ -981,6 +987,8 @@ pub fn create_checkpoint(
     // CheckpointMeta.label 因截断且无读者被移除，见结构体注释）。
     _label: &str,
 ) -> Result<CheckpointMeta> {
+    let _workspace_lock = platform::lock_workspace(ledger_root)?;
+    let _metadata_lock = platform::lock_metadata(ledger_root, Duration::ZERO)?;
     create_checkpoint_preserving(ledger_root, execution_root, turn, kind, _label, &[])
 }
 
@@ -1007,11 +1015,11 @@ fn create_checkpoint_preserving(
     let repo = ensure_repo(ledger_root, &execution_root)?;
     // add -A 全量暂存（影子 index），write-tree 取内容树；与上一条 commit 的树相同
     // 则复用（空 turn 不产生冗余快照内容，但 meta 仍按新 turn 登记，保持对齐）。
-    git_ok(&repo, &execution_root, &["add", "-A"])?;
+    platform::stage_workspace(&repo, &execution_root)?;
     let tree = git_ok(&repo, &execution_root, &["write-tree"])?
         .trim()
         .to_string();
-    let mut index = load_index(ledger_root)?;
+    let mut index = load_index(ledger_root, true)?;
     let previous = index.entries.last().cloned();
     let commit = match previous {
         Some(previous) => {
@@ -1132,12 +1140,16 @@ fn commit_tree(repo: &Path, work_tree: &Path, tree: &str, kind: CheckpointKind) 
 
 /// 列出会话的全部 checkpoint（按创建顺序升序，turn 对齐用）。
 pub fn list_checkpoints(ledger_root: &Path) -> Result<Vec<CheckpointMeta>> {
-    Ok(load_index(ledger_root)?.entries)
+    Ok(load_index(ledger_root, platform::list_can_quarantine())?.entries)
 }
 
-fn find_checkpoint(ledger_root: &Path, checkpoint_id: &str) -> Result<CheckpointMeta> {
+fn find_checkpoint(
+    ledger_root: &Path,
+    checkpoint_id: &str,
+    quarantine: bool,
+) -> Result<CheckpointMeta> {
     validate_checkpoint_id(checkpoint_id)?;
-    load_index(ledger_root)?
+    load_index(ledger_root, quarantine)?
         .entries
         .into_iter()
         .find(|entry| entry.id == checkpoint_id)
@@ -1368,11 +1380,12 @@ pub fn diff_checkpoint(
     checkpoint_id: &str,
     include_patch: bool,
 ) -> Result<CheckpointDiff> {
-    let meta = find_checkpoint(ledger_root, checkpoint_id)?;
+    let _workspace_lock = platform::lock_workspace(ledger_root)?;
+    let meta = find_checkpoint(ledger_root, checkpoint_id, platform::list_can_quarantine())?;
     let execution_root = canonical_execution_root(execution_root)?;
     let repo = ensure_repo(ledger_root, &execution_root)?;
     // add -A 让影子 index 反映当前执行根，diff --cached <commit> 即「快照→现在」。
-    git_ok(&repo, &execution_root, &["add", "-A"])?;
+    platform::stage_workspace(&repo, &execution_root)?;
     let listed = git_raw_status_changes(
         &repo,
         &execution_root,
@@ -1497,7 +1510,9 @@ pub fn restore_checkpoint(
     execution_root: &Path,
     checkpoint_id: &str,
 ) -> Result<CheckpointMeta> {
-    let meta = find_checkpoint(ledger_root, checkpoint_id)?;
+    let _workspace_lock = platform::lock_workspace(ledger_root)?;
+    let _metadata_lock = platform::lock_metadata(ledger_root, Duration::ZERO)?;
+    let meta = find_checkpoint(ledger_root, checkpoint_id, true)?;
     let execution_root = canonical_execution_root(execution_root)?;
     // 回滚点快照失败必须中止：没有可反悔的兜底就不能动用户文件。
     // preserve 传入恢复目标：PreRestore 触发的 LRU/存储压力淘汰不得把目标
@@ -1597,7 +1612,14 @@ fn invalidate_entries_if(
     ledger_root: &Path,
     matches: impl Fn(&CheckpointMeta) -> bool,
 ) -> Result<usize> {
-    let mut index = load_index(ledger_root)?;
+    let mut index = load_index(ledger_root, platform::list_can_quarantine())?;
+    let _lock = if !platform::list_can_quarantine() && index.entries.iter().any(&matches) {
+        let lock = platform::lock_metadata(ledger_root, Duration::from_secs(2))?;
+        index = load_index(ledger_root, true)?;
+        lock
+    } else {
+        None
+    };
     // partition 稳定保序：kept 即「原顺序去掉被作废条目」。
     let (kept, invalidated): (Vec<CheckpointMeta>, Vec<CheckpointMeta>) =
         index.entries.into_iter().partition(|entry| !matches(entry));
@@ -1672,7 +1694,7 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let index = load_index(dir.path()).expect("a main-era index must deserialize");
+        let index = load_index(dir.path(), true).expect("a main-era index must deserialize");
         assert_eq!(index.entries.len(), 2, "both entries must survive the load");
         assert_eq!(
             index.entries[0].label, "",
@@ -2788,7 +2810,7 @@ mod tests {
         fs::create_dir_all(checkpoints_dir(ledger.path())).unwrap();
         fs::write(index_path(ledger.path()), b"{ not valid json !!!").unwrap();
 
-        let index = load_index(ledger.path()).expect("quarantined load");
+        let index = load_index(ledger.path(), true).expect("quarantined load");
         assert!(index.entries.is_empty());
         // 隔离文件带时间戳后缀（二次损坏不覆盖首次取证）。
         let quarantined = fs::read_dir(checkpoints_dir(ledger.path()))

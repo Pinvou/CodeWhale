@@ -5292,7 +5292,7 @@ wait(github, context, {env}, resolve => queueMicrotask(resolve))
         loop_steps = [
             step
             for step in re.split(r"\n      - name: ", windows_rust_test)[1:]
-            if "/tmp/windows_regression.log" in step
+            if step.startswith("Windows 原子替换状态机回归\n")
         ]
         self.assertEqual(
             len(loop_steps),
@@ -5301,7 +5301,7 @@ wait(github, context, {env}, resolve => queueMicrotask(resolve))
             "executed-count guard this pin binds",
         )
         self.assertIn(
-            "^test result: ok\\. [1-9][0-9]* passed",
+            """grep -qE '^test result: ok\\. [1-9][0-9]* passed' "$report" """,
             loop_steps[0],
             "the loop's executed-count guard keeps a filter whose every "
             "match is #[ignore]d from passing the leg silently; this "

@@ -319,7 +319,7 @@ pub async fn rewind_to_turn(
         // 下抢占新分支同号 turn 的对齐锚（再次回退静默恢复出被弃分支的代码）。
         // sidecar 备份先于截断落盘，其记录是可靠凭据：`turn > kept_turns` 且
         // 创建于该次回退之前的快照必属被弃分支（新分支同号快照创建于回退后）。
-        // best-effort：和解失败不阻塞回退，如实记日志（与即时作废同级语义）。
+        // Windows 锁冲突必须重试，避免用尚未清理的旧锚；其他失败沿用日志降级。
         match store_snapshot.rewound_turns_records(&session_id_snapshot) {
             Ok(records) => {
                 for record in records {
@@ -338,6 +338,9 @@ pub async fn rewind_to_turn(
                         record.kept_turns,
                         cutoff,
                     ) {
+                        if error.is::<checkpoints::CheckpointWorkspaceBusy>() {
+                            return Err("检查点正在更新，请稍后再回退".to_string());
+                        }
                         eprintln!("[checkpoints] 陈旧 checkpoint 和解失败（仅清理未做）: {error:#}");
                     }
                 }

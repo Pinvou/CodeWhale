@@ -58,6 +58,7 @@
 核心语义（移植自 feat 分支，均已有测试）：
 
 - 快照 = `add -A` + `write-tree` + orphan `commit-tree` + `refs/checkpoints/<id>` 保持可达；`autocrlf=false` 字节保真；内容与上一条相同则复用 commit（空 turn 无冗余对象）。
+- Windows 创建快照或预览回退前，保留暂存树中已跟踪的路径并清除影子索引的文件 stat 缓存，再使用原暂存命令重读内容。这样能捕捉等长且修改时间未变的编辑。创建和恢复按固定顺序锁定暂存区和索引账本，预览只锁暂存区，清理只锁账本。清理最多等待两秒，桌面与 CLI 回退预检遇到持续占用会要求重试。聊天仍沿用快照失败时允许继续发送的行为，该轮可能没有回退点。大工作区可能需要更多读取时间，原忽略规则和 Git 子进程预算继续适用。
 - 恢复 = `read-tree` + `checkout-index -f -a` + `clean -fd`（不用 `-x`，不误删 node_modules 等 ignored 目录）；**恢复前强制打 PreRestore 快照，失败则中止回滚**。
 - 影子 exclude 列表（.git/node_modules/target/dist 等）+ checkpoint 目录自身排除（临时会话两根相同时防自递归）。
 - 安全闸：session_id validate、checkpoint_id 字符集校验、写操作 work-tree 恒为执行根。

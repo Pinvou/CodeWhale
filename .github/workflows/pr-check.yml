@@ -5226,6 +5226,8 @@ jobs:
             'features::marketplace::scope::tests::' \
             'work_mcp_profiles_route_bundled_pptx_to_each_session_artifact_directory' \
             'work_mcp_rejects_global_pptx_fallback_when_session_profile_is_unwritable' \
+            'windows_checkpoint_rehashes_equal_length_edits_with_the_same_mtime' \
+            'diff_preview_filters_secret_paths_from_legacy_snapshot' \
             'before_landing' \
             'before_anything_lands' \
             'preserves_consent_state' \
@@ -5328,7 +5330,7 @@ jobs:
             # hole the pinvou-cli filtered-run step closed in round-27); an
             # executed-count guard keeps a filter whose every match is
             # #[ignore]d from passing the leg silently.
-            grep -qE '^test result: ok\. [1-9][0-9]* passed' /tmp/windows_regression.log || {
+            grep -qE '^test result: ok\. [1-9][0-9]* passed' "$report" || {
               echo "FAIL: regression filter '$filter' passed 0 tests — an ignored-only run must not pass the guard" >&2
               exit 1
             }
