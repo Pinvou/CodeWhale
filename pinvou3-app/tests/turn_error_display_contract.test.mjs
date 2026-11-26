@@ -206,6 +206,11 @@ const migrationCases = {
   ja: [/再起動/, /読み取りアクセス/],
   'zh-Hans': [/重启/, /恢复读取/],
 };
+const gongwenRecoveryMarkers = {
+  en: [/built-in document tool/, /matches your Pinvou3 version/, /write access/],
+  ja: [/内蔵の文書ツール/, /現在のアプリのバージョン/, /書き込み権限/],
+  zh: [/内置公文工具/, /当前品悟版本/, /写入权限/],
+};
 for (const [language, copy] of Object.entries(CHAT_RECOVERY_COPY)) {
   await withLanguage(language === 'zh' ? 'zh-Hans' : language, () => {
     const pptError = 'send_user_message failed: pptx_session_profile_unavailable';
@@ -217,7 +222,11 @@ for (const [language, copy] of Object.entries(CHAT_RECOVERY_COPY)) {
     const gongwenCopy = GONGWEN_PROFILE_UNAVAILABLE_COPY[language].message;
     assert.equal(displayTurnError(new Error(gongwenError)), gongwenCopy);
     assert.equal(displayTurnError(gongwenError), gongwenCopy);
-    assert.equal(displayTurnError('gongwen_session_profile_unavailable'), gongwenCopy);
+    const bareGongwenMessage = displayTurnError('gongwen_session_profile_unavailable');
+    assert.equal(bareGongwenMessage, gongwenCopy);
+    for (const marker of gongwenRecoveryMarkers[language]) {
+      assert.match(bareGongwenMessage, marker, language + ': document tool and directory recovery guidance');
+    }
     for (const message of ['account_platform_runtime_protocol_unavailable: internal detail', 'account platform model runtime protocol is missing or unsupported; publish its capability before invoking']) {
       for (const prefix of ['', 'send_user_message failed: ']) {
         assert.equal(displayTurnError(new Error(prefix + message)), copy.modelRuntimeProtocolUnavailable);

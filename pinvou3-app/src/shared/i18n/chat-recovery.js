@@ -27,7 +27,7 @@ export const PPTX_PROFILE_UNAVAILABLE_COPY = {
 };
 
 export const GONGWEN_PROFILE_UNAVAILABLE_COPY = {
-  en: { message: "Pinvou3 could not save this chat's document output settings. Check write access to the app data directory and try again." },
-  ja: { message: "このチャットの文書出力設定を保存できませんでした。アプリのデータディレクトリへの書き込み権限を確認して、もう一度お試しください。" },
-  zh: { message: "无法保存当前会话的公文产物配置。请检查应用数据目录的写入权限后重试。" },
+  en: { message: "Pinvou3 could not prepare document output for this chat. Check that the built-in document tool is installed correctly and matches your Pinvou3 version. Also check write access to the app data directory, then try again." },
+  ja: { message: "このチャットの文書出力を準備できませんでした。内蔵の文書ツールが正しくインストールされ、現在のアプリのバージョンと一致していることを確認してください。アプリのデータディレクトリへの書き込み権限も確認してから、もう一度お試しください。" },
+  zh: { message: "无法为当前会话准备公文输出。请确认内置公文工具完整并与当前品悟版本匹配，再检查应用数据目录的写入权限后重试。" },
 };
