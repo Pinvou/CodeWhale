@@ -9,10 +9,13 @@ The Portal image still supplies the HTML. Login, APIs and ingress rules
 do not change. An empty claim uses embedded assets as before.
 
 Provision a volume that can mount the same files on all Portal nodes,
-including during a rollout. Grant write access only to a release publisher
-outside the Portal pods. Use a dedicated volume with no other service's
-files, symbolic links, or nested mounts. The filesystem must support atomic hard links in
-the destination directory. Provision `/mnt/portal-assets/assets` on the
+including during a rollout. Use a storage class that supports simultaneous
+mounts across nodes, such as ReadWriteMany with the Portal mounts set
+read-only. ReadWriteOnce alone does not guarantee simultaneous mounts across nodes.
+Grant write access only to a release publisher outside the Portal pods. Use
+a dedicated volume with no other service's files, symbolic links, or nested
+mounts. The filesystem must support atomic hard links in the destination
+directory. Provision `/mnt/portal-assets/assets` on the
 publisher's mount before publishing. Verify that the Portal runtime
 identity can traverse the document root and the assets directory and read
 the asset files. The publisher leaves directory permissions as provisioned.

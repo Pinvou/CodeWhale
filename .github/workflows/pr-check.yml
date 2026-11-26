@@ -895,6 +895,7 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/publish-portal-assets.py'
               - 'scripts/ci-frontend-bundle.py'
               - 'scripts/ci-frontend-cache-server.py'
               - 'scripts/lib/ci_frontend_cache.py'
