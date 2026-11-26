@@ -251,11 +251,18 @@ type brokerAdmissionFacts struct {
 }
 
 func (facts brokerAdmissionFacts) clean() bool {
-	return facts.Roles == 0 && facts.Databases == 0 && facts.Clients == 0 && facts.Relations == 0 && facts.Functions == 0
+	return facts.Clients == 0 && facts.catalogClean()
+}
+
+func (facts brokerAdmissionFacts) catalogClean() bool {
+	return facts.Roles == 0 && facts.Databases == 0 && facts.Relations == 0 && facts.Functions == 0
 }
 
 func readBrokerAdmission(ctx context.Context, admin *pgx.Conn) (brokerAdmissionFacts, error) {
 	var facts brokerAdmissionFacts
+	if err := cifixture.Verify(ctx, admin); err != nil {
+		return facts, err
+	}
 	err := admin.QueryRow(ctx, `SELECT
  (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'postgres'),
  (SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')),
@@ -265,7 +272,40 @@ func readBrokerAdmission(ctx context.Context, admin *pgx.Conn) (brokerAdmissionF
 	return facts, err
 }
 
-func brokerAdmissionErrorDiagnostic(err error) string {
+const brokerAdmissionWait = 15 * time.Second
+
+// A client's close can precede PostgreSQL's removal of its backend. Observe a
+// clean catalog and zero other backends before admitting any fixture writes.
+func awaitBrokerAdmission(ctx context.Context, read func(context.Context) (brokerAdmissionFacts, error)) (brokerAdmissionFacts, error) {
+	window, cancel := context.WithTimeout(ctx, brokerAdmissionWait)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var last brokerAdmissionFacts
+	for {
+		if err := window.Err(); err != nil {
+			return last, err
+		}
+		facts, err := read(window)
+		if err != nil {
+			return last, err
+		}
+		if err := window.Err(); err != nil {
+			return last, err
+		}
+		if facts.Clients == 0 || !facts.catalogClean() {
+			return facts, nil
+		}
+		last = facts
+		select {
+		case <-window.Done():
+			return last, window.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func brokerAdmissionErrorDiagnostic(err error, last brokerAdmissionFacts) string {
 	category, sqlstate := "other", "unavailable"
 	var postgresError *pgconn.PgError
 	switch {
@@ -283,7 +323,11 @@ func brokerAdmissionErrorDiagnostic(err error) string {
 			sqlstate = postgresError.Code
 		}
 	}
-	return fmt.Sprintf("broker fixture admission query failed: class=%s sqlstate=%s", category, sqlstate)
+	message := fmt.Sprintf("broker fixture admission query failed: class=%s sqlstate=%s", category, sqlstate)
+	if category == "deadline" && last.Clients > 0 {
+		message += fmt.Sprintf(" last_observed_clients=%d", last.Clients)
+	}
+	return message
 }
 
 func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixture {
@@ -297,10 +341,12 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 	}
 	// The broker CI service is pristine; a short fixed-actor list alone is not ownership.
 	if os.Getenv("PINVOU_ACCOUNT_CI_PG_DIRECTORY") == "/var/lib/postgresql/18/docker" {
-		facts, err := readBrokerAdmission(ctx, admin)
+		facts, err := awaitBrokerAdmission(ctx, func(observation context.Context) (brokerAdmissionFacts, error) {
+			return readBrokerAdmission(observation, admin)
+		})
 		if err != nil {
 			admin.Close(ctx)
-			t.Fatal(brokerAdmissionErrorDiagnostic(err))
+			t.Fatal(brokerAdmissionErrorDiagnostic(err, facts))
 		}
 		if !facts.clean() {
 			admin.Close(ctx)
