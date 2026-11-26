@@ -2094,11 +2094,20 @@ fn every_builtin_schema_survives_the_moonshot_projection_or_declares_relaxed() {
         .with_runtime_task_tools()
         .with_runtime_task_shell_tools()
         .with_diagnostics_tool()
+        // Production assembles these via `with_agent_runtime_surface`
+        // (registry.rs); the oracle previously missed them, so their schemas
+        // had no Moonshot-projection coverage (P3-4).
+        .with_tui_help_tool()
         .with_validation_tools()
         .with_test_runner_tool()
         .with_project_tools()
         .with_skill_tools()
         .with_pandoc_tools()
+        // Host-probe conditional, exactly like `with_pandoc_tools` above:
+        // production calls it unconditionally and `ocr_available()` decides
+        // whether `image_ocr` registers, so the oracle mirrors that pattern
+        // instead of silently skipping the builder.
+        .with_image_ocr_tools()
         .with_read_media_tool()
         .with_harness_tool()
         .with_notify_tool()
@@ -2106,6 +2115,23 @@ fn every_builtin_schema_survives_the_moonshot_projection_or_declares_relaxed() {
         .with_verify_tool(None, "kimi-k3".to_string())
         .with_review_tool(None, "kimi-k3".to_string())
         .with_fim_tool(None, "kimi-k3".to_string())
+        // Production threads the session client into speech/vision; the stub
+        // client here is already consumed by the `SubAgentRuntime`, and both
+        // tools only need the client at invocation time, so `None` matches
+        // the existing `with_rlm_tool(None, ..)` stub style (see also
+        // `builder_registers_speech_alias_tools`).
+        .with_speech_tools(None, None)
+        // Production registers vision only when `[vision_model]` is
+        // configured; the oracle always assembles it so `image_analyze`'
+        // schema stays under projection coverage.
+        .with_vision_tools(
+            crate::config::VisionModelConfig {
+                model: "test-vision-model".to_string(),
+                api_key: None,
+                base_url: None,
+            },
+            None,
+        )
         .with_subagent_tools(runtime.manager.clone(), runtime)
         .build(crate::tools::spec::ToolContext::new(
             tmp.path().to_path_buf(),
@@ -2117,6 +2143,52 @@ fn every_builtin_schema_survives_the_moonshot_projection_or_declares_relaxed() {
         "the assembled catalog must stay broad, found {}",
         tools.len()
     );
+    // Teeth check for the widened surface: the four production-only builders
+    // must actually contribute tools, not no-op into the chain. This assembles
+    // them in isolation and pins their exact contribution (conditional
+    // `image_ocr` mirrored through the same `ocr_available()` probe
+    // production uses, so a host without OCR does not silently skip it).
+    let four_builder_surface = ToolRegistryBuilder::new()
+        .with_tui_help_tool()
+        .with_image_ocr_tools()
+        .with_speech_tools(None, None)
+        .with_vision_tools(
+            crate::config::VisionModelConfig {
+                model: "test-vision-model".to_string(),
+                api_key: None,
+                base_url: None,
+            },
+            None,
+        )
+        .build(crate::tools::spec::ToolContext::new(
+            tmp.path().to_path_buf(),
+        ));
+    let mut four_builder_names = four_builder_surface
+        .to_api_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    let mut expected_four_builder_names = vec![
+        "image_analyze".to_string(),
+        "speech".to_string(),
+        "tui_help".to_string(),
+        "tts".to_string(),
+    ];
+    if crate::tools::image_ocr::ocr_available() {
+        expected_four_builder_names.push("image_ocr".to_string());
+    }
+    four_builder_names.sort();
+    expected_four_builder_names.sort();
+    assert_eq!(
+        four_builder_names, expected_four_builder_names,
+        "the four production-only builders must contribute exactly their tools"
+    );
+    for name in &four_builder_names {
+        assert!(
+            registry.contains(name),
+            "the assembled oracle catalog must include {name} from the widened production surface"
+        );
+    }
     let relaxed = tools
         .iter()
         .filter(|tool| tool.strict == Some(false))
@@ -2138,25 +2210,41 @@ fn every_builtin_schema_survives_the_moonshot_projection_or_declares_relaxed() {
         "built-ins the Moonshot projection drops (declare `strict: false` on the ToolSpec or make the schema MFJS-compatible):\n{}",
         dropped.join("\n")
     );
-    assert!(
-        relaxed.len() >= 15,
-        "the relaxed set must cover the known MFJS-incompatible built-ins, found: {}",
-        relaxed.join(", ")
-    );
-    for required in [
-        "apply_patch",
-        "agent",
-        "web.run",
+    // P3-4 pin: the relaxed lane is EXACTLY the set of builder-registered
+    // built-ins that declare `strict: false`. The previous 9-name allowlist
+    // plus a `>= 15` count left the remaining relaxed tools protected only
+    // indirectly. `tool_search` is intentionally absent: it is a synthetic
+    // client-level discovery tool (`ToolProvenance::Synthetic`), never
+    // produced by a builder, so it cannot appear on this registry surface.
+    let mut relaxed_names = relaxed;
+    relaxed_names.sort_unstable();
+    let mut expected_relaxed = vec![
         "Web",
+        "agent",
+        "apply_patch",
+        "automation",
+        "create_goal",
+        "finance",
+        "github",
+        "handle_read",
+        "lsp",
+        "memory_search",
+        "request_user_input",
+        "retrieve_tool_result",
+        "revert_turn",
+        "send_later",
+        "task_shell_start",
+        "task_shell_wait",
         "tasks",
         "terminal/run",
-        "request_user_input",
-        "finance",
+        "terminal/send",
+        "terminal/wait",
+        "web.run",
         "workflow",
-    ] {
-        assert!(
-            relaxed.contains(&required),
-            "{required} must stay on the Moonshot wire via the relaxed lane"
-        );
-    }
+    ];
+    expected_relaxed.sort_unstable();
+    assert_eq!(
+        relaxed_names, expected_relaxed,
+        "the Moonshot relaxed lane must carry exactly the built-ins that declare `strict: false` (22 builder-registered tools)",
+    );
 }

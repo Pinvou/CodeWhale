@@ -1644,6 +1644,20 @@ mod tests {
         }
     }
 
+    /// A live Moonshot route config whose per-provider endpoint is `base_url`,
+    /// mirroring the `[providers.moonshot]` shape the membership routes are
+    /// configured with (tests in config do the same via TOML).
+    fn moonshot_route_config(base_url: &str) -> Config {
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.moonshot.api_key = Some("test-key".to_string());
+        providers.moonshot.base_url = Some(base_url.to_string());
+        Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(providers),
+            ..Config::default()
+        }
+    }
+
     #[test]
     fn read_only_roles_report_the_narrowed_shell_they_actually_run_under() {
         use crate::fleet::role;
@@ -2958,6 +2972,116 @@ mod tests {
 
             validate_fleet_task_routes(&[task], &[profile], Some("deepseek-v4-flash"), None)
                 .unwrap_or_else(|error| panic!("{effort} must remain valid: {error}"));
+        }
+    }
+
+    #[test]
+    fn membership_k3_route_with_config_accepts_explicit_thinking_tier() {
+        // The exact Kimi Code membership endpoint serving the bare K3-series
+        // ids is always-thinking at the vendor, so the thinking-tier gate must
+        // accept an explicit tier through the exact-membership predicate: the
+        // bare ids are deliberately blind in `model_supports_reasoning`, so
+        // `provider_capability` alone cannot vouch for this route (review
+        // 6061318874). Both K3-era membership spellings ride the same
+        // predicate.
+        for model in ["k3", "k3-256k"] {
+            let config = moonshot_route_config("https://api.kimi.com/coding/v1");
+            let mut profile = agent_profile(
+                "kimi-builder",
+                "builder",
+                None,
+                codewhale_config::FleetLoadout::Inherit,
+            );
+            profile.profile.model = Some(model.to_string());
+            profile.profile.provider = Some("moonshot".to_string());
+            profile.profile.reasoning_effort = Some("high".to_string());
+            let task = fleet_task(
+                "kimi-build",
+                Some(worker_profile(
+                    Some("kimi-builder"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                )),
+            );
+
+            validate_fleet_task_routes(&[task], &[profile], Some(model), Some(&config))
+                .unwrap_or_else(|error| panic!("{model} membership route: {error}"));
+        }
+    }
+
+    #[test]
+    fn gateway_lookalike_with_literal_k3_rejects_explicit_thinking_tier() {
+        // A lookalike path on a non-Kimi host can serve a literal `k3`, and
+        // the bare-id-blind capability table cannot vouch for it either, so
+        // the exact-host conjunct must keep the membership thinking exception
+        // off this route (models.rs keeps custom gateways bare-id-blind).
+        let config = moonshot_route_config("https://gateway.example/coding/v1");
+        let mut profile = agent_profile(
+            "gateway-builder",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("k3".to_string());
+        profile.profile.provider = Some("moonshot".to_string());
+        profile.profile.reasoning_effort = Some("high".to_string());
+        let task = fleet_task(
+            "gateway-build",
+            Some(worker_profile(
+                Some("gateway-builder"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        let err = validate_fleet_task_routes(&[task], &[profile], Some("k3"), Some(&config))
+            .expect_err("gateway lookalike must not inherit the membership exception");
+        let message = err.to_string();
+        assert!(message.contains("does not support thinking"), "{message}");
+        assert!(message.contains("k3"), "{message}");
+    }
+
+    #[test]
+    fn kimi_prefixed_spelling_on_membership_endpoint_rejects_explicit_thinking_tier() {
+        // The DIRECT-platform spellings are not in the bare membership
+        // roster: on the membership endpoint the cross-pairing guard fails
+        // the route before the thinking gate, so run creation rejects the
+        // task outright instead of letting a `kimi-k`-prefixed id ride the
+        // always-thinking membership exception.
+        let config = moonshot_route_config("https://api.kimi.com/coding/v1");
+        for model in ["kimi-k3", "kimi-k2.7-code"] {
+            let mut profile = agent_profile(
+                "direct-spelling-builder",
+                "builder",
+                None,
+                codewhale_config::FleetLoadout::Inherit,
+            );
+            profile.profile.model = Some(model.to_string());
+            profile.profile.provider = Some("moonshot".to_string());
+            profile.profile.reasoning_effort = Some("high".to_string());
+            let task = fleet_task(
+                "direct-spelling-build",
+                Some(worker_profile(
+                    Some("direct-spelling-builder"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                )),
+            );
+
+            let err = validate_fleet_task_routes(&[task], &[profile], Some(model), Some(&config))
+                .expect_err("direct spellings are not membership roster models");
+            let message = err.to_string();
+            assert!(message.contains(model), "{model}: {message}");
+            assert!(message.contains("does not resolve"), "{model}: {message}");
         }
     }
 

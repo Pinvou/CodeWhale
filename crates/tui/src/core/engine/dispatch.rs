@@ -780,4 +780,98 @@ mod schema_json_container_tests {
             json!([])
         );
     }
+
+    #[test]
+    fn bounded_raw_arguments_excerpt_keeps_short_buffers_intact() {
+        // In-bound buffers are only debug-quoted: full content, no marker.
+        assert_eq!(bounded_raw_arguments_excerpt(""), "\"\"");
+        assert_eq!(
+            bounded_raw_arguments_excerpt("not json {"),
+            "\"not json {\""
+        );
+        let excerpt = bounded_raw_arguments_excerpt("not json {");
+        assert!(!excerpt.contains('…'), "{excerpt}");
+        assert!(!excerpt.contains("bytes total"), "{excerpt}");
+    }
+
+    #[test]
+    fn bounded_raw_arguments_excerpt_keeps_exactly_512_bytes_whole() {
+        let buffer = "a".repeat(512);
+        let excerpt = bounded_raw_arguments_excerpt(&buffer);
+        // Exactly 512 bytes still counts as in-bound (`<=`): quoted content
+        // only, never the truncation marker.
+        assert_eq!(excerpt, format!("\"{}\"", "a".repeat(512)));
+        assert_eq!(excerpt.len(), 514);
+        assert!(!excerpt.contains('…'), "{excerpt}");
+        assert!(!excerpt.contains("bytes total"), "{excerpt}");
+    }
+
+    #[test]
+    fn bounded_raw_arguments_excerpt_truncates_oversized_ascii_at_512_bytes() {
+        let buffer = "a".repeat(600);
+        let excerpt = bounded_raw_arguments_excerpt(&buffer);
+        assert_eq!(
+            excerpt,
+            format!("\"{}\"… (600 bytes total)", "a".repeat(512))
+        );
+        assert_eq!(excerpt.len(), 512 + 2 + "… (600 bytes total)".len());
+        assert_eq!(excerpt, bounded_raw_arguments_excerpt(&buffer));
+    }
+
+    #[test]
+    fn bounded_raw_arguments_excerpt_truncates_multibyte_without_splitting_chars() {
+        let buffer = "🦀".repeat(150); // 150 * 4 = 600 bytes.
+        let excerpt = bounded_raw_arguments_excerpt(&buffer);
+        assert!(std::str::from_utf8(excerpt.as_bytes()).is_ok());
+        assert!(!excerpt.contains('\u{FFFD}'), "{excerpt}");
+        assert!(excerpt.ends_with("… (600 bytes total)"), "{excerpt}");
+        // The 512-byte window lands on a char boundary, so the core is 128
+        // whole crabs (512 bytes) and no partial character is emitted.
+        assert_eq!(
+            excerpt,
+            format!("\"{}\"… (600 bytes total)", "🦀".repeat(128))
+        );
+        let core = &excerpt[1..excerpt.len() - 1 - "… (600 bytes total)".len()];
+        assert_eq!(core.len(), 512);
+        assert_eq!(core.chars().count(), 128);
+    }
+
+    #[test]
+    fn bounded_raw_arguments_excerpt_keeps_multibyte_window_on_a_char_boundary() {
+        // 129 crabs = 516 bytes: the 512-byte window ends exactly where the
+        // 129th crab starts, so the core is 128 whole crabs (512 bytes).
+        let buffer = "🦀".repeat(129);
+        assert!(buffer.is_char_boundary(512));
+        let excerpt = bounded_raw_arguments_excerpt(&buffer);
+        assert_eq!(
+            excerpt,
+            format!("\"{}\"… (516 bytes total)", "🦀".repeat(128))
+        );
+        assert_eq!(excerpt.len(), 512 + 2 + "… (516 bytes total)".len());
+        assert!(!excerpt.contains('\u{FFFD}'), "{excerpt}");
+        let core = &excerpt[1..excerpt.len() - 1 - "… (516 bytes total)".len()];
+        assert_eq!(core.len(), 512);
+        assert_eq!(core.chars().count(), 128);
+    }
+
+    #[test]
+    fn bounded_raw_arguments_excerpt_backs_off_to_a_char_boundary_when_the_window_splits_a_char() {
+        // 510 ASCII bytes then two crabs (518 bytes): byte 512 falls inside
+        // the first crab, so the excerpt must back off to the boundary at
+        // 510 instead of slicing mid-character (which would panic).
+        let buffer = format!("{}🦀🦀", "a".repeat(510));
+        assert_eq!(buffer.len(), 518);
+        assert!(!buffer.is_char_boundary(512));
+        let excerpt = bounded_raw_arguments_excerpt(&buffer);
+        assert_eq!(
+            excerpt,
+            format!("\"{}\"… (518 bytes total)", "a".repeat(510))
+        );
+        assert_eq!(excerpt.len(), 510 + 2 + "… (518 bytes total)".len());
+        assert!(!excerpt.contains('\u{FFFD}'), "{excerpt}");
+        let core = &excerpt[1..excerpt.len() - 1 - "… (518 bytes total)".len()];
+        assert_eq!(core.len(), 510);
+        assert_eq!(core, "a".repeat(510));
+        assert!(buffer.is_char_boundary(510));
+    }
 }

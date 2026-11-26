@@ -3500,7 +3500,15 @@ mod tests {
         for (name, entry) in [
             ("generic", sanitize as fn(&mut Value)),
             ("strict", sanitize_for_strict as fn(&mut Value)),
-            ("kimi", sanitize_for_kimi as fn(&mut Value)),
+            (
+                "kimi",
+                (|schema: &mut Value| {
+                    // Overdepth input trips the entry-point depth guard, so
+                    // the result is `Ok` here; the pointer table only needs
+                    // the fail-closed "no mutation" behavior under test.
+                    let _ = sanitize_for_kimi(schema);
+                }) as fn(&mut Value),
+            ),
         ] {
             let mut schema = plain.clone();
             entry(&mut schema);
@@ -7746,41 +7754,59 @@ mod tests {
 }
 
 /// Intersect a parent `type` with every nested `anyOf` branch. Branches with
-/// a provably disjoint type are removed; an empty result remains invalid and
-/// is rejected by MFJS validation. `oneOf` is deliberately not rewritten.
-pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
+/// a provably disjoint type are removed; a parent type that conflicts with
+/// EVERY branch is reported as [`KimiParameterSchemaError::
+/// ContradictoryParentUnion`] instead of leaving an emptied union for
+/// validation to misreport as a resource failure. `oneOf` is deliberately
+/// not rewritten.
+pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParameterSchemaError> {
     if !schema_within_structural_depth_limit(schema) {
-        return;
+        return Ok(());
     }
     if let Some(obj) = schema.as_object_mut() {
         for map_key in ["properties", "$defs"] {
             if let Some(children) = obj.get_mut(map_key).and_then(Value::as_object_mut) {
                 for child in children.values_mut() {
-                    sanitize_for_kimi(child);
+                    sanitize_for_kimi(child)?;
                 }
             }
         }
         if let Some(items) = obj.get_mut("items") {
-            sanitize_for_kimi(items);
+            sanitize_for_kimi(items)?;
         }
         if let Some(additional) = obj.get_mut("additionalProperties")
             && additional.is_object()
         {
-            sanitize_for_kimi(additional);
+            sanitize_for_kimi(additional)?;
         }
         if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
             for branch in branches {
-                sanitize_for_kimi(branch);
+                sanitize_for_kimi(branch)?;
             }
         }
 
         let Some(parent_type) = obj.get("type").and_then(Value::as_str).map(str::to_string) else {
-            return;
+            return Ok(());
         };
         if obj.get("anyOf").is_some_and(Value::is_array) {
             obj.remove("type");
             if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-                branches.retain_mut(|branch| intersect_kimi_branch_type(branch, &parent_type));
+                let mut contradiction = None;
+                branches.retain_mut(|branch| {
+                    match intersect_kimi_branch_type(branch, &parent_type) {
+                        Ok(keep) => keep,
+                        Err(error) => {
+                            contradiction.get_or_insert(error);
+                            false
+                        }
+                    }
+                });
+                if let Some(error) = contradiction {
+                    return Err(error);
+                }
+                if branches.is_empty() {
+                    return Err(KimiParameterSchemaError::ContradictoryParentUnion);
+                }
             }
         }
         if obj
@@ -7792,32 +7818,54 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
             obj.remove("properties");
         }
     }
+    Ok(())
 }
 
 /// Apply a same-instance parent type to a branch. Nested unions receive the
 /// constraint recursively instead of gaining an invalid `type + anyOf` pair.
-/// Malformed nodes stay in place for the validator to reject.
-fn intersect_kimi_branch_type(branch: &mut Value, parent_type: &str) -> bool {
+/// Malformed nodes stay in place for the validator to reject; a nested union
+/// whose parent-excluded branches all vanish surfaces the
+/// [`KimiParameterSchemaError::ContradictoryParentUnion`] diagnosis instead
+/// of leaving an empty union behind. Returns whether the branch survives.
+fn intersect_kimi_branch_type(
+    branch: &mut Value,
+    parent_type: &str,
+) -> Result<bool, KimiParameterSchemaError> {
     let Some(obj) = branch.as_object_mut() else {
-        return true;
+        return Ok(true);
     };
     let effective_type = match obj.get("type").and_then(Value::as_str) {
         Some(branch_type) => match intersect_schema_types(parent_type, branch_type) {
             Some(effective) => effective.to_string(),
-            None => return false,
+            None => return Ok(false),
         },
-        None if obj.contains_key("type") => return true,
+        None if obj.contains_key("type") => return Ok(true),
         None => parent_type.to_string(),
     };
     if obj.get("anyOf").is_some_and(Value::is_array) {
         obj.remove("type");
         if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-            branches.retain_mut(|nested| intersect_kimi_branch_type(nested, &effective_type));
+            let mut contradiction = None;
+            branches.retain_mut(|nested| {
+                match intersect_kimi_branch_type(nested, &effective_type) {
+                    Ok(keep) => keep,
+                    Err(error) => {
+                        contradiction.get_or_insert(error);
+                        false
+                    }
+                }
+            });
+            if let Some(error) = contradiction {
+                return Err(error);
+            }
+            if branches.is_empty() {
+                return Err(KimiParameterSchemaError::ContradictoryParentUnion);
+            }
         }
     } else {
         obj.insert("type".into(), Value::String(effective_type));
     }
-    true
+    Ok(true)
 }
 
 /// A safe, provider-facing reason that Kimi parameters could not be emitted.
@@ -7840,6 +7888,8 @@ pub enum KimiParameterSchemaError {
     UnsupportedNestedAllOf,
     #[error("Moonshot function parameters contain conflicting nested union composition")]
     ConflictingNestedUnion,
+    #[error("Moonshot function parameters parent type conflicts with every anyOf branch")]
+    ContradictoryParentUnion,
     #[error("Moonshot function parameters contain an unsupported const literal")]
     UnsupportedConstLiteral,
     #[error("Moonshot function parameters contain conflicting literal constraints")]
@@ -7921,7 +7971,7 @@ fn sanitize_kimi_parameters_candidate(
     // union), so an early rejection would preempt the collapse (review
     // 4689524141).
     normalize_kimi_compatibility(parameters, true)?;
-    sanitize_for_kimi(parameters);
+    sanitize_for_kimi(parameters)?;
 
     // Only annotations are removed. Bounds and dependent keywords are real
     // constraints, so they remain for validation to reject rather than being
@@ -9003,7 +9053,7 @@ mod kimi_tests {
                 }
             }
         });
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
         let handle = &schema["properties"]["handle"];
         assert!(!handle.as_object().unwrap().contains_key("type"));
         let any_of = handle["anyOf"].as_array().unwrap();
@@ -9021,7 +9071,7 @@ mod kimi_tests {
             ]
         });
 
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
 
         assert!(
             !schema.as_object().unwrap().contains_key("type"),
@@ -9292,7 +9342,7 @@ mod kimi_tests {
             ]
         });
 
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
 
         let outer_item = &schema["anyOf"][0];
         assert!(outer_item.get("type").is_none());
@@ -9311,7 +9361,7 @@ mod kimi_tests {
             "required": ["x"]
         });
         let mut schema = original.clone();
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
         assert_eq!(schema, original);
     }
 
@@ -11595,6 +11645,135 @@ mod review_wave_tests {
         assert_eq!(
             worked, schema,
             "the over-budget merge must decline, preserving the original union"
+        );
+    }
+
+    #[test]
+    fn enum_intersection_merge_completes_under_the_cap_and_declines_at_it() {
+        // The decline pinned by
+        // `enum_intersection_work_is_capped_and_declines_instead_of_hanging`
+        // fires for any cap value: the disjoint enums there also decline on
+        // the empty intersection, and with no cap at all the bounded scan
+        // still ends in the same decline. This test pins the cap VALUE. The
+        // control performs 50 × 100 candidate comparisons and must COMPLETE
+        // into the exact five-value intersection; the band case performs
+        // ≈500 × 1000 = 500k comparisons — over the 100_000 cap and under
+        // 100_000_000 — so loosening the cap past 500k would complete the
+        // band merge and flip this assertion. The five shared values sit at
+        // the END of the inner enum so the per-candidate match short-circuit
+        // cannot undercut the O(outer × inner) accounting: every outer
+        // candidate scans essentially the whole inner enum either way.
+        let build_enum = |start: u64, count: u64| -> Value {
+            Value::Array((start..start + count).map(Value::from).collect())
+        };
+        let enum_with_shared_tail =
+            |filler_start: u64, filler_count: u64, shared_start: u64, shared_count: u64| -> Value {
+                let mut values: Vec<Value> = (filler_start..filler_start + filler_count)
+                    .map(Value::from)
+                    .collect();
+                values.extend((shared_start..shared_start + shared_count).map(Value::from));
+                Value::Array(values)
+            };
+
+        // Control: well under the cap — the merge must complete.
+        let mut worked = json!({
+            "type": "integer",
+            "enum": build_enum(0, 50),
+            "anyOf": [{
+                "type": "integer",
+                "enum": enum_with_shared_tail(1_000, 95, 45, 5)
+            }]
+        });
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked,
+            json!({"type": "integer", "enum": build_enum(45, 5)}),
+            "under the merge-work cap the exact intersection must complete"
+        );
+
+        // Band: ≈500k comparisons — over the real cap, under any loosened
+        // value a mutation would introduce — so the merge must decline and
+        // the ORIGINAL union must be preserved verbatim.
+        let band = json!({
+            "type": "integer",
+            "enum": build_enum(0, 500),
+            "anyOf": [{
+                "type": "integer",
+                "enum": enum_with_shared_tail(1_000, 995, 495, 5)
+            }]
+        });
+        let mut worked = band.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, band,
+            "≈500k comparisons exceed the 100_000 merge-work cap: the merge \
+             must decline and preserve the original union, not collapse it \
+             to the five shared values"
+        );
+    }
+
+    #[test]
+    fn contradictory_parent_union_reports_the_conflict_instead_of_a_resource_limit() {
+        // A parent `type` that provably excludes every `anyOf` branch is a
+        // schema contradiction. The reconciliation used to leave the emptied
+        // union behind for MFJS validation to trip over, surfacing as the
+        // misleading `ResourceLimitExceeded` (or a root-shape error); the
+        // fail-closed outcome must carry the precise diagnosis instead.
+        let expect_contradiction = |schema: &Value, label: &str| {
+            let mut candidate = schema.clone();
+            let error = crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut candidate)
+                .expect_err("a parent type excluding every anyOf branch must be rejected");
+            assert_eq!(
+                error,
+                crate::tools::schema_sanitize::KimiParameterSchemaError::ContradictoryParentUnion,
+                "{label}: the rejection must name the parent/branch contradiction"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicts with every anyOf branch"),
+                "{label}: the message must name the conflict, got: {error}"
+            );
+        };
+        // The review's shape: the contradiction sits on a property, so the
+        // emptied union used to surface at validation as
+        // `ResourceLimitExceeded`.
+        expect_contradiction(
+            &json!({
+                "type": "object",
+                "properties": {
+                    "victim": {
+                        "type": "object",
+                        "anyOf": [{"type": "string"}, {"type": "integer"}]
+                    }
+                }
+            }),
+            "property-level contradiction",
+        );
+        // The same contradiction at the root.
+        expect_contradiction(
+            &json!({
+                "type": "object",
+                "anyOf": [{"type": "string"}, {"type": "integer"}]
+            }),
+            "root-level contradiction",
+        );
+        // And inside a branch: the effective parent type flows through the
+        // outer branch and conflicts with every nested branch.
+        expect_contradiction(
+            &json!({
+                "type": "object",
+                "properties": {
+                    "victim": {
+                        "type": "object",
+                        "anyOf": [{
+                            "type": "object",
+                            "anyOf": [{"type": "string"}, {"type": "integer"}]
+                        }]
+                    }
+                }
+            }),
+            "branch-nested contradiction",
         );
     }
 }
