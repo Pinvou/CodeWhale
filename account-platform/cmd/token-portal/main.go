@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -46,6 +47,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	static := portal.StaticHandler()
+	if directory := os.Getenv("PORTAL_SHARED_ASSETS_DIR"); directory != "" {
+		handler, root, err := portal.OpenSharedStaticHandler(directory)
+		if err != nil {
+			log.Fatal("PORTAL_SHARED_ASSETS_NOT_READY: ", err)
+		}
+		defer root.Close()
+		static = handler
+	}
 	store, err := portal.NewRedisStoreWithAdmissionLimits(os.Getenv("REDIS_URL"), os.Getenv("REDIS_CA_FILE"), portalConfig.AdmissionLimits)
 	if err != nil {
 		log.Fatal(err)
@@ -55,18 +65,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := runPortal(service, store); err != nil {
+	if err := runPortal(service, store, static); err != nil {
 		_ = store.Close() // log.Fatal bypasses defers.
 		log.Fatal("TOKEN_PORTAL_HTTP_SERVER_FAILED")
 	}
 }
 
-func runPortal(service *portal.Service, store *portal.RedisStore) error {
+func runPortal(service *portal.Service, store *portal.RedisStore, static http.Handler) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	done := make(chan struct{})
 	go func() { defer close(done); store.RunTransientInventory(ctx) }()
-	err := httpserver.RunWithApplicationContext(ctx, "token-portal", service.Handler(portal.StaticHandler()), store.Ping)
+	err := httpserver.RunWithApplicationContext(ctx, "token-portal", service.Handler(static), store.Ping)
 	stop()
 	select {
 	case <-done:

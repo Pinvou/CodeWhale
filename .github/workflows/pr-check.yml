@@ -1494,6 +1494,7 @@ jobs:
       - name: Verify embedded Account Portal assets are current
         run: |
           npm run build:account-portal
+          python3 ../scripts/publish-portal-assets.py --check ../account-platform/internal/portal/static ../account-platform/internal/portal/static
           git diff --exit-code -- ../account-platform/internal/portal/static
           test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
 

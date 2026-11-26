@@ -35,6 +35,7 @@
   (dict "name" "token-portal" "image" .Values.images.tokenPortal "replicas" .Values.replicas.tokenPortal)
 -}}
 {{- range $app := $apps }}
+{{- $portalAssets := and (eq $app.name "token-portal") $root.Values.portal.assetsExistingClaim -}}
 {{- $redisCAForApp := and $redisCA (or (eq $app.name "token-portal") (and (eq $app.name "identity-service") $root.Values.sms.enabled $root.Values.security.authRiskEnabled)) -}}
 {{- $natsClient := "" -}}
 {{- if eq $app.name "billing-service" -}}{{- $natsClient = "billing-command-executor" -}}
@@ -327,6 +328,9 @@ spec:
             - name: CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: client-readiness-attestation-private-key-base64 } }
             {{- else if eq $app.name "token-portal" }}
+            {{- if $portalAssets }}
+            - { name: PORTAL_SHARED_ASSETS_DIR, value: /run/pinvou/portal-assets }
+            {{- end }}
             - { name: PORTAL_OPERATION_RPS, value: {{ $root.Values.portal.operationRps | quote }} }
             - { name: PORTAL_OPERATION_BURST, value: {{ $root.Values.portal.operationBurst | quote }} }
             - { name: PORTAL_LOGIN_FLOW_CAPACITY, value: {{ $root.Values.portal.loginFlowCapacity | quote }} }
@@ -386,6 +390,9 @@ spec:
             {{- include "pinvou.kubernetesJWKSMounts" $root | nindent 12 }}
             {{- else }}
             - { name: portal-handoff-oidc, mountPath: /var/run/secrets/pinvou/portal-handoff, readOnly: true }
+            {{- if $portalAssets }}
+            - { name: portal-assets, mountPath: /run/pinvou/portal-assets, readOnly: true }
+            {{- end }}
             {{- end }}
             {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
             - { name: nats-private, mountPath: /run/pinvou/nats, readOnly: true }
@@ -427,6 +434,10 @@ spec:
             sources:
               - serviceAccountToken: { path: token, audience: {{ $root.Values.workloadIdentity.audience | quote }}, expirationSeconds: {{ $root.Values.workloadIdentity.tokenExpirationSeconds }} }
         {{- else }}
+        {{- if $portalAssets }}
+        - name: portal-assets
+          persistentVolumeClaim: { claimName: {{ $portalAssets | quote }}, readOnly: true }
+        {{- end }}
         - name: portal-handoff-oidc
           secret:
             secretName: {{ $root.Values.global.runtimeSecret }}
