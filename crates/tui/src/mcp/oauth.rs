@@ -1545,7 +1545,10 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
     }
 
     if let (Some(code), Some(state)) = (code, state) {
-        let mut issuers = url::form_urlencoded::parse(query.as_bytes())
+        let mut callback_url = Url::parse("http://localhost/").expect("constant callback URL");
+        callback_url.set_query(Some(query));
+        let mut issuers = callback_url
+            .query_pairs()
             .filter_map(|(key, value)| (key == "iss").then_some(value));
         let issuer = issuers.next().map(|value| value.into_owned());
         if issuer.as_deref() == Some("") || issuers.next().is_some() {
@@ -1683,7 +1686,7 @@ mod tests {
                 issuer: Some("https://issuer.example/tenant".to_owned()),
             })
         );
-        for invalid_query in ["iss", "iss=", "iss=one&%69ss=two"] {
+        for invalid_query in ["iss", "iss=", "iss=one&%69ss=two", "iss=one#two&iss=three"] {
             let outcome = parse_oauth_callback(
                 &format!("/callback/id?code=abc&state=xyz&{invalid_query}"),
                 "/callback/id",
