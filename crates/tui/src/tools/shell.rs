@@ -7848,6 +7848,20 @@ fn enforce_readonly_glob_operand(
             "[shell.readonly.operand.shape] Read-only shell globs may not recurse (`**/`); refused {value:?}. Name the directory levels explicitly, or use the bounded File search actions."
         )));
     }
+    // The case fold above covers only the ASCII one-to-one pair, which every
+    // supported lane folds identically. A cased non-ASCII character pairs
+    // through volume upcase tables and culture-dependent fold rules instead,
+    // and no host-side fold reproduces that pairing reliably (directional
+    // specials, expansion-length changes, per-culture tables). Rather than
+    // judge a candidate set the shell could widen past the fold, the operand
+    // refuses outright (fail-closed, like every per-shell divergence wall):
+    // caseless characters (CJK, digits, punctuation) keep the exact textual
+    // path, and ASCII letters keep the one-to-one fold.
+    if readonly_chars_case_fold_sensitive(value) {
+        return Err(ToolError::permission_denied(format!(
+            "[shell.readonly.operand.glob_case_fold] Read-only shell glob {value:?} carries a cased non-ASCII character, which the supported Windows lanes bind through volume and culture case tables no host-side fold reproduces reliably; refused {value:?} (fail-closed). Spell the operand with ASCII letters or caseless characters, or use the bounded File read/search actions."
+        )));
+    }
     // The walk recurses once per component (every `.*` level also enters the
     // synthesized `..`), so the component count bounds the stack; real probes
     // name a handful of levels.
@@ -8133,9 +8147,17 @@ fn collect_readonly_glob_matches(
         let name = entry.file_name();
         // A name that is not UTF-8 cannot be matched textually; count it as a
         // match so its location is still judged (fail closed).
+        // A name carrying a cased non-ASCII character gets the same
+        // treatment: the Windows lanes bind such names through volume upcase
+        // tables and culture-dependent folds that pair characters no single
+        // host-side textual comparison does, so an ASCII-spelled probe could
+        // select the entry while this fold skips it unjudged. The dot rule
+        // stays authoritative first — a hidden entry under a non-dot
+        // component is not a candidate on the lane this fold documents.
         let matched = name.to_str().is_none_or(|name| {
             (!name.starts_with('.') || component.starts_with('.'))
-                && readonly_star_match(component, name)
+                && (readonly_chars_case_fold_sensitive(name)
+                    || readonly_star_match(component, name))
         });
         if !matched {
             continue;
@@ -8166,7 +8188,12 @@ fn collect_readonly_glob_matches(
 /// over-approximates them: the extra candidates are judged like any other
 /// match, and refusal still requires a candidate resolving outside the
 /// workspace (the same fail-safe direction as the quoted-value and
-/// trailing-slash over-approximations the gate already takes).
+/// trailing-slash over-approximations the gate already takes). The fold
+/// covers only the ASCII one-to-one pair: cased non-ASCII characters pair
+/// through volume and culture fold tables this comparison cannot reproduce,
+/// so an operand carrying one refuses outright and an entry name carrying
+/// one is judged without a textual comparison (see
+/// [`readonly_chars_case_fold_sensitive`]).
 fn readonly_star_match(pattern: &str, name: &str) -> bool {
     let pattern = pattern.to_lowercase();
     let name = name.to_lowercase();
@@ -8186,6 +8213,26 @@ fn readonly_star_match(pattern: &str, name: &str) -> bool {
         }
     }
     rest.ends_with(last)
+}
+
+/// Whether the text carries a character whose match needs case folding and
+/// whose folding is not the ASCII one-to-one pair every supported lane
+/// agrees on: cased non-ASCII characters bind through volume upcase tables
+/// and culture-dependent fold rules that pair characters (directional
+/// specials, expansion-length changes, per-culture tables) no host-side
+/// fold reproduces reliably. Caseless characters (CJK, digits, punctuation,
+/// combining marks) fold to themselves on every lane and keep the exact
+/// textual path; ASCII letters fold one-to-one everywhere. Used on two
+/// sides of the glob walk: an operand carrying such a character refuses
+/// outright, and an entry name carrying one is judged without a textual
+/// comparison — both fail-closed, so the gate's candidate set stays a
+/// superset of what any lane could bind.
+fn readonly_chars_case_fold_sensitive(value: &str) -> bool {
+    value.chars().any(|ch| {
+        !ch.is_ascii()
+            && (ch.to_lowercase().ne(std::iter::once(ch))
+                || ch.to_uppercase().ne(std::iter::once(ch)))
+    })
 }
 
 fn readonly_sanitized_path_from(

@@ -2959,6 +2959,66 @@ fn readonly_glob_walk_judges_case_variant_outside_symlink() {
         .expect("a folded candidate resolving inside stays admitted");
 }
 
+/// The Windows lanes' case tables pair characters beyond the ASCII
+/// one-to-one mapping this walker folds (directional specials,
+/// expansion-length changes, per-culture tables), and no host-side fold
+/// reproduces that pairing reliably. Two fail-closed walls keep the
+/// walker's candidate set a superset of what any lane could bind: an
+/// operand whose literal parts carry a cased non-ASCII character refuses
+/// outright, and an entry whose name carries one is judged without a
+/// textual comparison (the non-UTF-8 fallback's shape). Caseless
+/// characters fold to themselves on every lane, so CJK operands and names
+/// keep the exact textual path.
+#[cfg(unix)]
+#[test]
+fn readonly_glob_refuses_fold_sensitive_patterns_and_judges_fold_sensitive_names() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let roots = [workspace
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.path().to_path_buf())];
+
+    // Wall 1: a cased non-ASCII character in the operand refuses before any
+    // walk — the pairing its fold would need is not reproducible host-side.
+    let error = enforce_readonly_workspace_operands("cat Σ*.txt", &roots, workspace.path())
+        .expect_err("the fold-sensitive operand must refuse")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.glob_case_fold"),
+        "{error}"
+    );
+
+    // Wall 2: an entry whose name carries a cased non-ASCII character is
+    // judged rather than trusted to a textual comparison — an ASCII-spelled
+    // probe can select it on the lanes while this fold does not, so the
+    // entry counts as a candidate and its resolved location decides.
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("ςfile.txt"),
+    )
+    .expect("fold-sensitive outside symlink");
+    let error = enforce_readonly_workspace_operands("cat s*.txt", &roots, workspace.path())
+        .expect_err("the fold-sensitive name must be judged like any candidate")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+
+    // The wall is the character class, not the alphabet: caseless
+    // characters fold to themselves everywhere, so a CJK operand against an
+    // in-workspace CJK name keeps the exact textual path and stays admitted.
+    // The fold-sensitive entry above is removed first because its
+    // fail-closed reach is component-wide: any wildcard probe in this
+    // directory judges it, which is the over-approximation the wall is for.
+    std::fs::remove_file(workspace.path().join("ςfile.txt")).expect("remove fold-sensitive entry");
+    std::fs::write(workspace.path().join("数据报告.txt"), "inside").expect("caseless inside file");
+    enforce_readonly_workspace_operands("cat 数据*.txt", &roots, workspace.path())
+        .expect("caseless operands and names keep the textual path");
+}
+
 /// The gh stage exemption is literal-operand-only: a `*` after the program
 /// word would let the shell expand a workspace entry into a
 /// `HOST/OWNER/REPO` position at runtime, past the host the network policy
