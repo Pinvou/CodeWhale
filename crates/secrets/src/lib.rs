@@ -87,6 +87,42 @@ pub enum SecretsError {
     ReadOnly,
 }
 
+impl SecretsError {
+    /// The error's category and source position for diagnostic logs — never
+    /// the [`Display`](std::fmt::Display) payload. The deserialization
+    /// variant's Display carries the underlying formatter's message, which
+    /// can embed the offending input text; for a schema-drifted or corrupt
+    /// store that text is the store's own secret material, so log paths
+    /// carry this summary instead (see the redaction note on the per-load
+    /// warning).
+    fn log_summary(&self) -> String {
+        match self {
+            SecretsError::Keyring(_) => "keyring backend error".to_string(),
+            SecretsError::Io(err) => format!("io error: {}", err.kind()),
+            SecretsError::Json(err) => format!(
+                "json {} error at line {} column {}",
+                json_error_category(err),
+                err.line(),
+                err.column()
+            ),
+            SecretsError::InsecurePermissions { .. } => "insecure file permissions".to_string(),
+            SecretsError::SecretsFileTooLarge { .. } => "secrets file too large".to_string(),
+            SecretsError::ReadOnly => "read-only store".to_string(),
+        }
+    }
+}
+
+/// The serde_json error category as a plain name; the category type's shape
+/// is a dependency detail the log contract does not need.
+fn json_error_category(err: &serde_json::Error) -> &'static str {
+    match err.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    }
+}
+
 /// Abstract secret store trait.
 ///
 /// Concrete implementations may use the OS keyring ([`DefaultKeyringStore`]),
@@ -437,14 +473,18 @@ impl FileKeyringStore {
                 Ok(legacy) => {
                     if let Err(err) = Self::migrate_legacy_file_if_needed(&primary, &legacy) {
                         tracing::warn!(
-                            "could not migrate legacy secret store from {} to {}: {err}",
+                            "could not migrate legacy secret store from {} to {}: {}",
                             legacy.display(),
-                            primary.display()
+                            primary.display(),
+                            err.log_summary()
                         );
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("could not resolve legacy secret store path: {err}");
+                    tracing::warn!(
+                        "could not resolve legacy secret store path: {}",
+                        err.log_summary()
+                    );
                 }
             }
         }
@@ -509,8 +549,9 @@ impl FileKeyringStore {
             Ok(blob) => Ok(blob),
             Err(err) => {
                 tracing::warn!(
-                    "file-backed secret store at {} failed to load (falling back to env): {err}",
-                    self.path.display()
+                    "file-backed secret store at {} failed to load (falling back to env): {}",
+                    self.path.display(),
+                    err.log_summary()
                 );
                 Err(err)
             }
@@ -2594,6 +2635,104 @@ mod tests {
         let _key = EnvVarGuard::set(DAYTONA_API_KEY_ENV, "dtn_env");
         assert_eq!(daytona_credential_source(&secrets), Some("env"));
         assert_eq!(env_for("daytona").as_deref(), Some("dtn_env"));
+    }
+
+    /// Test-only capturing subscriber, shaped like the config crate's
+    /// `test_tracing` helper: clones share one buffer; install with
+    /// `tracing::subscriber::with_default` around the synchronous code whose
+    /// events should be captured.
+    #[derive(Clone, Default)]
+    struct CapturedEvents(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl CapturedEvents {
+        fn messages(&self) -> Vec<String> {
+            self.0.lock().expect("event capture lock").clone()
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.level() <= &tracing::Level::WARN
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0
+                            .lock()
+                            .expect("event capture lock")
+                            .push(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut visitor = Visitor(std::sync::Arc::clone(&self.0));
+            event.record(&mut visitor);
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows_from: &tracing::Id) {}
+    }
+
+    /// The per-load warning must carry the error's category and position,
+    /// never the error Display: for a schema-drifted store the deserializer's
+    /// message embeds the offending input text — the store's own contents —
+    /// and interpolating that Display into the warning would copy secret
+    /// material into the diagnostic log. The summary keeps the swallow
+    /// observable (fail-neutral) without the payload.
+    #[test]
+    fn load_warning_carries_category_and_position_not_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.json");
+        // A schema-drifted store: structurally valid JSON whose field carries
+        // a string where the blob shape expects a map. The deserializer's
+        // message for this data-category error embeds the string itself, so
+        // a Display-interpolating warning would copy the value verbatim.
+        let payload = "sk-live-CONFIDENTIAL-STORE-VALUE";
+        std::fs::write(&path, format!(r#"{{"entries": "{payload}"}}"#))
+            .expect("write schema-drifted store");
+        // The store's unix guard refuses a world-readable store before the
+        // deserializer ever runs, and the fixture's point is the parse path.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("set 0600 on the fixture store");
+        }
+
+        let store = FileKeyringStore::new(&path);
+        let captured = CapturedEvents::default();
+        tracing::subscriber::with_default(captured.clone(), || {
+            let _ = KeyringStore::get(&store, "any-key");
+        });
+
+        let warning = captured
+            .messages()
+            .into_iter()
+            .find(|message| message.contains("failed to load"))
+            .expect("the load failure must stay observable as a warning");
+        assert!(
+            warning.contains("json data error at line 1 column"),
+            "the warning must name the json category and position: {warning}"
+        );
+        assert!(
+            !warning.contains(payload),
+            "the warning must not carry the store payload: {warning}"
+        );
     }
 
     #[path = "diagnostic_tests.rs"]
