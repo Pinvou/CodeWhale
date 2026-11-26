@@ -24,6 +24,14 @@ const transport = {
   registrationStatus: async () => null,
   openPortal: async () => { throw new Error('Unexpected Portal reauthentication'); },
   logout: async () => { state.logoutCalls++; state.authenticated = false; },
+  createSliderCaptcha: async () => ({ captcha_id: id(11), width: 280, height: 120, piece_width: 44, piece_height: 44 }),
+  sendSms: async body => { state.smsSend = body; return { challenge_id: id(12), retry_after_seconds: 1 }; },
+  loginSms: async body => {
+    state.smsLogin = body;
+    state.user = state.wrongActor ? id(2) : state.originalUser;
+    state.authenticated = true;
+    state.recent = true;
+  },
   login: async () => {
     state.loginCalls++; state.authenticated = false;
     if (state.delayed) await new Promise(resolve => { state.resolveLogin = resolve; });

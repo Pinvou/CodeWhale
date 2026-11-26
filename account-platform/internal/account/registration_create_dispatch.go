@@ -3,9 +3,11 @@ package account
 import (
 	"context"
 	"errors"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"time"
 )
 
 // The first grant is durable before the network boundary. Every later caller
@@ -21,7 +23,8 @@ func (r *PostgresRepository) MarkRegistrationCreateAttempted(ctx context.Context
 	}
 	var prior *time.Time
 	var version int64
-	err = tx.QueryRow(ctx, `SELECT identity_create_attempted_at,version FROM registration_operations WHERE id=$1 AND status='IDENTITY_CREATING' AND identity_subject IS NULL AND committed_user_id IS NULL FOR UPDATE`, id).Scan(&prior, &version)
+	var mode string
+	err = tx.QueryRow(ctx, `SELECT identity_create_attempted_at,version,password_policy_version FROM registration_operations WHERE id=$1 AND status='IDENTITY_CREATING' AND identity_subject IS NULL AND committed_user_id IS NULL FOR UPDATE`, id).Scan(&prior, &version, &mode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, 0, ErrRegistrationConflict
 	}
@@ -29,7 +32,11 @@ func (r *PostgresRepository) MarkRegistrationCreateAttempted(ctx context.Context
 		return false, 0, err
 	}
 	version++
-	if _, err = tx.Exec(ctx, `UPDATE registration_operations SET identity_create_attempted_at=COALESCE(identity_create_attempted_at,$2),version=$3,updated_at=$2 WHERE id=$1`, id, r.now(), version); err != nil {
+	query := `UPDATE registration_operations SET identity_create_attempted_at=COALESCE(identity_create_attempted_at,$2),version=$3,updated_at=$2 WHERE id=$1`
+	if prior == nil && mode == identity.MobileSignupCredentialMode {
+		query = `UPDATE registration_operations SET identity_create_attempted_at=$2,version=$3,signup_first_dispatch_version=$3,updated_at=$2 WHERE id=$1`
+	}
+	if _, err = tx.Exec(ctx, query, id, r.now(), version); err != nil {
 		return false, 0, err
 	}
 	if err = tx.Commit(ctx); err != nil {

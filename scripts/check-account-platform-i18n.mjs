@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { accountAuthCopy } from '../pinvou3-app/src/shared/account-auth-i18n.js';
 import { accountPlatformCopy } from '../pinvou3-app/src/shared/account-platform-i18n.js';
 import { adminPlatformCopy } from '../pinvou3-app/src/shared/admin-platform-i18n.js';
 import { platformRoleCopy } from '../pinvou3-app/src/shared/platform-role-i18n.js';
@@ -14,6 +15,7 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const portalStatic = path.join(repositoryRoot, 'account-platform', 'internal', 'portal', 'static');
 const identityThemeMessages = path.join(repositoryRoot, 'account-platform', 'deploy', 'keycloak', 'themes', 'pinvou', 'login', 'messages');
 const userInterfaceSources = [
+  'pinvou3-app/src/features/account-platform/AccountLogin.jsx',
   'pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx',
   'pinvou3-app/src/features/account-platform/AccountPlatformView.jsx',
   'pinvou3-app/src/features/account-platform/AdminPlatformView.jsx',
@@ -191,6 +193,7 @@ async function validateIdentityTheme() {
 export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
   const catalogs = [
     ['account', accountPlatformCopy],
+    ['account-auth', accountAuthCopy],
     ['admin', adminPlatformCopy],
     ['platform-roles', platformRoleCopy],
     ['account-layout', accountLayoutCopy],

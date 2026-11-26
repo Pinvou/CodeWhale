@@ -255,10 +255,11 @@ func requireStatisticsLedgerPreserved(t *testing.T, ctx context.Context, operato
 	}
 }
 
-func statisticsOriginalIndexFacts(t *testing.T, ctx context.Context, operator *pgx.Conn) string {
+func statisticsOriginalIndexFacts(t *testing.T, ctx context.Context, operator *pgx.Conn, replacedIndexes ...string) string {
 	t.Helper()
 	var raw string
-	if err := operator.QueryRow(ctx, `SELECT coalesce(jsonb_agg(jsonb_build_array(c.oid,c.relname,c.relowner,pg_get_indexdef(c.oid)) ORDER BY c.relname),'[]'::jsonb)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='i' AND c.relname<>'outbox_events_dead_statistics_idx'`).Scan(&raw); err != nil {
+	excluded := append([]string{"outbox_events_dead_statistics_idx"}, replacedIndexes...)
+	if err := operator.QueryRow(ctx, `SELECT coalesce(jsonb_agg(jsonb_build_array(c.oid,c.relname,c.relowner,pg_get_indexdef(c.oid)) ORDER BY c.relname),'[]'::jsonb)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='i' AND c.relname <> ALL($1::text[])`, excluded).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	return raw
@@ -281,6 +282,29 @@ func requireStatisticsOriginalIndexesPreserved(t *testing.T, ctx context.Context
 		if !current[string(index)] {
 			t.Fatal("upgrade changed an original index OID, owner or definition")
 		}
+	}
+}
+
+const statisticsRegistrationMobileIndex = "registration_operations_active_mobile_idx"
+
+func requireStatisticsRegistrationMobileIndex(t *testing.T, ctx context.Context, operator *pgx.Conn) {
+	t.Helper()
+	const predicate = "((committed_user_id IS NULL) AND (status = ANY (ARRAY[" +
+		"'SMS_PENDING'::text, 'REGISTRATION_IN_PROGRESS'::text, 'IDENTITY_CREATING'::text, " +
+		"'IDENTITY_CREATED'::text, 'ACCOUNT_COMMITTING'::text, 'REPAIR_REQUIRED'::text, 'COMPENSATION_PENDING'::text])))"
+	var valid bool
+	if err := operator.QueryRow(ctx, `
+SELECT i.indisunique AND i.indisvalid AND i.indisready
+   AND i.indrelid = 'public.registration_operations'::regclass
+   AND idx.relowner = registered.relowner
+   AND i.indnkeyatts = 1 AND pg_get_indexdef(i.indexrelid, 1, false) = 'mobile_e164'
+   AND pg_get_expr(i.indpred, i.indrelid) = $2
+FROM pg_index i
+JOIN pg_class idx ON idx.oid = i.indexrelid
+JOIN pg_class registered ON registered.oid = i.indrelid
+WHERE i.indexrelid = to_regclass('public.' || $1)
+`, statisticsRegistrationMobileIndex, predicate).Scan(&valid); err != nil || !valid {
+		t.Fatal("900027 must install the unique uncommitted registration mobile reservation index", err)
 	}
 }
 
@@ -610,10 +634,12 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 					t.Fatal("forward-only replay changed retained facts")
 				}
 				beforeCurrentLedger := statisticsLedgerFacts(t, ctx, operator)
-				beforeCurrentIndexes := statisticsOriginalIndexFacts(t, ctx, operator)
+				// The full Account upgrade includes 900027's intentional replacement.
+				beforeCurrentIndexes := statisticsOriginalIndexFacts(t, ctx, operator, statisticsRegistrationMobileIndex)
 				run(databaseURL, candidateCLI, fullDirectory, "up", true)
 				requireStatisticsLedgerPreserved(t, ctx, operator, beforeCurrentLedger, 0)
 				requireStatisticsOriginalIndexesPreserved(t, ctx, operator, beforeCurrentIndexes)
+				requireStatisticsRegistrationMobileIndex(t, ctx, operator)
 				if statisticsFacts(t, ctx, operator) != facts || statisticsAccessFacts(t, ctx, operator) != policy {
 					t.Fatal("full current upgrade changed retained facts or authority")
 				}

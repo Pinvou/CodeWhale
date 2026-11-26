@@ -16,9 +16,9 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	tokendomain "github.com/Pinvou/pinvou3/account-platform/internal/token"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -38,9 +38,16 @@ func TestApprovalDeliveryTerminalRecoveryPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
 	defer cancel()
-	repo, operator, relay, _ := newEntitlementApprovalFixture(t, ctx, raw)
+	t.Setenv("PINVOU_TEST_ACCOUNT_DATABASE_URL", raw)
+	fixture := retainedWalletFenceActors(t)
+	const terminalRecoveryVersion = 900026
+	const recoveryRoutineAbsent = `SELECT to_regprocedure('public.recover_approval_authorization_terminals(integer)') IS NULL`
 	t.Run("public-migration-rollback-and-upgrade", func(t *testing.T) {
-		installed, err := migrations.Load("../../migrations/account")
+		// DownOne rolls back the latest installed version. Exercise this release
+		// in its own fixture at 900026 so later migrations stay outside the test.
+		historical := fixture.repositoryThroughVersion(t, terminalRecoveryVersion, nil)
+		operator := registrationBonusCheckpointMigrator(t, historical)
+		installed, err := accountMigrationsThrough(terminalRecoveryVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -48,7 +55,7 @@ func TestApprovalDeliveryTerminalRecoveryPostgres(t *testing.T) {
 			t.Fatal("public down", err)
 		}
 		var absent bool
-		if err = operator.QueryRow(ctx, `SELECT to_regprocedure('public.recover_approval_authorization_terminals(integer)') IS NULL`).Scan(&absent); err != nil || !absent {
+		if err = operator.QueryRow(ctx, recoveryRoutineAbsent).Scan(&absent); err != nil || !absent {
 			t.Fatal("recovery migration rollback incomplete", err)
 		}
 		if err = accountschema.Up(ctx, operator, installed); err != nil {
@@ -57,12 +64,16 @@ func TestApprovalDeliveryTerminalRecoveryPostgres(t *testing.T) {
 		if _, err = accountschema.VerifyApplied(ctx, operator, installed); err != nil {
 			t.Fatal("public verification", err)
 		}
+		if err = operator.QueryRow(ctx, recoveryRoutineAbsent).Scan(&absent); err != nil || absent {
+			t.Fatal("recovery migration upgrade incomplete", err)
+		}
 	})
+	repo, operator, relay, _ := fixture.entitlementApprovalRepository(t, ctx, raw, 0, NewApprovalRelayStore)
 	requester := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "terminal-requester")
 	approver := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "terminal-approver")
 	repo.WithBillingGovernanceActivation(queryLeaseBillingActivation{})
 	sequence := uint64(0)
-	produce := func(t *testing.T, stage string) terminalRecoveryFixture {
+	produceFor := func(t *testing.T, repo *PostgresRepository, operator *pgx.Conn, relay *ApprovalRelayStore, requester, approver entitlementFixtureActor, stage string) terminalRecoveryFixture {
 		t.Helper()
 		now := time.Now().UTC().Truncate(time.Second)
 		draft := tokenRecentAuthDraft("TOKEN_CREDENTIAL_REVOKE", now)
@@ -171,7 +182,11 @@ func TestApprovalDeliveryTerminalRecoveryPostgres(t *testing.T) {
 		}
 		return state
 	}
-	facts := func(t *testing.T) string {
+	produce := func(t *testing.T, stage string) terminalRecoveryFixture {
+		t.Helper()
+		return produceFor(t, repo, operator, relay, requester, approver, stage)
+	}
+	factsFor := func(t *testing.T, repo *PostgresRepository, operator *pgx.Conn) string {
 		t.Helper()
 		if _, err := operator.Exec(ctx, `SET ROLE account_approval_authorization_owner`); err != nil {
 			t.Fatal(err)
@@ -192,6 +207,10 @@ func TestApprovalDeliveryTerminalRecoveryPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		return frozen + snapshot
+	}
+	facts := func(t *testing.T) string {
+		t.Helper()
+		return factsFor(t, repo, operator)
 	}
 	ready, unknown, inflight := produce(t, "READY"), produce(t, "UNKNOWN"), produce(t, "BILLING_DOMAIN")
 
@@ -431,6 +450,16 @@ RESET ROLE; SET ROLE account_service;`
 		}
 	})
 	t.Run("populated-rollback-retains-frozen-and-terminal-history", func(t *testing.T) {
+		repo, operator, relay, _ := fixture.entitlementApprovalRepository(t, ctx, raw, terminalRecoveryVersion, NewApprovalRelayStore)
+		requester := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "terminal-requester")
+		approver := seedEntitlementApprovalActor(t, ctx, repo.pool, "PLATFORM_SUPER_ADMIN", "terminal-approver")
+		repo.WithBillingGovernanceActivation(queryLeaseBillingActivation{})
+		for _, stage := range []string{"READY", "UNKNOWN", "BILLING_DOMAIN", "EXECUTED", "FAILED", "BILLING_EXECUTED"} {
+			produceFor(t, repo, operator, relay, requester, approver, stage)
+		}
+		if n, err := repo.RecoverApprovalDeliveryTerminals(ctx, 100); err != nil || n != 3 {
+			t.Fatal("fixture must contain three terminal deliveries before rollback", n, err)
+		}
 		allStates := func() string {
 			t.Helper()
 			if _, err := operator.Exec(ctx, `SET ROLE account_approval_authorization_owner`); err != nil {
@@ -445,15 +474,19 @@ RESET ROLE; SET ROLE account_service;`
 			}
 			return state
 		}
-		before, frozen := allStates(), facts(t)
-		installed, err := migrations.Load("../../migrations/account")
+		before, frozen := allStates(), factsFor(t, repo, operator)
+		installed, err := accountMigrationsThrough(terminalRecoveryVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err = accountschema.DownOne(ctx, operator, installed); err != nil {
 			t.Fatal(err)
 		}
-		if allStates() != before || facts(t) != frozen {
+		var absent bool
+		if err = operator.QueryRow(ctx, recoveryRoutineAbsent).Scan(&absent); err != nil || !absent {
+			t.Fatal("populated recovery migration rollback incomplete", err)
+		}
+		if allStates() != before || factsFor(t, repo, operator) != frozen {
 			t.Fatal("rollback rewrote history")
 		}
 		if err = accountschema.Up(ctx, operator, installed); err != nil {
@@ -462,7 +495,7 @@ RESET ROLE; SET ROLE account_service;`
 		if _, err = accountschema.VerifyApplied(ctx, operator, installed); err != nil {
 			t.Fatal(err)
 		}
-		if allStates() != before || facts(t) != frozen {
+		if allStates() != before || factsFor(t, repo, operator) != frozen {
 			t.Fatal("upgrade rewrote history")
 		}
 		if n, err := repo.RecoverApprovalDeliveryTerminals(ctx, 100); err != nil || n != 0 {

@@ -45,15 +45,19 @@ func TestF01SMSLoginHTTPPreservesFailureClassification(t *testing.T) {
 	for _, scenario := range []struct {
 		name, code, retry string
 		status            int
+		binding           bool
 	}{
-		{"admission-storage", "AUTH_INTERNAL_ERROR", "", 500},
-		{"identity-storage", "AUTH_INTERNAL_ERROR", "", 500},
-		{"ready-storage", "AUTH_INTERNAL_ERROR", "", 500},
-		{"consume-storage", "AUTH_INTERNAL_ERROR", "", 500},
-		{"invalid-code", "SMS_CODE_INVALID", "", 401},
-		{"rate-limit", "SMS_RATE_LIMITED", "43", 429},
-		{"provider-unavailable", "SMS_UNAVAILABLE", "", 503},
-		{"success", "", "", 204},
+		{"admission-storage", "AUTH_INTERNAL_ERROR", "", 500, true},
+		{"identity-storage", "AUTH_INTERNAL_ERROR", "", 500, true},
+		{"ready-storage", "AUTH_INTERNAL_ERROR", "", 500, true},
+		{"consume-storage", "AUTH_INTERNAL_ERROR", "", 500, true},
+		{"consume-deadline-after-proof", "AUTH_INTERNAL_ERROR", "", 500, true},
+		{"consume-deadline-before-proof", "SMS_CODE_INVALID", "", 401, true},
+		{"invalid-code", "SMS_CODE_INVALID", "", 401, true},
+		{"rate-limit", "SMS_RATE_LIMITED", "43", 429, true},
+		{"legacy-provider-unavailable", "SMS_UNAVAILABLE", "", 503, false},
+		{"ordinary-provider-unavailable", "SMS_CODE_INVALID", "", 401, true},
+		{"success", "", "", 204, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			logs.Reset()
@@ -68,11 +72,16 @@ func TestF01SMSLoginHTTPPreservesFailureClassification(t *testing.T) {
 				repo.readyErr = fault
 			case "consume-storage":
 				repo.consumeErr = fault
+			case "consume-deadline-after-proof":
+				repo.consumeErr = context.DeadlineExceeded
+			case "consume-deadline-before-proof":
+				sms.verified = false
+				repo.consumeErr = context.DeadlineExceeded
 			case "invalid-code":
 				sms.verified = false
 			case "rate-limit":
 				repo.admissionErr = &SMSRateLimitError{RetryAfter: 43 * time.Second}
-			case "provider-unavailable":
+			case "legacy-provider-unavailable", "ordinary-provider-unavailable":
 				sms.verifyErr = fault
 			}
 			auth := newMobileAuthForTest(t, repo, sms, &identityProvisionerFake{})
@@ -80,6 +89,9 @@ func TestF01SMSLoginHTTPPreservesFailureClassification(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/internal/v1/auth/sms/verify", strings.NewReader(`{"mobile":"13800138000","challenge_id":"018f0f76-3f5d-7d43-b630-163e3f635e5a","code":"123456"}`))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer internal-service-token-for-tests-123456")
+			if scenario.binding {
+				request.Header.Set("X-Pinvou-SMS-Binding", "v1")
+			}
 			response := httptest.NewRecorder()
 			service.Handler(nil).ServeHTTP(response, request)
 			body := response.Body.String()

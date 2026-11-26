@@ -1241,6 +1241,7 @@ test("each independently changed Account Platform translation input triggers its
   // account-platform/** changes could conceal a missing UI/catalog route.
   const inputs = [
     "pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx",
+    "pinvou3-app/src/features/account-platform/AccountLogin.jsx",
     "pinvou3-app/src/features/account-platform/AccountPlatformView.jsx",
     "pinvou3-app/src/features/account-platform/AdminPlatformView.jsx",
     "pinvou3-app/src/app/account-main.jsx",
@@ -1248,6 +1249,7 @@ test("each independently changed Account Platform translation input triggers its
     "pinvou3-app/src/app/portal-session-handoff-main.js",
     "pinvou3-app/src/portal-session-handoff.html",
     "pinvou3-app/src/shared/account-platform-i18n.js",
+    "pinvou3-app/src/shared/account-auth-i18n.js",
     "pinvou3-app/src/shared/admin-platform-i18n.js",
     "pinvou3-app/src/shared/supported-locales.js",
     "pinvou3-app/src/shared/i18n.js",

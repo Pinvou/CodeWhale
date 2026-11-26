@@ -52,6 +52,12 @@
               <button type="submit" data-mode="reset" formnovalidate>${msg("pinvouForgotPassword")}</button>
             </div>
           <#elseif pinvouMode == "sms">
+            <#if pinvouSignupOffered!false>
+              <div class="pv-options"><label>
+                <input type="checkbox" name="signup_consent" <#if pinvouSignupConsented!false>checked</#if> <#if pinvouCaptchaId?has_content>disabled</#if>>
+                <span>${msg("pinvouMobileSignupConsent")}</span>
+              </label></div>
+            </#if>
             <label class="pv-field">
               <span>${msg("pinvouMobileLabel")}</span>
               <span class="pv-inline-control">

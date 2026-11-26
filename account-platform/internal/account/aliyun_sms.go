@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -150,12 +151,16 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 		"AutoRetry":        {"1"},
 	}
 	request, err := p.signedRequest(ctx, "SendSmsVerifyCode", parameters)
+	// Send diagnostics omit request context, which can carry caller-supplied IDs.
 	if err != nil {
+		slog.Warn("Aliyun SMS send failed", "stage", "request")
 		return SMSDelivery{}, err
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return SMSDelivery{}, fmt.Errorf("send Aliyun SMS: %w", err)
+		// The transport error can embed the complete signed request URL.
+		slog.Warn("Aliyun SMS send failed", "stage", "transport")
+		return SMSDelivery{}, errors.New("Aliyun SMS send transport failed")
 	}
 	defer response.Body.Close()
 	var body struct {
@@ -169,12 +174,15 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 		} `json:"Model"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&body); err != nil {
+		slog.Warn("Aliyun SMS send failed", "stage", "response_decode", "status", response.StatusCode)
 		return SMSDelivery{}, errors.New("Aliyun SMS returned an invalid response")
 	}
 	if response.StatusCode >= 200 && response.StatusCode < 300 && (body.Code != "OK" || !body.Success) {
+		slog.Warn("Aliyun SMS send failed", "stage", "provider_rejected", "status", response.StatusCode)
 		return SMSDelivery{}, &SMSDeliveryRejectedError{Cause: fmt.Errorf("Aliyun SMS rejected the request: %s", sanitizeProviderCode(body.Code))}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		slog.Warn("Aliyun SMS send failed", "stage", "http_status", "status", response.StatusCode)
 		return SMSDelivery{}, fmt.Errorf("Aliyun SMS returned HTTP %d", response.StatusCode)
 	}
 	if body.Model.BizID != "" {
@@ -206,7 +214,9 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return false, fmt.Errorf("verify Aliyun SMS: %w", err)
+		// The transport error can embed the complete signed request URL.
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "transport")
+		return false, errors.New("Aliyun SMS verification transport failed")
 	}
 	defer response.Body.Close()
 	var body struct {
@@ -218,9 +228,11 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 		} `json:"Model"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&body); err != nil {
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "response_decode", "status", response.StatusCode)
 		return false, errors.New("Aliyun SMS returned an invalid verification response")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" || !body.Success {
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "provider_rejected", "status", response.StatusCode)
 		return false, fmt.Errorf("Aliyun SMS rejected verification: %s", sanitizeProviderCode(body.Code))
 	}
 	switch body.Model.VerifyResult {
@@ -229,6 +241,7 @@ func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, chall
 	case "UNKNOWN":
 		return false, nil
 	default:
+		slog.WarnContext(ctx, "Aliyun SMS verification failed", "stage", "invalid_result")
 		return false, errors.New("Aliyun SMS returned an invalid verification result")
 	}
 }

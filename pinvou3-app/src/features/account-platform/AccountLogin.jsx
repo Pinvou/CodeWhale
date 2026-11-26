@@ -12,7 +12,8 @@ import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
 export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, reauthentication = false, onAuthenticationFailure }) {
   const words = accountAuthCopy[language];
   const hintID = useId();
-  const [mode, setMode] = useState('password');
+  const [mode, setMode] = useState(reauthentication ? 'password' : 'sms');
+  const [signupConsent, setSignupConsent] = useState(false);
   const [account, setAccount] = useState('');
   const [mobile, setMobile] = useState('');
   const [password, setPassword] = useState('');
@@ -30,7 +31,7 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const owner = useRef(0);
-  useEffect(() => { owner.current++; setPreparation(null); setReference(null); setCaptcha(null); setChallenge(''); setPassword(''); setConfirmation(''); setBusy(false); return () => { owner.current++; }; }, [client]);
+  useEffect(() => { owner.current++; setPreparation(null); setReference(null); setCaptcha(null); setChallenge(''); setPassword(''); setConfirmation(''); setSignupConsent(false); setBusy(false); return () => { owner.current++; }; }, [client]);
   useEffect(() => {
     if (cooldown <= 0) return;
     const timer = setTimeout(() => setCooldown(value => Math.max(0, value - 1)), 1000);
@@ -58,15 +59,18 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
     return () => { stopped = true; clearTimeout(timer); };
   }, [client, recovery?.registration_operation_id, reauthentication]);
   const manualReviewReason = registrationManualReviewReason(progress);
+  const manualReviewMessage = manualReviewReason === 'IDENTITY_CREATE_OUTCOME_UNKNOWN'
+    ? copy.registrationManualReviewUnknown
+    : copy.registrationManualReview;
   const pending = Boolean(progress && !progress.user_id && ['REGISTRATION_IN_PROGRESS', 'IDENTITY_CREATING', 'IDENTITY_CREATED', 'ACCOUNT_COMMITTING', 'REPAIR_REQUIRED', 'RECOVERY_UNAVAILABLE'].includes(progress.status));
-  const run = async action => {
+  const run = async (action, authenticationAttempt = false) => {
     const generation = owner.current;
     const current = () => owner.current === generation;
     setBusy(true); setError(''); setNotice('');
     try { await action(current); }
     catch (reason) {
       if (current()) {
-        if (reauthentication) { setPassword(''); setConfirmation(''); onAuthenticationFailure?.(reason); }
+        if (reauthentication && authenticationAttempt) { setPassword(''); setConfirmation(''); onAuthenticationFailure?.(reason); }
         setError(localizedAccountPlatformError(copy, reason, {
           USERNAME_INVALID: copy.usernameInvalid,
           USERNAME_ALREADY_REGISTERED: copy.usernameAlreadyRegistered,
@@ -80,7 +84,15 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
           SMS_CODE_INVALID: copy.mobileAuthFailed,
           MOBILE_AUTH_FAILED: copy.mobileAuthFailed,
         }));
-        if (Number.isFinite(reason?.retryAfterSeconds) && reason.retryAfterSeconds > 0) setCooldown(Math.ceil(reason.retryAfterSeconds));
+        if (Number.isFinite(reason?.retryAfterSeconds) && reason.retryAfterSeconds > 0) {
+          const retryAfter = Math.ceil(reason.retryAfterSeconds);
+          if (authenticationAttempt && mode === 'sms' && accountPlatformErrorCodes(reason).includes('RATE_LIMITED')) {
+            // A verification throttle must not shorten the existing SMS send cooldown.
+            setCooldown(remaining => Math.max(remaining, retryAfter));
+          } else {
+            setCooldown(retryAfter);
+          }
+        }
       }
     } finally { if (current()) setBusy(false); }
   };
@@ -119,7 +131,7 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
         setReference(checked);
       }
       sending = true;
-      result = await client.sendSms(mode === 'register' ? account.trim() : '', mobile.trim(), checked, purpose, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, offset));
+      result = await client.sendSms(mode === 'register' ? account.trim() : '', mobile.trim(), checked, purpose, captcha.captcha_id, profileCaptchaSubmissionOffset(selectedOffset, offset), undefined, mode === 'sms' && !reauthentication && signupConsent);
     } catch (reason) {
       if (current()) {
         const codes=accountPlatformErrorCodes(reason);
@@ -170,29 +182,60 @@ export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, r
         if (!result?.user_id) return;
         try { await client.login(result.username || account.trim(), password); }
         catch { if (current()) { setMode('password'); setPassword(''); setConfirmation(''); setError(copy.registrationCompletedLoginFailed); } return; }
-      } else if (mode === 'sms') await client.loginSms(mobile.trim(), challenge, code.trim());
+      } else if (mode === 'sms') {
+        try { await client.loginSms(mobile.trim(), challenge, code.trim()); }
+        catch (reason) {
+          const codes = accountPlatformErrorCodes(reason);
+          const manualReview = codes.includes('REGISTRATION_MANUAL_REVIEW_REQUIRED');
+          const restartRequired = codes.includes('REGISTRATION_RESTART_REQUIRED');
+          if (current() && codes.includes('SMS_UNAVAILABLE')) {
+            setChallenge('');
+            setCode('');
+          }
+          if (!manualReview && !restartRequired && !codes.includes('REGISTRATION_RECOVERING')) throw reason;
+          if (current()) {
+            setChallenge('');
+            setCode('');
+            const nextStep = restartRequired ? words.smsSignupRestartRequired : words.smsSignupRecovering;
+            setNotice(manualReview ? words.smsSignupManualReview : nextStep);
+          }
+          return;
+        }
+      }
       else await client.login(account.trim().replace(/^\+?86(?=1\d{10}$)/, ''), password);
       if (current()) { setPassword(''); setConfirmation(''); await onAuthenticated(); }
-    });
+    }, true);
   };
   const changeMode = value => {
     if (busy || pending) return;
+    setSignupConsent(false);
     owner.current++; setPreparation(null); setMode(value); setPassword(''); setConfirmation(''); setCode(''); setChallenge(''); setReference(null); setRecovery(null); setProgress(null); setCaptcha(null); setError(''); setNotice('');
   };
   const changeFacts = setter => event => {
+    setSignupConsent(false);
     owner.current++; setPreparation(null); setter(event.target.value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null);
+  };
+  const changeSignupConsent = event => {
+    setSignupConsent(event.target.checked);
+    if (challenge) {
+      setChallenge('');
+      setCode('');
+      setError('');
+      setNotice(words.smsSignupConsentChanged);
+    }
   };
   const title = mode === 'register' ? words.registerTitle : mode === 'forgot' ? words.resetTitle : words.loginTitle;
   const lead = mode === 'register' ? words.registerLead : mode === 'forgot' ? words.resetLead : words.loginLead;
   return <section className="ap-auth-card">
     <header className="ap-auth-heading"><h1>{reauthentication ? copy.desktopReauthenticationTitle : title}</h1><p>{reauthentication ? copy.desktopReauthenticationLead : lead}</p></header>
-    {!reauthentication && <nav className="ap-auth-modes" aria-label={copy.login}>
+    <nav className="ap-auth-modes" aria-label={copy.login}>
       {['password', 'sms'].includes(mode) ? [['password', copy.authModes.password], ['sms', copy.authModes.sms]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>) : <button type="button" disabled={busy || pending} onClick={() => changeMode('password')}>{words.backToLogin}</button>}
-    </nav>}
+    </nav>
     {error && <div className="ap-alert error" role="alert">{error}</div>}{notice && <div className="ap-alert" role="status">{notice}</div>}
-    {pending ? <div role="status"><p>{manualReviewReason ? copy.registrationManualReview : copy.registrationDoNotRepeat}</p>{manualReviewReason && <p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' ? copy.usernameAlreadyRegistered : copy.mobileAlreadyRegistered}</p>}<p>{statusLabel(progress.status, copy.statusLanguage)}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-auth-form" onSubmit={submit}>
+    {pending ? <div role="status"><p>{manualReviewReason ? manualReviewMessage : copy.registrationDoNotRepeat}</p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' && <p>{copy.usernameAlreadyRegistered}</p>}{manualReviewReason === 'MOBILE_ALREADY_REGISTERED' && <p>{copy.mobileAlreadyRegistered}</p>}<p>{statusLabel(progress.status, copy.statusLanguage)}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-auth-form" onSubmit={submit}>
       {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.username : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} />{mode === 'register' && <small>{words.usernameHint}</small>}</label>}
-      {mode !== 'password' && <label>{copy.mobile}<input required value={mobile} inputMode="tel" autoComplete="tel-national" disabled={busy || Boolean(challenge)} onChange={changeFacts(setMobile)} /></label>}
+      {mode !== 'password' && <label>{copy.mobile}<input type="tel" required value={mobile} inputMode="tel" autoComplete="tel-national" disabled={busy || Boolean(challenge)} onChange={changeFacts(setMobile)} /></label>}
+      {mode === 'sms' && !reauthentication && <label className="ap-auth-signup-consent"><input type="checkbox" checked={signupConsent} disabled={busy || Boolean(captcha)} onChange={changeSignupConsent} />{words.smsSignupConsent}</label>}
       {mode !== 'sms' && <label>{mode === 'forgot' ? words.newPassword : words.password}<PasswordInput resetKey={mode} showLabel={copy.showPassword} hideLabel={copy.hidePassword} ariaLabel={mode === 'forgot' ? words.newPassword : words.password} autoComplete={mode === 'password' ? 'current-password' : 'new-password'} maxLength={128} value={password} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setPassword(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} />{mode !== 'password' && <small>{words.passwordHint}</small>}</label>}
       {(mode === 'register' || mode === 'forgot') && <label>{copy.confirmPassword}<PasswordInput resetKey={mode} showLabel={copy.showPasswordConfirmation} hideLabel={copy.hidePasswordConfirmation} ariaLabel={copy.confirmPassword} autoComplete="new-password" value={confirmation} maxLength={128} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setConfirmation(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
       {mode !== 'password' && <><div className="ap-auth-code"><label>{copy.smsCode}<input value={code} required autoComplete="one-time-code" inputMode="numeric" aria-describedby={challenge ? undefined : hintID} disabled={busy} onChange={event => setCode(event.target.value)} /></label><button type="button" aria-describedby={challenge ? undefined : hintID} disabled={busy || cooldown > 0 || !mobile.trim()} onClick={openCaptcha}>{cooldown > 0 ? copy.resendCountdown(cooldown) : copy.sendCode}</button></div>{!challenge && <p id={hintID} className="ap-auth-hint">{mobile.trim() ? words.smsHint : words.mobileHint}</p>}</>}

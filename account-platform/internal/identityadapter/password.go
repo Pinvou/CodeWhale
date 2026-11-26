@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/passwordpreparation"
 	"github.com/google/uuid"
 )
@@ -238,6 +239,12 @@ func (v *PasswordVault) precheckBefore(password string, deadline time.Time) (Pas
 }
 
 func (v *PasswordVault) ValidateReference(operationID uuid.UUID, handle, policyVersion, username, mobile string) error {
+	if policyVersion == identity.MobileSignupCredentialMode {
+		if operationID == uuid.Nil || handle != "" || !validSMSOnlyIdentity(username, mobile) {
+			return ErrReferenceInvalid
+		}
+		return nil
+	}
 	if err := v.validatePreparedPurpose(handle, policyVersion, "REGISTER", mobile); err != nil {
 		return err
 	}
@@ -285,6 +292,12 @@ func (v *PasswordVault) CreateMobileUser(ctx context.Context, operationID uuid.U
 func (v *PasswordVault) CreateMobileUserFirstAttempt(ctx context.Context, operationID uuid.UUID, handle, policyVersion, username, mobile string, firstAttempt bool) (string, error) {
 	if operationID == uuid.Nil {
 		return "", ErrReferenceInvalid
+	}
+	if policyVersion == identity.MobileSignupCredentialMode {
+		if handle != "" {
+			return "", ErrReferenceInvalid
+		}
+		return v.createSMSOnlyUser(ctx, operationID, username, mobile, firstAttempt)
 	}
 	if err := v.registrationDispatchFence(operationID, handle, policyVersion, username, mobile, firstAttempt); err != nil {
 		return "", err

@@ -68,9 +68,17 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
                 context.getAuthenticationSession().removeAuthNote(note("password_handle"));
                 context.getAuthenticationSession().removeAuthNote(note("password_policy"));
             }
-            if ("REGISTRATION_RESTART_REQUIRED".equals(error.code())) clearState(context);
+            boolean signupRestart = "REGISTRATION_RESTART_REQUIRED".equals(error.code());
+            if (signupRestart && !"sms".equals(requestedMode)) clearState(context);
+            if ("sms".equals(requestedMode) && (signupRestart || "REGISTRATION_RECOVERING".equals(error.code())
+                || "REGISTRATION_MANUAL_REVIEW_REQUIRED".equals(error.code()) || "SIGNUP_CONSENT_INVALID".equals(error.code()))) {
+                context.getAuthenticationSession().removeAuthNote(note("sms_challenge"));
+                context.getAuthenticationSession().removeAuthNote(note("sms_sent"));
+            }
             if (shouldRestartPasswordReset(requestedMode, error.code())) clearState(context);
-            render(context, requestedMode, messageFor(error.code()));
+            String message = signupRestart && "sms".equals(requestedMode)
+                ? "pinvouMobileSignupRestartRequired" : messageFor(error.code());
+            render(context, requestedMode, message);
         } catch (RuntimeException error) {
             LOG.errorf("Pinvou browser authentication failed safely: %s", error.getClass().getSimpleName());
             render(context, requestedMode, "pinvouServiceUnavailable");
@@ -91,6 +99,12 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         }
         put(context, "mobile", mobile);
         put(context, "device", device);
+        put(context, "signup_consent", "sms".equals(mode) && canOfferMobileSignup(context)
+            && "on".equals(form.getFirst("signup_consent")) ? "mobile-signup-v1" : "");
+        if ("sms".equals(mode)) {
+            context.getAuthenticationSession().removeAuthNote(note("sms_challenge"));
+            context.getAuthenticationSession().removeAuthNote(note("sms_sent"));
+        }
         if ("register".equals(mode)) {
             String username = trim(form.getFirst("username"));
             if (!USERNAME.matcher(username).matches()) {
@@ -162,6 +176,9 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         request.put("purpose", purpose(mode));
         request.put("captcha_id", captchaID);
         request.put("captcha_offset", offset);
+        if ("sms".equals(mode) && canOfferMobileSignup(context) && "mobile-signup-v1".equals(get(context, "signup_consent"))) {
+            request.put("signup_consent_version", "mobile-signup-v1");
+        }
         Map<String, Object> response;
         try {
             response = client.sendSMS(request, source(context), get(context, "device"));
@@ -197,6 +214,14 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         String code = trim(form.getFirst("sms_code"));
         if (mobile.isEmpty() || challenge.isEmpty() || !CODE.matcher(code).matches()) {
             render(context, mode, "pinvouCodeInvalid");
+            return;
+        }
+        if ("sms".equals(mode) && canOfferMobileSignup(context)
+            && "on".equals(form.getFirst("signup_consent")) != "mobile-signup-v1".equals(get(context, "signup_consent"))) {
+            put(context, "signup_consent", "on".equals(form.getFirst("signup_consent")) ? "mobile-signup-v1" : "");
+            context.getAuthenticationSession().removeAuthNote(note("sms_challenge"));
+            context.getAuthenticationSession().removeAuthNote(note("sms_sent"));
+            render(context, mode, "pinvouMobileSignupConsentChanged");
             return;
         }
         clearFailedPasswordAttribution(context);
@@ -245,13 +270,13 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             render(context, "password", "pinvouPasswordResetSuccess");
             return;
         }
-        String subject = client.verifySMS(mobile, challenge, code, source(context), get(context, "device"));
-        UserModel user = context.getSession().users().getUserById(context.getRealm(), subject);
+        PinvouAuthClient.SMSLogin login = client.verifySMS(mobile, challenge, code, source(context), get(context, "device"));
+        UserModel user = context.getSession().users().getUserById(context.getRealm(), login.subject());
         if (user == null || !user.isEnabled()) {
             credentialFailure(context, mode);
             return;
         }
-        succeed(context, user);
+        succeed(context, user, login.bindingRequired() ? challenge : "");
     }
 
     private void authenticatePassword(AuthenticationFlowContext context, MultivaluedMap<String, String> form)
@@ -318,10 +343,12 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         }
     }
 
-    private void succeed(AuthenticationFlowContext context, UserModel user) throws PinvouAuthClient.AuthClientException {
-        if (!client.authorizeLogin(user.getId()).allowed()) {
+    private void succeed(AuthenticationFlowContext context, UserModel user, String smsChallenge) throws PinvouAuthClient.AuthClientException {
+        PinvouAuthClient.LoginAuthorization decision = smsChallenge.isEmpty()
+            ? client.authorizeLogin(user.getId()) : client.authorizeLogin(user.getId(), smsChallenge);
+        if (!decision.allowed()) {
             clearState(context);
-            credentialFailure(context, "password");
+            credentialFailure(context, "sms");
             return;
         }
         complete(context, user);
@@ -366,6 +393,8 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             .setAttribute("pinvouMobile", nationalMobile(get(context, "mobile")))
             .setAttribute("pinvouPasswordAccepted", !get(context, "password_handle").isEmpty())
             .setAttribute("pinvouSmsSent", "true".equals(get(context, "sms_sent")))
+            .setAttribute("pinvouSignupOffered", canOfferMobileSignup(context))
+            .setAttribute("pinvouSignupConsented", "mobile-signup-v1".equals(get(context, "signup_consent")))
             .setAttribute("pinvouRetryAfter", get(context, "retry_after"))
             .setAttribute("pinvouCaptchaId", get(context, "captcha_id"))
             .setAttribute("pinvouCaptchaBackground", get(context, "captcha_background"))
@@ -376,7 +405,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
             .setAttribute("pinvouCaptchaPieceHeight", get(context, "captcha_piece_height"))
             .setAttribute("pinvouCaptchaPieceY", get(context, "captcha_piece_y"));
         if (message == null || message.isBlank()) return form;
-        if ("pinvouCodeSent".equals(message) || "pinvouRegistrationRecovering".equals(message) || "pinvouPasswordResetSuccess".equals(message)) return form.setInfo(message);
+        if ("pinvouCodeSent".equals(message) || "pinvouRegistrationRecovering".equals(message) || "pinvouMobileSignupRecovering".equals(message) || "pinvouPasswordResetSuccess".equals(message)) return form.setInfo(message);
         return form.setError(message);
     }
 
@@ -392,6 +421,9 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
 
     static String messageFor(String code) {
         return switch (code) {
+            case "REGISTRATION_RECOVERING" -> "pinvouMobileSignupRecovering";
+            case "REGISTRATION_MANUAL_REVIEW_REQUIRED" -> "pinvouMobileSignupManualReview";
+            case "SIGNUP_CONSENT_INVALID" -> "pinvouMobileSignupConsentChanged";
             case "MOBILE_INVALID" -> "pinvouMobileInvalid";
             case "USERNAME_INVALID" -> "pinvouUsernameInvalid";
             case "USERNAME_ALREADY_REGISTERED", "USERNAME_TAKEN" -> "pinvouUsernameTaken";
@@ -438,7 +470,17 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
     private static void put(AuthenticationFlowContext context, String key, String value) {
         context.getAuthenticationSession().setAuthNote(note(key), value == null ? "" : value);
     }
-    private static String mode(AuthenticationFlowContext context) { return safeMode(get(context, "mode")); }
+    private static String mode(AuthenticationFlowContext context) {
+        String selected = get(context, "mode");
+        return selected.isEmpty() && canOfferMobileSignup(context) ? "sms" : safeMode(selected);
+    }
+
+    private static boolean canOfferMobileSignup(AuthenticationFlowContext context) {
+        var session = context.getAuthenticationSession();
+        // Portal uses prompt=login after ordinary sign-out as well as for
+        // reauthentication. Only the latter sends a max_age constraint.
+        return trim(session.getClientNote("max_age")).isEmpty();
+    }
     private static void clearCaptcha(AuthenticationFlowContext context) {
         context.getAuthenticationSession().removeAuthNote(note("preparation_operation"));
         context.getAuthenticationSession().removeAuthNote(note("preparation_offset"));
@@ -447,7 +489,7 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         }
     }
     private static void clearState(AuthenticationFlowContext context) {
-        for (String key : new String[]{"mode", "username", "mobile", "device", "password_handle", "password_policy", "sms_challenge", "sms_sent", "retry_after", "registration_operation", "registration_token"}) {
+        for (String key : new String[]{"mode", "username", "mobile", "device", "signup_consent", "password_handle", "password_policy", "sms_challenge", "sms_sent", "retry_after", "registration_operation", "registration_token"}) {
             context.getAuthenticationSession().removeAuthNote(note(key));
         }
         clearCaptcha(context);

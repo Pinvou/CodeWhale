@@ -277,7 +277,7 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	success := response.StatusCode >= 200 && response.StatusCode < 300
-	upstreamError := tokenOAuthError(body)
+	upstreamError, upstreamDescription := tokenOAuthError(body)
 	if !success && (upstreamError == "invalid_client" || upstreamError == "unauthorized_client") {
 		waitTokenFloor(r.Context(), started, p.floor)
 		writeOAuthError(w, http.StatusUnauthorized, "unauthorized_client", 0)
@@ -290,7 +290,17 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !success && (response.StatusCode >= 500 || upstreamError == "temporarily_unavailable") {
 		waitTokenFloor(r.Context(), started, p.floor)
-		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
+		if grant == "password" && r.Form.Get("sms_challenge_id") != "" && r.Form.Get("sms_code") != "" &&
+			response.StatusCode == http.StatusServiceUnavailable &&
+			upstreamError == "temporarily_unavailable" &&
+			(upstreamDescription == "REGISTRATION_RECOVERING" || upstreamDescription == "REGISTRATION_MANUAL_REVIEW_REQUIRED") {
+			if values := response.Header.Values("X-Pinvou-SMS-Restart-Required"); upstreamDescription == "REGISTRATION_RECOVERING" && len(values) == 1 && values[0] == "true" {
+				w.Header().Set("X-Pinvou-SMS-Restart-Required", "true")
+			}
+			writeOAuthErrorDescription(w, http.StatusServiceUnavailable, "temporarily_unavailable", upstreamDescription, 1)
+		} else {
+			writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
+		}
 		return
 	}
 	delay, completeErr := p.admission.Complete(r.Context(), d, success, tokenSubject(body))
@@ -315,14 +325,15 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func tokenOAuthError(body []byte) string {
+func tokenOAuthError(body []byte) (string, string) {
 	var envelope struct {
-		Error string `json:"error"`
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
 	}
 	if json.Unmarshal(body, &envelope) != nil {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(envelope.Error)
+	return strings.TrimSpace(envelope.Error), envelope.Description
 }
 
 func upstreamRetryAfter(raw string, now time.Time) int {
@@ -393,13 +404,20 @@ func waitTokenFloor(ctx context.Context, started time.Time, floor time.Duration)
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code string, retry int) {
+	writeOAuthErrorDescription(w, status, code, "", retry)
+}
+
+func writeOAuthErrorDescription(w http.ResponseWriter, status int, code, description string, retry int) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	if retry > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
 	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
+	_ = json.NewEncoder(w).Encode(struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description,omitempty"`
+	}{code, description})
 }
 
 func (p *TokenProxy) Ping(ctx context.Context) error {

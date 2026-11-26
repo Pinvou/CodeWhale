@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { registrationManualReviewReason } from '../src/features/account-platform/registration-recovery-state.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
-test('only explicit same-operation deterministic repair retires automatic registration polling', () => {
-  for (const reason of ['USERNAME_ALREADY_REGISTERED', 'MOBILE_ALREADY_REGISTERED']) {
+test('only an explicit same-operation manual review retires automatic registration polling', () => {
+  for (const reason of ['USERNAME_ALREADY_REGISTERED', 'MOBILE_ALREADY_REGISTERED', 'IDENTITY_CREATE_OUTCOME_UNKNOWN']) {
     const receipt = { status: 'REPAIR_REQUIRED', manual_review_required: true, reason };
     assert.equal(registrationManualReviewReason(receipt), reason);
     for (const status of ['IDENTITY_CREATING', 'ACTIVE', 'COMPENSATED']) assert.equal(registrationManualReviewReason({ ...receipt, status }), '');
@@ -18,6 +18,9 @@ test('manual-repair messages in all three languages do not promise automatic com
   for (const language of ['zh', 'en', 'ja']) {
     const copy = accountPlatformCopy[language];
     assert.ok(copy.registrationManualReview?.trim());
+    assert.ok(copy.registrationManualReviewUnknown?.trim());
+    assert.notEqual(copy.registrationManualReviewUnknown, copy.registrationManualReview);
+    assert.notEqual(copy.registrationManualReviewUnknown, copy.registrationDoNotRepeat);
     assert.notEqual(copy.registrationManualReview, copy.registrationDoNotRepeat);
     assert.ok(copy.usernameAlreadyRegistered?.trim());
     assert.ok(copy.mobileAlreadyRegistered?.trim());

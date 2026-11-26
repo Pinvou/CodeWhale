@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.Executors;
 import javax.imageio.ImageIO;
 import org.junit.jupiter.api.Test;
@@ -230,9 +231,12 @@ final class PinvouAuthClientTransportTest {
         return new PinvouAuthClient(env::get);
     }
     private HttpServer server(int status, String body) throws Exception {
+        return server(status, body, true);
+    }
+    private HttpServer server(int status, String body, boolean requiresWorkloadToken) throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
-            assertEquals("Bearer controlled-test-workload-token", exchange.getRequestHeaders().getFirst("Authorization"));
+            assertEquals(requiresWorkloadToken ? "Bearer controlled-test-workload-token" : null, exchange.getRequestHeaders().getFirst("Authorization"));
             exchange.getResponseHeaders().set("X-Pinvou-Identity-Subject", "controlled-subject");
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(status, status == 204 ? -1 : bytes.length);
@@ -245,11 +249,67 @@ final class PinvouAuthClientTransportTest {
         HttpServer s = server(200, "{\"allowed\":true,\"user_id\":\"" + USER + "\",\"permission\":\"personal.session.login\",\"permission_scope\":\"PERSONAL\",\"future\":{\"safe\":true}}");
         try { assertTrue(client(s).authorizeLogin("controlled-subject").allowed()); } finally { s.stop(0); }
     }
+    @Test void boundAuthorizationSendsTheVerifiedChallengeOverHTTP() throws Exception {
+        String challenge = "018f0f76-3f5d-7d43-b630-163e3f635e5a";
+        var received = new AtomicReference<com.fasterxml.jackson.databind.JsonNode>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/internal/v1/authorization/check", exchange -> {
+            received.set(new com.fasterxml.jackson.databind.ObjectMapper().readTree(exchange.getRequestBody()));
+            byte[] response = authority().getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            assertTrue(client(server).authorizeLogin("controlled-subject", challenge).allowed());
+            assertNotNull(received.get());
+            assertEquals("controlled-subject", received.get().path("subject").asText());
+            assertEquals("personal.session.login", received.get().path("permission").asText());
+            assertEquals(challenge, received.get().path("sms_challenge_id").asText());
+        } finally { server.stop(0); }
+    }
     @Test void smsNeedsTheActual204SubjectHeader() throws Exception {
         HttpServer s = server(204, "");
-        try { assertEquals("controlled-subject", client(s).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
+        try { assertEquals(new PinvouAuthClient.SMSLogin("controlled-subject", false), client(s).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
         s = server(200, "{}");
         try { HttpServer current = s; assertThrows(PinvouAuthClient.AuthClientException.class, () -> client(current).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device")); } finally { s.stop(0); }
+    }
+    @Test void browserSMSNegotiatesBindingAndRestartOverHTTP() throws Exception {
+        var binding = new AtomicReference<String>();
+        var restartAware = new AtomicReference<String>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/verify", exchange -> {
+            binding.set(exchange.getRequestHeaders().getFirst("X-Pinvou-SMS-Binding"));
+            restartAware.set(exchange.getRequestHeaders().getFirst("X-Pinvou-SMS-Restart-Aware"));
+            exchange.getResponseHeaders().set("X-Pinvou-Identity-Subject", "controlled-subject");
+            exchange.getResponseHeaders().set("X-Pinvou-SMS-Binding", "v1");
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var result = client(server).verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device");
+            assertEquals("v1", binding.get());
+            assertEquals("v1", restartAware.get());
+            assertEquals(new PinvouAuthClient.SMSLogin("controlled-subject", true), result);
+        } finally { server.stop(0); }
+    }
+    @Test void browserSMSPreservesOnlyTheExpectedSignupErrorCodes() throws Exception {
+        for (String code : new String[]{"REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED", "REGISTRATION_RESTART_REQUIRED", "SIGNUP_CONSENT_INVALID", "fixture-untrusted-value"}) {
+            boolean send = "SIGNUP_CONSENT_INVALID".equals(code);
+            int status = send ? 400 : 409;
+            HttpServer server = server(status, "{\"code\":\"" + code + "\"}", !send);
+            try {
+                var auth = client(server);
+                var failure = assertThrows(PinvouAuthClient.AuthClientException.class, () -> {
+                    if (send) auth.sendSMS(Map.of("purpose", "LOGIN"), "198.51.100.1", "fixture-device");
+                    else auth.verifySMS("+8613800000000", "fixture-challenge", "000000", "198.51.100.1", "fixture-device");
+                });
+                assertEquals(status, failure.status());
+                assertEquals("fixture-untrusted-value".equals(code) ? "AUTH_REQUEST_FAILED" : code, failure.code());
+            } finally { server.stop(0); }
+        }
     }
     @Test void malformedAndIncompleteAuthorityCannotAuthorize() throws Exception {
         for (String body : new String[]{"{}", "{\"allowed\":true,\"user_id\":\"wrong\"}", "{\"allowed\":true,\"user_id\":\"00000000-0000-0000-0000-000000000000\",\"permission\":\"personal.session.login\",\"permission_scope\":\"PERSONAL\"}"}) {

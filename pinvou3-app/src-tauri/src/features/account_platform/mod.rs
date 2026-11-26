@@ -477,6 +477,8 @@ pub struct PortalOpenRequest {
 #[derive(Debug, Deserialize)]
 pub struct SMSRequest {
     #[serde(default)]
+    pub signup_consent_version: String,
+    #[serde(default)]
     pub password_preparation_token: String,
     pub username: String,
     pub mobile: String,
@@ -699,17 +701,18 @@ impl AccountPlatformState {
         if purpose != "REGISTER" && purpose != "LOGIN" && purpose != "PASSWORD_RESET" {
             return Err("mobile_auth_request_invalid: invalid SMS purpose".to_string());
         }
-        let mut result = self.public_account_request(
-            &config,
-            "v1/auth/sms/challenges",
-            serde_json::json!({
-                "username": input.username.trim(), "mobile": input.mobile.trim(),
-                "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
-                "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
-                "password_preparation_token": input.password_preparation_token,
-            }),
-        )
-        .await?;
+        let mut body = serde_json::json!({
+            "username": input.username.trim(), "mobile": input.mobile.trim(),
+            "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
+            "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
+            "password_preparation_token": input.password_preparation_token,
+        });
+        if !input.signup_consent_version.is_empty() {
+            body["signup_consent_version"] = input.signup_consent_version.into();
+        }
+        let mut result = self
+            .public_account_request(&config, "v1/auth/sms/challenges", body)
+            .await?;
         if purpose == "REGISTER" {
             let operation_id = result
                 .get("registration_operation_id")
@@ -1195,17 +1198,39 @@ impl AccountPlatformState {
             .await
             .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
         let status = response.status();
+        let sms_flow = matches!(flow, TokenFlow::Sms);
+        let sms_rate_limited = sms_flow && status == StatusCode::TOO_MANY_REQUESTS;
+        let sms_restart_required = sms_flow
+            && status == StatusCode::SERVICE_UNAVAILABLE
+            && response
+                .headers()
+                .get_all("x-pinvou-sms-restart-required")
+                .iter()
+                .map(|value| value.as_bytes())
+                .eq([b"true".as_slice()]);
+        let retry_after_seconds = sms_rate_limited
+            .then(|| response_retry_after_seconds(&response))
+            .flatten();
         let bytes = bounded_response_bytes(response).await?;
         if !status.is_success() {
             let oauth_error = serde_json::from_slice::<OAuthErrorResponse>(&bytes).ok();
-            return Err(classify_token_error(
-                flow,
-                status,
-                oauth_error.as_ref().and_then(|body| body.error.as_deref()),
-                oauth_error
-                    .as_ref()
-                    .and_then(|body| body.error_description.as_deref()),
-            ));
+            let code = oauth_error.as_ref().and_then(|body| body.error.as_deref());
+            if sms_rate_limited && code == Some("temporarily_unavailable") {
+                let retry = retry_after_seconds
+                    .map(|seconds| format!(":{seconds}"))
+                    .unwrap_or_default();
+                return Err(format!("mobile_auth_failed: RATE_LIMITED{retry}"));
+            }
+            let description = oauth_error
+                .as_ref()
+                .and_then(|body| body.error_description.as_deref());
+            if sms_restart_required
+                && code == Some("temporarily_unavailable")
+                && description == Some("REGISTRATION_RECOVERING")
+            {
+                return Err("mobile_auth_failed: REGISTRATION_RESTART_REQUIRED".to_string());
+            }
+            return Err(classify_token_error(flow, status, code, description));
         }
         serde_json::from_slice::<TokenResponse>(&bytes)
             .map_err(|_| "oidc_token_response_invalid: token response is invalid".to_string())
@@ -1677,6 +1702,21 @@ fn classify_token_error(
         (TokenFlow::Sms, Some("invalid_grant")) => {
             "mobile_auth_code_invalid: SMS code is invalid or expired".to_string()
         }
+        (TokenFlow::Sms, Some("temporarily_unavailable"))
+            if oauth_description == Some("REGISTRATION_RECOVERING") =>
+        {
+            "mobile_auth_failed: REGISTRATION_RECOVERING".to_string()
+        }
+        (TokenFlow::Sms, Some("temporarily_unavailable"))
+            if oauth_description == Some("REGISTRATION_MANUAL_REVIEW_REQUIRED") =>
+        {
+            "mobile_auth_failed: REGISTRATION_MANUAL_REVIEW_REQUIRED".to_string()
+        }
+        (TokenFlow::Sms, Some("temporarily_unavailable"))
+            if status == StatusCode::SERVICE_UNAVAILABLE =>
+        {
+            "mobile_auth_failed: SMS_UNAVAILABLE".to_string()
+        }
         (TokenFlow::Sms, Some("unauthorized_client")) => {
             "oidc_direct_grant_disabled: client configuration is invalid or in-app SMS sign-in is disabled"
                 .to_string()
@@ -2113,6 +2153,14 @@ fn parse_retry_after_seconds(value: &str, now: chrono::DateTime<chrono::Utc>) ->
     (seconds > 0).then_some(seconds.min(86_400))
 }
 
+fn response_retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get("Retry-After")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_retry_after_seconds(value, chrono::Utc::now()))
+}
+
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let balance_response = response.url().path().ends_with("/v1/me/balance")
         || response.url().path().starts_with("/v1/organizations/")
@@ -2124,11 +2172,7 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         || response.url().path().ends_with("/v1/me/usage-requests")
         || response.url().path().ends_with("/v1/me/usage-turns");
     let status = response.status().as_u16();
-    let retry_after_seconds = response
-        .headers()
-        .get("Retry-After")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_retry_after_seconds(value, chrono::Utc::now()));
+    let retry_after_seconds = response_retry_after_seconds(&response);
     let context_version = response
         .headers()
         .get("X-Context-Version")
@@ -2459,6 +2503,115 @@ mod tests {
                 .unwrap_err();
             server.join().unwrap();
             assert_eq!(error, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn sms_token_verification_retains_retry_after_for_proxy_rate_limit() {
+        for (flow, header, expected) in [
+            (
+                TokenFlow::Sms,
+                "Retry-After: 45\r\n",
+                "mobile_auth_failed: RATE_LIMITED:45",
+            ),
+            (
+                TokenFlow::Sms,
+                "Retry-After: invalid\r\n",
+                "mobile_auth_failed: RATE_LIMITED",
+            ),
+            (
+                TokenFlow::Password,
+                "Retry-After: 45\r\n",
+                "oidc_token_exchange_failed: token endpoint returned 429",
+            ),
+        ] {
+            let is_sms = matches!(flow, TokenFlow::Sms);
+            let (base, server) = spawn_portal_fixture_with_headers(1, move |request| {
+                assert!(request.starts_with("POST /token "));
+                assert_eq!(request.contains("sms_code=123456"), is_sms);
+                (429, r#"{"error":"temporarily_unavailable"}"#, header)
+            });
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let mut config = config();
+            config.token_url = base.join("token").unwrap();
+            let mut form = vec![("grant_type", "password")];
+            if is_sms {
+                form.extend([("sms_challenge_id", "fixture-id"), ("sms_code", "123456")]);
+            }
+            let result = state.token_request(&config, &form, flow).await;
+            server.join().unwrap();
+            assert_eq!(result.err().as_deref(), Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn token_restart_requires_trusted_sms_recovery_response() {
+        const RECOVERING: &str =
+            r#"{"error":"temporarily_unavailable","error_description":"REGISTRATION_RECOVERING"}"#;
+        const REVIEW: &str = r#"{"error":"temporarily_unavailable","error_description":"REGISTRATION_MANUAL_REVIEW_REQUIRED"}"#;
+        const RESTART: &str = "X-Pinvou-SMS-Restart-Required: true\r\n";
+        const AMBIGUOUS: &str =
+            "X-Pinvou-SMS-Restart-Required: true\r\nX-Pinvou-SMS-Restart-Required: false\r\n";
+        for (flow, status, body, header, expected) in [
+            (
+                TokenFlow::Sms,
+                503,
+                RECOVERING,
+                RESTART,
+                "mobile_auth_failed: REGISTRATION_RESTART_REQUIRED",
+            ),
+            (
+                TokenFlow::Sms,
+                503,
+                RECOVERING,
+                "",
+                "mobile_auth_failed: REGISTRATION_RECOVERING",
+            ),
+            (
+                TokenFlow::Sms,
+                503,
+                RECOVERING,
+                AMBIGUOUS,
+                "mobile_auth_failed: REGISTRATION_RECOVERING",
+            ),
+            (
+                TokenFlow::Sms,
+                503,
+                REVIEW,
+                RESTART,
+                "mobile_auth_failed: REGISTRATION_MANUAL_REVIEW_REQUIRED",
+            ),
+            (
+                TokenFlow::Sms,
+                429,
+                RECOVERING,
+                RESTART,
+                "mobile_auth_failed: RATE_LIMITED",
+            ),
+            (
+                TokenFlow::Password,
+                503,
+                RECOVERING,
+                RESTART,
+                "oidc_token_exchange_failed: token endpoint returned 503",
+            ),
+        ] {
+            let (base, server) = spawn_portal_fixture_with_headers(1, move |request| {
+                assert!(request.starts_with("POST /token "));
+                (status, body, header)
+            });
+            let state = portal_test_state(Arc::new(MemoryCredentialStore::default()), None);
+            let mut config = config();
+            config.token_url = base.join("token").unwrap();
+            let mut form = vec![("grant_type", "password")];
+            if matches!(flow, TokenFlow::Sms) {
+                form.extend([("sms_challenge_id", "fixture-id"), ("sms_code", "123456")]);
+            } else {
+                form.push(("password", "fixture"));
+            }
+            let result = state.token_request(&config, &form, flow).await;
+            server.join().unwrap();
+            assert_eq!(result.err().as_deref(), Some(expected));
         }
     }
 
@@ -2874,6 +3027,31 @@ mod tests {
             )
             .starts_with("oidc_account_setup_incomplete:")
         );
+    }
+
+    #[test]
+    fn sms_token_errors_preserve_registration_and_service_outcomes() {
+        for (description, expected) in [
+            (
+                Some("REGISTRATION_RECOVERING"),
+                "mobile_auth_failed: REGISTRATION_RECOVERING",
+            ),
+            (
+                Some("REGISTRATION_MANUAL_REVIEW_REQUIRED"),
+                "mobile_auth_failed: REGISTRATION_MANUAL_REVIEW_REQUIRED",
+            ),
+            (None, "mobile_auth_failed: SMS_UNAVAILABLE"),
+        ] {
+            assert_eq!(
+                classify_token_error(
+                    TokenFlow::Sms,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some("temporarily_unavailable"),
+                    description,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -3704,6 +3882,7 @@ mod tests {
         first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         state
             .send_sms(SMSRequest {
+                signup_consent_version: String::new(),
                 password_preparation_token: String::new(),
                 username: "public-b".into(),
                 mobile: "+8613800000000".into(),

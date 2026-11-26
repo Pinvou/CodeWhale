@@ -66,22 +66,32 @@ final class PinvouAuthClient {
             Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device), 202).body();
     }
 
-    String verifySMS(String mobile, String challenge, String code, String source, String device) throws AuthClientException {
+    record SMSLogin(String subject, boolean bindingRequired) {}
+
+    SMSLogin verifySMS(String mobile, String challenge, String code, String source, String device) throws AuthClientException {
         Response result = post(requiredURL("PINVOU_SMS_VERIFY_URL"),
             Map.of("mobile", mobile, "challenge_id", challenge, "code", code),
-            Map.of("Authorization", "Bearer " + workloadToken(), "X-Pinvou-Client-Source", source, "X-Device-ID", device), 204);
+            Map.of("Authorization", "Bearer " + workloadToken(), "X-Pinvou-Client-Source", source, "X-Device-ID", device,
+                "X-Pinvou-SMS-Binding", "v1", "X-Pinvou-SMS-Restart-Aware", "v1"), 204);
         String subject = result.header("X-Pinvou-Identity-Subject");
         if (result.status() != 204 || !subject.matches("[A-Za-z0-9._:-]{1,128}")) throw new AuthClientException(401, "SMS_CODE_INVALID");
-        return subject;
+        return new SMSLogin(subject, result.header("X-Pinvou-SMS-Binding").equals("v1"));
     }
 
     LoginAuthorization authorizeLogin(String subject) throws AuthClientException {
+        return authorizeLogin(subject, "");
+    }
+
+    LoginAuthorization authorizeLogin(String subject, String smsChallenge) throws AuthClientException {
         String issuer = requiredValue("PINVOU_OIDC_ISSUER");
-        Response result = post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/internal/v1/authorization/check"), Map.of(
+        Map<String, Object> request = new java.util.LinkedHashMap<>(Map.of(
             "issuer", issuer,
             "subject", subject,
             "permission", "personal.session.login"
-        ), Map.of("Authorization", "Bearer " + workloadToken()), 200);
+        ));
+        if (!smsChallenge.isEmpty()) request.put("sms_challenge_id", smsChallenge);
+        Response result = post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/internal/v1/authorization/check"), request,
+            Map.of("Authorization", "Bearer " + workloadToken()), 200);
         String userID = string(result.body().get("user_id"));
         boolean allowed = Boolean.TRUE.equals(result.body().get("allowed"))
             && "personal.session.login".equals(string(result.body().get("permission")))
@@ -269,7 +279,8 @@ final class PinvouAuthClient {
                     "USERNAME_ALREADY_REGISTERED", "USERNAME_TAKEN", "MOBILE_ALREADY_REGISTERED", "PHONE_IN_USE",
                     "CAPTCHA_INVALID", "PASSWORD_PREPARATION_INVALID", "PASSWORD_PREPARATION_UNAVAILABLE", "PASSWORD_PRECHECK_CAPACITY_REACHED", "RATE_LIMITED", "SMS_RATE_LIMITED", "PASSWORD_POLICY_VIOLATION", "PASSWORD_INVALID",
                     "PASSWORD_EDGE_SPACE_NOT_ALLOWED", "PASSWORD_REFERENCE_INVALID", "PASSWORD_REFERENCE_CONFLICT",
-                    "REGISTRATION_RESTART_REQUIRED" -> code;
+                    "REGISTRATION_RESTART_REQUIRED", "REGISTRATION_RECOVERING", "REGISTRATION_MANUAL_REVIEW_REQUIRED",
+                    "SIGNUP_CONSENT_INVALID" -> code;
                 default -> "AUTH_REQUEST_FAILED";
             };
         }

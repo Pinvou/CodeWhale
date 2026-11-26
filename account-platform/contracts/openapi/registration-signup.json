@@ -343,7 +343,7 @@
     "/v1/auth/sms/challenges": {
       "post": {
         "operationId": "sendRegistrationOrLoginSMS",
-        "description": "Consumes the one-time mobile/purpose captcha before rate-limited registration availability and password-reference validation; sends no SMS or registration operation when that precheck fails.",
+        "description": "Consumes the one-time mobile/purpose captcha before rate-limited checks. With LOGIN and explicit signup consent, it sends a code for existing and unregistered numbers. Signup can only begin when the bound code is verified.",
         "parameters": [
           {
             "name": "X-Device-ID",
@@ -388,6 +388,11 @@
                   },
                   "captcha_offset": {
                     "type": "integer"
+                  },
+                  "signup_consent_version": {
+                    "type": "string",
+                    "enum": ["mobile-signup-v1"],
+                    "description": "Optional for LOGIN only. Records the user's agreement to create a personal account if the number is unregistered when sending and verification occur."
                   },
                   "password_preparation_token": {
                     "type": "string",

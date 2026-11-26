@@ -174,6 +174,8 @@ test('manual unknown identity action only queries the attempted original operati
   const { registrationRepairActions } = await import('../src/features/account-platform/registration-repair.js');
   const item = {status:'IDENTITY_CREATING',stage:'IDENTITY_CREATING',identity_create_attempted_at:'2026-10-25T00:00:00Z',account_created:false};
   assert.deepEqual(registrationRepairActions(item), {query:true,retry:true,compensate:false});
+  assert.deepEqual(registrationRepairActions({ ...item, status: 'REPAIR_REQUIRED', reason: 'IDENTITY_CREATE_OUTCOME_UNKNOWN', compensation_allowed: false }), {query:true,retry:true,compensate:false});
+  assert.deepEqual(registrationRepairActions({ ...item, status: 'REPAIR_REQUIRED', reason: 'MOBILE_ALREADY_REGISTERED', compensation_allowed: false }), {query:false,retry:true,compensate:false});
   for (const change of [{identity_create_attempted_at:null},{account_created:true},{stage:'ACCOUNT_COMMITTING'},{status:'ACTIVE'}]) {
     assert.equal(registrationRepairActions({...item,...change}).query,false);
     assert.equal(registrationRepairActions({...item,...change}).compensate,false);

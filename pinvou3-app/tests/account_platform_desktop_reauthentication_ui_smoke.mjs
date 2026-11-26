@@ -25,8 +25,15 @@ async function begin(page) {
   await page.type('[role="alertdialog"] input', 'CLOSE_MY_ACCOUNT');
   await page.$eval('form[role="alertdialog"]', form => form.requestSubmit());
 }
-async function password(page) {
+async function showPassword(page) {
+  await page.waitForSelector('.ap-login form');
+  if (!await page.$('.ap-login form input[autocomplete="username"]')) {
+    await click(page, '.ap-login', await page.evaluate(() => window.nativeReauth.copy[window.nativeReauth.language].authModes.password));
+  }
   await page.waitForSelector('.ap-login form input[autocomplete="username"]');
+}
+async function password(page) {
+  await showPassword(page);
   await page.type('.ap-login form input[autocomplete="username"]', 'controlled-original-user');
   await page.type('.ap-login form input[type="password"]', 'controlled-test-input');
   await page.$eval('.ap-login form', form => form.requestSubmit());
@@ -93,6 +100,29 @@ try {
     assert.equal(writes.length, 2); assert.equal(writes[0].idempotencyKey, original.key); assert.equal(writes[1].idempotencyKey, original.key);
     assert.deepEqual(writes.map(value => value.body), [original.facts, original.facts]);
   });
+  for (const wrongActor of [false, true]) await run('SMS reauthentication preserves the original actor gate: ' + wrongActor, wrongActor ? 'wrong-actor=1' : '', async page => {
+    await page.waitForSelector('.ap-login form');
+    const original = await page.evaluate(() => window.nativeReauth.proof());
+    await click(page, '.ap-login', await page.evaluate(() => window.nativeReauth.copy.zh.authModes.sms));
+    assert.equal(await page.$('.ap-auth-signup-consent'), null);
+    await page.type('.ap-login input[autocomplete="tel-national"]', '13800000000');
+    await click(page, '.ap-login', await page.evaluate(() => window.nativeReauth.copy.zh.sendCode));
+    await page.waitForSelector('[role=dialog]');
+    await click(page, '[role=dialog]', await page.evaluate(() => window.nativeReauth.copy.zh.captchaConfirm));
+    await page.waitForFunction(() => window.nativeReauth.smsSend);
+    assert.ok(await page.evaluate(() => window.nativeReauth.smsSend.purpose === 'LOGIN' && !('signup_consent_version' in window.nativeReauth.smsSend)));
+    await page.waitForFunction(() => !document.querySelector('.ap-auth-submit')?.disabled);
+    await page.type('.ap-login input[autocomplete="one-time-code"]', '000000');
+    await page.$eval('.ap-login form', form => form.requestSubmit());
+    if (wrongActor) {
+      await page.waitForSelector('.ap-login [role=alert]');
+      assert.equal(await page.$('main'), null);
+    } else {
+      await page.waitForSelector('main .ap-danger-section');
+    }
+    assert.deepEqual(await page.evaluate(() => window.nativeReauth.proof()), original);
+    assert.equal(await page.evaluate(() => window.nativeReauth.calls.filter(value => value.resource === '/v1/me/account-closure-requests').length), 1);
+  });
   await run('an existing unknown-result closure retains the original key through native re-login', 'unknown=1', async page => {
     await page.waitForFunction(() => window.nativeReauth.proof() && [...document.querySelectorAll('.ap-danger-section button')].some(value => value.textContent === window.nativeReauth.financeCopy.zh.retry && !value.disabled));
     const original = await page.evaluate(() => window.nativeReauth.proof());
@@ -110,6 +140,7 @@ try {
     await password(page); await page.waitForFunction(() => document.querySelector('.ap-login [role="alert"]'));
     assert.equal(await page.$('main'), null); assert.deepEqual(await page.evaluate(() => window.nativeReauth.proof()), original);
     assert.equal(await page.evaluate(() => window.nativeReauth.calls.filter(value => value.resource === '/v1/me/account-closure-requests').length), 1);
+    await showPassword(page);
     assert.equal(await page.$eval('.ap-login input[type="password"]', input => input.value), '');
   });
   await run('cancel before password login preserves first-attempt closure proof', '', async page => {

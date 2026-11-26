@@ -137,6 +137,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     const { coordinator, ticket } = reauthentication;
     const value = Object.create(client);
     value.login = (account, password) => coordinator.authenticate(ticket, () => client.login(account, password));
+    value.loginSms = (mobile, challenge, code) => coordinator.authenticate(ticket, () => client.loginSms(mobile, challenge, code));
     return value;
   }, [client, reauthentication]);
   useEffect(() => {

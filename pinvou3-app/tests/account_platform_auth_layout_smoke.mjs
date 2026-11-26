@@ -33,7 +33,7 @@ try {
       const backdrop = document.querySelector('.ap-popover-backdrop.ap-desktop-backdrop');
       const frame = backdrop.getBoundingClientRect();
       const style = getComputedStyle(backdrop);
-      const inputs = [...document.querySelectorAll('.ap-auth-form input')].map(node => (node.closest('.ap-auth-code') || node).getBoundingClientRect());
+      const inputs = [...document.querySelectorAll('.ap-auth-form input:not([type=checkbox])')].map(node => (node.closest('.ap-auth-code') || node).getBoundingClientRect());
       return { centered: Math.abs(shell.left + shell.width / 2 - innerWidth / 2) < 2, fits: shell.left >= 0 && shell.right <= innerWidth && shell.height <= innerHeight, fitsBackdrop: shell.left >= frame.left + parseFloat(style.paddingLeft) - 1 && shell.right <= frame.right - parseFloat(style.paddingRight) + 1, desktopWidth: innerWidth < 600 || Math.abs(shell.width - 480) < 1, aligned: inputs.every(rect => Math.abs(rect.left - inputs[0].left) < 2 && Math.abs(rect.width - inputs[0].width) < 2), overflow: document.documentElement.scrollWidth > innerWidth };
     });
     assert.deepEqual(result, { centered: true, fits: true, fitsBackdrop: true, desktopWidth: true, aligned: true, overflow: false });
@@ -47,8 +47,13 @@ try {
   for (const language of ['zh', 'en', 'ja']) for (const width of [1920, 390, 560, 561]) await run(`${language} ${width}px: centered and aligned authentication flows`, async () => {
     await fresh(`guest&language=${language}`, width);
     const words = accountAuthCopy[language], copy = accountPlatformCopy[language];
+    const consent = await page.$eval('.ap-auth-signup-consent', node => ({
+      text: node.textContent, checked: node.querySelector('input').checked,
+      unlabeled: !node.querySelector('input').labels.length,
+    }));
+    assert.deepEqual(consent, { text: words.smsSignupConsent, checked: false, unlabeled: false });
     for (const mode of ['password', 'sms', 'register', 'forgot']) {
-      if (mode === 'sms') await click(copy.authModes.sms);
+      if (mode === 'password' || mode === 'sms') await click(copy.authModes[mode]);
       if (mode === 'register') await click(copy.register);
       if (mode === 'forgot') { await click(words.backToLogin); await click(copy.authModes.forgot); }
       await geometry();

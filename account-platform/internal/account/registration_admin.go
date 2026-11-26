@@ -98,7 +98,9 @@ WITH queue AS (
  COALESCE(wj.last_error_code,ro.last_error_code,'') AS reason,
  CASE WHEN wj.user_id IS NOT NULL THEN wj.next_attempt_at ELSE ro.next_retry_at END AS next_retry_at,
  ro.created_at,ro.updated_at,ro.identity_create_attempted_at,
- COALESCE(wj.sla_expires_at,ro.identity_created_at+interval '30 minutes') AS sla_expires_at
+ COALESCE(wj.sla_expires_at,ro.identity_created_at+interval '30 minutes',
+   CASE WHEN ro.status='REPAIR_REQUIRED' AND ro.last_error_code=$8
+        THEN ro.identity_create_attempted_at+$9::bigint*interval '1 second' END) AS sla_expires_at
  FROM registration_operations ro LEFT JOIN wallet_provisioning_jobs wj ON wj.registration_operation_id=ro.id
  WHERE ro.status IN ('REPAIR_REQUIRED','COMPENSATION_PENDING')
  OR (ro.status='IDENTITY_CREATING' AND ro.identity_create_attempted_at IS NOT NULL
@@ -110,7 +112,8 @@ WHERE ($1='' OR status=$1) AND ($2='' OR stage=$2) AND ($3='' OR responsibility=
   AND ($4=0 OR updated_at <= now()-make_interval(mins => $4))
   AND ($5='' OR $5='OVERDUE' AND sla_expires_at <= now() OR $5='WITHIN' AND sla_expires_at > now())
   AND ($7::uuid IS NULL OR id=$7)
-ORDER BY updated_at,created_at LIMIT $6`, filter.Status, filter.Stage, filter.Responsibility, filter.OlderThanMinutes, filter.SLA, filter.Limit, operationID)
+ORDER BY updated_at,created_at LIMIT $6`, filter.Status, filter.Stage, filter.Responsibility, filter.OlderThanMinutes,
+		filter.SLA, filter.Limit, operationID, registrationIdentityOutcomeUnknown, int64(registrationIdentityQueryWindow/time.Second))
 	if err != nil {
 		return nil, err
 	}

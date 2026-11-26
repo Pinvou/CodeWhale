@@ -1,6 +1,6 @@
 import { runSMSConflictCases } from './account_platform_sms_conflict_cases.mjs';
 import { navigateFixture } from './helpers/navigate-fixture.mjs';
-import { registrationRepairCopy, smsStatusCopy, smsTemplateCopy } from '../src/shared/i18n.js';
+import { accountAuthCopy, accountPlatformCopy, registrationRepairCopy, smsStatusCopy, smsTemplateCopy } from '../src/shared/i18n.js';
 import { profileRepairQueueCopy } from '../src/shared/admin-profile-repair-i18n.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -88,14 +88,18 @@ try {
     await page.waitForFunction(() => globalThis.f01.status === 'ACTIVE');
     assert(await page.evaluate(() => globalThis.f01.calls.filter(call => call.url.endsWith('/status')).every(call => call.method === 'PATCH')), 'wrong status method');
   });
-  for (const language of ['zh','en','ja']) await caseRun(`${language}: unknown identity manual query uses original retry route without compensation`, async () => {
+  for (const language of ['zh','en','ja']) for (const status of ['IDENTITY_CREATING', 'REPAIR_REQUIRED']) await caseRun(`${language}: ${status} unknown identity manual query uses original retry route without compensation`, async () => {
     await fresh('admin'); await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
-    await page.evaluate(() => { globalThis.f01.unknownRegistration=true;globalThis.f01.calls.length=0; });
+    await page.evaluate(value => { globalThis.f01.unknownRegistration = value; globalThis.f01.calls.length = 0; }, status);
     await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair));
-    const row='tr[data-operation-status="IDENTITY_CREATING"]'; await page.waitForSelector(`${row} button`);
+    const row = `tr[data-operation-status="${status}"]`;
+    await page.waitForSelector(`${row} button`);
     const text=await page.$eval(`${row} button`,node=>node.textContent);
     assert(text===registrationRepairCopy[language].stages.IDENTITY_CREATING,'unknown action is not a localized identity query');
     assert(await page.$$eval(`${row} button`,nodes=>nodes.length)===1,'unknown offered compensation');
+    const nextQueryVisible = await page.$eval(`${row} > td:nth-child(5)`, cell => Boolean(cell.querySelector('time')));
+    assert(nextQueryVisible === (status === 'IDENTITY_CREATING'), 'next automatic lookup did not match the operation state');
+    assert(await page.$eval(row, (element, copy) => element.textContent.includes(copy), registrationRepairCopy[language].identityUnknown), 'unknown operation lost its lookup guidance');
     await page.evaluate(() => { globalThis.f01.calls.length = 0; });
     await page.click(`${row} button`); await page.waitForFunction(()=>globalThis.f01.calls.some(call=>call.url.endsWith('/actions/retry')));
     await page.waitForNetworkIdle({ idleTime: 100 });
@@ -105,6 +109,23 @@ try {
       const posts = globalThis.f01.calls.filter(call => call.method === 'POST' && call.url !== '/api/account/v1/account/bootstrap');
       return posts.length === 1 && posts[0].url === `/api/admin/account/admin/v1/registration-operations/${globalThis.f01.id}/actions/retry`;
     }), 'query duplicated a command, requested compensation, or sent a new or foreign operation');
+  });
+  for (const language of ['zh','en','ja']) for (const reason of ['IDENTITY_CREATE_OUTCOME_UNKNOWN', 'USERNAME_ALREADY_REGISTERED']) await caseRun(`${language}: registration review receipt renders ${reason}`, async () => {
+    await fresh();
+    await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
+    const copy = accountPlatformCopy[language];
+    const unknown = reason === 'IDENTITY_CREATE_OUTCOME_UNKNOWN';
+    await page.evaluate(value => {
+      globalThis.f01.authenticated = false;
+      globalThis.f01.registration = { registration_operation_id: globalThis.f01.id, status: 'REPAIR_REQUIRED', manual_review_required: true, reason: value };
+      globalThis.f01.render('desktop');
+    }, reason);
+    const target = '.ap-auth-card [role=status]';
+    const expected = unknown ? copy.registrationManualReviewUnknown : copy.registrationManualReview;
+    await page.waitForFunction((selector, message) => document.querySelector(selector)?.textContent.includes(message), {}, target, expected);
+    const rendered = await page.$eval(target, element => element.textContent);
+    assert(!rendered.includes(unknown ? copy.registrationManualReview : copy.registrationManualReviewUnknown), 'registration review reported a different outcome');
+    assert(rendered.includes(copy.usernameAlreadyRegistered) === !unknown, 'username rejection detail did not match the receipt');
   });
   await caseRun('registration retry and compensation are actual wired actions', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.userManagement.registrationRepair)); const operationID = await page.evaluate(() => globalThis.f01.id);
     const row = `tr[data-operation-id="${operationID}"][data-operation-status="REPAIR_REQUIRED"]`;
@@ -159,9 +180,14 @@ try {
     assert((await page.evaluate(() => new Set(globalThis.f01.smsCalls.map(call => JSON.stringify(call.command))).size)) === 1, 'all attempts retain the original command');
   });
   await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
-  const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=username]'); };
-  await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
+  const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=tel-national]'); };
+  const desktopPassword = async () => {
     await desktopGuest();
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.password));
+    await page.waitForSelector('.ap-login input[autocomplete=username]');
+  };
+  await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
+    await desktopPassword();
     await page.evaluate(() => { globalThis.f01.loginError = 'oidc_credentials_invalid: SYNTHETIC_PROVIDER_DETAIL'; });
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
     await page.click('form button:not([type=button])');
@@ -178,6 +204,119 @@ try {
     await waitText(await page.evaluate(() => globalThis.f01.copy().account.smsRateLimited));
     assert(await page.evaluate(() => [...document.querySelectorAll('.ap-login button')].some(button => button.disabled && /1\d\d/.test(button.textContent))), 'SMS rate limit did not disable its resend button');
   });
+  await caseRun('desktop SMS verification rate limit preserves or extends resend cooldown', async () => {
+    await desktopGuest();
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    await page.evaluate(() => { globalThis.f01.smsRetryAfter = 60; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode));
+    await page.waitForSelector('[role=dialog]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await page.waitForFunction(() => !document.querySelector('[role=dialog]') && !document.querySelector('.ap-auth-submit')?.disabled);
+    await page.type('input[autocomplete=one-time-code]', '000000');
+
+    const resend = () => page.$eval('.ap-auth-code button', button => ({
+      disabled: button.disabled,
+      seconds: Number(button.textContent.match(/\d+/)?.[0]),
+    }));
+    const verifyWithThrottle = async (seconds, callCount) => {
+      await page.evaluate(value => {
+        globalThis.f01.smsLoginError = Object.assign(new Error('mobile_auth_failed: RATE_LIMITED'), {
+          code: 'RATE_LIMITED',
+          retryAfterSeconds: value,
+        });
+      }, seconds);
+      await page.click('.ap-auth-submit');
+      await page.waitForFunction(count => {
+        const { nativeCalls, copy } = globalThis.f01;
+        return nativeCalls.filter(([name]) => name === 'sms-login').length === count
+          && document.querySelector('.ap-login [role=alert]')?.textContent === copy().account.authRequestRateLimited
+          && !document.querySelector('.ap-auth-submit')?.disabled;
+      }, {}, callCount);
+      return resend();
+    };
+
+    const initial = await resend();
+    assert(initial.disabled && initial.seconds > 30 && initial.seconds <= 60, 'send did not establish the resend cooldown');
+    const shorter = await verifyWithThrottle(5, 1);
+    assert(shorter.disabled && shorter.seconds > 30 && shorter.seconds <= initial.seconds, 'shorter verification throttle shortened the send cooldown');
+    const longer = await verifyWithThrottle(120, 2);
+    assert(longer.disabled && longer.seconds > 60 && longer.seconds <= 120, 'longer verification throttle did not extend the send cooldown');
+  });
+  await caseRun('changing the SMS signup choice retires the original challenge and sends consent on the new one', async () => {
+    await desktopGuest();
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    const send = async () => {
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode));
+      await page.waitForSelector('[role=dialog]');
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+    };
+    await send();
+    await page.type('input[autocomplete=one-time-code]', '000000');
+    await page.click('.ap-auth-signup-consent input');
+    assert(await page.$eval('.ap-auth-submit', node => node.disabled), 'changed consent reused the old SMS challenge');
+    const sendLabel = await page.evaluate(() => globalThis.f01.copy().account.sendCode);
+    await page.waitForFunction(label => [...document.querySelectorAll('.ap-auth-code button')].some(node => node.textContent === label && !node.disabled), {}, sendLabel);
+    await send();
+    assert(await page.evaluate(() => {
+      const sent = globalThis.f01.nativeCalls.filter(([method]) => method === 'sms');
+      return sent.length === 2 && !('signup_consent_version' in sent[0][1])
+        && sent[1][1].purpose === 'LOGIN' && sent[1][1].signup_consent_version === 'mobile-signup-v1';
+    }), 'consent was not scoped to the new SMS challenge');
+    await page.type('input[autocomplete=one-time-code]', '000000');
+    await page.click('.ap-auth-submit');
+    await waitText('account-a');
+    assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(([method]) => method === 'sms-login')), 'SMS login was not used');
+  });
+  for (const [code, role, message] of [
+    ['REGISTRATION_RECOVERING', 'status', accountAuthCopy.en.smsSignupRecovering],
+    ['REGISTRATION_MANUAL_REVIEW_REQUIRED', 'status', accountAuthCopy.en.smsSignupManualReview],
+    ['REGISTRATION_RESTART_REQUIRED', 'status', accountAuthCopy.en.smsSignupRestartRequired],
+    ['SMS_UNAVAILABLE', 'alert', accountPlatformCopy.en.smsUnavailable],
+  ]) await caseRun('desktop SMS signup feedback ' + code + ' requires a new code', async () => {
+    await desktopGuest();
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    await page.click('.ap-auth-signup-consent input');
+    const send = async () => {
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode));
+      await page.waitForSelector('[role=dialog]');
+      await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]') && !document.querySelector('.ap-auth-submit').disabled);
+    };
+    await send();
+    const sessionChecks = await page.evaluate(() => globalThis.f01.nativeSessionChecks);
+    await page.evaluate(code => { globalThis.f01.smsLoginError = 'mobile_auth_failed: ' + code; }, code);
+    await page.type('input[autocomplete=one-time-code]', '000000');
+    await page.click('.ap-auth-submit');
+    await page.waitForFunction((role, message) =>
+      document.querySelector('.ap-login .ap-alert[role=' + role + ']')?.textContent === message, {}, role, message);
+    assert(await page.evaluate(expectedSessionChecks => {
+      const { authenticated, authenticatedCallbacks, nativeCalls, nativeSessionChecks, id } = globalThis.f01;
+      const attempts = nativeCalls.filter(([method]) => method === 'sms-login');
+      return !authenticated && authenticatedCallbacks.length === 0 &&
+        nativeSessionChecks === expectedSessionChecks &&
+        attempts.length === 1 && attempts[0][1].challenge_id === id &&
+        document.querySelector('input[autocomplete=one-time-code]').value === '' &&
+        !document.querySelector('input[autocomplete=tel-national]').disabled &&
+        document.querySelector('.ap-auth-submit').disabled;
+    }, sessionChecks), 'failed SMS login kept the old challenge or started a success refresh');
+
+    await page.evaluate(() => {
+      globalThis.f01.smsLoginError = null;
+      globalThis.f01.smsChallengeId = globalThis.f01.other;
+    });
+    await send();
+    await page.type('input[autocomplete=one-time-code]', '111111');
+    await page.click('.ap-auth-submit');
+    await page.waitForFunction(() => globalThis.f01.authenticatedCallbacks.length > 0);
+    assert(await page.evaluate(() => {
+      const { authenticated, authenticatedCallbacks, nativeCalls, id, other } = globalThis.f01;
+      const attempts = nativeCalls.filter(([method]) => method === 'sms-login');
+      return authenticated && authenticatedCallbacks.length === 1 && authenticatedCallbacks[0] === id &&
+        attempts.length === 2 &&
+        attempts[1][1].challenge_id === other && attempts[1][1].code === '111111';
+    }), 'fresh code did not authenticate with its own challenge');
+  });
   const fillRegistration = async () => {
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[autocomplete=tel-national]', '13800000000');
@@ -190,7 +329,7 @@ try {
     await fresh();
     await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
     await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); });
-    await page.waitForSelector('.ap-login input[autocomplete=username]');
+    await page.waitForSelector('.ap-login input[autocomplete=tel-national]');
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[autocomplete=tel-national]', '13800000000');
     const inputs = await page.$$('input[type=password]'); await inputs[0].type('ControlPassword9'); await inputs[1].type('ControlPassword9');
@@ -245,7 +384,7 @@ try {
   for (const language of ['zh','en','ja']) await caseRun(`${language}: reset prepares only after challenge and submits only original reference`, async () => {
     await fresh();await page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select',language);
     await page.evaluate(() => {globalThis.f01.authenticated=false;globalThis.f01.render('desktop');});
-    await page.waitForSelector('.ap-login input[autocomplete=username]');
+    await page.waitForSelector('.ap-login input[autocomplete=tel-national]');
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.forgot));
     await page.type('input[autocomplete=tel-national]','13800000000');
     const inputs=await page.$$('input[type=password]');await inputs[0].type('ControlPassword9');await inputs[1].type('ControlPassword9');
@@ -268,7 +407,7 @@ try {
     assert(await page.evaluate(() => !document.body.textContent.includes(globalThis.f01.copy().account.requestFailed) && !document.querySelector('.ap-login [role=alert]') && globalThis.f01.nativeCalls.filter(call => call[0] === 'sms').length === 1), 'retired response contaminated current account');
   });
   await caseRun('typed passwords require an explicit reveal and blur hides without shifting submit', async () => {
-    await desktopGuest(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
+    await desktopPassword(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
     assert(await page.evaluate(() => document.querySelector('[data-password-reveal-output]').hidden), 'typed password automatically revealed');
     await page.click('[data-password-input] > button');
     await page.waitForFunction(() => !document.querySelector('[data-password-reveal-output]').hidden);
@@ -276,9 +415,9 @@ try {
     await page.click('form button:not([type=button])'); await waitText('account-a');
     assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'login')), 'reveal/blur prevented submission');
   });
-  await caseRun('desktop normal password login uses the explicit Native transport', async () => { await desktopGuest(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9'); await page.click('form button:not([type=button])'); await waitText('account-a'); assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'login')), 'login not sent'); });
+  await caseRun('desktop normal password login uses the explicit Native transport', async () => { await desktopPassword(); await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9'); await page.click('form button:not([type=button])'); await waitText('account-a'); assert(await page.evaluate(() => globalThis.f01.nativeCalls.some(call => call[0] === 'login')), 'login not sent'); });
   await caseRun('retired login completion cannot notify the host about the previous identity', async () => {
-    await desktopGuest(); await page.evaluate(() => { globalThis.f01.delayNextBalance = true; });
+    await desktopPassword(); await page.evaluate(() => { globalThis.f01.delayNextBalance = true; });
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9'); await page.click('form button:not([type=button])');
     await page.waitForFunction(() => typeof globalThis.f01.releaseBalance === 'function');
     await page.evaluate(() => globalThis.f01.switchIdentity()); await waitText('account-b');

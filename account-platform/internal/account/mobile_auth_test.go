@@ -2,7 +2,9 @@ package account
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -50,6 +54,91 @@ func TestPublicMobileAuthRejectsMalformedJSONWithStructuredErrors(t *testing.T) 
 	}
 }
 
+func TestPublicSMSChallengeBindsSignupConsentToLogin(t *testing.T) {
+	const consentV1 = "mobile-signup-v1"
+	for _, tc := range []struct {
+		name       string
+		purpose    SMSPurpose
+		consent    string
+		wantStatus int
+		wantSend   bool
+	}{
+		{"unknown consent version", SMSPurposeLogin, "unsupported", http.StatusBadRequest, false},
+		{"consent on registration", SMSPurposeRegister, consentV1, http.StatusBadRequest, false},
+		{"unregistered login without consent field", SMSPurposeLogin, "", http.StatusAccepted, false},
+		{"valid consent on unregistered login", SMSPurposeLogin, consentV1, http.StatusAccepted, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repository := &mobileAuthRepositoryFake{deliveryDone: make(chan struct{})}
+			provider := &smsProviderFake{}
+			auth := newMobileAuthForTest(t, repository, provider, &identityProvisionerFake{})
+			handler := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456").Handler(nil)
+			fields := map[string]any{
+				"mobile": "13800138000", "purpose": tc.purpose,
+				"captcha_id": uuid.New(), "captcha_offset": 128,
+			}
+			if tc.consent != "" {
+				fields["signup_consent_version"] = tc.consent
+			}
+			payload, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/auth/sms/challenges", strings.NewReader(string(payload)))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != tc.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, tc.wantStatus, response.Body)
+			}
+			if tc.wantStatus == http.StatusBadRequest {
+				var failure struct {
+					Code string `json:"code"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure.Code != "SIGNUP_CONSENT_INVALID" {
+					t.Fatalf("invalid consent lacks structured error: %v body=%s", err, response.Body)
+				}
+				if _, calls := provider.deliveryState(); calls != 0 || repository.challengeCreateCalls != 0 ||
+					repository.operation.ID != uuid.Nil || repository.publicAdmissionCalls != 0 || repository.captchaConsumed {
+					t.Fatal("invalid consent reached quota, CAPTCHA, challenge creation, or SMS delivery")
+				}
+				return
+			}
+
+			var challenge struct {
+				ID uuid.UUID `json:"challenge_id"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &challenge); err != nil || challenge.ID == uuid.Nil {
+				t.Fatalf("expected a public challenge ID: err=%v body=%s", err, response.Body)
+			}
+			stored := repository.challenge
+			if repository.challengeCreateCalls != 1 || !repository.captchaConsumed ||
+				stored.ID != challenge.ID || stored.Purpose != SMSPurposeLogin || stored.Mobile != "+8613800138000" ||
+				stored.SignupConsentVersion != tc.consent || stored.SignupIssuer != auth.issuer {
+				t.Fatal("public challenge was not stored once with the requested consent and login identity")
+			}
+			if !tc.wantSend {
+				// The empty stored opt-in is the invariant for existing HTTP callers.
+				return
+			}
+
+			repository.waitForDelivery(t)
+			repository.deliveryMu.Lock()
+			sent, failed, deliveredID := repository.challengeSent, repository.challengeFailed, repository.deliveryChallenge
+			repository.deliveryMu.Unlock()
+			provider.deliveryMu.Lock()
+			providerID, calls, recipient, purpose := provider.sentChallenge, provider.sendCalls, provider.sentMobile, provider.sentPurpose
+			provider.deliveryMu.Unlock()
+			if providerID != challenge.ID || deliveredID != challenge.ID || calls != 1 ||
+				recipient != stored.Mobile || purpose != SMSPurposeLogin || !sent || failed {
+				t.Fatal("accepted consent did not deliver and mark the same login challenge exactly once")
+			}
+		})
+	}
+}
+
 func TestSMSRateLimitReturnsRemainingCooldown(t *testing.T) {
 	now := time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC)
 	last := now.Add(-17 * time.Second)
@@ -82,8 +171,10 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 type mobileAuthRepositoryFake struct {
 	publicAdmissionErr    error
 	publicAdmissionSource string
+	publicAdmissionCalls  int
 	deliveryMu            sync.Mutex
 	deliveryDone          chan struct{}
+	deliveryChallenge     uuid.UUID
 	deliveryOnce          sync.Once
 	mobileExists          bool
 	securityAllowed       bool
@@ -92,6 +183,7 @@ type mobileAuthRepositoryFake struct {
 	identityErr           error
 	usernameExists        bool
 	challenge             SMSChallenge
+	challengeCreateCalls  int
 	challengeSent         bool
 	challengeFailed       bool
 	readyErr              error
@@ -105,6 +197,7 @@ type mobileAuthRepositoryFake struct {
 }
 
 func (f *mobileAuthRepositoryFake) AdmitPublicMobileRequest(_ context.Context, _, _, source string) error {
+	f.publicAdmissionCalls++
 	f.publicAdmissionSource = source
 	return f.publicAdmissionErr
 }
@@ -139,6 +232,7 @@ func (f *mobileAuthRepositoryFake) ConsumeSliderCaptcha(context.Context, uuid.UU
 }
 
 func (f *mobileAuthRepositoryFake) CreateSMSChallenge(_ context.Context, challenge SMSChallenge) error {
+	f.challengeCreateCalls++
 	f.challenge = challenge
 	return nil
 }
@@ -148,9 +242,10 @@ func (f *mobileAuthRepositoryFake) CreateRegistrationOperation(_ context.Context
 	return nil
 }
 
-func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, _ uuid.UUID, _ string, _ []byte) error {
+func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, challengeID uuid.UUID, _ string, _ []byte) error {
 	f.deliveryMu.Lock()
 	f.challengeSent = true
+	f.deliveryChallenge = challengeID
 	f.deliveryMu.Unlock()
 	f.notifyDeliveryDone()
 	return nil
@@ -269,6 +364,8 @@ type smsProviderFake struct {
 	deliveryMu      sync.Mutex
 	sendCalls       int
 	sentChallenge   uuid.UUID
+	sentMobile      string
+	sentPurpose     SMSPurpose
 	verifyChallenge uuid.UUID
 	sendErr         error
 	verifyCalls     int
@@ -292,10 +389,12 @@ func (*smsProviderFake) PrepareVerification(uuid.UUID) ([]byte, error) {
 	return []byte("verification"), nil
 }
 
-func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
+func (f *smsProviderFake) SendCode(_ context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
 	f.deliveryMu.Lock()
 	defer f.deliveryMu.Unlock()
 	f.sentChallenge = challengeID
+	f.sentMobile = mobile
+	f.sentPurpose = purpose
 	f.sendCalls++
 	return SMSDelivery{MessageID: "provider-message", VerificationData: []byte("verification")}, f.sendErr
 }
@@ -367,6 +466,7 @@ func newMobileAuthForTest(t *testing.T, repository MobileAuthRepository, sms SMS
 	}
 	service.now = func() time.Time { return time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC) }
 	service.loginResponseFloor = 0
+	service.ordinaryLoginVerifyBudget = 0
 	return service
 }
 
@@ -454,13 +554,105 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	}
 }
 
+func TestOrdinarySMSVerificationHidesPreProofProviderFailure(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{identitySubject: "existing-subject"}
+	sms := &smsProviderFake{verifyErr: errors.New("controlled provider failure")}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	id := uuid.New()
+	if subject, err := service.VerifyLogin(context.Background(), "13800138000", id, "123456"); subject != "" || !errors.Is(err, ErrSMSInvalid) || sms.verifyCalls != 1 {
+		t.Fatal("pre-proof provider failure exposed a different login outcome", err)
+	}
+}
+
+func TestOrdinarySMSVerificationBoundsSlowProviderBeforePublicRejection(t *testing.T) {
+	const providerBudget = 100 * time.Millisecond
+	responses := make(map[string]time.Duration)
+	for _, mode := range []string{"unknown", "slow-provider"} {
+		t.Run(mode, func(t *testing.T) {
+			repository := &mobileAuthRepositoryFake{}
+			provider := &resetFloorProvider{delay: 3 * time.Second}
+			if mode == "slow-provider" {
+				repository.identitySubject = "existing-subject"
+			}
+			service := newMobileAuthForTest(t, repository, provider, &identityProvisionerFake{})
+			service.ordinaryLoginVerifyBudget = providerBudget
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			startedAt := time.Now()
+			subject, err := service.VerifyLogin(ctx, "13800138000", uuid.New(), "123456")
+			elapsed := time.Since(startedAt)
+			if subject != "" || !errors.Is(err, ErrSMSInvalid) || ctx.Err() != nil {
+				t.Fatalf("expected an ordinary rejection before the client deadline, subject=%q err=%v elapsed=%v", subject, err, elapsed)
+			}
+			if elapsed < providerBudget+240*time.Millisecond || repository.consumeVerified {
+				t.Fatalf("rejected before the common response window or consumed an unverified code: %v", elapsed)
+			}
+			responses[mode] = elapsed
+		})
+	}
+	if delta := responses["slow-provider"] - responses["unknown"]; delta > 200*time.Millisecond {
+		t.Fatalf("provider delayed ordinary login beyond the common response window: %v", delta)
+	}
+}
+
+type transientSignupCompensationRepository struct {
+	*mobileAuthRepositoryFake
+	attempts int
+}
+
+func (r *transientSignupCompensationRepository) CompensatePreIdentityRegistration(ctx context.Context, id uuid.UUID, code string, version int64) error {
+	r.attempts++
+	if r.attempts <= 4 {
+		return errors.New("controlled persistence outage")
+	}
+	return r.mobileAuthRepositoryFake.CompensatePreIdentityRegistration(ctx, id, code, version)
+}
+
+func TestMobileSignupRetriesPersistingKnownNoDispatchProof(t *testing.T) {
+	repository := &transientSignupCompensationRepository{mobileAuthRepositoryFake: &mobileAuthRepositoryFake{}}
+	service := newMobileAuthForTest(t, repository, &smsProviderFake{}, &identityProvisionerFake{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := service.compensateKnownRegistrationDispatch(ctx, uuid.New(), signupCreateNotDispatched, 7); err != nil || repository.attempts != 5 {
+		t.Fatalf("expected the proof to persist after the transient outage, attempts=%d err=%v", repository.attempts, err)
+	}
+}
+
+type smsLogRecords chan string
+
+func (logs smsLogRecords) Write(record []byte) (int, error) {
+	logs <- string(record)
+	return len(record), nil
+}
+
 func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{mobileExists: true, deliveryDone: make(chan struct{})}
 	sms := &smsProviderFake{sendErr: errors.New("provider unavailable")}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposeLogin, uuid.New(), 128, "192.0.2.1", "device-1")
-	if err != nil || challenge.ID == uuid.Nil {
-		t.Fatalf("known account response must not expose provider state: challenge=%#v err=%v", challenge, err)
+	handler := httpserver.CorrelationHandler(NewService(nil, nil).WithMobileAuth(service, "internal-service-token-for-tests-123456").Handler(nil))
+	logs := make(smsLogRecords, 16)
+	previous := slog.Default()
+	slog.SetDefault(observability.NewLogger(logs, observability.Config{Service: "account-service", Environment: "test"}))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	const callerRequestID = "fixture-caller-request"
+	const callerTraceID = "11111111222222223333333344444444"
+	const mobile = "13800138000"
+	request := httptest.NewRequest(http.MethodPost, "/v1/auth/sms/challenges",
+		strings.NewReader(`{"mobile":"13800138000","purpose":"LOGIN","captcha_id":"aaaa1111-bbbb-4ccc-8ddd-eeee22223333","captcha_offset":128}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Device-ID", "device-1")
+	request.Header.Set("X-Request-ID", callerRequestID)
+	request.Header.Set("traceparent", "00-"+callerTraceID+"-1234567812345678-01")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var challenge struct {
+		ID uuid.UUID `json:"challenge_id"`
+	}
+	if response.Code != http.StatusAccepted || response.Header().Get("X-Trace-ID") != callerTraceID ||
+		json.Unmarshal(response.Body.Bytes(), &challenge) != nil || challenge.ID == uuid.Nil {
+		t.Fatalf("known account response must not expose provider state: status=%d", response.Code)
 	}
 	repository.waitForDelivery(t)
 	sent, failed := repository.deliveryState()
@@ -469,6 +661,19 @@ func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T
 	}
 	if providerChallenge, calls := sms.deliveryState(); providerChallenge != challenge.ID || calls != 1 {
 		t.Fatal("asynchronous provider failure must correspond to exactly one delivery attempt")
+	}
+	select {
+	case record := <-logs:
+		if !strings.Contains(record, `"event":"sms_asynchronous_delivery_failed"`) {
+			t.Fatal("async failure diagnostic was not recorded")
+		}
+		for _, private := range []string{callerRequestID, callerTraceID, mobile, challenge.ID.String(), sms.sendErr.Error()} {
+			if strings.Contains(record, private) {
+				t.Fatal("async failure diagnostic contained caller or provider data")
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("async failure diagnostic was not recorded")
 	}
 }
 

@@ -41,6 +41,8 @@ var mainlandMobile = regexp.MustCompile(`^1[3-9][0-9]{9}$`)
 var registrationUsername = regexp.MustCompile(`^[a-z][a-z0-9._-]{2,31}$`)
 
 type SMSChallenge struct {
+	SignupConsentVersion            string                `json:"-"`
+	SignupIssuer                    string                `json:"-"`
 	ID                              uuid.UUID             `json:"challenge_id"`
 	Status                          string                `json:"delivery_status,omitempty"`
 	Mobile                          string                `json:"-"`
@@ -150,13 +152,14 @@ func (e *SMSRateLimitError) Error() string { return ErrSMSRateLimited.Error() }
 func (e *SMSRateLimitError) Unwrap() error { return ErrSMSRateLimited }
 
 type MobileAuthService struct {
-	repository         MobileAuthRepository
-	sms                SMSProvider
-	identities         IdentityProvisioner
-	issuer             string
-	now                func() time.Time
-	loginResponseFloor time.Duration
-	tokens             *RegistrationTokenSigner
+	repository                MobileAuthRepository
+	sms                       SMSProvider
+	identities                IdentityProvisioner
+	issuer                    string
+	now                       func() time.Time
+	loginResponseFloor        time.Duration
+	ordinaryLoginVerifyBudget time.Duration
+	tokens                    *RegistrationTokenSigner
 }
 
 func NewMobileAuthService(repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner, issuer string, tokens *RegistrationTokenSigner) (*MobileAuthService, error) {
@@ -164,7 +167,11 @@ func NewMobileAuthService(repository MobileAuthRepository, sms SMSProvider, iden
 	if repository == nil || sms == nil || identities == nil || issuer == "" || tokens == nil {
 		return nil, errors.New("mobile authentication is not fully configured")
 	}
-	return &MobileAuthService{repository: repository, sms: sms, identities: identities, issuer: issuer, tokens: tokens, now: func() time.Time { return time.Now().UTC() }, loginResponseFloor: 750 * time.Millisecond}, nil
+	return &MobileAuthService{
+		repository: repository, sms: sms, identities: identities, issuer: issuer, tokens: tokens,
+		now: func() time.Time { return time.Now().UTC() }, loginResponseFloor: 750 * time.Millisecond,
+		ordinaryLoginVerifyBudget: 3 * time.Second,
+	}, nil
 }
 
 func NormalizeMainlandMobile(value string) (string, error) {
@@ -215,10 +222,17 @@ func (s *MobileAuthService) precheckRegistration(ctx context.Context, rawUsernam
 }
 
 func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string, purpose SMSPurpose, captchaID uuid.UUID, captchaOffset int, source, device string) (SMSChallenge, error) {
+	return s.send(ctx, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion, purpose, captchaID, captchaOffset, source, device, "")
+}
+
+func (s *MobileAuthService) send(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string, purpose SMSPurpose, captchaID uuid.UUID, captchaOffset int, source, device, signupConsent string) (SMSChallenge, error) {
 	startedAt := time.Now()
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin && purpose != SMSPurposeProfileMobile && purpose != SMSPurposePasswordReset {
 		return SMSChallenge{}, ErrMobileInvalid
+	}
+	if signupConsent != "" && (purpose != SMSPurposeLogin || signupConsent != mobileSignupConsentVersion) {
+		return SMSChallenge{}, errMobileSignupConsent
 	}
 	if captchaID == uuid.Nil || captchaOffset < 0 {
 		return SMSChallenge{}, ErrCaptchaInvalid
@@ -264,7 +278,7 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	if err != nil {
 		return SMSChallenge{}, ErrSMSUnavailable
 	}
-	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device), Provider: provider.Descriptor()}
+	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device), Provider: provider.Descriptor(), SignupConsentVersion: signupConsent, SignupIssuer: s.issuer}
 	if purpose == SMSPurposeRegister {
 		operationID := uuid.Must(uuid.NewV7())
 		if err := s.identities.ValidateMobileUser(ctx, operationID, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
@@ -294,8 +308,13 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	// and unknown mobiles therefore share the same status and minimum timing
 	// bucket even when the provider is slow or unavailable.
 	if purpose == SMSPurposeLogin || purpose == SMSPurposePasswordReset {
-		if exists && (purpose == SMSPurposeLogin || passwordResetAllowed) {
-			go s.deliverSMS(context.WithoutCancel(ctx), challenge)
+		if signupConsent != "" || exists && (purpose == SMSPurposeLogin || passwordResetAllowed) {
+			go func(deliveryCtx context.Context) {
+				if err := s.deliverSMS(deliveryCtx, challenge); err != nil {
+					// Caller-supplied correlation IDs can be present in deliveryCtx.
+					slog.Warn("SMS asynchronous delivery failed")
+				}
+			}(context.WithoutCancel(ctx))
 		}
 		if err := waitForResponseFloor(ctx, startedAt, s.loginResponseFloor); err != nil {
 			return SMSChallenge{}, err
@@ -407,7 +426,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	if err != nil {
 		return RegistrationResult{}, err
 	}
-	if registrationIdentityRejected(operation) {
+	if registrationNeedsIdentityReview(operation) {
 		return registrationResult(operation), ErrRegistrationRecovering
 	}
 	// The query token selects the immutable registration operation. All identity
@@ -458,7 +477,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 		}
 		verified, verifyErr := provider.VerifyCode(ctx, operation.Mobile, operation.ChallengeID, verificationData, strings.TrimSpace(code))
 		if verifyErr != nil {
-			return RegistrationResult{}, fmt.Errorf("%w: %v", ErrSMSUnavailable, verifyErr)
+			return RegistrationResult{}, ErrSMSUnavailable
 		}
 		if err := s.repository.ConsumeRegistrationSMS(ctx, operationID, operation.ChallengeID, operation.Mobile, verified); err != nil {
 			if errors.Is(err, ErrRegistrationConflict) {
@@ -504,7 +523,7 @@ func (s *MobileAuthService) authorizeRegistrationQuery(ctx context.Context, oper
 }
 
 func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation RegistrationOperation) (RegistrationResult, error) {
-	if registrationIdentityRejected(operation) {
+	if registrationNeedsIdentityReview(operation) {
 		return registrationResult(operation), ErrRegistrationRecovering
 	}
 	if operation.Status == "REGISTRATION_IN_PROGRESS" || operation.Status == "IDENTITY_CREATING" {
@@ -515,7 +534,15 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 		var firstAttempt bool
 		var attemptVersion int64
 		if err == nil && !found {
-			firstAttempt, attemptVersion, err = s.repository.MarkRegistrationCreateAttempted(ctx, operation.ID)
+			if operation.PasswordPolicyVersion == identity.MobileSignupCredentialMode && operation.IdentityCreateAttemptedAt == nil {
+				// Verify adapter support before consuming the durable first
+				// dispatch grant. An old or temporarily unavailable adapter
+				// leaves a recoverable operation with no create attempted.
+				err = s.identities.ValidateMobileUser(ctx, operation.ID, operation.Username, operation.Mobile, "", operation.PasswordPolicyVersion)
+			}
+			if err == nil {
+				firstAttempt, attemptVersion, err = s.repository.MarkRegistrationCreateAttempted(ctx, operation.ID)
+			}
 			if err == nil && firstAttempt {
 				subject, err = s.identities.CreateMobileUserFirstAttempt(ctx, operation.ID, operation.Username, operation.Mobile, "", operation.PasswordPolicyVersion)
 			} else if err == nil {
@@ -539,7 +566,11 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 			}
 			if errors.Is(err, ErrIdentityCreateNotDispatched) && firstAttempt && attemptVersion > 0 {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-				compensateErr := s.repository.CompensatePreIdentityRegistration(cleanupCtx, operation.ID, "IDENTITY_CREATE_NOT_DISPATCHED", attemptVersion)
+				code := "IDENTITY_CREATE_NOT_DISPATCHED"
+				if operation.PasswordPolicyVersion == identity.MobileSignupCredentialMode {
+					code = signupCreateNotDispatched
+				}
+				compensateErr := s.compensateKnownRegistrationDispatch(cleanupCtx, operation.ID, code, attemptVersion)
 				if compensateErr == nil {
 					updated, readErr := s.repository.RegistrationOperation(cleanupCtx, operation.ID)
 					cancel()
@@ -577,41 +608,92 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 
 func registrationResult(operation RegistrationOperation) RegistrationResult {
 	result := RegistrationResult{OperationID: operation.ID, UserID: operation.UserID, UserCode: operation.UserCode, Username: operation.Username, Status: operation.Status, NextRetryAt: operation.NextRetryAt}
-	if registrationIdentityRejected(operation) {
+	if registrationNeedsIdentityReview(operation) {
 		result.Reason, result.ManualReviewRequired = operation.LastErrorCode, true
 	}
 	return result
 }
 
-func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (subject string, resultErr error) {
-	startedAt := s.now()
+func registrationNeedsIdentityReview(operation RegistrationOperation) bool {
+	return registrationIdentityRejected(operation) || registrationIdentityEscalated(operation)
+}
+
+func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {
+	subject, _, err := s.verifyLogin(ctx, rawMobile, challengeID, code, true)
+	return subject, err
+}
+
+func (s *MobileAuthService) verifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string, supportsBinding bool) (subject string, bound bool, resultErr error) {
+	startedAt := time.Now()
+	responseFloor := s.loginResponseFloor
 	defer func() {
-		if err := waitForResponseFloor(ctx, startedAt, s.loginResponseFloor); err != nil && resultErr == nil {
+		if err := waitForResponseFloor(ctx, startedAt, responseFloor); err != nil && resultErr == nil {
 			subject, resultErr = "", err
 		}
 	}()
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
-		return "", ErrSMSInvalid
+		return "", false, ErrSMSInvalid
 	}
 	risk := authRiskFromContext(ctx)
 	if err := s.repository.AdmitSMSVerification(ctx, challengeID, mobile, SMSPurposeLogin, risk.source, risk.device); err != nil {
-		return "", err
+		return "", false, err
 	}
-	subject, err = s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrSMSInvalid
+	if signup, ok := s.repository.(mobileSignupRepository); ok {
+		consented, err := signup.MobileSignupConsented(ctx, challengeID, mobile)
+		if err != nil {
+			return "", false, err
+		}
+		if consented {
+			if !supportsBinding {
+				return "", false, ErrSMSUnavailable
+			}
+			subject, err := s.verifyMobileSignup(ctx, signup, mobile, challengeID, code)
+			return subject, err == nil && subject != "", err
+		}
+	}
+	verificationCtx := ctx
+	if supportsBinding && s.ordinaryLoginVerifyBudget > 0 {
+		// Only previously registered mobiles reach the provider in ordinary
+		// SMS login. Complete rejection inside a shared response window and
+		// leave time before the shortest Keycloak request deadline (5 s).
+		responseFloor = s.ordinaryLoginVerifyBudget + 250*time.Millisecond
+		verifyCtx, cancel := context.WithDeadline(ctx, startedAt.Add(s.ordinaryLoginVerifyBudget))
+		defer cancel()
+		verificationCtx = verifyCtx
+	}
+	subject, err = s.repository.MobileIdentitySubject(verificationCtx, s.issuer, mobile)
+	if errors.Is(err, pgx.ErrNoRows) || supportsBinding && errors.Is(err, context.DeadlineExceeded) {
+		return "", false, ErrSMSInvalid
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if strings.TrimSpace(subject) == "" {
-		return "", ErrSMSInvalid
+		return "", false, ErrSMSInvalid
 	}
-	if err := s.verifyChallengeAccepted(ctx, challengeID, mobile, SMSPurposeLogin, code); err != nil {
-		return "", err
+	verified, err := s.checkSMSCode(verificationCtx, challengeID, mobile, SMSPurposeLogin, code)
+	if err != nil {
+		// Ordinary login sends only for known accounts. Keep an unavailable
+		// provider during verification indistinguishable before proof.
+		if supportsBinding && (errors.Is(err, ErrSMSUnavailable) || errors.Is(err, context.DeadlineExceeded)) {
+			return "", false, ErrSMSInvalid
+		}
+		return "", false, err
 	}
-	return subject, nil
+	if verified {
+		// Finishing a proven login is outside the provider budget. Report
+		// dependency failures after proof through the normal service path.
+		verificationCtx = ctx
+		responseFloor = s.loginResponseFloor
+	}
+	if err := s.repository.ConsumeSMSChallenge(verificationCtx, challengeID, mobile, SMSPurposeLogin, verified); err != nil {
+		if supportsBinding && !verified && errors.Is(err, context.DeadlineExceeded) {
+			return "", false, ErrSMSInvalid
+		}
+		return "", false, err
+	}
+	return subject, false, nil
 }
 
 func (s *MobileAuthService) verifyChallenge(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) error {
@@ -623,23 +705,31 @@ func (s *MobileAuthService) verifyChallenge(ctx context.Context, challengeID uui
 }
 
 func (s *MobileAuthService) verifyChallengeAccepted(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) error {
-	code = strings.TrimSpace(code)
-	if code == "" {
-		return ErrSMSInvalid
-	}
-	verificationData, err := s.repository.SMSChallengeReady(ctx, challengeID, mobile, purpose)
+	verified, err := s.checkSMSCode(ctx, challengeID, mobile, purpose, code)
 	if err != nil {
 		return err
 	}
+	return s.repository.ConsumeSMSChallenge(ctx, challengeID, mobile, purpose, verified)
+}
+
+func (s *MobileAuthService) checkSMSCode(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) (bool, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return false, ErrSMSInvalid
+	}
+	verificationData, err := s.repository.SMSChallengeReady(ctx, challengeID, mobile, purpose)
+	if err != nil {
+		return false, err
+	}
 	provider, providerErr := smsProviderForVerification(ctx, s.sms, verificationData.Provider)
 	if providerErr != nil {
-		return ErrSMSUnavailable
+		return false, ErrSMSUnavailable
 	}
 	verified, err := provider.VerifyCode(ctx, mobile, challengeID, verificationData, code)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
+		return false, ErrSMSUnavailable
 	}
-	return s.repository.ConsumeSMSChallenge(ctx, challengeID, mobile, purpose, verified)
+	return verified, nil
 }
 
 func activeSMSProvider(ctx context.Context, provider SMSProvider) (SMSProvider, error) {
@@ -677,7 +767,7 @@ func (r *PostgresRepository) MobileExists(ctx context.Context, mobile string) (b
 
 func (r *PostgresRepository) MobileIdentitySubject(ctx context.Context, issuer, mobile string) (string, error) {
 	var subject string
-	err := r.pool.QueryRow(ctx, `SELECT i.subject FROM users u JOIN identities i ON i.user_id=u.id WHERE u.status<>'DELETED' AND i.issuer=$2 AND (u.mobile_e164=$1 OR EXISTS(SELECT 1 FROM profile_change_requests p WHERE p.user_id=u.id AND p.identity_issuer=i.issuer AND p.identity_subject=i.subject AND p.field='MOBILE' AND p.new_value=$1 AND p.identity_updated_at IS NOT NULL AND p.status IN ('IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))) ORDER BY (u.mobile_e164=$1) DESC,i.last_seen_at DESC LIMIT 1`, mobile, issuer).Scan(&subject)
+	err := r.pool.QueryRow(ctx, `SELECT subject FROM (`+smsLoginBindingQuery+`) binding`, mobile, issuer).Scan(&subject)
 	return subject, err
 }
 
@@ -715,6 +805,9 @@ func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge S
 		challenge.Device = "device:absent:" + challenge.Source
 	}
 	locks := []string{"mobile:" + challenge.Mobile, "source:" + challenge.Source, "device:" + challenge.Device}
+	if challenge.SignupConsentVersion != "" {
+		locks = append(locks, "registration-mobile:"+challenge.Mobile)
+	}
 	sort.Strings(locks)
 	for _, lock := range locks {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lock); err != nil {
@@ -732,7 +825,15 @@ func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge S
 		}
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at,provider_id,adapter_version) VALUES($1,$2,$3,NULL,'CREATED',$4,$5,$5,$6,$7)`, challenge.ID, challenge.Mobile, challenge.Purpose, challenge.ExpiresAt, now, challenge.Provider.ID, challenge.Provider.AdapterVersion)
+	if challenge.SignupConsentVersion == "" {
+		_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at,provider_id,adapter_version) VALUES($1,$2,$3,NULL,'CREATED',$4,$5,$5,$6,$7)`, challenge.ID, challenge.Mobile, challenge.Purpose, challenge.ExpiresAt, now, challenge.Provider.ID, challenge.Provider.AdapterVersion)
+	} else {
+		snapshot, bindingErr := readSMSLoginSnapshot(ctx, tx, challenge.SignupIssuer, challenge.Mobile, now)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at,provider_id,adapter_version,signup_consent_version,signup_login_binding) VALUES($1,$2,$3,NULL,'CREATED',$4,$5,$5,$6,$7,$8,$9)`, challenge.ID, challenge.Mobile, challenge.Purpose, challenge.ExpiresAt, now, challenge.Provider.ID, challenge.Provider.AdapterVersion, challenge.SignupConsentVersion, snapshot.binding[:])
+	}
 	if err != nil {
 		return err
 	}

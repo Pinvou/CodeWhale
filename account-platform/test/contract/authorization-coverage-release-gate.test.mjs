@@ -212,7 +212,8 @@ test('authorization release gate classifies every HTTP task event callback and C
   // The existing complete graph includes the reconciliation repair-context GET.
   // It also includes the two profile-revocation receipt claim/confirm routes.
   // Also retain main's approval delivery terminal recovery worker.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 431, tasks: 35, events: 18, cli: 29 });
+  // Identity Adapter also exposes POST /users/mobile/sms-only for Account.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 432, tasks: 35, events: 18, cli: 29 });
 });
 
 test('enterprise SMS gateway requires an exact workload authorization entry', async () => {

@@ -113,6 +113,56 @@ func TestTokenProxyMapsUpstreamAvailabilityFailuresWithoutCountingCredentialFail
 	}
 }
 
+func TestTokenProxyForwardsOnlyRecognizedSMSSignupRecovery(t *testing.T) {
+	for _, test := range []struct {
+		name, form, description string
+		restartMarker           []string
+		forward, restart        bool
+	}{
+		{"sms recovery", "grant_type=password&sms_challenge_id=test&sms_code=123456", "REGISTRATION_RECOVERING", nil, true, false},
+		{"sms compensated", "grant_type=password&sms_challenge_id=test&sms_code=123456", "REGISTRATION_RECOVERING", []string{"true"}, true, true},
+		{"sms ambiguous marker", "grant_type=password&sms_challenge_id=test&sms_code=123456", "REGISTRATION_RECOVERING", []string{"true", "false"}, true, false},
+		{"sms manual review", "grant_type=password&sms_challenge_id=test&sms_code=123456", "REGISTRATION_MANUAL_REVIEW_REQUIRED", []string{"true"}, true, false},
+		{"password reply", "grant_type=password&password=test", "REGISTRATION_RECOVERING", []string{"true"}, false, false},
+		{"unknown sms reply", "grant_type=password&sms_challenge_id=test&sms_code=123456", "upstream internal detail", []string{"true"}, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for _, marker := range test.restartMarker {
+					w.Header().Add("X-Pinvou-SMS-Restart-Required", marker)
+				}
+				writeOAuthErrorDescription(w, http.StatusServiceUnavailable, "temporarily_unavailable", test.description, 0)
+			}))
+			defer upstream.Close()
+			admission := &admissionFake{}
+			proxy, err := NewTokenProxy(upstream.URL, admission)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy.floor = 0
+			request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(test.form))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			proxy.ServeHTTP(response, request)
+			want := ""
+			if test.forward {
+				want = test.description
+			}
+			code, description := tokenOAuthError(response.Body.Bytes())
+			if response.Code != http.StatusServiceUnavailable || code != "temporarily_unavailable" || description != want || admission.completions != 0 {
+				t.Fatal("recovery response was lost, leaked details, or counted as bad credentials")
+			}
+			wantMarker := ""
+			if test.restart {
+				wantMarker = "true"
+			}
+			if marker := response.Header().Get("X-Pinvou-SMS-Restart-Required"); marker != wantMarker {
+				t.Fatalf("restart marker = %q, want %q", marker, wantMarker)
+			}
+		})
+	}
+}
+
 func TestTokenProxyPreservesBoundedUpstreamRateLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "23")

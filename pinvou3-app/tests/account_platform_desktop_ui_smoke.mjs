@@ -30,7 +30,7 @@ try {
   const geometry = async () => {
     const result = await page.evaluate(() => {
       const shell = document.querySelector('.ap-shell').getBoundingClientRect();
-      const inputs = [...document.querySelectorAll('.ap-auth-form input')].map(node => node.getBoundingClientRect());
+      const inputs = [...document.querySelectorAll('.ap-auth-form input:not([type=checkbox])')].map(node => (node.closest('.ap-auth-code') || node).getBoundingClientRect());
       return { centered: Math.abs(shell.left + shell.width / 2 - innerWidth / 2) < 2, fits: shell.left >= 0 && shell.right <= innerWidth && shell.height <= innerHeight, aligned: inputs.every(rect => Math.abs(rect.left - inputs[0].left) < 2 && Math.abs(rect.width - inputs[0].width) < 2), overflow: document.documentElement.scrollWidth > innerWidth };
     });
     assert.deepEqual(result, { centered: true, fits: true, aligned: true, overflow: false });
@@ -172,7 +172,7 @@ try {
     assert.equal(await page.$eval('#background', node => Boolean(node.closest('[inert]'))), false);
   });
   await run('sign out returns to the centered login form', async () => {
-    await fresh(); await click(accountPlatformCopy.zh.logout); await page.waitForSelector('.ap-login form input[autocomplete=username]'); await geometry();
+    await fresh(); await click(accountPlatformCopy.zh.logout); await page.waitForSelector('.ap-login form input[autocomplete=tel-national]'); await geometry();
   });
   console.log(`Desktop account UI: ${cases} cases passed`);
 } finally { try { if (browser) await browser.close(); } finally { await server.close(); } }

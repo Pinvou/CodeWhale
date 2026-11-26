@@ -143,7 +143,7 @@ export class AccountPlatformDesktopClient {
     return this.call(() => this.transport.prepareRegistrationPassword({ ...preparation, password }), signal);
   }
 
-  sendSms(username, mobile, passwordReference, purpose, captchaId, captchaOffset, signal) {
+  sendSms(username, mobile, passwordReference, purpose, captchaId, captchaOffset, signal, signupConsent = false) {
     return this.call(
       () =>
         this.transport.sendSms({
@@ -155,6 +155,7 @@ export class AccountPlatformDesktopClient {
           captcha_id: captchaId,
           captcha_offset: captchaOffset,
           password_preparation_token: passwordReference?.authorization_token || '',
+          ...(signupConsent && purpose === 'LOGIN' ? { signup_consent_version: 'mobile-signup-v1' } : {}),
         }),
       signal,
     );

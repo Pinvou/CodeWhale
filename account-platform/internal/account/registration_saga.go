@@ -114,7 +114,9 @@ func enforceSMSRateLimits(ctx context.Context, tx pgx.Tx, challenge SMSChallenge
 	}
 	var last, oldest *time.Time
 	var hourly int
-	if err := tx.QueryRow(ctx, `SELECT max(created_at) FILTER (WHERE status<>'FAILED'),min(created_at) FILTER (WHERE created_at>$2 AND status<>'FAILED'),count(*) FILTER (WHERE created_at>$2 AND status<>'FAILED') FROM sms_challenges WHERE mobile_e164=$1`, challenge.Mobile, now.Add(-time.Hour)).Scan(&last, &oldest, &hourly); err != nil {
+	// A login transport failure must not make the known number take a different
+	// next-request quota path from an unknown number with no delivery attempt.
+	if err := tx.QueryRow(ctx, `SELECT max(created_at),min(created_at) FILTER (WHERE created_at>$2),count(*) FILTER (WHERE created_at>$2) FROM sms_challenges WHERE mobile_e164=$1 AND (status<>'FAILED' OR purpose IN ('LOGIN','PASSWORD_RESET'))`, challenge.Mobile, now.Add(-time.Hour)).Scan(&last, &oldest, &hourly); err != nil {
 		return err
 	}
 	mobileHash, sourceHash, deviceHash := sha256Bytes(challenge.Mobile), sha256Bytes(challenge.Source), sha256Bytes(challenge.Device)
@@ -418,12 +420,30 @@ UPDATE registration_operations SET
 WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','REPAIR_REQUIRED')
 AND NOT (status='REPAIR_REQUIRED' AND identity_create_attempted_at IS NOT NULL
          AND identity_subject IS NULL AND committed_user_id IS NULL
-         AND COALESCE(last_error_code,'') IN ('USERNAME_ALREADY_REGISTERED','MOBILE_ALREADY_REGISTERED'))`, operationID, now, code)
+         AND COALESCE(last_error_code,'') IN ('USERNAME_ALREADY_REGISTERED','MOBILE_ALREADY_REGISTERED',$4))`, operationID, now, code, registrationIdentityOutcomeUnknown)
 		return err
 	})
 }
 
 func (r *PostgresRepository) CompensatePreIdentityRegistration(ctx context.Context, operationID uuid.UUID, code string, attemptVersion int64) error {
+	if code == signupCreateNotDispatched {
+		// This proof concerns the immutable first grant. A later query-only
+		// recovery lease may change the operation version but cannot create
+		// another identity. Still refuse if any identity or Account exists.
+		command, err := r.pool.Exec(ctx, `
+UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,
+last_error_code=$3,compensation_evidence=jsonb_build_object('authority','IDENTITY_ADAPTER','creation_never_dispatched',true,'attempt_version',$4::bigint),version=version+1,updated_at=$2
+WHERE id=$1 AND identity_subject IS NULL AND committed_user_id IS NULL
+  AND signup_first_dispatch_version=$4 AND $4>0 AND signup_consent_version IS NOT NULL
+  AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now(), code, attemptVersion)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrRegistrationConflict
+		}
+		return nil
+	}
 	return r.identityRecoveryWrite(ctx, "registration", operationID, func(tx pgx.Tx) error {
 		command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='COMPENSATED',lease_expires_at=NULL,next_retry_at=$2,
@@ -451,6 +471,10 @@ func (r *PostgresRepository) LeaseRegistrationRecoveries(ctx context.Context, li
 	}
 	defer tx.Rollback(ctx)
 	now := r.now().Truncate(time.Microsecond)
+	identityQueryCutoff := now.Add(-registrationIdentityQueryWindow)
+	if err := r.escalateUnknownRegistrationIdentities(ctx, tx, now, identityQueryCutoff, limit); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='REPAIR_REQUIRED',last_error_code='FORWARD_RECOVERY_SLA_EXCEEDED',next_retry_at=$1,
 version=version+1,updated_at=$1
@@ -464,8 +488,9 @@ WHERE status IN ('IDENTITY_CREATED','ACCOUNT_COMMITTING') AND identity_created_a
      AND next_retry_at<=$1
       AND (recovery_lease_until IS NULL OR recovery_lease_until<=$1)
      AND (identity_created_at IS NULL OR identity_created_at+interval '30 minutes'>$1)
+     AND NOT (`+registrationIdentityEscalationDue+`)
    ORDER BY next_retry_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2
- ) ORDER BY ro.next_retry_at,ro.created_at`, now, limit)
+ ) ORDER BY ro.next_retry_at,ro.created_at`, now, limit, identityQueryCutoff)
 	if err != nil {
 		return nil, err
 	}

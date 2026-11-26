@@ -1212,6 +1212,26 @@
         "file": "900026_approval_delivery_terminal_recovery.up.sql",
         "version": 900026,
         "sha256": "aa4dd01995ecc0fe9bcc8ede004404e83ebca986d527131d914663eb189d3860"
+      },
+      {
+        "file": "900027_sms_signup_consent.down.sql",
+        "version": 900027,
+        "sha256": "653d5a53df86cfc9d8fc6947dac156bcb13a11e79daf0a0797e439da7c33d389"
+      },
+      {
+        "file": "900027_sms_signup_consent.up.sql",
+        "version": 900027,
+        "sha256": "62e33cba0ef134865ac0f73e079f8362f68b7d4e2434a8b27d1096f0a5887b68"
+      },
+      {
+        "file": "900028_validate_sms_signup_consent.down.sql",
+        "version": 900028,
+        "sha256": "2ff39677ff04338f49d7d1f16f636a426948a2417ba59a77846844631fae7497"
+      },
+      {
+        "file": "900028_validate_sms_signup_consent.up.sql",
+        "version": 900028,
+        "sha256": "9077449a56a0dc69a66c3c2b3e0463c2d643cdf2a36c2ae8aacca8d95bede652"
       }
     ],
     "billing": [
