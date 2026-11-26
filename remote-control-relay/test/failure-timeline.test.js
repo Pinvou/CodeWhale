@@ -1,11 +1,56 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { failureTimeline, redactDiagnosticText } from "../failure-diagnostics.js";
+import { failureExport, failureTimeline, redactDiagnosticText } from "../failure-diagnostics.js";
 import { validateBehaviorEventShape } from "../behavior-telemetry-schema.js";
 
 const event = (index, extra = {}) => ({event_id:`timeline_event_${index}`,device_id:"device_fixture",
   collection_period_id:"period_fixture",turn_id:"turn_fixture",attempt_id:"attempt_fixture",
   event_name:"tool_call_completed",occurred_at:1000+index*100,...extra});
+
+for (const scenario of ["distinct turns", "same attempt", "distinct attempts", "distinct attempts with shared rows"]) test(`bulk evidence indexes ${scenario} on the same installation`, async () => {
+  const count = 2048;
+  let turnReads = 0;
+  const cases = Array.from({length: count}, (_, index) => event(index, {
+    diagnostic_id: `sample_${index}`, diagnostic_code: "process_failed", diagnostic_component: "tool",
+    turn_id: scenario === "distinct turns" ? `turn_${index}` : "shared_turn",
+    attempt_id: scenario === "same attempt" ? "shared_attempt" : `attempt_${index}`,
+  }));
+  const events = cases.flatMap((incident, index) => {
+    const terminal = event(count + index, {
+      turn_id: incident.turn_id, attempt_id: incident.attempt_id, event_name: "task_finished", status: "failed",
+    });
+    const turn = terminal.turn_id;
+    Object.defineProperty(terminal, "turn_id", { get() { turnReads++; return turn; } });
+    return [incident, terminal];
+  });
+  if (scenario.startsWith("distinct attempts")) {
+    const sharedCount = scenario === "distinct attempts" ? 1 : count;
+    for (let index = 0; index < sharedCount; index++) {
+      const shared = event(count * 2 + index, {
+        turn_id: "shared_turn", attempt_id: undefined, occurred_at: cases[index].occurred_at, event_name: "tool_call_started",
+      });
+      Object.defineProperty(shared, "turn_id", { get() { turnReads++; return "shared_turn"; } });
+      events.push(shared);
+    }
+  }
+  const reports = { audit() {}, exportEvidence() { return new Map(); } };
+  const output = [];
+  for await (const chunk of failureExport(events, {now: 1_000_000}, {groupBy: "all"}, reports, "actor", e => e.diagnostic_id)) {
+    output.push(chunk);
+  }
+  const samples = JSON.parse(output.join("")).groups[0].samples;
+  assert.equal(samples.length, count);
+  const expectedTotal = {
+    "distinct turns": 2, "same attempt": count * 2, "distinct attempts": 3, "distinct attempts with shared rows": count + 2,
+  }[scenario];
+  assert(samples.every(sample => sample.timeline_context.total_events === expectedTotal
+    && sample.timeline_context.task_terminal_included));
+  for (const index of [0, count / 2, count - 1]) {
+    const {timeline, timeline_context} = samples[index];
+    assert.deepEqual({timeline, timeline_context}, failureTimeline(events, cases[index]));
+  }
+  assert(turnReads < count * 10, `expected bounded lifecycle lookups, got ${turnReads}`);
+});
 
 test("long tasks retain the incident and nearby events as well as the late task terminal", () => {
   const events=Array.from({length:120},(_,index)=>event(index));
@@ -118,4 +163,35 @@ test("remote execution keeps the controlled authoritative terminal without mixin
   const unknown=failureTimeline([incident,{...terminal,remote_task_status:"unknown"}],incident);
   assert.equal(unknown.timeline_context.task_terminal_included,false);
   assert.equal(unknown.timeline.at(-1).remote_task_status,"unknown");
+});
+
+test("bulk remote timeline keeps a controller incident out of other samples", async () => {
+  const key="c".repeat(64);
+  const controller=event(1,{event_name:"remote_control_event",remote_role:"controller",remote_stage:"result_received",
+    remote_task_key:key,diagnostic_id:"controller_case",diagnostic_code:"remote_result_unknown",diagnostic_component:"remote_control"});
+  const controlled=event(2,{event_name:"remote_control_event",remote_role:"controlled",remote_stage:"task_terminal",
+    remote_task_key:key,remote_task_status:"failed",diagnostic_id:"controlled_case",diagnostic_code:"process_failed",diagnostic_component:"remote_control"});
+  const related=event(3,{execution_task_key:key});
+  const sameTime={...controller,occurred_at:controlled.occurred_at};
+  const tiedContext=Array.from({length:40},(_,index)=>event(10+index,{
+    occurred_at:controlled.occurred_at,execution_task_key:key,duration_ms:index,
+  }));
+  const reports={audit() {},exportEvidence(){return new Map();}};
+  for (const events of [
+    [controller,controlled,related],
+    [controlled,related,controller],
+    [sameTime,controlled,...tiedContext],
+    [...tiedContext,controlled,sameTime],
+  ]) {
+    const chunks=[];
+    for await (const chunk of failureExport(events,{now:10_000},{groupBy:"all"},reports,"actor",e=>e.diagnostic_id)) {
+      chunks.push(chunk);
+    }
+    const {samples}=JSON.parse(chunks.join("")).groups[0];
+    assert.equal(samples.length,2);
+    for (const {id,timeline,timeline_context} of samples) {
+      const anchor=events.find(event=>event.diagnostic_id===id);
+      assert.deepEqual({timeline,timeline_context},failureTimeline(events,anchor));
+    }
+  }
 });
