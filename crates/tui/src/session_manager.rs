@@ -957,21 +957,6 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
 }
 
 /// Manager for session persistence operations
-/// The process-wide archive/retention exclusion (reviews 6051224372,
-/// 6051443775, and 6057332xxx on #154): every `SessionManager` in this
-/// process addresses the same sessions directory through the shipped
-/// topologies — the boot janitor and the exact-id archive command each
-/// construct their own manager (lib.rs / session.rs) — so the exclusion
-/// between archive persistence and retention deletion must live on the
-/// storage, not on any one instance. A per-instance mutex serialized the
-/// two operations only when tests shared one manager; the shipped callers
-/// each held their own unrelated lock and the race survived. One process
-/// serves one sessions directory, so one process-wide gate closes the
-/// boundary; a second OS process sharing the directory remains outside
-/// any in-process coordination, exactly as the existing live-session
-/// registry documents.
-static RETENTION_GATE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-
 #[derive(Debug)]
 pub struct SessionManager {
     /// Directory where sessions are stored
@@ -1163,6 +1148,36 @@ impl SessionManager {
     /// Return the resolved sessions directory path.
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
+    }
+
+    /// Open the storage-scoped archive/retention exclusion for this store
+    /// (reviews 6051224372, 6051443775, 6057332xxx, 6069398276, and
+    /// 6069674738 on #154): an advisory lock file beside the session
+    /// documents, so the exclusion between archive persistence and
+    /// retention deletion holds between every process that addresses the
+    /// same sessions directory — not only between the managers of one
+    /// process. The shipped topologies construct separate managers for the
+    /// same directory (the boot janitor in lib.rs, the exact-id archive
+    /// command in session.rs), and ordinary desktop use can run two
+    /// CodeWhale processes against one store; a process-local mutex
+    /// serialized the former but not the latter. The lock is advisory and
+    /// keyed on the (normalized) directory, so it releases on process
+    /// death without a stale marker, and holding it across selection
+    /// through deletion costs no more than the in-process gate it
+    /// replaces. The file's name keeps it outside every store scan: only
+    /// `.json` documents list, and only per-session subdirectories
+    /// reclaim. Callers hold the returned lock's `write()` guard across
+    /// their whole selection/persistence span; an acquisition error
+    /// aborts the operation instead of running it uncoordinated
+    /// (fail-closed).
+    fn open_retention_store_lock(&self) -> std::io::Result<fd_lock::RwLock<std::fs::File>> {
+        let lock_path = self.sessions_dir.join(".retention.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)?;
+        Ok(fd_lock::RwLock::new(lock_file))
     }
 
     /// Persist the bounded goal control state for one saved session.
@@ -1735,10 +1750,12 @@ impl SessionManager {
         // load (then it already deleted, and the load below misses with a
         // real error) or runs after this receipt (its snapshot then sees
         // `archived = true` and exempts the record).
-        // The gate is process-wide, so the exclusion holds between the
-        // boot janitor's manager and this command's independently
-        // constructed one (review 6057332xxx).
-        let _retention_gate = RETENTION_GATE.lock();
+        // The gate is storage-scoped: the exclusion holds between every
+        // process sharing this sessions directory, so an acknowledged
+        // archive cannot be deleted by another process's stale selection
+        // either (reviews 6069398276 / 6069674738).
+        let mut retention_store_lock = self.open_retention_store_lock()?;
+        let _retention_gate = retention_store_lock.write()?;
         let mut session = self.load_session(id)?;
         if session.metadata.archived == archived {
             return Ok(session.metadata);
@@ -2015,10 +2032,13 @@ impl SessionManager {
         // whole pass makes the archive either land before the selection
         // (the snapshot then excludes the record) or after the deletes
         // (its exact-id load then misses and reports a real error).
-        // The gate is process-wide: the shipped callers construct separate
-        // managers for the same directory, and only a storage-scoped
-        // exclusion holds between them (review 6057332xxx).
-        let _retention_gate = RETENTION_GATE.lock();
+        // The gate is storage-scoped: the shipped callers construct
+        // separate managers for the same directory, and a second OS
+        // process sharing the store serializes on the same lock file, so
+        // the exclusion holds across every reader of this directory
+        // (reviews 6069398276 / 6069674738).
+        let mut retention_store_lock = self.open_retention_store_lock()?;
+        let _retention_gate = retention_store_lock.write()?;
         let sessions = self.list_sessions()?;
 
         // Cap only the non-archived history: archived records are exempt (see
@@ -3492,8 +3512,11 @@ mod tests {
 
         // The archive side holds the gate first: the janitor must block
         // until the receipt is durable — it must never delete the record
-        // with a snapshot taken before the archive persisted.
-        let gate = RETENTION_GATE.lock();
+        // with a snapshot taken before the archive persisted. The holder
+        // takes the same storage lock the production sides take, so the
+        // exclusion this pins is the one the operations acquire.
+        let mut gate_holder = janitor_manager.open_retention_store_lock().expect("lock");
+        let gate = gate_holder.write().expect("hold the storage lock");
         let archiver_manager = Arc::clone(&archive_manager);
         let archiver = std::thread::spawn(move || {
             archiver_manager
@@ -3534,7 +3557,8 @@ mod tests {
         // block until the selection-and-delete pass completes, then either
         // land on the surviving record or miss it with a real error — never
         // report success for a document the cleanup deleted.
-        let gate = RETENTION_GATE.lock();
+        let mut gate_holder = janitor_manager.open_retention_store_lock().expect("lock");
+        let gate = gate_holder.write().expect("hold the storage lock");
         let janitor_thread_manager = Arc::clone(&janitor_manager);
         let janitor = std::thread::spawn(move || {
             janitor_thread_manager
@@ -3550,6 +3574,101 @@ mod tests {
         }
         drop(gate);
         janitor.join().expect("cleanup joins");
+    }
+
+    /// Cross-process serialization (reviews 6069398276 / 6069674738): a
+    /// second OS process holding the storage lock blocks this process's
+    /// identical acquisition until it releases. The child is this same
+    /// test binary running the companion test below through the
+    /// production acquisition path, so the pin covers the real
+    /// cross-process primitive (fd-lock → flock/LockFileEx), not an
+    /// in-process stand-in.
+    #[cfg(unix)]
+    #[test]
+    fn retention_store_lock_serializes_across_processes() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
+
+        let exe = std::env::current_exe().expect("current exe");
+        let mut child = std::process::Command::new(exe)
+            // A substring filter (no `--exact`): the full libtest name
+            // carries the module path, and this suffix is unique.
+            .args([
+                "retention_store_lock_child_holds_and_releases",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CW_RETENTION_CHILD_DIR", &sessions_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the holder child");
+
+        let held_marker = sessions_dir.join("child-holds");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !held_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the child never reported the held lock"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // While the child holds the storage lock, this process's identical
+        // acquisition must not take it: the exclusion is keyed on the
+        // store, not on the process.
+        let mut contender = manager.open_retention_store_lock().expect("open the lock");
+        assert!(
+            contender.try_write().is_err(),
+            "the storage lock must stay held by the other process"
+        );
+
+        // Acknowledge; the child exits and releases the lock by process
+        // death, and the same acquisition then succeeds.
+        std::fs::write(sessions_dir.join("parent-seen"), "ok").expect("ack the child");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match contender.try_write() {
+                Ok(_guard) => break,
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the child never released the storage lock"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+        let _ = child.wait();
+    }
+
+    /// Companion for `retention_store_lock_serializes_across_processes`:
+    /// runs only when spawned by that test (`--ignored` plus the marker
+    /// env var; a plain ignored-test run is a no-op). Acquires the same
+    /// storage lock through the production path, reports the hold, waits
+    /// for the parent's acknowledgement, and exits — the lock releases by
+    /// process death.
+    #[test]
+    #[ignore = "spawned only by retention_store_lock_serializes_across_processes"]
+    fn retention_store_lock_child_holds_and_releases() {
+        use std::time::{Duration, Instant};
+
+        let Ok(dir) = std::env::var("CW_RETENTION_CHILD_DIR") else {
+            return;
+        };
+        let manager = SessionManager::new(std::path::PathBuf::from(dir)).expect("child manager");
+        let mut lock = manager.open_retention_store_lock().expect("child lock");
+        let _guard = lock.write().expect("child holds the storage lock");
+        std::fs::write(manager.sessions_dir().join("child-holds"), "held")
+            .expect("report the hold");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !manager.sessions_dir().join("parent-seen").exists() {
+            assert!(Instant::now() < deadline, "the parent never acknowledged");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
