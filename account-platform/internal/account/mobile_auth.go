@@ -426,7 +426,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	if err != nil {
 		return RegistrationResult{}, err
 	}
-	if registrationIdentityRejected(operation) {
+	if registrationNeedsIdentityReview(operation) {
 		return registrationResult(operation), ErrRegistrationRecovering
 	}
 	// The query token selects the immutable registration operation. All identity
@@ -523,7 +523,7 @@ func (s *MobileAuthService) authorizeRegistrationQuery(ctx context.Context, oper
 }
 
 func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation RegistrationOperation) (RegistrationResult, error) {
-	if registrationIdentityRejected(operation) {
+	if registrationNeedsIdentityReview(operation) {
 		return registrationResult(operation), ErrRegistrationRecovering
 	}
 	if operation.Status == "REGISTRATION_IN_PROGRESS" || operation.Status == "IDENTITY_CREATING" {
@@ -608,10 +608,14 @@ func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation Re
 
 func registrationResult(operation RegistrationOperation) RegistrationResult {
 	result := RegistrationResult{OperationID: operation.ID, UserID: operation.UserID, UserCode: operation.UserCode, Username: operation.Username, Status: operation.Status, NextRetryAt: operation.NextRetryAt}
-	if registrationIdentityRejected(operation) {
+	if registrationNeedsIdentityReview(operation) {
 		result.Reason, result.ManualReviewRequired = operation.LastErrorCode, true
 	}
 	return result
+}
+
+func registrationNeedsIdentityReview(operation RegistrationOperation) bool {
+	return registrationIdentityRejected(operation) || registrationIdentityEscalated(operation)
 }
 
 func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {

@@ -23,6 +23,21 @@ var ErrIdentityCreateUnconfirmed = errors.New("identity creation may have been d
 
 var ErrIdentityRegistrationNotFound = errors.New("identity registration correlation was not found")
 
+const mobileIdentityCreatePath = "/internal/v1/users/mobile"
+
+// identityCreateTransportError retains the cause without publishing the private
+// adapter URL from the HTTP client's error message.
+type identityCreateTransportError struct {
+	cause error
+}
+
+func (e identityCreateTransportError) Error() string { return "identity adapter request failed" }
+func (e identityCreateTransportError) Unwrap() error { return e.cause }
+
+func (e identityCreateTransportError) Is(target error) bool {
+	return target == ErrIdentityCreateUnconfirmed
+}
+
 type IdentityProvisioner interface {
 	ValidateMobileUser(context.Context, uuid.UUID, string, string, string, string) error
 	CreateMobileUser(context.Context, uuid.UUID, string, string, string, string) (string, error)
@@ -91,7 +106,7 @@ func (p *HTTPIdentityProvisioner) createMobileUser(ctx context.Context, operatio
 	var response struct {
 		Subject string `json:"subject"`
 	}
-	path := "/internal/v1/users/mobile"
+	path := mobileIdentityCreatePath
 	if policyVersion == identity.MobileSignupCredentialMode {
 		path = identity.MobileSignupCreatePath
 	}
@@ -162,6 +177,9 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		if path == mobileIdentityCreatePath || path == identity.MobileSignupCreatePath {
+			return identityCreateTransportError{cause: err}
+		}
 		return errors.New("identity adapter request failed")
 	}
 	defer response.Body.Close()

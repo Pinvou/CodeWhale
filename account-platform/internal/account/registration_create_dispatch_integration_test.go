@@ -247,6 +247,12 @@ func TestRegistrationCreateDispatchRuntimePostgres(t *testing.T) {
 	t.Run("consented-sms-creates-account-before-wallet", func(t *testing.T) {
 		testConsentedMobileSignup(t, f)
 	})
+	t.Run("expired-profile-reservation-releases-consented-signup", func(t *testing.T) {
+		testExpiredMobileProfileReservationReleasesSignup(t, f)
+	})
+	t.Run("consented-signup-does-not-retire-for-another-registration", func(t *testing.T) {
+		testConsentedSignupDoesNotRetireForAnotherRegistration(t, f)
+	})
 	t.Run("only-explicit-proof-at-exact-first-version-compensates", func(t *testing.T) {
 		r := f.repository(t)
 		ctx := context.Background()

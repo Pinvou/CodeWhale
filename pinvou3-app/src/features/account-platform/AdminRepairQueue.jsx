@@ -6,7 +6,7 @@ import './admin-registration-queue.css';
 import { profileRepairQueueCopy } from '../../shared/admin-profile-repair-i18n.js';
 import './admin-profile-repair.css';
 import { localizedAccountPlatformError } from './error-localization.js';
-import { registrationInspectionFilters, registrationOperationAge, registrationRepairActions } from './registration-repair.js';
+import { registrationIdentityIsUnderReview, registrationInspectionFilters, registrationOperationAge, registrationRepairActions } from './registration-repair.js';
 
 const initialFilters = () => ({ operation_id: '', status: '', stage: '', responsibility: '', sla: '', older_than_minutes: '' });
 const time = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '—';
@@ -216,8 +216,8 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       const age = !profile && receivedAt !== null && typeof item.updated_at === 'string' && !item.updated_at.startsWith('0001-')
         ? registrationOperationAge(item.updated_at, receivedAt) : null;
       return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code><small>{statusLabel(item.stage, language, labels.stages)}</small></td><td>{statusLabel(item.status, language, labels.statuses)}</td>
-        {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? queryCopy.notReported : labels.minutes(age)}</td><td><RegistrationQueueTime value={item.next_retry_at} queryCopy={queryCopy} /></td><td><RegistrationQueueTime value={item.sla_expires_at} queryCopy={queryCopy} /></td></>}
-        <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{item.status === 'IDENTITY_CREATING' ? labels.identityUnknown : labels.readOnly}</small>}{!profile && <RegistrationEvidence {...{ item, labels, queryCopy, id }} />}</td></tr>;
+        {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? queryCopy.notReported : labels.minutes(age)}</td><td><RegistrationQueueTime value={registrationIdentityIsUnderReview(item) ? null : item.next_retry_at} queryCopy={queryCopy} /></td><td><RegistrationQueueTime value={item.sla_expires_at} queryCopy={queryCopy} /></td></>}
+        <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{allowed.query ? labels.identityUnknown : labels.readOnly}</small>}{!profile && <RegistrationEvidence {...{ item, labels, queryCopy, id }} />}</td></tr>;
     })}</tbody></table></div>}
     {profile && profileItems?.length === 0 && readState === 'ready' && <div className="adm-profile-repair-empty">
       <p role="status">{profileFiltered && currentItems.length ? profileCopy.filteredEmpty : profileCopy.empty}</p>

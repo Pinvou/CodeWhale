@@ -136,6 +136,7 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrRegistrationRestart):
 			w.Header().Set("X-Pinvou-SMS-Outcome", "REGISTRATION_RECOVERING")
+			// The direct-grant SPI reads the marker without sending Restart-Aware.
 			w.Header().Set("X-Pinvou-SMS-Restart-Required", "true")
 			w.Header().Set("Cache-Control", "no-store")
 			// Older browser clients clear all SMS state on a restart code.

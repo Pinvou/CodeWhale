@@ -420,7 +420,7 @@ UPDATE registration_operations SET
 WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','REPAIR_REQUIRED')
 AND NOT (status='REPAIR_REQUIRED' AND identity_create_attempted_at IS NOT NULL
          AND identity_subject IS NULL AND committed_user_id IS NULL
-         AND COALESCE(last_error_code,'') IN ('USERNAME_ALREADY_REGISTERED','MOBILE_ALREADY_REGISTERED'))`, operationID, now, code)
+         AND COALESCE(last_error_code,'') IN ('USERNAME_ALREADY_REGISTERED','MOBILE_ALREADY_REGISTERED',$4))`, operationID, now, code, registrationIdentityOutcomeUnknown)
 		return err
 	})
 }
@@ -471,6 +471,10 @@ func (r *PostgresRepository) LeaseRegistrationRecoveries(ctx context.Context, li
 	}
 	defer tx.Rollback(ctx)
 	now := r.now().Truncate(time.Microsecond)
+	identityQueryCutoff := now.Add(-registrationIdentityQueryWindow)
+	if err := r.escalateUnknownRegistrationIdentities(ctx, tx, now, identityQueryCutoff, limit); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='REPAIR_REQUIRED',last_error_code='FORWARD_RECOVERY_SLA_EXCEEDED',next_retry_at=$1,
 version=version+1,updated_at=$1
@@ -484,8 +488,9 @@ WHERE status IN ('IDENTITY_CREATED','ACCOUNT_COMMITTING') AND identity_created_a
      AND next_retry_at<=$1
       AND (recovery_lease_until IS NULL OR recovery_lease_until<=$1)
      AND (identity_created_at IS NULL OR identity_created_at+interval '30 minutes'>$1)
+     AND NOT (`+registrationIdentityEscalationDue+`)
    ORDER BY next_retry_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2
- ) ORDER BY ro.next_retry_at,ro.created_at`, now, limit)
+ ) ORDER BY ro.next_retry_at,ro.created_at`, now, limit, identityQueryCutoff)
 	if err != nil {
 		return nil, err
 	}

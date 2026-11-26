@@ -1,7 +1,12 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export function registrationIdentityIsUnderReview(item) {
+  return item?.status === 'REPAIR_REQUIRED' && item?.reason === 'IDENTITY_CREATE_OUTCOME_UNKNOWN';
+}
+
 export function registrationRepairActions(item) {
-  const query = item?.status === 'IDENTITY_CREATING' && item?.stage === 'IDENTITY_CREATING'
+  const query = (item?.status === 'IDENTITY_CREATING' || registrationIdentityIsUnderReview(item))
+    && item?.stage === 'IDENTITY_CREATING'
     && Boolean(item?.identity_create_attempted_at) && item?.account_created === false;
   return {
     query,

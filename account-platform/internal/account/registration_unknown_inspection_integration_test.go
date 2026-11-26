@@ -42,6 +42,118 @@ func TestRegistrationUnknownInspectionPostgres(t *testing.T) {
 	userCodeLookupTestGuard(t)
 	f := retainedWalletFenceActors(t)
 	registrationManualQueryCases(t, f)
+	t.Run("overdue-unknown-stops-worker-and-opens-one-case", func(t *testing.T) {
+		t.Setenv("APP_ENV", "test")
+		ctx := context.Background()
+		r := f.repository(t)
+		principal, _, _ := userCodeActor(t, r, "overdue-inspection")
+		ungranted := seedEntitlementApprovalActor(t, ctx, r.pool, "PLATFORM_BILLING_OPERATOR", "overdue-ungranted")
+		start := time.Now().UTC().Truncate(time.Microsecond).Add(-29 * time.Minute)
+		clock := start
+		r.now = func() time.Time { return clock }
+		id := inspectionRegistrationReady(t, r, "overdueidentity", "+8613800140199")
+		remote := &manualQueryIdentity{}
+		auth := newMobileAuthForTest(t, r, &smsProviderFake{}, remote)
+		if err := r.ConfigureRegistrationBonusFingerprint("public-overdue-identity", bytes.Repeat([]byte{7}, 32)); err != nil {
+			t.Fatal(err)
+		}
+		op, err := r.RegistrationOperation(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = auth.resumeRegistration(ctx, op); !errors.Is(err, ErrRegistrationRecovering) {
+			t.Fatal("first dispatch did not remain unknown", err)
+		}
+		worker := NewRegistrationRecoveryWorker(r, auth, time.Second)
+		deadline := start.Add(30 * time.Minute)
+		clock = deadline.Add(-time.Microsecond)
+		if err = worker.RunOnce(ctx); err != nil || remote.queries.Load() != 2 || remote.creates.Load() != 1 {
+			t.Fatal("pre-deadline correlation lookup", err, remote.queries.Load(), remote.creates.Load())
+		}
+		clock = deadline
+		if err = worker.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		observed, err := r.RegistrationOperation(ctx, id)
+		if err != nil || observed.Status != "IDENTITY_CREATING" || observed.RecoveryLeaseUntil == nil {
+			t.Fatal("deadline replaced an active lease", observed.Status, err)
+		}
+		clock = *observed.RecoveryLeaseUntil
+		if err = worker.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err = r.ScheduleRegistrationRetry(ctx, id, "IDENTITY_UNAVAILABLE"); err != nil {
+			t.Fatal("stale caller failed", err)
+		}
+		clock = deadline.Add(49 * time.Hour)
+		if err = worker.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		observed, err = r.RegistrationOperation(ctx, id)
+		if err != nil || observed.Status != "REPAIR_REQUIRED" || observed.LastErrorCode != "IDENTITY_CREATE_OUTCOME_UNKNOWN" ||
+			observed.IdentitySubject != "" || observed.UserID != nil || remote.queries.Load() != 2 || remote.creates.Load() != 1 ||
+			observed.IdentityCreateAttemptedAt == nil || !observed.IdentityCreateAttemptedAt.Equal(start) {
+			t.Fatal("overdue operation repeated or lost its original grant", observed.Status, err)
+		}
+		if result, err := auth.resumeRegistration(ctx, observed); !errors.Is(err, ErrRegistrationRecovering) || !result.ManualReviewRequired ||
+			result.Reason != "IDENTITY_CREATE_OUTCOME_UNKNOWN" || remote.queries.Load() != 2 {
+			t.Fatal("ordinary recovery did not report manual review", result.Status, err)
+		}
+		var cases, events, deliveries int
+		if err = r.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE status='OPEN' AND created_at=$2),
+ (SELECT count(*) FROM outbox_events WHERE event_type='account.manual-review.created.v1')
+ FROM manual_review_cases WHERE case_type='REGISTRATION_REPAIR' AND resource_id=$1`, id, deadline).Scan(&cases, &events, &deliveries); err != nil ||
+			cases != 1 || events != 1 || deliveries != 1 {
+			t.Fatal("transition did not atomically create one review and delivery", cases, events, deliveries, err)
+		}
+		if count, err := r.SyncManualReviewCases(ctx, 100); err != nil || count != 0 {
+			t.Fatal("periodic sync must not duplicate the existing case", count, err)
+		}
+		// Operator claims use the live database clock, not the worker's simulated time.
+		r.now = time.Now
+		h := NewService(r, nil).WithMobileAuth(auth, "public-overdue-inspection").Handler(func(_ context.Context, token string) (identity.Principal, error) {
+			switch token {
+			case "operator":
+				return principal, nil
+			case "ungranted":
+				return entitlementApprovalPrincipal(ungranted), nil
+			default:
+				return identity.Principal{}, errors.New("untrusted public fixture")
+			}
+		})
+		basePath := "/admin/v1/registration-operations"
+		items := inspectionItems(t, inspectionHTTP(h, "operator", http.MethodGet, basePath+"?operation_id="+id.String()))
+		if len(items) != 1 || items[0].Status != "REPAIR_REQUIRED" || items[0].CompensationAllowed ||
+			items[0].SLAExpiresAt == nil || !items[0].SLAExpiresAt.Equal(deadline) {
+			t.Fatal("repair queue lost the cutoff or allowed unknown compensation", items)
+		}
+		retry := basePath + "/" + id.String() + "/actions/retry"
+		compensate := basePath + "/" + id.String() + "/actions/compensate"
+		if out := inspectionHTTP(h, "ungranted", http.MethodPost, retry); out.Code < 400 || remote.queries.Load() != 2 {
+			t.Fatal("ungranted actor queried the adapter", out.Code)
+		}
+		if out := inspectionHTTP(h, "operator", http.MethodPost, compensate); out.Code != http.StatusConflict || remote.disables.Load() != 0 {
+			t.Fatal("unknown result authorized compensation", out.Code)
+		}
+		out := inspectionHTTP(h, "operator", http.MethodPost, retry)
+		stillUnknown, err := r.RegistrationOperation(ctx, id)
+		if out.Code != http.StatusAccepted || err != nil || stillUnknown.Status != "REPAIR_REQUIRED" ||
+			stillUnknown.LastErrorCode != registrationIdentityOutcomeUnknown || remote.queries.Load() != 3 {
+			t.Fatal("empty manual query changed outcome", out.Code, err)
+		}
+		// Move the previous query lease into the past without a wall-clock sleep.
+		if _, err = r.pool.Exec(ctx, `UPDATE registration_operations SET recovery_lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		remote.found, remote.subject = true, "public-overdue-correlated-identity"
+		out = inspectionHTTP(h, "operator", http.MethodPost, retry)
+		committed, err := r.RegistrationOperation(ctx, id)
+		if out.Code != http.StatusAccepted || err != nil || committed.Status != "PROVISIONING" ||
+			committed.UserID == nil || committed.IdentitySubject != remote.subject || remote.queries.Load() != 4 ||
+			remote.creates.Load() != 1 || remote.disables.Load() != 0 {
+			t.Fatal("authorized original query did not continue registration once", out.Code, committed.Status, err)
+		}
+	})
 	t.Run("durable-unknown-visible-active-worker-claim-denies-manual-actions", func(t *testing.T) {
 		t.Setenv("APP_ENV", "test")
 		r := f.repository(t)

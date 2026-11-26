@@ -205,3 +205,192 @@ FROM registration_operations WHERE sms_challenge_id=$1`, notYetSupported).Scan(&
 		t.Fatal("blocked migration rollback lost consent", err)
 	}
 }
+
+func testExpiredMobileProfileReservationReleasesSignup(t *testing.T, f *retainedWalletFenceFixture) {
+	t.Helper()
+	ctx := context.Background()
+	r := f.repository(t)
+	provider := &smsProviderFake{verified: true}
+	identities := &identityProvisionerFake{}
+	auth := newMobileAuthForTest(t, r, provider, identities)
+	auth.now = r.now
+	if err := r.ConfigureRegistrationBonusFingerprint("fixture-mobile-reservation", make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.PrepareRegistrationBonusEligibility(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	principal := identity.Principal{Issuer: auth.issuer, Subject: "existing-profile", SessionID: "existing-session", Username: "existing-profile"}
+	if _, _, err := r.Bootstrap(ctx, principal); err != nil {
+		t.Fatal(err)
+	}
+	const mobile = "+8613800138012"
+	change, err := r.CreateProfileChange(ctx, principal, "MOBILE", mobile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := SMSChallenge{
+		ID: uuid.New(), Mobile: mobile, Purpose: SMSPurposeProfileMobile,
+		Provider: provider.Descriptor(), ExpiresAt: r.now().Add(5 * time.Minute),
+	}
+	if err := r.CreateSMSChallenge(ctx, proof); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET sms_challenge_id=$2 WHERE id=$1`, change.ID, proof.ID); err != nil {
+		t.Fatal(err)
+	}
+	if occupied, err := r.MobileExists(ctx, mobile); err != nil || !occupied {
+		t.Fatal("an active unverified reservation lost its number", occupied, err)
+	}
+
+	// Holding the same mobile lock as consented signup keeps a profile
+	// confirmation from moving to VERIFIED in a competing transaction.
+	owner, err := r.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Rollback(ctx)
+	if err := lockRegistrationMobile(ctx, owner, mobile); err != nil {
+		t.Fatal(err)
+	}
+	wait, cancel := context.WithTimeout(ctx, time.Second)
+	err = r.CommitProfileSMSVerification(wait, change.ID, change.UserID, proof.ID, true)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("profile verification escaped the shared mobile lock", err)
+	}
+	if err := owner.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var deadline time.Time
+	if err := r.pool.QueryRow(ctx, `UPDATE profile_change_requests SET sla_expires_at=clock_timestamp()+interval '2 seconds' WHERE id=$1 RETURNING sla_expires_at`, change.ID).Scan(&deadline); err != nil {
+		t.Fatal(err)
+	}
+	err = wallClockAcrossLock(t, f.ctx, r, f.admin, `SELECT id FROM sms_challenges WHERE id=$1 FOR UPDATE`, proof.ID, deadline, func() error {
+		_, _, err := r.ClaimProfileSMSDelivery(f.ctx, change.ID, change.UserID, proof.ID, true)
+		return err
+	})
+	if !errors.Is(err, ErrProfileChangeConflict) {
+		t.Fatal("delivery acquired after waiting past reservation expiry", err)
+	}
+	var unclaimed bool
+	if err := r.pool.QueryRow(ctx, `SELECT status='CREATED' AND delivery_started_at IS NULL AND delivery_lease_id IS NULL FROM sms_challenges WHERE id=$1`, proof.ID).Scan(&unclaimed); err != nil || !unclaimed {
+		t.Fatal("refused delivery left an upstream dispatch grant", unclaimed, err)
+	}
+	// Simulate an old deployment that had sent this code before expiry and
+	// persisted its longer independent challenge expiry.
+	if err := r.MarkSMSChallengeSent(ctx, proof.ID, "controlled-profile", nil); err != nil {
+		t.Fatal(err)
+	}
+	var validProof bool
+	if err := r.pool.QueryRow(ctx, `SELECT status='SENT' AND expires_at>clock_timestamp() FROM sms_challenges WHERE id=$1`, proof.ID).Scan(&validProof); err != nil || !validProof {
+		t.Fatal("fixture must retain a still-valid old SMS code", validProof, err)
+	}
+	if _, err := r.ReserveProfileSMSChallenge(ctx, change.ID, change.UserID, uuid.Nil, 0, proof); !errors.Is(err, ErrProfileChangeConflict) {
+		t.Fatal("expired reservation returned a sendable challenge", err)
+	}
+	if _, _, err := r.ClaimProfileSMSDelivery(ctx, change.ID, change.UserID, proof.ID, true); !errors.Is(err, ErrProfileChangeConflict) {
+		t.Fatal("expired reservation accepted delivery retry", err)
+	}
+	if err := r.CommitProfileSMSVerification(ctx, change.ID, change.UserID, proof.ID, true); !errors.Is(err, ErrProfileChangeConflict) {
+		t.Fatal("expired reservation accepted a valid old code", err)
+	}
+
+	r.now = func() time.Time { return time.Now().UTC().Add(time.Minute + time.Second) }
+	auth.now = r.now
+	signup := SMSChallenge{
+		ID: uuid.New(), Mobile: mobile, Purpose: SMSPurposeLogin, Provider: provider.Descriptor(),
+		ExpiresAt: r.now().Add(5 * time.Minute), SignupConsentVersion: mobileSignupConsentVersion, SignupIssuer: auth.issuer,
+	}
+	if err := r.CreateSMSChallenge(ctx, signup); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkSMSChallengeSent(ctx, signup.ID, "controlled-signup", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, lock := range []struct {
+		query string
+		id    uuid.UUID
+	}{
+		{`SELECT id FROM users WHERE id=$1 FOR UPDATE`, change.UserID},
+		{`SELECT id FROM profile_change_requests WHERE id=$1 FOR UPDATE`, change.ID},
+	} {
+		blocker, err := r.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer blocker.Rollback(ctx)
+		if _, err := blocker.Exec(ctx, lock.query, lock.id); err != nil {
+			t.Fatal(err)
+		}
+		retry, stop := context.WithTimeout(ctx, 2*time.Second)
+		_, err = auth.VerifyLogin(retry, mobile, signup.ID, "123456")
+		stop()
+		if !errors.Is(err, ErrRegistrationRecovering) || identities.createCalls != 0 {
+			t.Fatal("signup did not defer behind locked profile state", err, identities.createCalls)
+		}
+		if err := blocker.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var retained bool
+		if err := r.pool.QueryRow(ctx, `SELECT status='SENT' FROM sms_challenges WHERE id=$1`, signup.ID).Scan(&retained); err != nil || !retained {
+			t.Fatal("busy reservation consumed the caller's signup challenge", retained, err)
+		}
+	}
+	subject, err := auth.VerifyLogin(ctx, mobile, signup.ID, "123456")
+	if err != nil || subject != "keycloak-subject" || identities.createCalls != 1 {
+		t.Fatal("consented signup did not claim the released number exactly once", subject, identities.createCalls, err)
+	}
+	old, err := r.ProfileChange(ctx, change.ID, nil)
+	if err != nil || old.Status != "SUPERSEDED" || old.SMSVerifiedAt != nil || old.IdentityUpdatedAt != nil {
+		t.Fatal("signup did not retire the unverified profile change before creating an identity", old.Status, err)
+	}
+	var audits int
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE resource_id=$1 AND action='account.profile_change.superseded'`, change.ID.String()).Scan(&audits); err != nil || audits != 1 {
+		t.Fatal("retirement and signup must share the existing audit transaction", audits, err)
+	}
+}
+
+func testConsentedSignupDoesNotRetireForAnotherRegistration(t *testing.T, f *retainedWalletFenceFixture) {
+	t.Helper()
+	ctx := context.Background()
+	r := f.repository(t)
+	const mobile = "+8613800138013"
+	registrationBonusTestOperation(t, ctx, r, "pendinglegacy", mobile)
+	provider := &smsProviderFake{verified: true}
+	directory := &identityProvisionerFake{}
+	auth := newMobileAuthForTest(t, r, provider, directory)
+	principal := identity.Principal{Issuer: auth.issuer, Subject: "existing-profile", SessionID: "existing-session", Username: "existing-profile"}
+	if _, _, err := r.Bootstrap(ctx, principal); err != nil {
+		t.Fatal(err)
+	}
+	change, err := r.CreateProfileChange(ctx, principal, "MOBILE", mobile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE profile_change_requests SET sla_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.now = func() time.Time { return time.Now().UTC().Add(time.Minute + time.Second) }
+	auth.now = r.now
+	proof := SMSChallenge{
+		ID: uuid.New(), Mobile: mobile, Purpose: SMSPurposeLogin, Provider: provider.Descriptor(),
+		ExpiresAt: r.now().Add(5 * time.Minute), SignupConsentVersion: mobileSignupConsentVersion, SignupIssuer: auth.issuer,
+	}
+	if err := r.CreateSMSChallenge(ctx, proof); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkSMSChallengeSent(ctx, proof.ID, "controlled-signup", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.VerifyLogin(ctx, mobile, proof.ID, "123456"); !errors.Is(err, ErrSMSInvalid) || directory.createCalls != 0 {
+		t.Fatal("competing registration unexpectedly accepted the signup", err, directory.createCalls)
+	}
+	var status string
+	var audits int
+	if err := r.pool.QueryRow(ctx, `SELECT status,(SELECT count(*) FROM audit_logs WHERE resource_id=$2 AND action='account.profile_change.superseded') FROM profile_change_requests WHERE id=$1`, change.ID, change.ID.String()).Scan(&status, &audits); err != nil || status != "PENDING" || audits != 0 {
+		t.Fatal("denied signup unexpectedly retired the profile reservation", status, audits, err)
+	}
+}

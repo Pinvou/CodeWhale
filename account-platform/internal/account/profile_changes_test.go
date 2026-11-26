@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -543,7 +544,7 @@ func TestProfileMobileChallengeReopenReusesBoundChallenge(t *testing.T) {
 	store := &profileStoreFake{
 		change: ProfileChange{
 			ID: uuid.New(), UserID: uuid.New(), IdentityIssuer: "issuer", IdentitySubject: "subject",
-			Field: "MOBILE", NewValue: "+8613800138000", Status: "PENDING", SMSChallengeID: &challenge.ID,
+			Field: "MOBILE", NewValue: "+8613800138000", Status: "PENDING", SMSChallengeID: &challenge.ID, SLAExpiresAt: now.Add(30 * time.Minute),
 		},
 		activeChallenge: challenge,
 	}
@@ -555,6 +556,14 @@ func TestProfileMobileChallengeReopenReusesBoundChallenge(t *testing.T) {
 	}
 	if got.ID != challenge.ID {
 		t.Fatalf("challenge=%s, want existing %s", got.ID, challenge.ID)
+	}
+	if !got.ExpiresAt.Equal(challenge.ExpiresAt) {
+		t.Fatalf("earlier SMS expiry changed: %s", got.ExpiresAt)
+	}
+	store.change.SLAExpiresAt = now.Add(2 * time.Minute)
+	got, err = service.SendMobileCode(context.Background(), principal, store.change.ID, uuid.New(), 100, "source", "device")
+	if err != nil || got.ID != challenge.ID || !got.ExpiresAt.Equal(store.change.SLAExpiresAt) {
+		t.Fatal("existing SMS advertised validity beyond the reservation", got.ExpiresAt, err)
 	}
 }
 
@@ -602,7 +611,7 @@ func (p *blockingProfileSMSProvider) callCount() int {
 func newProfileMobileSendFixture(now time.Time, provider SMSProvider) (*profileStoreFake, *ProfileChangeService, identity.Principal) {
 	store := &profileStoreFake{change: ProfileChange{
 		ID: uuid.New(), UserID: uuid.New(), IdentityIssuer: "issuer", IdentitySubject: "subject",
-		Field: "MOBILE", NewValue: "+8613800138000", Status: "PENDING",
+		Field: "MOBILE", NewValue: "+8613800138000", Status: "PENDING", SLAExpiresAt: now.Add(30 * time.Minute),
 	}}
 	service := &ProfileChangeService{store: store, auth: &MobileAuthService{sms: provider}, now: func() time.Time { return now }}
 	principal := identity.Principal{Issuer: "issuer", Subject: "subject", AuthenticatedAt: now.Add(-time.Minute)}
@@ -1017,5 +1026,44 @@ func TestPasswordResetUpdatedSnapshotPreservesTerminalAndRepair(t *testing.T) {
 				t.Fatal("snapshot replay changed final stage", got, store.reset)
 			}
 		})
+	}
+}
+
+func TestProfileMobileChallengeLateSendDoesNotOfferCodeEntry(t *testing.T) {
+	now := time.Date(2026, time.September, 27, 8, 0, 0, 0, time.UTC)
+	provider := &blockingProfileSMSProvider{started: make(chan struct{}, 1), release: make(chan struct{})}
+	defer func() {
+		select {
+		case <-provider.release:
+		default:
+			close(provider.release)
+		}
+	}()
+	store, service, principal := newProfileMobileSendFixture(now, provider)
+	var elapsed atomic.Int64
+	service.now = func() time.Time { return now.Add(time.Duration(elapsed.Load())) }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := service.SendMobileCode(ctx, principal, store.change.ID, uuid.New(), 100, "source", "device")
+		result <- err
+	}()
+	select {
+	case <-provider.started:
+	case err := <-result:
+		t.Fatalf("send never reached the provider: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	elapsed.Store(int64(30 * time.Minute))
+	close(provider.release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrProfileChangeConflict) || store.activeChallenge == nil || store.activeChallenge.Status != "SENT" {
+			t.Fatal("late delivery must be recorded without opening code entry", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }

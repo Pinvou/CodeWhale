@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -54,6 +55,50 @@ func TestSMSOnlyDispatchDistinguishesProvenAbsenceFromUnknownResult(t *testing.T
 			client.serviceToken = "controlled-token"
 			if err := request(); err == nil || errors.Is(err, ErrIdentityCreateNotDispatched) != test.proof || hits.Load() != 1 {
 				t.Fatal("wrong dispatch classification or endpoint", err, hits.Load())
+			}
+		})
+	}
+}
+
+func TestIdentityCreateTransportFailurePreservesCauseWithoutProvingNoDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		mode string
+	}{
+		{"password", mobileIdentityCreatePath, "password-fixture"},
+		{"sms only", identity.MobileSignupCreatePath, identity.MobileSignupCredentialMode},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dispatched atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != tc.path {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+					return
+				}
+				conn, _, err := http.NewResponseController(w).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				dispatched.Add(1)
+				_ = conn.Close()
+			}))
+			defer server.Close()
+			client, err := NewHTTPIdentityProvisioner(server.URL, "fixture-service-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.CreateMobileUserFirstAttempt(context.Background(), uuid.New(), "fixture", "+8613800138000", "", tc.mode)
+			if dispatched.Load() != 1 || !errors.Is(err, ErrIdentityCreateUnconfirmed) || !errors.Is(err, io.EOF) || errors.Is(err, ErrIdentityCreateNotDispatched) {
+				t.Fatalf("expected one dispatch with an unconfirmed EOF: requests=%d error=%v", dispatched.Load(), err)
+			}
+			if err.Error() != "identity adapter request failed" {
+				t.Fatal("transport diagnostic included more than the public error")
 			}
 		})
 	}

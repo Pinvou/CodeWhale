@@ -159,6 +159,20 @@ WHERE id=$1
 		return snapshot.subject, RegistrationOperation{}, tx.Commit(ctx)
 	}
 
+	if snapshot.occupied && snapshot.pendingStatus == "" {
+		retired, err := supersedeExpiredMobileSignupReservation(ctx, tx, operation.Mobile)
+		if err != nil {
+			return "", RegistrationOperation{}, err
+		}
+		snapshot, err = readSMSLoginSnapshot(ctx, tx, issuer, operation.Mobile, now)
+		if err != nil {
+			return "", RegistrationOperation{}, err
+		}
+		if retired && (snapshot.occupied || snapshot.pendingStatus != "") {
+			// Do not commit a retirement without accepting the corresponding signup.
+			return "", RegistrationOperation{}, ErrRegistrationRecovering
+		}
+	}
 	if snapshot.occupied || snapshot.pendingStatus != "" {
 		if err := tx.Commit(ctx); err != nil {
 			return "", RegistrationOperation{}, err

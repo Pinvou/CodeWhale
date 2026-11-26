@@ -150,8 +150,18 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 	if change.IdentityIssuer != principal.Issuer || change.IdentitySubject != principal.Subject {
 		return SMSChallenge{}, ErrNotFound
 	}
-	if change.Field != "MOBILE" || change.Status != "PENDING" {
+	if change.Field != "MOBILE" || change.Status != "PENDING" || !change.SLAExpiresAt.After(s.now()) {
 		return SMSChallenge{}, ErrProfileChangeConflict
+	}
+	// Record late provider results, but do not offer an expired code entry.
+	showChallenge := func(challenge SMSChallenge) (SMSChallenge, error) {
+		if !change.SLAExpiresAt.After(s.now()) {
+			return SMSChallenge{}, ErrProfileChangeConflict
+		}
+		if change.SLAExpiresAt.Before(challenge.ExpiresAt) {
+			challenge.ExpiresAt = change.SLAExpiresAt
+		}
+		return challenge, nil
 	}
 	provider, err := activeSMSProvider(ctx, s.auth.sms)
 	if err != nil {
@@ -176,18 +186,18 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 		return SMSChallenge{}, ErrSMSUnavailable
 	}
 	if challenge.Status == "SENT" {
-		return challenge, nil
+		return showChallenge(challenge)
 	}
 	policy := provider.DeliveryRetryPolicy()
 	if challenge.Status == "UNCERTAIN" {
-		return challenge, nil
+		return showChallenge(challenge)
 	}
 	if challenge.Status == "SENDING" && policy == SMSDeliveryAtMostOnce && challenge.DeliveryLeaseUntil != nil && !challenge.DeliveryLeaseUntil.After(s.now()) {
 		if err := s.store.MarkProfileSMSDeliveryUncertain(context.WithoutCancel(ctx), requestID, challenge.ID, uuid.Nil); err != nil {
 			return SMSChallenge{}, ErrSMSUnavailable
 		}
 		challenge.Status = "UNCERTAIN"
-		return challenge, nil
+		return showChallenge(challenge)
 	}
 	leaseID, claimed, err := s.store.ClaimProfileSMSDelivery(ctx, requestID, change.UserID, challenge.ID, policy == SMSDeliveryIdempotent)
 	if err != nil {
@@ -195,7 +205,7 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 	}
 	if !claimed {
 		challenge.Status = "SENDING"
-		return challenge, nil
+		return showChallenge(challenge)
 	}
 	delivery, err := provider.SendCode(ctx, challenge.Mobile, challenge.Purpose, challenge.ID)
 	if err != nil {
@@ -210,7 +220,7 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 			} else {
 				if uncertainErr := s.store.MarkProfileSMSDeliveryUncertain(context.WithoutCancel(ctx), requestID, challenge.ID, leaseID); uncertainErr == nil {
 					challenge.Status = "UNCERTAIN"
-					return challenge, nil
+					return showChallenge(challenge)
 				}
 			}
 		}
@@ -222,13 +232,13 @@ func (s *ProfileChangeService) SendMobileCode(ctx context.Context, principal ide
 		} else {
 			if uncertainErr := s.store.MarkProfileSMSDeliveryUncertain(context.WithoutCancel(ctx), requestID, challenge.ID, leaseID); uncertainErr == nil {
 				challenge.Status = "UNCERTAIN"
-				return challenge, nil
+				return showChallenge(challenge)
 			}
 		}
 		return SMSChallenge{}, ErrSMSUnavailable
 	}
 	challenge.Status = "SENT"
-	return challenge, nil
+	return showChallenge(challenge)
 }
 
 func (s *ProfileChangeService) Complete(ctx context.Context, principal identity.Principal, requestID uuid.UUID, code string) (ProfileChange, error) {
@@ -243,6 +253,9 @@ func (s *ProfileChangeService) Complete(ctx context.Context, principal identity.
 		return ProfileChange{}, ErrNotFound
 	}
 	if change.Field == "MOBILE" && change.SMSVerifiedAt == nil {
+		if change.Status != "PENDING" || !change.SLAExpiresAt.After(s.now()) {
+			return ProfileChange{}, ErrProfileChangeConflict
+		}
 		if change.SMSChallengeID == nil {
 			return ProfileChange{}, ErrProfileChangeVerificationRequired
 		}
@@ -731,7 +744,8 @@ func (r *PostgresRepository) reserveProfileSMSChallenge(ctx context.Context, id,
 	defer tx.Rollback(ctx)
 	var boundID *uuid.UUID
 	var mobile string
-	err = tx.QueryRow(ctx, `SELECT sms_challenge_id,new_value FROM profile_change_requests WHERE id=$1 AND user_id=$2 AND field='MOBILE' AND status='PENDING' FOR UPDATE`, id, userID).Scan(&boundID, &mobile)
+	var reservationExpiresAt time.Time
+	err = tx.QueryRow(ctx, `SELECT sms_challenge_id,new_value,sla_expires_at FROM profile_change_requests WHERE id=$1 AND user_id=$2 AND field='MOBILE' AND status='PENDING' FOR UPDATE`, id, userID).Scan(&boundID, &mobile, &reservationExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SMSChallenge{}, ErrProfileChangeConflict
 	}
@@ -741,12 +755,30 @@ func (r *PostgresRepository) reserveProfileSMSChallenge(ctx context.Context, id,
 	if candidate.Mobile != mobile || candidate.Purpose != SMSPurposeProfileMobile || candidate.Provider.ID == "" || candidate.Provider.AdapterVersion == "" {
 		return SMSChallenge{}, ErrProfileChangeConflict
 	}
+	var reservationActive bool
+	if err := tx.QueryRow(ctx, `SELECT $1::timestamptz>clock_timestamp()`, reservationExpiresAt).Scan(&reservationActive); err != nil {
+		return SMSChallenge{}, err
+	}
+	if !reservationActive {
+		return SMSChallenge{}, ErrProfileChangeConflict
+	}
+	if reservationExpiresAt.Before(candidate.ExpiresAt) {
+		candidate.ExpiresAt = reservationExpiresAt
+	}
 	now := r.now()
 	if boundID != nil {
 		var existing SMSChallenge
 		err = tx.QueryRow(ctx, `SELECT id,mobile_e164,purpose,status,expires_at,provider_id,adapter_version,delivery_lease_until,delivery_started_at,delivery_uncertain_at FROM sms_challenges WHERE id=$1 FOR UPDATE`, *boundID).Scan(&existing.ID, &existing.Mobile, &existing.Purpose, &existing.Status, &existing.ExpiresAt, &existing.Provider.ID, &existing.Provider.AdapterVersion, &existing.DeliveryLeaseUntil, &existing.DeliveryStartedAt, &existing.DeliveryUncertainAt)
 		if err != nil {
 			return SMSChallenge{}, err
+		}
+		// An existing challenge may have been locked when the reservation
+		// was first checked. Do not return it after the cutoff.
+		if err := tx.QueryRow(ctx, `SELECT $1::timestamptz>clock_timestamp()`, reservationExpiresAt).Scan(&reservationActive); err != nil {
+			return SMSChallenge{}, err
+		}
+		if !reservationActive {
+			return SMSChallenge{}, ErrProfileChangeConflict
 		}
 		if (existing.Status == "CREATED" || existing.Status == "SENT") && existing.ExpiresAt.After(now) {
 			if existing.Status == "CREATED" && existing.DeliveryUncertainAt != nil {
@@ -803,7 +835,7 @@ func (r *PostgresRepository) reserveProfileSMSChallenge(ctx context.Context, id,
 	if err != nil {
 		return SMSChallenge{}, err
 	}
-	command, err := tx.Exec(ctx, `UPDATE profile_change_requests SET sms_challenge_id=$3,version=version+1,updated_at=$4 WHERE id=$1 AND user_id=$2 AND field='MOBILE' AND status='PENDING'`, id, userID, candidate.ID, now)
+	command, err := tx.Exec(ctx, `UPDATE profile_change_requests SET sms_challenge_id=$3,version=version+1,updated_at=$4 WHERE id=$1 AND user_id=$2 AND field='MOBILE' AND status='PENDING' AND sla_expires_at>clock_timestamp()`, id, userID, candidate.ID, now)
 	if err != nil {
 		return SMSChallenge{}, err
 	}
@@ -818,17 +850,38 @@ func (r *PostgresRepository) reserveProfileSMSChallenge(ctx context.Context, id,
 }
 
 func (r *PostgresRepository) ClaimProfileSMSDelivery(ctx context.Context, requestID, userID, challengeID uuid.UUID, allowUnknownRetry bool) (uuid.UUID, bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	defer tx.Rollback(ctx)
+	// A direct UPDATE can evaluate its deadline before waiting on the
+	// challenge. Lock it first so the write uses a fresh deadline check.
+	var lockedID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT challenge.id FROM profile_change_requests request
+JOIN sms_challenges challenge ON challenge.id=request.sms_challenge_id
+WHERE request.id=$1 AND request.user_id=$2 AND request.status='PENDING' AND challenge.id=$3
+FOR UPDATE OF challenge`, requestID, userID, challengeID).Scan(&lockedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, ErrProfileChangeConflict
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
 	leaseID := uuid.Must(uuid.NewV7())
 	now := r.now()
-	command, err := r.pool.Exec(ctx, `UPDATE sms_challenges challenge SET delivery_lease_id=$4,delivery_lease_until=$5,delivery_started_at=COALESCE(delivery_started_at,$6),updated_at=$6 FROM profile_change_requests request WHERE request.id=$1 AND request.user_id=$2 AND request.status='PENDING' AND request.sms_challenge_id=challenge.id AND challenge.id=$3 AND challenge.status='CREATED' AND challenge.delivery_uncertain_at IS NULL AND challenge.expires_at>$6 AND (challenge.delivery_started_at IS NULL OR ($7 AND (challenge.delivery_lease_until IS NULL OR challenge.delivery_lease_until<=$6)))`, requestID, userID, challengeID, leaseID, now.Add(profileSMSDeliveryLease), now, allowUnknownRetry)
+	command, err := tx.Exec(ctx, `UPDATE sms_challenges challenge SET delivery_lease_id=$4,delivery_lease_until=$5,delivery_started_at=COALESCE(delivery_started_at,$6),updated_at=$6 FROM profile_change_requests request WHERE request.id=$1 AND request.user_id=$2 AND request.status='PENDING' AND request.sla_expires_at>clock_timestamp() AND request.sms_challenge_id=challenge.id AND challenge.id=$3 AND challenge.status='CREATED' AND challenge.delivery_uncertain_at IS NULL AND challenge.expires_at>$6 AND (challenge.delivery_started_at IS NULL OR ($7 AND (challenge.delivery_lease_until IS NULL OR challenge.delivery_lease_until<=$6)))`, requestID, userID, challengeID, leaseID, now.Add(profileSMSDeliveryLease), now, allowUnknownRetry)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
 	if command.RowsAffected() == 1 {
+		if err := tx.Commit(ctx); err != nil {
+			return uuid.Nil, false, err
+		}
 		return leaseID, true, nil
 	}
 	var status string
-	err = r.pool.QueryRow(ctx, `SELECT challenge.status FROM profile_change_requests request JOIN sms_challenges challenge ON challenge.id=request.sms_challenge_id WHERE request.id=$1 AND request.user_id=$2 AND request.status='PENDING' AND challenge.id=$3`, requestID, userID, challengeID).Scan(&status)
+	err = tx.QueryRow(ctx, `SELECT challenge.status FROM profile_change_requests request JOIN sms_challenges challenge ON challenge.id=request.sms_challenge_id WHERE request.id=$1 AND request.user_id=$2 AND request.status='PENDING' AND request.sla_expires_at>clock_timestamp() AND challenge.id=$3`, requestID, userID, challengeID).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, ErrProfileChangeConflict
 	}
@@ -886,10 +939,11 @@ func (r *PostgresRepository) CommitProfileSMSVerification(ctx context.Context, i
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var profileStatus string
+	var profileStatus, mobile string
 	var boundID *uuid.UUID
 	var smsVerifiedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT status,sms_challenge_id,sms_verified_at FROM profile_change_requests WHERE id=$1 AND user_id=$2 AND field='MOBILE' FOR UPDATE`, id, userID).Scan(&profileStatus, &boundID, &smsVerifiedAt); err != nil {
+	var reservationExpiresAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT status,sms_challenge_id,sms_verified_at,new_value,sla_expires_at FROM profile_change_requests WHERE id=$1 AND user_id=$2 AND field='MOBILE' FOR UPDATE`, id, userID).Scan(&profileStatus, &boundID, &smsVerifiedAt, &mobile, &reservationExpiresAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrProfileChangeConflict
 		}
@@ -902,6 +956,18 @@ func (r *PostgresRepository) CommitProfileSMSVerification(ctx context.Context, i
 		return tx.Commit(ctx)
 	}
 	if profileStatus != "PENDING" || smsVerifiedAt != nil {
+		return ErrProfileChangeConflict
+	}
+	// Serialize the transition to VERIFIED with consented signup. Recheck
+	// the reservation after the shared mobile lock, using the database clock.
+	if err := lockRegistrationMobile(ctx, tx, mobile); err != nil {
+		return err
+	}
+	var reservationActive bool
+	if err := tx.QueryRow(ctx, `SELECT $1::timestamptz>clock_timestamp()`, reservationExpiresAt).Scan(&reservationActive); err != nil {
+		return err
+	}
+	if !reservationActive {
 		return ErrProfileChangeConflict
 	}
 	var challengeStatus string
@@ -932,12 +998,12 @@ func (r *PostgresRepository) CommitProfileSMSVerification(ctx context.Context, i
 	if _, err := tx.Exec(ctx, `UPDATE sms_challenges SET status='CONSUMED',consumed_at=$2,delivery_lease_id=NULL,delivery_lease_until=NULL,updated_at=$2 WHERE id=$1`, challengeID, now); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `UPDATE profile_change_requests SET sms_verified_at=$3,status='VERIFIED',version=version+1,updated_at=$3 WHERE id=$1 AND user_id=$2 AND status='PENDING' AND sms_challenge_id=$4`, id, userID, now, challengeID)
+	command, err := tx.Exec(ctx, `UPDATE profile_change_requests SET sms_verified_at=$3,status='VERIFIED',version=version+1,updated_at=$3 WHERE id=$1 AND user_id=$2 AND status='PENDING' AND sms_challenge_id=$4 AND sla_expires_at>clock_timestamp()`, id, userID, now, challengeID)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
-		return ErrConflict
+		return ErrProfileChangeConflict
 	}
 	return tx.Commit(ctx)
 }

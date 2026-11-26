@@ -57,24 +57,11 @@ ORDER BY created_at,resource_id LIMIT $1`, limit-grantCases)
 	}
 	created := grantCases
 	for _, candidate := range candidates {
-		deadlines, err := manualreview.DeadlinesFor(candidate.createdAt, candidate.severity)
-		if err != nil {
-			return created, err
-		}
 		tx, err := r.pool.Begin(ctx)
 		if err != nil {
 			return created, err
 		}
-		now := r.now()
-		caseID := uuid.Must(uuid.NewV7())
-		command, err := tx.Exec(ctx, `INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at) VALUES($1,'ACCOUNT',$2,$3,$4,$5,'OPEN',$6,$7,$8,$9,$10,$11) ON CONFLICT(domain,case_type,resource_type,resource_id) DO NOTHING`, caseID, candidate.caseType, candidate.resourceType, candidate.resourceID, candidate.severity, candidate.createdAt, deadlines.Claim, deadlines.FirstResponse, deadlines.Mitigation, deadlines.Resolution, now)
-		if err == nil && command.RowsAffected() == 1 {
-			details, _ := json.Marshal(map[string]any{"severity": candidate.severity, "source_created_at": candidate.createdAt})
-			_, err = tx.Exec(ctx, `INSERT INTO manual_review_case_events(id,case_id,event_type,details,created_at) VALUES($1,$2,'CREATED',$3,$4)`, uuid.Must(uuid.NewV7()), caseID, details, now)
-		}
-		if err == nil && command.RowsAffected() == 1 {
-			err = events.AppendOutbox(ctx, tx, "account.manual-review.created.v1", caseID, 1, map[string]any{"case_id": caseID, "case_type": candidate.caseType, "resource_type": candidate.resourceType, "resource_id": candidate.resourceID, "severity": candidate.severity})
-		}
+		inserted, err := insertAccountManualReviewCase(ctx, tx, candidate, r.now())
 		if err != nil {
 			tx.Rollback(ctx)
 			return created, err
@@ -82,7 +69,7 @@ ORDER BY created_at,resource_id LIMIT $1`, limit-grantCases)
 		if err := tx.Commit(ctx); err != nil {
 			return created, err
 		}
-		if command.RowsAffected() == 1 {
+		if inserted {
 			created++
 		}
 	}
@@ -92,6 +79,24 @@ ORDER BY created_at,resource_id LIMIT $1`, limit-grantCases)
  (review.case_type='HIGH_RISK_COMMAND_REPAIR' AND EXISTS(SELECT 1 FROM approval_requests source WHERE source.id=review.resource_id AND source.status IN ('EXECUTED','INVALIDATED','EXPIRED','REJECTED','WITHDRAWN')))
 )`)
 	return created, err
+}
+
+func insertAccountManualReviewCase(ctx context.Context, tx pgx.Tx, candidate accountManualReviewCandidate, now time.Time) (bool, error) {
+	deadlines, err := manualreview.DeadlinesFor(candidate.createdAt, candidate.severity)
+	if err != nil {
+		return false, err
+	}
+	caseID := uuid.Must(uuid.NewV7())
+	command, err := tx.Exec(ctx, `INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at) VALUES($1,'ACCOUNT',$2,$3,$4,$5,'OPEN',$6,$7,$8,$9,$10,$11) ON CONFLICT(domain,case_type,resource_type,resource_id) DO NOTHING`, caseID, candidate.caseType, candidate.resourceType, candidate.resourceID, candidate.severity, candidate.createdAt, deadlines.Claim, deadlines.FirstResponse, deadlines.Mitigation, deadlines.Resolution, now)
+	if err != nil || command.RowsAffected() != 1 {
+		return false, err
+	}
+	details, _ := json.Marshal(map[string]any{"severity": candidate.severity, "source_created_at": candidate.createdAt})
+	if _, err = tx.Exec(ctx, `INSERT INTO manual_review_case_events(id,case_id,event_type,details,created_at) VALUES($1,$2,'CREATED',$3,$4)`, uuid.Must(uuid.NewV7()), caseID, details, now); err != nil {
+		return false, err
+	}
+	err = events.AppendOutbox(ctx, tx, "account.manual-review.created.v1", caseID, 1, map[string]any{"case_id": caseID, "case_type": candidate.caseType, "resource_type": candidate.resourceType, "resource_id": candidate.resourceID, "severity": candidate.severity})
+	return err == nil, err
 }
 
 func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, schedule manualreview.OnCallSchedule, limit int) (int, error) {
