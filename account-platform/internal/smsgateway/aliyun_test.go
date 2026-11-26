@@ -2,6 +2,7 @@ package smsgateway
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"testing"
@@ -56,7 +57,10 @@ func TestAliyunAcs3SignatureGoldenVectors(t *testing.T) {
 				"TemplateCode":  {"SMS_100"},
 				"TemplateParam": {`{"code":"12:34"}`},
 			},
-			when:         time.Date(2026, time.June, 7, 8, 9, 10, 0, time.UTC),
+			// 非零小数秒落在同一秒内：发送实现按 UTC 整秒归一化（格式化截断
+			// 小数部分），wantDate/wantAuth 因此与整秒输入同值——真机时钟常带
+			// 小数秒，这里钉住归一化行为。
+			when:         time.Date(2026, time.June, 7, 8, 9, 10, 700000000, time.UTC),
 			nonce:        "01234567-89ab-cdef-0123-456789abcdef",
 			wantRawQuery: "PhoneNumbers=%2B8613800000000&SignName=%E6%B5%8B%E8%AF%95%E7%AD%BE%E5%90%8D%20Demo~&TemplateCode=SMS_100&TemplateParam=%7B%22code%22%3A%2212%3A34%22%7D",
 			wantDate:     "2026-06-07T08:09:10Z",
@@ -74,11 +78,29 @@ func TestAliyunAcs3SignatureGoldenVectors(t *testing.T) {
 			if got := req.Header.Get("X-Acs-Content-Sha256"); got != goldenPayloadHash {
 				t.Fatalf("x-acs-content-sha256 mismatch: %q", got)
 			}
+			// 摘要锁定的是零字节载荷：请求体必须实际携带零字节（实现现状是
+			// nil body，NoBody 同为空）；任何非空载荷都与 x-acs-content-sha256
+			// 不一致，必须红。
+			if req.Body != nil {
+				sent, readErr := io.ReadAll(req.Body)
+				if readErr != nil {
+					t.Fatalf("reading the signed request body: %v", readErr)
+				}
+				if len(sent) != 0 {
+					t.Fatalf("signed request must carry a zero-byte payload, got %d bytes", len(sent))
+				}
+			}
+			if req.ContentLength != 0 {
+				t.Fatalf("content length must be 0 for an empty payload, got %d", req.ContentLength)
+			}
 			if got := req.URL.RawQuery; got != vector.wantRawQuery {
 				t.Fatalf("canonical query mismatch\n got: %s\nwant: %s", got, vector.wantRawQuery)
 			}
 			if got := req.Header.Get("X-Acs-Date"); got != vector.wantDate {
 				t.Fatalf("x-acs-date mismatch\n got: %s\nwant: %s", got, vector.wantDate)
+			}
+			if got := req.Header.Get("X-Acs-Signature-Nonce"); got != vector.nonce {
+				t.Fatalf("x-acs-signature-nonce must carry the signed nonce\n got: %q\nwant: %q", got, vector.nonce)
 			}
 			if got := req.Header.Get("Authorization"); got != vector.wantAuth {
 				t.Fatalf("authorization mismatch\n got: %s\nwant: %s", got, vector.wantAuth)
@@ -129,6 +151,9 @@ func TestAliyunAcs3SignatureDifferentialControls(t *testing.T) {
 	changedNonce, err := a.signedRequest(context.Background(), baselineQuery, when, "ffffffff-ffff-ffff-ffff-ffffffffffff")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := changedNonce.Header.Get("X-Acs-Signature-Nonce"); got != "ffffffff-ffff-ffff-ffff-ffffffffffff" {
+		t.Fatalf("changed nonce must be sent verbatim, got %q", got)
 	}
 	nonceAuth := changedNonce.Header.Get("Authorization")
 	if nonceAuth == baseAuth {
