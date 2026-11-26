@@ -5300,6 +5300,12 @@ wait(github, context, {env}, resolve => queueMicrotask(resolve))
             "exactly one step owns the src-tauri regression loop whose "
             "executed-count guard this pin binds",
         )
+        filters = loop_steps[0].split("for filter in \\\n", 1)[1].split("; do", 1)[0]
+        for name in (
+            "windows_checkpoint_rehashes_equal_length_edits_with_the_same_mtime",
+            "diff_preview_filters_secret_paths_from_legacy_snapshot",
+        ):
+            self.assertIn(f"'{name}'", filters)
         self.assertIn(
             """grep -qE '^test result: ok\\. [1-9][0-9]* passed' "$report" """,
             loop_steps[0],
