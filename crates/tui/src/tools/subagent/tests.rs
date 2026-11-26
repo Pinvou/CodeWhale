@@ -6160,24 +6160,35 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     );
 
     // The raw reshape (direct `sanitize_for_strict`, bypassing the usability
-    // gate) removes optional properties — everything but the required
-    // `action` discriminator — and reports the removals. That is the
-    // documented strict contract, and it is exactly why the funnel, not the
-    // reshape, owns the agent surface.
+    // gate) removes optional properties outright (the Fleet role is
+    // optional), so the property — and with it the enum — leaves the schema,
+    // and the removals are reported. That is the documented strict contract,
+    // and it is exactly why the funnel, not the reshape, owns the agent
+    // surface. When the role is required, the property survives and its
+    // enum must be neither erased nor widened.
     let mut strict = agent_schema.clone();
     let removed = schema_sanitize::sanitize_for_strict(&mut strict);
     assert!(
         removed.contains(&"type".to_string()),
         "the optional role selector is removed and reported: {removed:?}"
     );
+    assert!(
+        strict["properties"].get("type").is_none(),
+        "the strict contract removes the optional role property outright: {strict}"
+    );
     assert_eq!(
         strict["required"],
         json!(["action"]),
         "only the required discriminator survives the reshape"
     );
-    assert!(
-        strict["properties"]["type"].is_null(),
-        "the removed role selector is gone from the enforced schema"
+    // When the role is required, the property survives and its enum must
+    // be neither erased nor widened.
+    let mut strict_required = agent_schema.clone();
+    strict_required["required"] = json!(["action", "type"]);
+    schema_sanitize::sanitize_for_strict(&mut strict_required);
+    assert_eq!(
+        strict_required["properties"]["type"]["enum"], expected,
+        "strict-mode sanitize must not erase or widen the role enum"
     );
 
     // Anthropic Messages and OpenAI Responses (and xAI, an alias of the
@@ -27877,5 +27888,72 @@ fn coordination_lane_precedence_matches_the_isolation_seam() {
         manager.coordination_lane_of(&manifest_id),
         CoordinationLane::Worktree(worktree_root.to_string_lossy().into_owned()),
         "the manifest leg covers a claim-less worktree child"
+    );
+}
+
+#[test]
+fn strict_mode_fails_the_agent_tool_closed() {
+    // The `agent` tool carries its per-action requirements in a
+    // `dependentSchemas` tree (`start` needs `prompt`, every targeted
+    // action needs an `agent_id` or `name`), and the schema marks those
+    // fields optional — a requirement table the strict subset cannot
+    // express. The strict path does NOT strip `dependentSchemas`: the
+    // composition gate's presence arm fails the tool closed on the
+    // keyword itself (round 29 narrative correction — the earlier
+    // "the strip pass deletes the tree" story was wrong; the strip is
+    // the xAI/Responses lanes' `dependentRequired`/`dependencies` pass,
+    // and it never touches this keyword). The counterfactual matters:
+    // were the gate arm removed, a strict `agent` would ship callable
+    // with `action` alone while the runtime rejects every call but the
+    // vacuous `wait`. The tool ships unchanged and non-strict via
+    // `STRICT_UNUSABLE_TOOLS` as defense-in-depth; this census feeds its
+    // real schema through the pipeline so the list and the tool cannot
+    // drift apart.
+    let workspace = tempdir().expect("temp workspace");
+    let manager = new_shared_subagent_manager(workspace.path().to_path_buf(), 1);
+    let config = crate::config::Config {
+        api_key: Some("deepseek-test-key".to_string()),
+        provider: Some("deepseek".to_string()),
+        ..Default::default()
+    };
+    let client = crate::client::DeepSeekClient::new(&config).expect("DeepSeek parent client");
+    let runtime = SubAgentRuntime::new(
+        client,
+        "deepseek-chat".to_string(),
+        crate::tools::ToolContext::new(workspace.path().to_path_buf()),
+        false,
+        None,
+        manager,
+    );
+    let tool = AgentTool::new(
+        new_shared_subagent_manager(workspace.path().to_path_buf(), 1),
+        runtime,
+    );
+    let mut tools = vec![crate::models::Tool {
+        tool_type: None,
+        name: ToolSpec::name(&tool).to_string(),
+        description: ToolSpec::description(&tool).to_string(),
+        input_schema: ToolSpec::input_schema(&tool),
+        allowed_callers: None,
+        defer_loading: None,
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }];
+    let original_schema = tools[0].input_schema.clone();
+    let original_description = tools[0].description.clone();
+
+    assert!(
+        !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+        "agent must fail closed, not ship strict callable with `action` alone"
+    );
+    assert_eq!(tools[0].strict, None, "agent must ship non-strict");
+    assert_eq!(
+        &tools[0].input_schema, &original_schema,
+        "agent keeps its schema"
+    );
+    assert_eq!(
+        &tools[0].description, &original_description,
+        "agent keeps its description"
     );
 }

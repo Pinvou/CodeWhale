@@ -414,6 +414,56 @@ fn work_progress_metadata(snapshot: &TodoListSnapshot) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn strict_mode_keeps_todo_write_usable_with_its_status_note() {
+        // The item-level `status` is schema-optional and the runtime defaults
+        // it to pending (todo.rs execute), so strict mode removes it at item
+        // depth and the whole status lifecycle goes dark: every rewritten
+        // item is created pending. The tool stays usable (creating and
+        // rewriting the list still works off the required `content`), so it
+        // ships strict with the context note naming the loss instead of
+        // failing closed — and this real-schema pin is what keeps the
+        // context-note entry bound (the full-catalog census fixture has no
+        // way to see a runtime contract).
+        let tool = super::TodoWriteTool::new(super::new_shared_todo_list());
+        let schema = tool.input_schema();
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+        assert!(
+            crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "todo_write's schema is strict-representable: {schema}"
+        );
+        assert_eq!(tools[0].strict, Some(true));
+        let items = tools[0].input_schema["properties"]["todos"]["items"]
+            .get("properties")
+            .and_then(|properties| properties.as_object())
+            .expect("the item schema keeps a properties map");
+        assert!(
+            !items.contains_key("status"),
+            "the optional item `status` is removed in strict mode: {items:?}"
+        );
+        assert!(
+            items.contains_key("content"),
+            "the required item `content` survives: {items:?}"
+        );
+        assert!(
+            tools[0]
+                .description
+                .contains("every written item is created pending"),
+            "the context note must name the status loss verbatim: {}",
+            tools[0].description
+        );
+    }
+
+    #[test]
     fn todo_write_is_bounded_agent_owned_state_for_read_only_envelopes() {
         let tool = super::TodoWriteTool::new(super::new_shared_todo_list());
         assert!(crate::tools::spec::ToolSpec::is_read_only_for(
