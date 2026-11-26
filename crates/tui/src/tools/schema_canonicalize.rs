@@ -27,17 +27,22 @@ use serde_json::Value;
 pub fn canonicalize_schema(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            // `enum`, `const`, and `default` carry INSTANCE data, not
-            // schema: an object under them is a literal argument, and a
-            // `required` key inside that literal is plugin data. Sorting
-            // its array or rebuilding its keys rewrites the only permitted
-            // value — `enum: [{"required": ["b","a"]}]` advertised as
-            // `["a","b"]` excludes the argument the plugin declared — so
-            // these subtrees are skipped entirely. Their bytes come from
-            // the manifest verbatim on every reconnect, so prefix-cache
-            // stability is preserved (review 5915330170, the registry
-            // companion to the sanitizer's enum/const instance-data rule).
-            const INSTANCE_DATA_KEYS: &[&str] = &["enum", "const", "default"];
+            // `enum`, `const`, `default`, `examples`, and `example` carry
+            // INSTANCE data, not schema: an object under them is a literal
+            // argument, and a `required` key inside that literal is plugin
+            // data. Sorting its array or rebuilding its keys rewrites the
+            // only permitted value — `enum: [{"required": ["b","a"]}]`
+            // advertised as `["a","b"]` excludes the argument the plugin
+            // declared — so these subtrees are skipped entirely. Their
+            // bytes come from the manifest verbatim on every reconnect, so
+            // prefix-cache stability is preserved (review 5915330170, the
+            // registry companion to the sanitizer's enum/const
+            // instance-data rule; round 25 adds the two example spellings
+            // the sanitizer's literal-key line already carries — without
+            // them the canonicalizer reordered bytes inside `examples`
+            // objects the sanitizer had just promised byte-for-byte).
+            const INSTANCE_DATA_KEYS: &[&str] =
+                &["enum", "const", "default", "examples", "example"];
             // Sort `required` arrays (they are sets per JSON Schema spec).
             if let Some(Value::Array(req)) = map.get_mut("required") {
                 sort_string_array(req);
@@ -130,6 +135,33 @@ fn sort_string_array(arr: &mut [Value]) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn examples_literals_are_instance_data_and_keep_their_bytes() {
+        // `examples`/`example` are instance data like `enum`/`const`/
+        // `default` (round 25): an object literal under them is plugin
+        // data whose key order and array order are the only permitted
+        // bytes, so canonicalize must not reorder them. The sanitizer's
+        // byte-for-byte example pins cover sanitize alone; this pin covers
+        // the registry chain (sanitize → canonicalize) those pins skipped.
+        let mut schema = json!({
+            "type": "object",
+            "required": ["z", "a"],
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "examples": [{"b": 1, "a": [2, 1]}]
+                }
+            }
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(schema["required"], json!(["a", "z"]));
+        assert_eq!(
+            schema["properties"]["q"]["examples"],
+            json!([{"b": 1, "a": [2, 1]}]),
+            "the examples literal keeps manifest order verbatim"
+        );
+    }
 
     #[test]
     fn sorts_required_array() {
