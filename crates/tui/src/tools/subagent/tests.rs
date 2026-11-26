@@ -27770,13 +27770,19 @@ fn strict_mode_fails_the_agent_tool_closed() {
     // The `agent` tool carries its per-action requirements in a
     // `dependentSchemas` tree (`start` needs `prompt`, every targeted
     // action needs an `agent_id` or `name`), and the schema marks those
-    // fields optional. The strict strip pass deletes the tree silently and
-    // the optional-removal pass takes the fields with it, so a strict
-    // `agent` ships callable with `action` alone while the runtime rejects
-    // every call but the vacuous `wait` — the same every-call-broken class
-    // as `update_goal`. The tool ships unchanged and non-strict via
-    // `STRICT_UNUSABLE_TOOLS`; this census feeds its real schema through
-    // the pipeline so the list and the tool cannot drift apart.
+    // fields optional — a requirement table the strict subset cannot
+    // express. The strict path does NOT strip `dependentSchemas`: the
+    // composition gate's presence arm fails the tool closed on the
+    // keyword itself (round 29 narrative correction — the earlier
+    // "the strip pass deletes the tree" story was wrong; the strip is
+    // the xAI/Responses lanes' `dependentRequired`/`dependencies` pass,
+    // and it never touches this keyword). The counterfactual matters:
+    // were the gate arm removed, a strict `agent` would ship callable
+    // with `action` alone while the runtime rejects every call but the
+    // vacuous `wait`. The tool ships unchanged and non-strict via
+    // `STRICT_UNUSABLE_TOOLS` as defense-in-depth; this census feeds its
+    // real schema through the pipeline so the list and the tool cannot
+    // drift apart.
     let workspace = tempdir().expect("temp workspace");
     let manager = new_shared_subagent_manager(workspace.path().to_path_buf(), 1);
     let config = crate::config::Config {

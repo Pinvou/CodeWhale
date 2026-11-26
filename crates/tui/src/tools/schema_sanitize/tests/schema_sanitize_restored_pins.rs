@@ -1420,7 +1420,10 @@ fn xai_sanitize_flattens_malformed_union_values() {
 #[test]
 fn xai_sanitize_flattens_empty_root_union() {
     // An empty union describes nothing; the flattening pass turns the
-    // root into a plain object schema as before.
+    // root into a plain object schema as before. (Round 29: it also
+    // stays NOTE-SILENT — "exactly one of zero alternatives" is not a
+    // contract the flatten relaxed; required-less compositions with
+    // branches do disclose now.)
     let mut schema = json!({"oneOf": []});
 
     let note = sanitize_for_xai_parameters(&mut schema);
@@ -1691,9 +1694,13 @@ fn xai_sanitize_flattens_oneof_whose_bare_branches_arrive_already_identical() {
         schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
         "the root's shared properties must stay usable after the fallback: {schema}"
     );
-    assert_eq!(
-        note, None,
-        "bare branches carry no required groups, so the note is empty: {note:?}"
+    // Round 29: bare (required-less) branches now disclose the
+    // exactly-one relaxation — the flatten still merged alternatives the
+    // authored schema made exclusive, even with no required group to
+    // label.
+    assert!(
+        note.as_deref().is_some_and(|n| n.contains("Exactly one")),
+        "the bare-branch flatten is disclosed: {note:?}"
     );
 
     // The satisfiable twin: an anyOf with the same duplicate bare branches
@@ -1849,7 +1856,15 @@ fn xai_sanitize_flattens_oneof_gutted_branches_that_differ_only_in_annotations()
         schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
         "the root's shared properties must stay usable after the fallback: {schema}"
     );
-    assert_eq!(note, None);
+    // Round 29: a required-less composition discloses the exactly-one
+    // relaxation even when the branches are annotation-only — the
+    // flatten still merged alternatives the authored schema made
+    // exclusive (this pin's own comment says validation saw two
+    // identical exactly-one alternatives).
+    assert!(
+        note.as_deref().is_some_and(|n| n.contains("Exactly one")),
+        "the exactly-one flatten is disclosed: {note:?}"
+    );
     let validator = jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
         .build(&schema)
@@ -1984,9 +1999,12 @@ fn xai_sanitize_flattens_registry_pruned_cross_branch_required_union() {
         schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
         "the root's shared properties must stay usable after the fallback: {schema}"
     );
-    assert_eq!(
-        note, None,
-        "the pruned branches carry no required groups, so the note is empty: {note:?}"
+    // Round 29: the required-less composition discloses the exactly-one
+    // relaxation even though the groups were pruned upstream — the
+    // flatten still merged the two alternatives.
+    assert!(
+        note.as_deref().is_some_and(|n| n.contains("Exactly one")),
+        "the pruned-branch flatten is disclosed: {note:?}"
     );
     let validator = jsonschema::options()
         .with_draft(jsonschema::Draft::Draft202012)
@@ -2493,7 +2511,12 @@ fn xai_sanitize_registry_path_flattens_minproperties_floored_cross_required_unio
             schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
             "the root's shared properties must survive: {schema}"
         );
-        assert_eq!(note, None);
+        // Round 29: the required-less composition discloses the
+        // exactly-one relaxation (the flatten merged the alternatives).
+        assert!(
+            note.as_deref().is_some_and(|n| n.contains("Exactly one")),
+            "the floored-union flatten is disclosed: {note:?}"
+        );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
             .build(&schema)

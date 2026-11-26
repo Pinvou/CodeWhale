@@ -5089,7 +5089,15 @@ fn base_url_host(base_url: &str) -> Option<&str> {
     let without_scheme = base_url
         .split_once("://")
         .map_or(base_url, |(_, rest)| rest);
-    let authority = without_scheme.split('/').next()?;
+    // WHATWG ends the authority at `?` and `#` exactly like `/`
+    // (url-2.5.9 parser.rs: `parse_userinfo` and `parse_host` both break
+    // on `'/' | '?' | '#'`), so text past either is path or fragment and
+    // the LAST `@` the wire honors lives BEFORE it. Splitting on `/`
+    // alone let `rsplit('@')` walk through a `?`/`#` into fragment text:
+    // `http://x#@localhost` dials `x` while this read `localhost`, and
+    // the plaintext-HTTP admission sent the bearer key to `x` (round 29
+    // blocker). Split on the full terminator set.
+    let authority = without_scheme.split(['/', '?', '#']).next()?;
     if authority.contains('\\') {
         // WHATWG dials whatever precedes the backslash; `rsplit('@')`
         // would read the PATH's userinfo segment and answer the host

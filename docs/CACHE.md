@@ -120,18 +120,21 @@ per OS thread, so the boundary is per thread: two preparations on
 different threads hold independent memos; every stability claim above
 holds per thread.) Catalogs within
 the compile budget (the default catalog is far below it) never see the
-boundary. Declared change fields include provider identity
-(`change:provider`), the token budget (with the goal objective, as
-`change:goal`), the resolved model (`change:model`), and a re-planned route
-(`change:route`) — the route-relevant subset of the header set, which also
-declares session mode, translation, verbosity, system prompt, resume, and
-tool-surface changes. A flip that changes the gate's verdict — official host ↔
-foreign host, a padded URL, or a provider retype — changes the shaped tool
-bytes: when one of those declared fields moved with the flip, the pin
-re-declares through it; only a flip no declared field moved with surfaces as
-undeclared drift. A flip inside the same scope (the canonical beta ↔ non-beta
-path) leaves the shaped bytes identical and produces no drift at all. When
-moving endpoints, prefer a change the header set can name.
+boundary. The engine's declared change reasons are `model`, `mode`,
+`goal`, `system`, `resume`, and `tool_surface` (plus the
+`mcp-session-boot` install edge) — there is no `provider` or `route`
+declared reason, and no translation or verbosity field. A provider
+retype or a re-planned route does not flip the gate in place: either
+change respawns the engine, and the new session re-pins its prefix as
+`initial` (round 29 — this paragraph previously invented
+`change:provider`/`change:route` fields the tree has never had, and
+described provider flips as in-place re-declarations). A gate flip a
+declared reason genuinely accompanies — a model switch that moves the
+route with it — re-declares through `model`; the one transition with no
+declared reason is a config-file endpoint edit between sessions, which
+the respawn absorbs. A flip inside the same scope (the canonical beta ↔
+non-beta path) leaves the shaped bytes identical and produces no drift
+at all.
 
 ## Permissions fragment budget compatibility
 

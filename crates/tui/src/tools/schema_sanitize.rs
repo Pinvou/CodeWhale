@@ -175,14 +175,18 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
 /// requirements in a `dependentSchemas` tree (`start` needs `prompt`,
 /// every targeted action needs an `agent_id` or `name`;
 /// `tools/subagent/mod.rs` `input_schema`): a requirement table the
-/// strict subset cannot express, whose deletion would leave the tool
-/// callable with `action` alone while the
-/// runtime rejects every targeted call (round 28 correction, verified
-/// against the dispatch: `roster`, a scope-less `status`, and the
-/// vacuous `wait` — nothing can spawn — do answer; every other action
-/// errors on the stripped fields). The titular surface is dead, so the
-/// tool ships unchanged and non-strict instead (pinned beside the real
-/// schema, `tools/subagent/mod.rs`).
+/// strict subset cannot express. The strict path NEVER strips
+/// `dependentSchemas` — the composition gate's presence arm fails the
+/// tool closed on the keyword itself (that arm is the primary
+/// mechanism; this name-list entry is defense-in-depth — round 28's
+/// "the strip pass deletes that tree" story was wrong and round 29
+/// corrects the narrative everywhere it appeared). The runtime truth
+/// the census sentence states (verified against the dispatch:
+/// `roster`, a scope-less `status`, and the vacuous `wait` — nothing
+/// can spawn — answer; every targeted action errors) describes what
+/// WOULD break if the gate arm were ever removed. The titular surface
+/// is dead, so the tool ships unchanged and non-strict (pinned beside
+/// the real schema, `tools/subagent/mod.rs`).
 /// `Web` runtime-requires `query` for `search`, `url` for `fetch`, and
 /// `port` for `wait` (`tools/web_tool.rs` dispatch) — all three actions
 /// are dead, and after the optional-removal pass the generic removal note
@@ -328,6 +332,22 @@ const STRICT_UNREPRESENTABLE_KEYWORDS: &[&str] = &[
     "propertyNames",
     "unevaluatedProperties",
     "unevaluatedItems",
+    // Round 29: `$id` re-bases URI resolution on a conformant wire
+    // (draft 2020-12 §8.2) while every resolver in this module reads
+    // pointers against the document root, so a nested `$id` let the walk
+    // prove a reference resolvable that the wire resolves against a
+    // different base — judge-cleared, wire-rejected. Outside the
+    // documented subset, so it fails closed instead of shipping.
+    "$id",
+    // Round 29: `$dynamicRef` fails closed outright. The round-28
+    // ship-line (bare spelling stands for its definition) only ever
+    // admitted the POINTER-fragment spelling — serde_json's pointer
+    // reader dangles the meta-schema's actual plain-name spelling — and
+    // the pointer spelling is a keyword the DeepSeek documents never
+    // list, so shipping it verbatim under `strict: true` bet on
+    // undocumented wire behavior. Dangling, sibling-pinned, bare, and
+    // plain-name forms now all fail closed.
+    "$dynamicRef",
 ];
 
 /// The name-map keys whose map values are schemas keyed by NAME. Every
@@ -378,6 +398,13 @@ const STRICT_PAIR_JUDGE_MAX_DEPTH: usize = 128;
 /// into that fail-closed instead of shipping strict callable by nothing.
 const STRICT_PAIR_JUDGE_CALL_BUDGET: usize = 1024;
 
+/// Chase budget for the value funnel's `anyOf` alternatives (round 29):
+/// the chase recurses through the union tree per pinned value, and a
+/// pathological nesting would otherwise multiply frame counts. Shared
+/// per tool like the pair budget; exhaustion fails closed — the same
+/// line every budget here draws for a judged constraint.
+const STRICT_ANYOF_VALUE_CHASE_BUDGET: usize = 4096;
+
 /// The literal-keyword keys whose values are DATA (enum members, defaults,
 /// examples), not schemas. Shared by every walker alongside
 /// [`STRICT_NAME_MAP_KEYS`] for the same drift reasons, and pinned the
@@ -418,10 +445,6 @@ pub(crate) const STRICT_LITERAL_KEYS: &[&str] =
 /// follows DeepSeek's strict-mode documents and would strip keywords other
 /// providers document (e.g. `minItems`/`maxItems` on OpenAI).
 pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
-    // One compile budget per request preparation: the counter is the
-    // per-request compile-work bound, so it resets here, on the boundary
-    // one preparation per model round draws.
-    PATTERN_COMPILES_THIS_REQUEST.with(|counter| counter.set(0));
     let mut all_strict = true;
     for tool in tools {
         // Round 28: the pair-judge budget pools PER TOOL, refilled at
@@ -435,7 +458,21 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
         // judgment work is bounded; registration order decides nothing)
         // while the compile budget stays request-shared (the memo makes
         // compiles one-time across the preparation).
+        // Round 29: the compile budget pools per tool beside the pair
+        // budget. The request-shared pool let one tool's 128 distinct
+        // patterns exhaust compilation for every LATER tool — and
+        // pattern-skip abstains compatible, so a later tool shipped
+        // `strict: true` with its only advertised value violating the
+        // skipped pattern on the wire (strictly worse than the pair-budget
+        // drain r28 fixed). The memo still makes compiles one-time across
+        // the preparation, so legitimate catalogs pay each distinct
+        // pattern once and later tools mostly memo-hit. Within one tool
+        // the pool stays finite: a union-heavy schema can exhaust it and
+        // fail its own later subtrees closed — order-dependent
+        // availability inside the tool, never a wrong verdict.
+        PATTERN_COMPILES_THIS_REQUEST.with(|counter| counter.set(0));
         PAIR_JUDGE_CALLS_LEFT.with(|cell| cell.set(STRICT_PAIR_JUDGE_CALL_BUDGET));
+        ANYOF_VALUE_CHASE_CALLS_LEFT.with(|cell| cell.set(STRICT_ANYOF_VALUE_CHASE_BUDGET));
         if STRICT_UNUSABLE_TOOLS.contains(&tool.name.as_str()) {
             // The runtime demands parameters the schema marks optional (see
             // the list above); the removal pass would leave the tool strict
@@ -550,7 +587,8 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize, widened_consts:
         }
         note.push_str(&format!(
             "Extra-key acceptance (`additionalProperties`) was narrowed to `false` \
-             on {narrowed_maps} object schema{} under the strict contract.",
+             on {narrowed_maps} object schema{} with named properties under the strict \
+             contract (every object schema gains the same closure).",
             if narrowed_maps == 1 { "" } else { "s" }
         ));
     }
@@ -2060,9 +2098,15 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
         *schema = Value::Object(Map::new());
     }
 
-    let Some(obj) = schema.as_object_mut() else {
-        return specific_notes.values().next().cloned();
-    };
+    // The force-replace above guarantees an object map, so this arm is
+    // the object path unconditionally. (The former
+    // `specific_notes.values().next()` fallback was unreachable AND
+    // picked an arbitrary keyword's note from HashMap order — a latent
+    // nondeterminism a future refactor could have revived; removed
+    // round 29.)
+    let obj = schema
+        .as_object_mut()
+        .expect("schema was force-replaced to an object");
 
     let stripped_compositions: Vec<&'static str> = ["oneOf", "anyOf", "allOf"]
         .iter()
@@ -2320,7 +2364,17 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|schema_type| schema_type != "array")
-            || (obj.get("type").is_none() && is_object_schema(obj)))
+            || (obj.get("type").is_none() && is_object_schema(obj))
+            // Round 29: a typeless union node is the third carrier. The
+            // union admits no array instance, so `items` there can never
+            // bind — the same misplaced-keyword dead letter the two arms
+            // above fail — but it is neither a declared non-array type
+            // nor an injected-object carrier, so this detector skipped it
+            // and `items` shipped verbatim beside the union (probed:
+            // `{"anyOf":[string,integer],"items":{"type":"string"}}` in a
+            // required property shipped `strict: true`). A single-branch
+            // `anyOf` collapses into the node first and stays covered.
+            || (obj.get("type").is_none() && obj.contains_key("anyOf")))
     {
         return true;
     }
@@ -2646,23 +2700,12 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // lands `{"anyOf": [{"$ref": num}], "multipleOf": 0}` as exactly
         // this shape on the enforced clone, so the laundered form shipped
         // strict callable by nothing (round 23). A node whose forcing is
-        // unknown past a budget fails closed beside contradicting bounds
-        // for the same reason the composition arm's unknown does; a node
-        // carrying its own `anyOf` is the composition arm's domain (a
-        // branch may admit a non-numeric instance the ref pin cannot
-        // see).
-        if !obj.contains_key("type")
-            && !obj.contains_key("anyOf")
-            && obj.contains_key("$ref")
-            && let Some(definition) = ref_pinned_definition(obj, root)
-            && matches!(
-                numeric_forcing_of_definition(definition, root, 4),
-                NumericForcing::Forces | NumericForcing::Unknown
-            )
-            && numeric_bounds_contradiction(obj)
-        {
-            return true;
-        }
+        // Round 29: the former ref-pinned bounds arm is gone — since the
+        // round-27 sibling gate every contradiction source it read
+        // (`minimum`/`maximum`/`exclusive*`/`multipleOf`) is a judged
+        // sibling, so a `$ref` beside any of them fails closed at the
+        // gate before this arm could run (unreachable; it also hand-read
+        // `$ref` instead of drawing through [`schema_ref_keyword`]).
         // An `enum` member must satisfy the declared type AND every
         // documented bound, so a member set none of whose members clears
         // the bounds ships the same no-satisfiable-value shape as the
@@ -2780,8 +2823,9 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // coverage arm's domain — its key-set + value-level closure
         // judgment is strictly stronger for them — and are not re-judged
         // here. One call budget per node, the same envelope the coverage
-        // arm draws; past the budget the pair judge abstains compatible
-        // and a witness is assumed.
+        // arm draws; past the budget the pair judge fails closed when a
+        // judged constraint is present and abstains only between
+        // constraint-free nodes (round 23).
         if !obj.contains_key("properties")
             && obj.len() > 1
             && let Some(branches) = obj.get("anyOf").and_then(Value::as_array)
@@ -2937,11 +2981,6 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
                 "oneOf",
                 "allOf",
                 "$ref",
-                // Round 28: a bare `$dynamicRef` stands for its definition
-                // exactly like a bare `$ref` (draft 2020-12, no matching
-                // `$dynamicAnchor`), so it joins the same whitelist — the
-                // reference walk above already proves it resolvable.
-                "$dynamicRef",
             ]
             .iter()
             .any(|key| obj.contains_key(*key))
@@ -3126,10 +3165,9 @@ fn collapse_nullable_unions(schema: &mut Value) {
             // the authored semantics instead of a schema that lost a
             // required property.
             let collides = survivor.as_object().is_some_and(|inner| {
-                inner.iter().any(|(k, v)| {
-                    obj.get(k)
-                        .is_some_and(|parent| parent != v && !is_empty_container(parent))
-                })
+                inner
+                    .iter()
+                    .any(|(k, v)| parent_keyword_collides(obj, k, v))
             });
             if collides {
                 continue;
@@ -3160,6 +3198,27 @@ fn is_empty_container(value: &Value) -> bool {
         Value::Array(items) => items.is_empty(),
         _ => false,
     }
+}
+
+/// Whether a parent-side keyword value collides with a branch value
+/// being merged in. An empty parent container asserts nothing — EXCEPT
+/// beside an authored schema-form `additionalProperties: false`, where
+/// `properties: {}` asserts the empty language: no key is admitted, and
+/// merging a branch's members over it silently widened an intentionally
+/// unsatisfiable schema into a satisfiable one (round 29 — the
+/// boolean-spelled `allOf: [false]` was already kept for exactly this
+/// reason; the map spelling had the hole).
+fn parent_keyword_collides(obj: &Map<String, Value>, key: &str, branch_value: &Value) -> bool {
+    obj.get(key).is_some_and(|parent| {
+        if parent == branch_value {
+            return false;
+        }
+        if is_empty_container(parent) {
+            return parent.is_object()
+                && obj.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+        }
+        true
+    })
 }
 
 fn is_null_type(v: &Value) -> bool {
@@ -3221,6 +3280,8 @@ thread_local! {
         const { std::cell::Cell::new(0) };
     static PAIR_JUDGE_CALLS_LEFT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static ANYOF_VALUE_CHASE_CALLS_LEFT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
     #[cfg(test)]
     static PATTERN_LEAKED_KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -3231,8 +3292,9 @@ thread_local! {
 /// compile cost and the match cost; the pre-screen worst legal compile
 /// measured 11-15 ms, not the ~1.5 ms this comment used to claim, and a
 /// budget-full request paid ~1 s recurring) stay well under the seconds
-/// the unbounded rotation cost, while normal catalogs (every pattern
-/// cached after the first pass) never reach the budget at all.
+/// the unbounded rotation cost; the pool refills per tool (round 29) and
+/// the memo makes each distinct pattern a one-time compile, so
+/// legitimate catalogs spend the budget on first sight only.
 const STRICT_PATTERN_COMPILE_BUDGET: usize = 128;
 
 /// Judged keywords whose wire semantics conjunct with a sibling `$ref`
@@ -3271,16 +3333,15 @@ const REF_SIBLING_JUDGED_KEYWORDS: &[&str] = &[
 /// Round 27: whether this node pairs a `$ref` with a judged sibling pin —
 /// the conjunction the node-level judges cannot see across the reference
 /// edge.
-/// The reference keyword a schema node carries: `$ref`, or the draft
-/// 2020-12 `$dynamicRef` (round 28 — without a matching `$dynamicAnchor`
-/// it behaves exactly as `$ref`, so a dangling one is the same
-/// wire-error class the `$ref` arms fail closed, and sibling pins ride
-/// the same conjunction question). Every reference-reading site on the
-/// strict path draws through this helper so the two spellings cannot
-/// diverge; the Kimi/MFJS lanes keep their own `$ref` reads (that
-/// validator's allow-list predates the keyword).
+/// The reference keyword a schema node carries. `$dynamicRef` does NOT
+/// flow through here any more (round 29): the reference machinery used
+/// to treat the two spellings as equivalent, which shipped the
+/// pointer-fragment spelling — a keyword the DeepSeek documents never
+/// list — verbatim under `strict: true`, while the meta-schema's actual
+/// plain-name spelling dangled and failed. The keyword now sits in
+/// [`STRICT_UNREPRESENTABLE_KEYWORDS`] and fails closed in every form.
 fn schema_ref_keyword(obj: &Map<String, Value>) -> Option<&Value> {
-    obj.get("$ref").or_else(|| obj.get("$dynamicRef"))
+    obj.get("$ref")
 }
 
 fn ref_siblings_carry_judged_pins(obj: &Map<String, Value>) -> bool {
@@ -3551,6 +3612,23 @@ fn ecma_dot_exact_pattern(pattern: &str) -> String {
             '[' => {
                 in_class = true;
                 out.push('[');
+                // First-`]`-literal: both engines read `[]` / `[^]` as a
+                // literal `]` member (regex-syntax parse.rs — "an empty
+                // class is impossible to write"; ECMA-262 Annex B's
+                // RegularExpressionClass). Consume it so the class stays
+                // open and a dot after it stays class-internal — the
+                // round-29 blocker shipped because this tracker closed
+                // the class there and rewrote a wire-internal dot into a
+                // nested class, compiling the judge to a strictly wider
+                // automaton (`[]a.x]` matched `b` on this side only).
+                if chars.peek() == Some(&'^') {
+                    out.push('^');
+                    chars.next();
+                }
+                if chars.peek() == Some(&']') {
+                    out.push(']');
+                    chars.next();
+                }
             }
             ']' => {
                 in_class = false;
@@ -3622,15 +3700,29 @@ fn has_stacked_quantifier(pattern: &str) -> bool {
     let bytes = pattern.as_bytes();
     let mut index = 0usize;
     let mut in_class = false;
-    // True when the previous token outside a class was a quantifier
-    // (`*`, `+`, `?`) or the closing brace of a counted `{n[,m]}` group.
-    let mut after_quant = false;
+    // What the previous token outside a class was: a quantifier
+    // (`*`, `+`, `?`, or a valid counted `{n[,m]}` group), its LAZY `?`
+    // suffix, or neither. Three states because one `?` after a
+    // quantifier is the lazy suffix — legal in both dialects and
+    // `is_match`-invariant (`.*?` is ubiquitous in real patterns; round
+    // 29 stopped screening it) — while a quantifier after a quantifier
+    // (`a**`, `a*+`, `a{2,3}*`), a lazy suffix after a lazy suffix
+    // (`a*??`), or a quantifier after a lazy one (`a*?+`) compiles here
+    // (re-quantification) and is a SyntaxError on the wire.
+    #[derive(Default, PartialEq)]
+    enum Adjacency {
+        #[default]
+        None,
+        Quant,
+        Lazy,
+    }
+    let mut after = Adjacency::None;
     while index < bytes.len() {
         let byte = bytes[index];
         if byte == b'\\' {
             // An escaped pair contributes a literal on both dialects.
             index += 2;
-            after_quant = false;
+            after = Adjacency::None;
             continue;
         }
         if in_class {
@@ -3643,15 +3735,31 @@ fn has_stacked_quantifier(pattern: &str) -> bool {
         match byte {
             b'[' => {
                 in_class = true;
-                after_quant = false;
+                after = Adjacency::None;
+                // First-`]`-literal (both dialects — see
+                // `ecma_dot_exact_pattern`): a leading `]` is a member,
+                // not the close.
+                let mut cursor = index + 1;
+                if bytes.get(cursor) == Some(&b'^') {
+                    cursor += 1;
+                }
+                if bytes.get(cursor) == Some(&b']') {
+                    index = cursor;
+                }
             }
             b'*' | b'+' | b'?' => {
-                if after_quant {
-                    return true;
+                match after {
+                    // `?` right after a quantifier is the lazy suffix —
+                    // consume it; right after a lazy suffix, or any
+                    // quantifier after a quantifier/lazy, stacks.
+                    Adjacency::Quant if byte == b'?' => after = Adjacency::Lazy,
+                    Adjacency::None => after = Adjacency::Quant,
+                    _ => return true,
                 }
-                after_quant = true;
             }
-            b'{' if after_quant => return true,
+            // A counted group after a quantifier or a lazy suffix stacks
+            // (`a{2}{3}` re-quantifies here, SyntaxError on the wire).
+            b'{' if after != Adjacency::None => return true,
             b'{' => {
                 // Counted repetition or literal brace: only the valid
                 // `{n[,m]}` spelling ends in a quantifiable position.
@@ -3662,13 +3770,13 @@ fn has_stacked_quantifier(pattern: &str) -> bool {
                     cursor += 1;
                 }
                 if cursor > index + 1 && cursor < bytes.len() && bytes[cursor] == b'}' {
-                    after_quant = true;
+                    after = Adjacency::Quant;
                     index = cursor;
                 } else {
-                    after_quant = false;
+                    after = Adjacency::None;
                 }
             }
-            _ => after_quant = false,
+            _ => after = Adjacency::None,
         }
         index += 1;
     }
@@ -3698,7 +3806,19 @@ fn has_class_set_operation(pattern: &str) -> bool {
             continue;
         }
         match byte {
-            b'[' if !in_class => in_class = true,
+            b'[' if !in_class => {
+                in_class = true;
+                // First-`]`-literal (both dialects — see
+                // `ecma_dot_exact_pattern`): a leading `]` is a member,
+                // not the close, and not a nested-class opener.
+                let mut cursor = index + 1;
+                if bytes.get(cursor) == Some(&b'^') {
+                    cursor += 1;
+                }
+                if bytes.get(cursor) == Some(&b']') {
+                    index = cursor;
+                }
+            }
             b'[' => return true,
             b']' => in_class = false,
             _ if in_class => {
@@ -3902,6 +4022,18 @@ fn branch_shape_unrepresentable(branch: &Value) -> bool {
     let Some(obj) = branch.as_object() else {
         return true;
     };
+    if !is_schema_shaped_branch(branch) {
+        // The shapeless class — no `type`/`$ref`/`enum`/`const`: `{}`, an
+        // annotation-only map, a bare nested-`anyOf` map — is what the
+        // node-level arm fails at every branch array it visits ("a form
+        // the documents never describe"). Presence-based poison missed it
+        // because absence leaves no keyword to detect, and a shaped
+        // wrapper (`{"type":"string","anyOf":[<shapeless>,…]}`) laundered
+        // the branch one union deeper onto the wire under `strict: true`
+        // (round 29, probed on four shapes). The union verdict must
+        // match the node verdict, which fails this shape.
+        return true;
+    }
     if branch_carries_null_family(branch) {
         return true;
     }
@@ -3947,6 +4079,11 @@ fn branch_shape_unrepresentable(branch: &Value) -> bool {
         ("enum", Value::is_array),
         ("anyOf", Value::is_array),
         ("items", Value::is_object),
+        // Round 29: a malformed non-array `required` survives the strips
+        // and the prune (both only read the array form), so the junk
+        // shape the node arm fails poisons a witnessed branch too — a
+        // clean sibling used to ship it verbatim.
+        ("required", Value::is_array),
     ] {
         if obj.contains_key(key) && !obj.get(key).is_some_and(well_formed) {
             return true;
@@ -4050,9 +4187,11 @@ fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
 /// integral pair, where the modulo test is exact — float modulo on
 /// fractional multiples would guess at representation error rather than
 /// at the wire, so that combination keeps shipping (disclosed), and the
-/// one integral pair the modulo cannot evaluate (`i64::MIN % -1`
-/// overflows) is treated as not clearing, with the negative-`multipleOf`
-/// junk arm failing that node closed regardless. `pattern` is the node's
+/// one integral pair that once overflowed (`i64::MIN % -1` in the i64
+/// era) now evaluates exactly in i128 and clears — the node still fails
+/// closed, through the negative-`multipleOf` arm of
+/// [`fractional_multiple_verdict`] and the junk arm, not through the
+/// modulo. `pattern` is the node's
 /// compiled judge (see [`compiled_documented_pattern`]) — callers judge
 /// many values against one node, so the compile is hoisted to them.
 /// JSON-value equality for pinned values (`const`/`enum` members) with
@@ -4061,6 +4200,33 @@ fn pinned_canonical_bytes(value: &Value, out: &mut Vec<u8>) {
 /// members. Booleans are not numbers (`as_f64` is `None` on them), and a
 /// string never equals a number — the derived comparison still decides
 /// those.
+/// Round 29: whether a pinned value satisfies the target's own value
+/// pins — `enum` membership and `const` equality — through the same
+/// canonical equality the node-level arms use. An `enum` whose members
+/// blow the serialized-byte cap is unjudgeable here; the honest verdict
+/// is not-clearing (the target carries a judged constraint this funnel
+/// cannot check), the same fail-closed line the pair judge draws past
+/// its own cap.
+fn value_satisfies_target_value_pins(value: &Value, obj: &Map<String, Value>) -> bool {
+    if let Some(const_value) = obj.get("const")
+        && !pinned_values_equal(value, const_value)
+    {
+        return false;
+    }
+    if let Some(members) = obj.get("enum").and_then(Value::as_array) {
+        if !enum_members_within_judge_cap(members) {
+            return false;
+        }
+        if !members
+            .iter()
+            .any(|member| pinned_values_equal(value, member))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn pinned_values_equal(a: &Value, b: &Value) -> bool {
     pinned_values_equal_depth(a, b, 8)
 }
@@ -4070,11 +4236,11 @@ fn pinned_values_equal(a: &Value, b: &Value) -> bool {
 /// arrays and objects so a nested pinned value (`{"k": 2}` beside
 /// `enum: [{"k": 2.0}]`, `[[2]]` beside `[[2.0]]`) reads as contained the
 /// way the top-level spellings have since the round-19/20 fixes. The depth
-/// bound falls back to the derived `Value` equality past eight levels —
-/// the containment checks this feeds only miss a containment (a needless
-/// yield or an overclosure) at that depth, never invent one, and it keeps
-/// a hostile 4 MB pinned value from paying a full structural walk per
-/// comparison.
+/// bound reads containers past eight levels as uncontained (derived
+/// equality is never consulted at depth): the containment checks this
+/// feeds only miss a containment (a needless yield or an overclosure)
+/// at that depth, never invent one, and a hostile 4 MB pinned value
+/// stops paying a full structural walk per comparison at the bound.
 fn pinned_values_equal_depth(a: &Value, b: &Value, depth: usize) -> bool {
     // Integer-typed numbers compare EXACTLY: serde stores clean integers
     // as u64/i64, and the f64 projection collapses distinct integers at
@@ -4138,8 +4304,55 @@ fn value_clears_bounds_with(
     // strict with an empty wire value set — so the honest verdict here is
     // not-clearing. Every judge site (enum/const members, property leaves,
     // pair-side pins) funnels through this function and inherits the check.
-    if ref_siblings_carry_judged_pins(obj) {
+    // Round 29: the refusal covers the BARE reference too. A bare `$ref`
+    // keeps shipping at the node level, but its target's constraints ride
+    // the wire unjudged — this judge has no document root to resolve
+    // through, so a pinned member cleared against the empty local
+    // keyword set advertised a value the wire's conjunct rejects
+    // (`{"properties":{"u":{"properties":{"a":{"$ref":"#/n"}},
+    // "enum":[{"a":"x"}]}}}` shipped strict; the wire demands `a`
+    // numeric). The items arm already refused reference-shaped items.
+    if schema_ref_keyword(obj).is_some() {
         return false;
+    }
+    // Round 29: the target's own value pins — `enum` membership and
+    // `const` equality — bind in this funnel. The judge used to read
+    // them only through the node-level enum/const ARMS, never here, so
+    // an array-valued pin cleared `items` whose own `enum` rejects its
+    // elements (the const→enum landing itself manufactures
+    // `{"items":{"enum":["a"]},"enum":[["b"]]}`), and a property-level
+    // `anyOf` was invisible to every leaf judgment.
+    if !value_satisfies_target_value_pins(value, obj) {
+        return false;
+    }
+    // Round 29: a value target carrying `anyOf` requires the value to
+    // clear at least one alternative — the wire admits the value only
+    // through some branch, and no other judge reads a property- or
+    // items-level union here (the pair judge's chase covers schema-level
+    // unions only). A non-object alternative clears nothing; chase
+    // exhaustion fails closed.
+    if let Some(alternatives) = obj.get("anyOf").and_then(Value::as_array)
+        && !alternatives.is_empty()
+    {
+        let clears_some = alternatives.iter().any(|alternative| {
+            ANYOF_VALUE_CHASE_CALLS_LEFT.with(|cell| {
+                let left = cell.get();
+                if left == 0 {
+                    return false;
+                }
+                cell.set(left - 1);
+                true
+            }) && alternative.as_object().is_some_and(|alternative_obj| {
+                value_clears_bounds_with(
+                    value,
+                    alternative_obj,
+                    compiled_documented_pattern(alternative_obj).as_ref(),
+                )
+            })
+        });
+        if !clears_some {
+            return false;
+        }
     }
     // Round 26: `items` binds every element of an array pin the way
     // `properties` binds the members of an object pin — the member judges
@@ -4271,7 +4484,11 @@ fn value_clears_bounds_with(
 /// genuinely fractional `multipleOf`. An f64 decomposes exactly as
 /// `mantissa × 2^exponent` with a 53-bit integral mantissa, so
 /// `v % f == 0` mathematically iff `v` is divisible by that product —
-/// decidable in i128 while the shifted mantissa fits (subnormal, huge,
+/// decidable in i128 while the SHIFT COUNT fits — `checked_shl` guards
+/// the shift, not the magnitude, so shifted-out high bits truncate and a
+/// wrong `exact` can only surface as an extra abstention (every `Some`
+/// verdict still requires agreement with the wire's own IEEE remainder;
+/// round 29). Subnormal, huge,
 /// and past-2^127 shapes abstain). The exact verdict ships only in
 /// agreement with the f64 remainder the mainstream JSON-Schema
 /// validators compute on the member's own parsed float; a divergence
@@ -4300,7 +4517,22 @@ fn fractional_multiple_verdict(integral: i128, member: f64, multiple: f64) -> Op
         shifted.checked_rem(mantissa) == Some(0)
     };
     let float = member % multiple == 0.0;
-    if exact == float { Some(exact) } else { None }
+    if exact == float {
+        return Some(exact);
+    }
+    // An integral multiple (`trunc` round-trips: 3.0 yes, 0.7 no) is
+    // exactly representable in the wire's f64 — its own storage cannot
+    // round — so the IEEE reading IS the wire reading, and fmod is exact
+    // besides. A disagreement above is then decisive, not a
+    // representation zone: the member the wire parses (every instance
+    // rounds the same way) is genuinely not a multiple (`2^53+1` divides
+    // by 3 in i128; its parsed double is `2^53`, which does not — round
+    // 29 blocker for that enum). Genuinely fractional multiples keep the
+    // disclosed abstain line.
+    if multiple.trunc() == multiple {
+        return Some(float);
+    }
+    None
 }
 
 /// The enforced property closure of one `anyOf` branch: the key set an
@@ -4331,27 +4563,6 @@ fn branch_property_closure<'a>(
             .map(|properties| properties.keys().map(String::as_str).collect())
             .unwrap_or_default(),
     )
-}
-
-/// Resolve a `$ref`-pinned node to the definition it stands for, map-side:
-/// the sibling of [`resolved_branch_definition`] that starts from the
-/// node's own `$ref` (the gate sees the node as a `&Map`, and cloning it
-/// into a `Value` per call would cost a transient allocation on every
-/// reference-carrying node per request). Same inclusive hop budget, same
-/// pre-failed dangling/malformed/cyclic classes.
-fn ref_pinned_definition<'a>(obj: &'a Map<String, Value>, root: &'a Value) -> Option<&'a Value> {
-    let mut target = resolve_local_ref(root, schema_ref_keyword(obj).and_then(Value::as_str)?)?;
-    for _ in 1..=STRICT_REF_MAX_HOPS {
-        let Some(reference) = target
-            .as_object()
-            .and_then(|target_obj| schema_ref_keyword(target_obj))
-            .and_then(Value::as_str)
-        else {
-            break;
-        };
-        target = resolve_local_ref(root, reference)?;
-    }
-    Some(target)
 }
 
 /// Resolve a union branch to the schema it stands for: the branch itself
@@ -4747,7 +4958,22 @@ fn schema_pair_satisfiable(
     // constraint-free nodes nothing could have been proven either way and
     // the abstention stays compatible (round 23).
     if depth > STRICT_PAIR_JUDGE_MAX_DEPTH || *budget == 0 {
-        return !(carries_judged_constraints(a) || carries_judged_constraints(b));
+        // A side whose shape is a bare reference carries the resolved
+        // definition's judged keywords even though the raw side names
+        // none — resolution below REPLACES the side wholesale, so the
+        // skipped judgment would have consulted the target's bounds and
+        // pins. Reading only the raw sides here let a drained pool
+        // abstain a ref-pinned contradiction compatible and ship the
+        // union `strict: true` callable by nothing (round 29). The r27
+        // pre-check above already covers ref+judged-sibling shapes; this
+        // covers the bare-ref pair.
+        let side_carries = |side: &Value| {
+            carries_judged_constraints(side)
+                || side
+                    .as_object()
+                    .is_some_and(|side_obj| schema_ref_keyword(side_obj).is_some())
+        };
+        return !(side_carries(a) || side_carries(b));
     }
     *budget -= 1;
     // By the time the gate runs, the reference walk has already failed
@@ -5843,10 +6069,9 @@ fn collapse_single_element_unions(schema: &mut Value) {
         // bare-object injection leaves on `{"type":"object"}` would block
         // the merge against a properties-bearing single branch and fail a
         // schema closed that the documented lossless collapse serves.
-        let collides = inner.iter().any(|(k, v)| {
-            obj.get(k)
-                .is_some_and(|parent| parent != v && !is_empty_container(parent))
-        });
+        let collides = inner
+            .iter()
+            .any(|(k, v)| parent_keyword_collides(obj, k, v));
         if collides {
             // Keeping the keyword is the lossless choice for strict mode —
             // but it is not free on the sibling paths: the Moonshot MFJS
@@ -6018,6 +6243,14 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) -> usize {
     // without `contains` (which the compatibility gate rejects outright),
     // and dropping a bound only widens what the endpoint accepts.
     obj.remove("uniqueItems");
+    // Round 29: the content family. `contentEncoding`/`contentMediaType`
+    // assert string-instance facts (a base64-encoded body, an RFC-2046
+    // media type) and `contentSchema` asserts the decoded document's
+    // shape — none is in the documented subset, and removing them only
+    // relaxes what the endpoint accepts.
+    obj.remove("contentEncoding");
+    obj.remove("contentMediaType");
+    obj.remove("contentSchema");
     obj.remove("minProperties");
     obj.remove("maxProperties");
     obj.remove("minContains");
@@ -6286,6 +6519,20 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
             notes.push(format!(
                 "{prefix} of these parameter groups {verb} provided: {list}."
             ));
+        } else if !items.is_empty() {
+            // Round 29: a required-less composition still relaxed
+            // exactly-one semantics — the flatten merges alternatives
+            // that were mutually exclusive — but with no required group
+            // to label it used to emit NO note on this path, so the
+            // model saw a flat object and never learned the original
+            // alternatives were exclusive. The Anthropic path disclosed
+            // the same shape generically; this path now mirrors it, and
+            // the Kimi lane's "the flatten retains the dropped
+            // required-group contract as a prompt note" comment is true
+            // for every composition it flattens. An EMPTY union (zero
+            // alternatives) stays silent: "exactly one of nothing" is
+            // not a contract the flatten relaxed.
+            notes.push(root_composition_generic_note(key).to_string());
         }
     }
     if notes.is_empty() {
@@ -6358,8 +6605,31 @@ fn strip_dependent_keywords(schema: &mut Value) -> bool {
         Value::Object(obj) => {
             let mut dropped = obj.remove("dependentRequired").is_some();
             dropped |= obj.remove("dependentSchemas").is_some();
-            for value in obj.values_mut() {
-                dropped |= strip_dependent_keywords(value);
+            for (key, value) in obj.iter_mut() {
+                // Key-position discipline, the same dispatch the generic
+                // walk and the enforce pass use (round 29): literal-keyed
+                // values are INSTANCE DATA — the walker used to rewrite a
+                // pinned enum member carrying a `dependentRequired` key
+                // (mutating the accepted set) — and name-map KEYS route
+                // names, so a property literally named `dependentRequired`
+                // was deleted outright (and its dangling `required`
+                // pruned after it). Name-map VALUES are schema positions
+                // and still strip.
+                if STRICT_LITERAL_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
+                if matches!(
+                    key.as_str(),
+                    "properties" | "patternProperties" | "$defs" | "definitions" | "$def"
+                ) {
+                    if let Some(name_map) = value.as_object_mut() {
+                        dropped |= name_map.values_mut().any(strip_dependent_keywords);
+                    } else {
+                        dropped |= strip_dependent_keywords(value);
+                    }
+                } else {
+                    dropped |= strip_dependent_keywords(value);
+                }
             }
             dropped
         }
@@ -9703,6 +9973,11 @@ mod tests {
             "propertyNames",
             "unevaluatedProperties",
             "unevaluatedItems",
+            // Round 29: `$id` re-bases wire URI resolution while the
+            // resolvers read document-root pointers; `$dynamicRef` is
+            // undocumented by the DeepSeek contract. Both fail closed.
+            "$id",
+            "$dynamicRef",
         ];
         assert_eq!(STRICT_UNREPRESENTABLE_KEYWORDS.to_vec(), EXPECTED.to_vec());
     }
@@ -10878,8 +11153,8 @@ mod tests {
         assert_eq!(tool.strict, Some(true));
         assert!(
             tool.description
-                .contains("on 1 object schema under the strict contract"),
-            "only the outer node's own narrowing is claimed: {}",
+                .contains("on 1 object schema with named properties under the strict contract",),
+            "only the outer node's own narrowing is claimed (round 29 note wording): {}",
             tool.description
         );
         assert!(
@@ -18333,8 +18608,8 @@ mod strict_fixwave_r27 {
         let bare_ref = json!({ "$ref": "#/$defs/n" });
         let bare = bare_ref.as_object().expect("map");
         assert!(
-            value_clears_bounds_with(&json!(1), bare, None),
-            "a bare $ref imposes no member constraint here"
+            !value_clears_bounds_with(&json!(1), bare, None),
+            "a bare $ref refuses to clear pinned members (round 29): the              judge carries no document root, so the target's constraints              ride the wire unjudged — clearing against the empty local              keyword set advertised values the wire's conjunct rejects.              The round-27 line ('imposes no member constraint') encoded              the pre-E3 funnel; the bare ref itself still SHIPS at the              node level, pinned in strict_fixwave_r29."
         );
     }
 
@@ -18614,11 +18889,15 @@ mod strict_fixwave_r28 {
     }
 
     #[test]
-    fn dynamic_ref_dangling_fails_closed_like_ref() {
-        // Round 28: `$dynamicRef` (draft 2020-12) without a matching
-        // `$dynamicAnchor` behaves as `$ref` — a dangling one is the
-        // same wire-error class, and sibling pins ride the same
-        // conjunction. Pre-fix, both shapes shipped strict.
+    fn dynamic_ref_fails_closed_in_every_form() {
+        // Round 29 tightened round 28's line: `$dynamicRef` fails closed
+        // outright. Round 28's equivalence only ever admitted the
+        // pointer-fragment spelling (the meta-schema's plain-name
+        // spelling dangles in serde_json's pointer reader), and that
+        // spelling is a keyword the DeepSeek documents never list —
+        // shipping it verbatim under `strict: true` bet on undocumented
+        // wire behavior. Dangling, sibling-pinned, and resolvable forms
+        // all fail closed now.
         let (all, strict) = verdict(json!({
             "type": "object",
             "properties": {"u": {"type": "string", "$dynamicRef": "#/missing"}},
@@ -18642,8 +18921,24 @@ mod strict_fixwave_r28 {
             "required": ["u", "v"],
             "$defs": {"n": {"type": "string"}}
         }));
-        assert!(all, "a resolvable bare dynamic reference keeps shipping");
-        assert_eq!(strict, Some(true));
+        assert!(!all, "even a resolvable dynamic reference fails closed");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn id_keyword_fails_closed_as_unmodeled_base_uri() {
+        // Round 29: a nested `$id` re-bases URI resolution on a
+        // conformant wire while this module's resolvers read pointers
+        // against the document root, so the walk proved a reference
+        // resolvable the wire resolves elsewhere. Outside the documented
+        // subset — fail closed.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"$id": "https://x/inner", "type": "string"}},
+            "required": ["u"]
+        }));
+        assert!(!all, "an $id-carrying node fails closed");
+        assert_eq!(strict, None);
     }
 
     #[test]
@@ -18799,6 +19094,509 @@ mod strict_fixwave_r28 {
         assert!(
             label.contains("(+5 more)"),
             "25 unique names leave exactly 5 over the cap: {label}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod strict_fixwave_r29 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    #[test]
+    fn first_bracket_literal_class_no_longer_widens_the_judge() {
+        // Round 29 (D1): the dot-rewrite class tracker used to close the
+        // class at the first `]`, so `[]a.x]` was rewritten with the
+        // ECMA-exact dot class INJECTED INSIDE the wire's class — Rust's
+        // nested-class union then compiled the judge to "everything
+        // except the four line terminators" while the wire admits only
+        // {], a, ., x}. An enum member the wire rejects cleared and the
+        // tool shipped strict callable by nothing. The tracker now
+        // consumes the literal first `]` (both engines read it as a
+        // member), so the judge compiles the source verbatim and answers
+        // exactly what the wire answers.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "string",
+                "pattern": "[]a.x]",
+                "enum": ["b"]}},
+            "required": ["u"]
+        }));
+        assert!(
+            !all,
+            "a member the wire rejects must not clear: the judge is wire-exact"
+        );
+        assert_eq!(strict, None);
+        // Control: a member the wire's class admits still ships.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "string",
+                "pattern": "[]a.x]",
+                "enum": ["]"]}},
+            "required": ["u"]
+        }));
+        assert!(
+            all,
+            "a member inside the wire's class clears: {} strict is not set",
+            all
+        );
+        assert_eq!(strict, Some(true));
+        // The negated mirror now compiles verbatim too: the wire and the
+        // judge both read `[^]a.x]` as "not in {], a, ., x}", so "b"
+        // matches on both sides and the member ships.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "string",
+                "pattern": "[^]a.x]",
+                "enum": ["b"]}},
+            "required": ["u"]
+        }));
+        assert!(all, "the negated class is wire-exact after the fix: {all}");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn shapeless_branch_laundered_by_a_shaped_wrapper_poisons_the_union() {
+        // Round 29 (B1): presence-based poison missed the class defined
+        // by keyword ABSENCE. A shaped wrapper carried a shapeless branch
+        // one union deeper onto the wire under strict:true — the shape
+        // the node-level arm fails at every branch array it visits.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"anyOf": [
+                {"type": "string"},
+                {"type": "integer", "anyOf": [{"description": "x"}, {"type": "integer"}]}
+            ]}},
+            "required": ["u"]
+        }));
+        assert!(
+            !all,
+            "a shapeless branch nested inside a shaped wrapper poisons"
+        );
+        assert_eq!(strict, None);
+        // The bare nested-union branch is the same shapeless class at the
+        // node level, so it poisons a witnessed union too.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"anyOf": [
+                {"type": "string"},
+                {"anyOf": [{"type": "integer"}, {"type": "boolean"}]}
+            ]}},
+            "required": ["u"]
+        }));
+        assert!(!all, "a bare nested-union branch is shapeless and poisons");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn malformed_required_in_a_witnessed_branch_poisons_the_union() {
+        // Round 29 (B2): a malformed non-array `required` survives the
+        // strips and the prune (both read the array form only), so the
+        // junk shape the node arm fails poisons a witnessed branch too.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"anyOf": [
+                {"type": "string"},
+                {"type": "integer", "required": "a"}
+            ]}},
+            "required": ["u"]
+        }));
+        assert!(!all, "a malformed required rides no witness onto the wire");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn items_beside_a_typeless_union_fails_closed() {
+        // Round 29 (A1): the third misplaced-`items` carrier. The union
+        // admits no array instance, so `items` there can never bind —
+        // the same dead letter the declared-type and injected-object
+        // arms fail.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"req": {
+                "anyOf": [{"type": "string"}, {"type": "integer"}],
+                "items": {"type": "string"}
+            }},
+            "required": ["req"]
+        }));
+        assert!(
+            !all,
+            "items beside a typeless union is a dead letter, not a decoration"
+        );
+        assert_eq!(strict, None);
+        // Control: items on an ARRAY-typed property keeps shipping.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"req": {"type": "array", "items": {"type": "string"}}},
+            "required": ["req"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn integral_multiple_disagreement_is_decisive_above_two_pow_53() {
+        // Round 29 (E1): `2^53+1` divides by 3 in i128, but its parsed
+        // double is `2^53` — and the wire parses every instance the same
+        // way. For an exactly-representable integral multiple the IEEE
+        // reading IS the wire reading, so disagreement is decisive, not
+        // a representation zone.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"n": {"type": "number",
+                "enum": [9007199254740993i64], "multipleOf": 3}},
+            "required": ["n"]
+        }));
+        assert!(
+            !all,
+            "the wire rejects every rounded instance of the member"
+        );
+        assert_eq!(strict, None);
+        // Control: a member both readings accept keeps shipping.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"n": {"type": "number", "enum": [6], "multipleOf": 3}},
+            "required": ["n"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn exhausted_bare_ref_pair_fails_closed_when_targets_contradict() {
+        // Round 29 (F1, direct call): with the pair budget at zero, the
+        // exhaustion arm used to read the RAW sides' keyword lists — a
+        // bare `$ref` names none — and abstain the pair compatible,
+        // letting a union ship strict while the resolved definitions
+        // contradicted each other. A ref-shaped side carries its
+        // target's judged constraints.
+        let root = json!({
+            "type": "object",
+            "properties": {"x": {"enum": ["a"]}},
+            "required": ["x"],
+            "definitions": {
+                "a_def": {"type": "integer", "const": 1},
+                "b_def": {"type": "integer", "const": 2}
+            }
+        });
+        let a = json!({"$ref": "#/definitions/a_def"});
+        let b = json!({"$ref": "#/definitions/b_def"});
+        let mut budget = 0usize;
+        let satisfiable = schema_pair_satisfiable(&a, &b, &root, 0, &mut budget);
+        assert!(
+            !satisfiable,
+            "exhaustion must fail closed past a ref-pinned contradiction"
+        );
+    }
+
+    #[test]
+    fn compile_budget_pools_per_tool() {
+        // Round 29 (F5): the compile budget used to be request-shared,
+        // so a burner tool's 128 distinct patterns exhausted compilation
+        // for every LATER tool — and pattern-skip abstains compatible,
+        // so the later tool shipped strict with its only advertised
+        // value violating the skipped pattern. Per-tool pooling keeps
+        // the later tool judged (the memo still makes each distinct
+        // pattern a one-time compile across the preparation).
+        // Each burner property carries a member that SATISFIES its own
+        // pattern: compilation only happens where a pattern meets a
+        // value, so a pattern with no pinned member never spends the
+        // budget (the r26 budget-pin lesson). 130 satisfying pins spend
+        // 128 compiles and exhaust the pool.
+        let mut burner_properties = serde_json::Map::new();
+        for index in 0..130 {
+            burner_properties.insert(
+                format!("p{index}"),
+                json!({"type": "string",
+                    "pattern": format!("^r29burner{index}x$"),
+                    "enum": [format!("r29burner{index}x")]}),
+            );
+        }
+        let mut required = Vec::new();
+        for index in 0..130 {
+            required.push(Value::String(format!("p{index}")));
+        }
+        let burner = json!({
+            "type": "object",
+            "properties": Value::Object(burner_properties),
+            "required": required
+        });
+        let victim = json!({
+            "type": "object",
+            "properties": {"v": {"type": "string",
+                "pattern": "^r29victimuniqueaa$", "enum": ["b"]}},
+            "required": ["v"]
+        });
+        let mut tools = vec![probe_tool("burner", burner), probe_tool("victim", victim)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        assert_eq!(
+            tools[1].strict, None,
+            "the victim's budget is its own: its violating member must fail it closed,"
+        );
+        // `all` is false because the victim failed closed; the burner
+        // (patterns only, no violating members) ships strict beside it.
+        assert!(!all);
+    }
+
+    #[test]
+    fn strip_walker_keeps_same_named_properties_and_literal_data() {
+        // Round 29 (G1): the xAI/Responses strip pass walked name maps
+        // and literal data as schemas — a property NAMED
+        // `dependentRequired` was deleted outright and a pinned enum
+        // member carrying that key was mutated. The walker now draws the
+        // same key-position line every other walker does.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "dependentRequired": {"type": "string"},
+                "normal": {"type": "integer"}
+            },
+            "required": ["dependentRequired", "normal"],
+            "dependentRequired": {"normal": ["dependentRequired"]},
+            "items": {"enum": [{"dependentRequired": {"a": ["b"]}, "id": 1}]}
+        });
+        let dropped = sanitize_for_responses(&mut schema).is_some();
+        let obj = schema.as_object().expect("object");
+        let properties = obj
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("map");
+        assert!(
+            properties.contains_key("dependentRequired"),
+            "a property named after the keyword is data-routed, not a keyword: {properties:?}"
+        );
+        let items_enum = obj
+            .get("items")
+            .and_then(|items| items.get("enum"))
+            .and_then(Value::as_array)
+            .expect("enum survives");
+        assert_eq!(
+            items_enum[0].get("dependentRequired"),
+            Some(&json!({"a": ["b"]})),
+            "literal data inside a pinned member is byte-faithful"
+        );
+        // Control: a REAL dependentRequired keyword still strips (the
+        // note fires).
+        assert!(dropped, "the real keyword strip still fires the note");
+    }
+
+    #[test]
+    fn lazy_quantifiers_judge_instead_of_abstaining() {
+        // Round 29 (D2): `?` directly after a quantifier is the lazy
+        // suffix — legal in BOTH dialects and is_match-invariant. The
+        // screen used to abstain the family, so the ubiquitous `.*?`
+        // shipped unjudged.
+        let node = json!({ "pattern": "^a.*?b$" });
+        assert!(
+            compiled_documented_pattern(node.as_object().expect("map")).is_some(),
+            "a lazy quantifier compiles and judges"
+        );
+        // The lazy counted form judges too (legal in both dialects —
+        // screening it was the same over-abstention).
+        let node = json!({ "pattern": "a{2,3}?b" });
+        assert!(
+            compiled_documented_pattern(node.as_object().expect("map")).is_some(),
+            "the lazy counted quantifier compiles and judges"
+        );
+        // The stacked families still screen.
+        for hostile in ["a**", "a*+", "a*??", "a{2}{3}", "a*?{2}", "a*?+"] {
+            let node = json!({ "pattern": hostile });
+            assert!(
+                compiled_documented_pattern(node.as_object().expect("map")).is_none(),
+                "stacked forms still abstain: {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_properties_beside_authored_closure_keeps_the_authored_language() {
+        // Round 29 (G3): `properties: {}` beside an authored
+        // `additionalProperties: false` asserts the empty language; the
+        // collapse used to merge a single-branch's members over it and
+        // widen an intentionally unsatisfiable schema into a satisfiable
+        // one.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"a": {"type": "string"}}, "required": ["a"]}]
+        }));
+        assert!(!all, "the authored empty language must not be merged open");
+        assert_eq!(strict, None);
+        // Control: without the authored closure the lossless collapse
+        // still serves the schema.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {},
+            "allOf": [{"properties": {"a": {"type": "string"}}, "required": ["a"]}]
+        }));
+        assert!(
+            all,
+            "the lossless collapse survives without the closure: {all}"
+        );
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn content_family_strips_silently_on_the_strict_lane() {
+        // Round 29 (G4): the content family is outside the documented
+        // subset and its removal only relaxes what the endpoint accepts.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "string",
+                "contentEncoding": "base64",
+                "contentMediaType": "application/json",
+                "const": "x"}},
+            "required": ["u"]
+        }));
+        assert!(all, "content assertions do not fail the tool");
+        assert_eq!(strict, Some(true));
+        let obj = probe_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"u": {"type": "string", "contentEncoding": "base64"}},
+                "required": ["u"]
+            }),
+        );
+        let mut tools = vec![obj];
+        prepare_tools_for_strict_mode(&mut tools);
+        assert!(
+            tools[0]
+                .input_schema
+                .pointer("/properties/u/contentEncoding")
+                .is_none(),
+            "contentEncoding strips on the strict lane"
+        );
+    }
+
+    #[test]
+    fn items_value_pins_bind_array_elements() {
+        // Round 29 (F2): the items conjunct read only type/pattern/
+        // bounds/format — an items-side `enum`/`const` was invisible, so
+        // an array-valued pin cleared items that reject its elements on
+        // the wire (the shape the const-to-enum landing itself
+        // manufactures).
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "array",
+                "items": {"enum": ["a"]},
+                "enum": [["b"]]}},
+            "required": ["u"]
+        }));
+        assert!(
+            !all,
+            "the array pin's element violates items.enum: fail closed"
+        );
+        assert_eq!(strict, None);
+        // Control: a member whose element satisfies items.enum ships.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "array",
+                "items": {"enum": ["a"]},
+                "enum": [["a"]]}},
+            "required": ["u"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn property_level_anyof_requires_the_member_to_clear_an_alternative() {
+        // Round 29 (F3/E2): a property-level union was invisible to every
+        // leaf judgment — a pinned member violating ALL alternatives
+        // cleared and shipped strict callable by nothing.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "object",
+                "properties": {"a": {"anyOf": [{"type": "string"}, {"type": "number"}]}},
+                "required": ["a"],
+                "enum": [{"a": true}]}},
+            "required": ["u"]
+        }));
+        assert!(!all, "the member violates every alternative: fail closed");
+        assert_eq!(strict, None);
+        // Control: a member clearing one alternative ships.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "object",
+                "properties": {"a": {"anyOf": [{"type": "string"}, {"type": "number"}]}},
+                "required": ["a"],
+                "enum": [{"a": "x"}]}},
+            "required": ["u"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn bare_ref_target_refuses_to_clear_pinned_members() {
+        // Round 29 (E3): a bare `$ref` keeps SHIPPING, but its target's
+        // constraints ride the wire unjudged and this judge has no root
+        // to resolve through — clearing a pinned member against the
+        // empty local keyword set advertised a value the wire's conjunct
+        // rejects.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "object",
+                "properties": {"a": {"$ref": "#/definitions/n"}},
+                "required": ["a"],
+                "enum": [{"a": "x"}]}},
+            "required": ["u"],
+            "definitions": {"n": {"type": "number"}}
+        }));
+        assert!(!all, "the member is not honestly clearable past a bare ref");
+        assert_eq!(strict, None);
+        // Control: without a pinned member the bare ref keeps shipping.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "object",
+                "properties": {"a": {"$ref": "#/definitions/n"}},
+                "required": ["a"]}},
+            "required": ["u"],
+            "definitions": {"n": {"type": "number"}}
+        }));
+        assert!(all, "the bare reference itself keeps shipping: {all}");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn required_less_root_composition_still_discloses_the_flatten() {
+        // Round 29 (H1): a required-less root oneOf flattens with the
+        // same exactly-one relaxation as a required-full one — the note
+        // used to be dropped on this path, so the model never learned
+        // the alternatives were exclusive.
+        let mut schema = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}},
+                {"type": "object", "properties": {"b": {"type": "string"}}}
+            ]
+        });
+        let note = sanitize_for_responses(&mut schema);
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("Exactly one")),
+            "the generic composition note fires for required-less branches: {note:?}"
         );
     }
 }

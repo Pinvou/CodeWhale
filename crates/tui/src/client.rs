@@ -13513,6 +13513,26 @@ mod tests {
                     .to_string()
                     .contains("Refusing insecure base URL")
             );
+            // Round 29: WHATWG ends the authority at `?` and `#` exactly
+            // like `/`, so `http://x#@localhost` dials host `x` while a
+            // `rsplit('@')` that walked through the `#` answered
+            // `localhost` and the loopback admission sent the bearer key
+            // to `x` in cleartext. The extractor splits on the full
+            // terminator set; the fragment's `@` is never a userinfo
+            // separator.
+            let fragment = validate_base_url_security("http://x#@localhost")
+                .expect_err("fragment-disguised host must not auto-allow");
+            assert!(fragment.to_string().contains("Refusing insecure base URL"));
+            let query = validate_base_url_security("http://x?@localhost")
+                .expect_err("query-disguised host must not auto-allow");
+            assert!(query.to_string().contains("Refusing insecure base URL"));
+            let fragment_port = validate_base_url_security("http://x:80#y@localhost")
+                .expect_err("port+fragment disguise must not auto-allow");
+            assert!(
+                fragment_port
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
             // Other schemes keep refusing even on a loopback host: the
             // local-host arm keys on the http scheme.
             let ftp = validate_base_url_security("ftp://localhost/file")

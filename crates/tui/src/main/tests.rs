@@ -517,7 +517,7 @@ fn doctor_provider_json_redacts_every_credential_url_to_its_authority() {
             provider: Some(provider.as_str().to_string()),
             ..Config::default()
         };
-        let report = doctor_provider_model_report_json(&config);
+        let report = doctor_provider_model_report_json(&config, &doctor_launch_identity(&config));
         for field in ["credential_url", "credential_docs_url"] {
             let Some(value) = report["auth"][field].as_str() else {
                 continue;
@@ -650,7 +650,8 @@ fn resolve_api_key_source_does_not_clone_openai_codex_env_tokens() {
     };
 
     let source = resolve_api_key_source(&config);
-    let report = doctor_provider_model_report_json(&config).to_string();
+    let report =
+        doctor_provider_model_report_json(&config, &doctor_launch_identity(&config)).to_string();
 
     assert_eq!(source, ApiKeySource::OAuth);
     assert_eq!(doctor_api_key_source_label(source), "oauth_unprobed");

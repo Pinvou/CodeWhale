@@ -6450,30 +6450,43 @@ fn doctor_runtime_telemetry(config: &Config) -> (bool, &'static str) {
     }
 }
 
-fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
+fn doctor_operate_fleet_report_json(
+    config: &Config,
+    identity: &crate::config::ProviderIdentity,
+    workspace: &Path,
+) -> serde_json::Value {
     use serde_json::json;
 
-    let provider = config.api_provider();
+    // Round 29 (K2): identity-scoped like provider_model above — the
+    // subagent knobs answered the raw typing while the auth half and the
+    // capability block answered the launch identity.
+    let mut scoped_config = config.clone();
+    scoped_config.scope_to_provider_identity(identity);
+    let scoped_config = &scoped_config;
+    let provider = scoped_config.api_provider();
     // Doctor reports configured routing posture only. In particular it must
     // never consume an external-file grant merely to label Fleet readiness.
     let credential = resolve_credential_diagnostic(config);
     let has_credentials_or_local = credential.availability.certifies_ready();
-    let subagents_enabled = config.subagents_enabled_for_provider(provider);
+    let subagents_enabled = scoped_config.subagents_enabled_for_provider(provider);
     let disabled_reason = if subagents_enabled {
         None
     } else {
         Some(
-            config
+            scoped_config
                 .subagents_disabled_reason()
                 .unwrap_or("disabled for active provider"),
         )
     };
-    let max_subagents = config.max_subagents_for_provider(provider);
-    let launch_concurrency = config.launch_concurrency_for_provider(provider);
-    let max_admitted = config.max_admitted_subagents_for_provider(provider);
-    let max_spawn_depth = config.subagent_max_spawn_depth_for_provider(provider);
-    let roster =
-        crate::fleet::identity::load_effective_roster(&config.fleet_config(), workspace, None);
+    let max_subagents = scoped_config.max_subagents_for_provider(provider);
+    let launch_concurrency = scoped_config.launch_concurrency_for_provider(provider);
+    let max_admitted = scoped_config.max_admitted_subagents_for_provider(provider);
+    let max_spawn_depth = scoped_config.subagent_max_spawn_depth_for_provider(provider);
+    let roster = crate::fleet::identity::load_effective_roster(
+        &scoped_config.fleet_config(),
+        workspace,
+        None,
+    );
     let mut built_in_members = 0usize;
     let mut plugin_members = 0usize;
     let mut config_members = 0usize;
@@ -6519,7 +6532,7 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     json!({
         "ready": has_credentials_or_local && runtime_ready && roster_ready,
         "provider": {
-            "id": config.provider_identity_for(provider),
+            "id": identity.key,
             "auth": {
                 "present_or_local": has_credentials_or_local,
                 "source": doctor_api_key_source_label(credential.source),
@@ -6558,11 +6571,24 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     })
 }
 
-fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
+fn doctor_provider_model_report_json(
+    config: &Config,
+    identity: &crate::config::ProviderIdentity,
+) -> serde_json::Value {
     use serde_json::json;
 
-    let provider = config.api_provider();
-    let credential = resolve_credential_diagnostic(config);
+    // Round 29 (K2): identity-scoped like the capability block (M10's
+    // rule). The raw root's provider/model fields answered the raw
+    // document while the same report's capability/route/strict sections
+    // answered the launch identity — a settings re-point produced
+    // `capability.resolved_provider: "ds4"` beside
+    // `provider_model.provider.id: "custom"` in one report (reproduced
+    // round 29). Scoping mirrors `provider_capability_report`.
+    let mut scoped_config = config.clone();
+    scoped_config.scope_to_provider_identity(identity);
+    let scoped_config = &scoped_config;
+    let provider = scoped_config.api_provider();
+    let credential = resolve_credential_diagnostic(scoped_config);
     let auth_present_or_local = credential.availability.certifies_ready();
     let credential_help = provider.credential_help();
     let credential_url = credential_help
@@ -6574,11 +6600,11 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
 
     json!({
         "provider": {
-            "id": config.provider_identity_for(provider),
+            "id": identity.key,
             "display": provider.display_name(),
         },
         "model": {
-            "resolved": config.default_model(),
+            "resolved": scoped_config.default_model(),
         },
         "auth": {
             "present_or_local": auth_present_or_local,
@@ -6730,6 +6756,7 @@ fn doctor_external_credential_consent_json(config: &Config) -> serde_json::Value
 fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Value {
     use serde_json::json;
 
+    let identity = doctor_launch_identity(config);
     let (state, source) = doctor_setup_state(config, workspace);
     let (default_mode, default_mode_source) = doctor_runtime_default_mode();
     let (permission_posture, permission_posture_source) = doctor_runtime_permission_posture();
@@ -6837,8 +6864,8 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
                 "source": "workspace",
             },
         },
-        "provider_model": doctor_provider_model_report_json(config),
-        "operate_fleet": doctor_operate_fleet_report_json(config, workspace),
+        "provider_model": doctor_provider_model_report_json(config, &identity),
+        "operate_fleet": doctor_operate_fleet_report_json(config, &identity, workspace),
         "consistency": doctor_setup_consistency(&state, source),
         "next_actions": {
             "constitution": "/constitution",
@@ -7376,19 +7403,16 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
     json!({
         "provider": target.provider,
         "provider_source": doctor_provider_source(config),
-        // The table key follows the LAUNCH identity: for a custom identity
-        // the raw root's `provider` string names a table no session serves
-        // (the settings re-point), so the identity's own key is the table
-        // the session reads. The legacy literal custom route has no table
-        // at all — the session reads the root — and answers from the
-        // helper's honest branch instead of naming `providers.custom`.
-        "provider_config_table": if identity.provider == crate::config::ApiProvider::Custom
-            && !config.uses_legacy_literal_custom_route()
-        {
-            format!("providers.{}", identity.key)
-        } else {
-            doctor_provider_config_table(config, identity.provider)
-        },
+        // The table key follows the LAUNCH identity. Round 29 (K1): the
+        // legacy-root question keys on the identity's own `exact_id`
+        // (None exactly when the identity IS the literal root), not on
+        // the raw document — a settings re-point (`default_provider =
+        // "ds4"`) serves `providers.ds4` even while the raw config keeps
+        // the legacy literal custom shape, and keying on the raw
+        // document labeled the served table "root (legacy literal
+        // custom)" beside a base_url the same report resolved from
+        // providers.ds4 (reproduced round 29).
+        "provider_config_table": doctor_provider_config_table(&identity),
         "model": target.model,
         "route_identity": route_identity,
         // Resolved routes answer from the candidate's own protocol — the
@@ -7424,14 +7448,13 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
     })
 }
 
-fn doctor_provider_config_table(config: &Config, provider: crate::config::ApiProvider) -> String {
-    if provider != crate::config::ApiProvider::Custom {
-        return provider_config_table_key(provider).to_string();
+fn doctor_provider_config_table(identity: &crate::config::ProviderIdentity) -> String {
+    if identity.provider != crate::config::ApiProvider::Custom {
+        return provider_config_table_key(identity.provider).to_string();
     }
-    if config.uses_legacy_literal_custom_route() {
-        "root (legacy literal custom)".to_string()
-    } else {
-        format!("providers.{}", config.provider_identity_for(provider))
+    match identity.exact_id {
+        Some(ref key) => format!("providers.{}", key),
+        None => "root (legacy literal custom)".to_string(),
     }
 }
 
@@ -7986,12 +8009,16 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             recommended_base_url: None,
         };
     }
-    // The Anthropic Messages wire forwards `function.strict` untranslated on
-    // every official path — the chat-completions strip does not apply there —
-    // while the beta message below describes a chat-completions surface an
-    // Anthropic-dialect route must not be pointed at. Answer that provider
-    // from the wire, not from the URL kind: the flag IS sent, and the
-    // beta/non-beta recommendation is withheld for the dialect.
+    // The Anthropic Messages wire forwards the per-tool top-level `strict`
+    // field untranslated on every official path (`client/anthropic.rs`
+    // writes tool-level `strict` — the Messages dialect has no `function`
+    // wrapper, so the round-28-era "function.strict" wording named a path
+    // that does not exist on this wire; corrected round 29) — the
+    // chat-completions strip does not apply there — while the beta message
+    // below describes a chat-completions surface an Anthropic-dialect
+    // route must not be pointed at. Answer that provider from the wire,
+    // not from the URL kind: the flag IS sent, and the beta/non-beta
+    // recommendation is withheld for the dialect.
     if effective_wire == codewhale_config::provider::WireFormat::AnthropicMessages {
         return DoctorStrictToolModeStatus {
             enabled: true,
@@ -8001,8 +8028,10 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             // legacy `api.deepseeki.com` compat host, which is not an
             // official endpoint (docs/REBRAND.md) — the same wording the
             // provider_mismatch arm uses ("recognized").
-            message: "enabled; the Anthropic wire forwards function.strict \
-                      untranslated on this DeepSeek-family endpoint"
+            message: "enabled; the Anthropic wire forwards the per-tool \
+                      top-level `strict` field untranslated on this \
+                      DeepSeek-family endpoint; tool_choice is omitted on \
+                      requests whose thinking is on the wire"
                 .to_string(),
             recommended_base_url: None,
         };
@@ -15104,6 +15133,11 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "official_route");
         assert!(status.function_strict_sent);
         assert!(status.message.contains("Anthropic wire forwards"));
+        assert!(status.message.contains("per-tool"));
+        assert!(
+            !status.message.contains("function.strict"),
+            "the Messages dialect has no function wrapper (round 29)"
+        );
         assert!(status.recommended_base_url.is_none());
     }
 
@@ -15133,6 +15167,11 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "official_route");
         assert!(status.function_strict_sent);
         assert!(status.message.contains("Anthropic wire forwards"));
+        assert!(status.message.contains("per-tool"));
+        assert!(
+            !status.message.contains("function.strict"),
+            "the Messages dialect has no function wrapper (round 29)"
+        );
         assert!(status.recommended_base_url.is_none());
     }
 
@@ -15225,6 +15264,11 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "official_route");
         assert!(status.function_strict_sent);
         assert!(status.message.contains("Anthropic wire forwards"));
+        assert!(status.message.contains("per-tool"));
+        assert!(
+            !status.message.contains("function.strict"),
+            "the Messages dialect has no function wrapper (round 29)"
+        );
         assert!(status.recommended_base_url.is_none());
     }
 
@@ -15820,8 +15864,9 @@ mod terminal_mode_tests {
         let config = custom_exec_config("custom-a");
         let workspace = tempfile::tempdir().expect("doctor workspace");
 
-        let operate = doctor_operate_fleet_report_json(&config, workspace.path());
-        let provider_model = doctor_provider_model_report_json(&config);
+        let identity = doctor_launch_identity(&config);
+        let operate = doctor_operate_fleet_report_json(&config, &identity, workspace.path());
+        let provider_model = doctor_provider_model_report_json(&config, &identity);
         let capability = provider_capability_report(&config);
         let route = doctor_route_report(&config);
 
@@ -15891,7 +15936,11 @@ mod terminal_mode_tests {
         .expect("project builder");
         let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
 
-        let operate = doctor_operate_fleet_report_json(&Config::default(), &workspace);
+        let operate = doctor_operate_fleet_report_json(
+            &Config::default(),
+            &doctor_launch_identity(&Config::default()),
+            &workspace,
+        );
         let layers = operate["roster"]["multi_layer"]
             .as_array()
             .expect("multi_layer array");
@@ -21363,6 +21412,79 @@ mod strict_doctor_fixwave_r22 {
             ..Default::default()
         };
         (tmp, config, home, env_lock)
+    }
+
+    #[test]
+    fn doctor_table_and_provider_model_labels_follow_the_identity_off_a_legacy_root() {
+        // Round 29 (K1+K2): the raw config keeps the legacy literal
+        // custom shape (provider = "custom", no providers.custom table,
+        // root base_url) while settings re-point the launch to
+        // providers.ds4. The session serves ds4 — the route report's own
+        // base_url resolved from ds4's table — but the table label keyed
+        // the legacy-root question on the RAW document and answered
+        // "root (legacy literal custom)", and the provider_model /
+        // operate_fleet blocks answered the raw provider/model fields:
+        // one internally contradictory report. Every block now answers
+        // the launch identity.
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let codewhale_home = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_provider = \"ds4\"\n",
+        )
+        .expect("plant remembered provider");
+        let config = Config {
+            provider: Some("custom".to_string()),
+            base_url: Some("https://legacy-root.example/v1".to_string()),
+            default_text_model: Some("gateway-model-x".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "ds4".to_string(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+                        model: Some("deepseek-v4-flash".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let identity = doctor_launch_identity(&config);
+        assert_eq!(identity.provider, crate::config::ApiProvider::Custom);
+        assert_eq!(
+            identity.key, "ds4",
+            "settings re-point wins the launch identity"
+        );
+
+        let route = doctor_route_report(&config);
+        assert_eq!(
+            route["provider_config_table"], "providers.ds4",
+            "the table label keys the legacy question on the identity: {}",
+            route
+        );
+        let provider_model = doctor_provider_model_report_json(&config, &identity);
+        assert_eq!(
+            provider_model["provider"]["id"], "ds4",
+            "the provider_model block names the launch identity: {}",
+            provider_model
+        );
+        assert_eq!(
+            provider_model["model"]["resolved"], "deepseek-v4-flash",
+            "the model reads the served table's chain: {}",
+            provider_model
+        );
+        let fleet = doctor_operate_fleet_report_json(&config, &identity, tmp.path());
+        assert_eq!(
+            fleet["provider"]["id"], "ds4",
+            "the operate_fleet block names the launch identity: {}",
+            fleet
+        );
     }
 
     #[test]

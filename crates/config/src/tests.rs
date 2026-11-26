@@ -9605,3 +9605,27 @@ fn base_url_host_extraction_refuses_backslash_authorities() {
     assert!(!base_url_uses_local_host("http://localhost\\@evil.com"));
     assert!(!base_url_uses_local_host("HTTP://LOCALHOST.attacker.com"));
 }
+
+#[test]
+fn base_url_host_extraction_ends_authority_at_query_and_fragment() {
+    // Round 29: WHATWG ends the authority at `?` and `#` exactly like `/`
+    // (url-2.5.9 parser.rs — `parse_userinfo` and `parse_host` both break
+    // on `'/' | '?' | '#'`), so `http://x#@localhost` dials host `x` with
+    // fragment `#@localhost` while a `rsplit('@')` walked through the
+    // `#` into fragment text and answered `localhost` — the plaintext-HTTP
+    // admission then sent the bearer key to the remote host. The
+    // extraction must split on the full terminator set; the fragment's
+    // `@` is never a userinfo separator.
+    assert!(!base_url_uses_local_host("http://x#@localhost"));
+    assert!(!base_url_uses_local_host("http://x?@localhost"));
+    assert!(!base_url_uses_local_host("http://x:80#y@localhost"));
+    assert!(!base_url_uses_local_host("HTTP://X#@LOCALHOST"));
+    // Fragment text containing a loopback-looking host must not flip the
+    // dialed remote host either way.
+    assert!(!base_url_uses_local_host("http://x#@127.0.0.1"));
+    // A genuine loopback authority with a fragment stays loopback: the
+    // wire dials 127.0.0.1 and drops the fragment.
+    assert!(base_url_uses_local_host("http://127.0.0.1#@localhost"));
+    assert!(base_url_uses_local_host("http://localhost#/whatever"));
+    assert!(base_url_uses_local_host("http://localhost?x=1"));
+}
