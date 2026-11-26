@@ -7075,6 +7075,12 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
         "https://api.deepseek.com",
         "https://api.deepseek.com/v1/",
         "https://api.deepseek.com/beta",
+        // The legacy compat host the TUI strict/beta routing already
+        // recognizes (round 25; docs/REBRAND.md — not an official
+        // endpoint) — the same three paths per host.
+        "https://api.deepseeki.com",
+        "https://api.deepseeki.com/v1/",
+        "https://api.deepseeki.com/beta",
     ] {
         assert!(provider_base_url_is_official(
             ProviderKind::Deepseek,
@@ -7088,6 +7094,21 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
     assert!(!provider_base_url_is_official(
         ProviderKind::Deepseek,
         "https://api.deepseek.com.evil.example/v1"
+    ));
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "https://api.deepseeki.com.evil.example/v1"
+    ));
+    // Round 27: no whitespace trimming — the TUI strict route gate rejects
+    // padded URLs outright, and this matcher answers the same question the
+    // gate answers, so a padded URL is official to neither.
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "  https://api.deepseek.com/v1"
+    ));
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "https://api.deepseek.com/v1  "
     ));
 }
 
@@ -9559,4 +9580,52 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     })
     .unwrap();
     assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
+}
+
+#[test]
+fn base_url_host_extraction_refuses_backslash_authorities() {
+    // WHATWG (url-2.5.9 parser.rs — the parser reqwest runs) terminates
+    // the authority at a backslash in special schemes exactly like `/`,
+    // `?`, or `#`, so `http://evil.com\@localhost` dials `evil.com` with
+    // path `/@localhost/` while a naive `rsplit('@')` reads the path's
+    // userinfo segment and answers `localhost` (round 28 blocker — the
+    // predicate feeds the plaintext-HTTP admission). An authority
+    // containing `\` cannot be parsed into the dialed host, so the honest
+    // answer is not-loopback. Userinfo without a backslash still splits
+    // the same way WHATWG does.
+    assert!(base_url_uses_local_host("http://localhost:8080"));
+    assert!(base_url_uses_local_host("http://me@localhost"));
+    assert!(base_url_uses_local_host("http://[::1]:9000"));
+    // userinfo without a backslash: the wire dials localhost, so the
+    // predicate answers loopback — the same answer WHATWG gives.
+    assert!(base_url_uses_local_host("http://evil.com@localhost"));
+    assert!(!base_url_uses_local_host("http://localhost.evil.com"));
+    assert!(!base_url_uses_local_host("http://evil.com\\@localhost"));
+    assert!(!base_url_uses_local_host("http://evil.com\\\\@localhost"));
+    assert!(!base_url_uses_local_host("http://localhost\\@evil.com"));
+    assert!(!base_url_uses_local_host("HTTP://LOCALHOST.attacker.com"));
+}
+
+#[test]
+fn base_url_host_extraction_ends_authority_at_query_and_fragment() {
+    // Round 29: WHATWG ends the authority at `?` and `#` exactly like `/`
+    // (url-2.5.9 parser.rs — `parse_userinfo` and `parse_host` both break
+    // on `'/' | '?' | '#'`), so `http://x#@localhost` dials host `x` with
+    // fragment `#@localhost` while a `rsplit('@')` walked through the
+    // `#` into fragment text and answered `localhost` — the plaintext-HTTP
+    // admission then sent the bearer key to the remote host. The
+    // extraction must split on the full terminator set; the fragment's
+    // `@` is never a userinfo separator.
+    assert!(!base_url_uses_local_host("http://x#@localhost"));
+    assert!(!base_url_uses_local_host("http://x?@localhost"));
+    assert!(!base_url_uses_local_host("http://x:80#y@localhost"));
+    assert!(!base_url_uses_local_host("HTTP://X#@LOCALHOST"));
+    // Fragment text containing a loopback-looking host must not flip the
+    // dialed remote host either way.
+    assert!(!base_url_uses_local_host("http://x#@127.0.0.1"));
+    // A genuine loopback authority with a fragment stays loopback: the
+    // wire dials 127.0.0.1 and drops the fragment.
+    assert!(base_url_uses_local_host("http://127.0.0.1#@localhost"));
+    assert!(base_url_uses_local_host("http://localhost#/whatever"));
+    assert!(base_url_uses_local_host("http://localhost?x=1"));
 }
