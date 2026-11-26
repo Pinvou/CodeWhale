@@ -58,9 +58,22 @@ pub enum SecretsError {
     /// File-backed fallback I/O error.
     #[error("file-backed secret store I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// File-backed fallback JSON (de)serialisation error.
-    #[error("file-backed secret store JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    /// File-backed fallback JSON (de)serialisation error. The parser's own
+    /// message embeds the offending input text — for a schema-drifted or
+    /// corrupt store that text is the store's contents — so the variant
+    /// carries the parser's category and position instead of the parser
+    /// error, and every presentation of the error chain (CLI stderr,
+    /// credential snapshots, TUI surfaces, diagnostic logs) stays
+    /// payload-free by construction.
+    #[error("file-backed secret store JSON error ({category}) at line {line} column {column}")]
+    Json {
+        /// serde_json error category name.
+        category: &'static str,
+        /// 1-based line of the parse failure.
+        line: usize,
+        /// 1-based column of the parse failure.
+        column: usize,
+    },
     /// Caught when a stored secret on disk has unsafe permissions.
     #[error("file-backed secret store at {path} has insecure permissions {mode:o} (expected 0600)")]
     InsecurePermissions {
@@ -89,25 +102,32 @@ pub enum SecretsError {
 
 impl SecretsError {
     /// The error's category and source position for diagnostic logs — never
-    /// the [`Display`](std::fmt::Display) payload. The deserialization
-    /// variant's Display carries the underlying formatter's message, which
-    /// can embed the offending input text; for a schema-drifted or corrupt
-    /// store that text is the store's own secret material, so log paths
-    /// carry this summary instead (see the redaction note on the per-load
-    /// warning).
+    /// a payload. The JSON variant's Display already carries only the
+    /// category and position (the parser error is never stored), so this
+    /// summary and the Display agree; the remaining variants label their
+    /// fixed shapes for the same uniform log contract.
     fn log_summary(&self) -> String {
         match self {
             SecretsError::Keyring(_) => "keyring backend error".to_string(),
             SecretsError::Io(err) => format!("io error: {}", err.kind()),
-            SecretsError::Json(err) => format!(
-                "json {} error at line {} column {}",
-                json_error_category(err),
-                err.line(),
-                err.column()
-            ),
+            SecretsError::Json {
+                category,
+                line,
+                column,
+            } => format!("json {category} error at line {line} column {column}"),
             SecretsError::InsecurePermissions { .. } => "insecure file permissions".to_string(),
             SecretsError::SecretsFileTooLarge { .. } => "secrets file too large".to_string(),
             SecretsError::ReadOnly => "read-only store".to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for SecretsError {
+    fn from(err: serde_json::Error) -> Self {
+        SecretsError::Json {
+            category: json_error_category(&err),
+            line: err.line(),
+            column: err.column(),
         }
     }
 }
@@ -548,8 +568,13 @@ impl FileKeyringStore {
         match self.load_unlocked_inner() {
             Ok(blob) => Ok(blob),
             Err(err) => {
+                // Action-neutral wording: whether a caller falls back to the
+                // environment is decided later, at the resolution layer —
+                // this store's direct get/set/delete paths surface the
+                // failure as-is and must not narrate a fallback that does
+                // not happen here.
                 tracing::warn!(
-                    "file-backed secret store at {} failed to load (falling back to env): {}",
+                    "file-backed secret store at {} failed to load: {}",
                     self.path.display(),
                     err.log_summary()
                 );
@@ -2482,7 +2507,7 @@ mod tests {
         let store = FileKeyringStore::new(path.clone());
         let err = store.set("deepseek", "sk-new").unwrap_err();
         assert!(
-            matches!(err, SecretsError::Json(_)),
+            matches!(err, SecretsError::Json { .. }),
             "set must surface the parse error rather than wiping the file; got: {err}"
         );
         let on_disk = fs::read_to_string(&path).unwrap();
@@ -2733,6 +2758,62 @@ mod tests {
             !warning.contains(payload),
             "the warning must not carry the store payload: {warning}"
         );
+        // Action-neutral wording: this store's direct get/set/delete
+        // surfaces the failure as-is — whether anything falls back to the
+        // environment is decided later, at the resolution layer, so the
+        // load-time warning must not narrate one.
+        assert!(
+            !warning.contains("falling back"),
+            "the load warning must not claim a fallback this layer does not perform: {warning}"
+        );
+    }
+
+    /// The typed error's own presentation must be payload-free, not just
+    /// the log line: the load failure reaches direct consumers (a get/set
+    /// caller, a CLI credential snapshot, a TUI surface) as a
+    /// `SecretsError` whose Display and Debug are printed verbatim. The
+    /// JSON variant therefore stores the parser's category and position
+    /// instead of the parser error, and every rendering of the chain is
+    /// safe by construction.
+    #[test]
+    fn displayed_error_chain_is_payload_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.json");
+        let payload = "sk-live-CONFIDENTIAL-STORE-VALUE";
+        std::fs::write(&path, format!(r#"{{"entries": "{payload}"}}"#))
+            .expect("write schema-drifted store");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("set 0600 on the fixture store");
+        }
+
+        let store = FileKeyringStore::new(&path);
+        let err = KeyringStore::get(&store, "any-key").expect_err("the drifted store must fail");
+        assert!(
+            matches!(err, SecretsError::Json { .. }),
+            "the typed variant must survive the reshape: {err:?}"
+        );
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("JSON error (data) at line 1 column"),
+            "the displayed chain must name the category and position: {rendered}"
+        );
+        assert!(
+            !rendered.contains(payload),
+            "the displayed chain must not carry the store payload: {rendered}"
+        );
+        let debug = format!("{err:?}");
+        assert!(
+            !debug.contains(payload),
+            "the debug chain must not carry the store payload either: {debug}"
+        );
+        // The mutating path surfaces the same typed error without wiping
+        // the store, and its presentation is equally safe.
+        let err = KeyringStore::set(&store, "any-key", "v").expect_err("set must abort");
+        assert!(matches!(err, SecretsError::Json { .. }));
+        assert!(!format!("{err}").contains(payload));
     }
 
     #[path = "diagnostic_tests.rs"]
