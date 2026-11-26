@@ -8151,13 +8151,15 @@ fn collect_readonly_glob_matches(
         // treatment: the Windows lanes bind such names through volume upcase
         // tables and culture-dependent folds that pair characters no single
         // host-side textual comparison does, so an ASCII-spelled probe could
-        // select the entry while this fold skips it unjudged. The dot rule
-        // stays authoritative first — a hidden entry under a non-dot
-        // component is not a candidate on the lane this fold documents.
+        // select the entry while this fold skips it unjudged. Hidden entries
+        // are candidates too: the Windows lanes bind a leading dot as an
+        // ordinary name character, so a POSIX-only skip would omit entries
+        // the reader selects; judging them on the POSIX lanes is the same
+        // safe over-approximation as the trailing-slash one below (a command
+        // the POSIX shells would run inertly refuses when a hidden candidate
+        // resolves outside).
         let matched = name.to_str().is_none_or(|name| {
-            (!name.starts_with('.') || component.starts_with('.'))
-                && (readonly_chars_case_fold_sensitive(name)
-                    || readonly_star_match(component, name))
+            readonly_chars_case_fold_sensitive(name) || readonly_star_match(component, name)
         });
         if !matched {
             continue;

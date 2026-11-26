@@ -5256,13 +5256,22 @@ fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
         enforce_readonly_workspace_operands(command, &roots, workspace.path())
             .unwrap_or_else(|error| panic!("{command} must stay admitted: {error}"));
     }
-    // Hidden entries are expanded only when the component asks for them.
-    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join(".hidden-link"))
+    // Hidden entries are candidates on every lane: the Windows shells bind a
+    // leading dot as an ordinary name character, so a POSIX-only skip would
+    // omit entries the reader selects; judging them on the POSIX lanes is
+    // the safe over-approximation (an inert POSIX read refuses when a hidden
+    // candidate resolves outside).
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join(".hidden.txt"))
         .expect("hidden outside symlink");
+    let error = enforce_readonly_workspace_operands("cat sub/*.txt", &roots, workspace.path())
+        .expect_err("the hidden outside symlink is judged like any candidate")
+        .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+    std::fs::remove_file(sub.join(".hidden.txt")).expect("remove hidden outside link");
+    std::fs::write(sub.join(".inside.txt"), "inside").expect("hidden inside file");
     enforce_readonly_workspace_operands("cat sub/*.txt", &roots, workspace.path())
-        .expect("`*` does not expand hidden entries");
-    // ...and the exclusion itself is load-bearing: without it, a bare `*`
-    // would pick up the hidden outside symlink and refuse a legitimate read.
+        .expect("a hidden candidate resolving inside stays admitted");
+    // ...and the bare `*` covers the visible outside link the same way.
     enforce_readonly_workspace_operands("cat sub/*", &roots, workspace.path())
         .expect_err("the glob still covers the visible outside link")
         .to_string();
@@ -5273,8 +5282,15 @@ fn readonly_operand_gate_judges_glob_expansions_by_resolved_location() {
     )
     .expect("only hidden entry is an outside symlink");
     let only_hidden_roots = [only_hidden.path().to_path_buf()];
-    enforce_readonly_workspace_operands("cat *", &only_hidden_roots, only_hidden.path())
-        .expect("a bare `*` must not match hidden entries");
+    let error =
+        enforce_readonly_workspace_operands("cat *", &only_hidden_roots, only_hidden.path())
+            .expect_err("a bare `*` judges the hidden entry's resolved location")
+            .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+    // `.*` reaches the hidden outside entry the same way (its `.`/`..`
+    // synthesis judges the workspace-relative spellings textually).
+    std::os::unix::fs::symlink(outside.path().join("secret.txt"), sub.join(".hidden.txt"))
+        .expect("re-create hidden outside symlink");
     let error = enforce_readonly_workspace_operands("cat sub/.*", &roots, workspace.path())
         .expect_err("`.*` does")
         .to_string();
