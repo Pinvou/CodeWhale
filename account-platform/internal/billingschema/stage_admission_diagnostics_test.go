@@ -47,11 +47,29 @@ func TestExistingBrokerAdmissionWait(t *testing.T) {
 	t.Run("persistent client reaches the fixed deadline", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			start := time.Now()
-			_, err := awaitBrokerAdmission(t.Context(), func(context.Context) (brokerAdmissionFacts, error) {
+			facts, err := awaitBrokerAdmission(t.Context(), func(context.Context) (brokerAdmissionFacts, error) {
 				return brokerAdmissionFacts{Clients: 1}, nil
 			})
 			if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != 15*time.Second {
 				t.Fatalf("unexpected wait result: elapsed=%s err=%v", time.Since(start), err)
+			}
+			if got := brokerAdmissionErrorDiagnostic(err, facts); got != "broker fixture admission query failed: class=deadline sqlstate=unavailable last_observed_clients=1" {
+				t.Fatalf("timeout lost the last complete observation: %s", got)
+			}
+		})
+	})
+	t.Run("incomplete sample does not overwrite the last observation", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			samples := 0
+			facts, err := awaitBrokerAdmission(t.Context(), func(context.Context) (brokerAdmissionFacts, error) {
+				samples++
+				if samples == 1 {
+					return brokerAdmissionFacts{Clients: 2}, nil
+				}
+				return brokerAdmissionFacts{Clients: 99}, context.DeadlineExceeded
+			})
+			if !errors.Is(err, context.DeadlineExceeded) || facts.Clients != 2 || samples != 2 {
+				t.Fatalf("incomplete observation replaced the diagnostic: facts=%+v samples=%d err=%v", facts, samples, err)
 			}
 		})
 	})
@@ -101,7 +119,7 @@ func TestBrokerAdmissionDiagnosticRedaction(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := brokerAdmissionErrorDiagnostic(test.err)
+			got := brokerAdmissionErrorDiagnostic(test.err, brokerAdmissionFacts{})
 			if strings.Contains(got, private) {
 				t.Fatal("private sentinel escaped admission diagnostic")
 			}

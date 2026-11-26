@@ -281,29 +281,31 @@ func awaitBrokerAdmission(ctx context.Context, read func(context.Context) (broke
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
+	var last brokerAdmissionFacts
 	for {
 		if err := window.Err(); err != nil {
-			return brokerAdmissionFacts{}, err
+			return last, err
 		}
 		facts, err := read(window)
 		if err != nil {
-			return facts, err
+			return last, err
 		}
 		if err := window.Err(); err != nil {
-			return facts, err
+			return last, err
 		}
 		if facts.Clients == 0 || !facts.catalogClean() {
 			return facts, nil
 		}
+		last = facts
 		select {
 		case <-window.Done():
-			return facts, window.Err()
+			return last, window.Err()
 		case <-ticker.C:
 		}
 	}
 }
 
-func brokerAdmissionErrorDiagnostic(err error) string {
+func brokerAdmissionErrorDiagnostic(err error, last brokerAdmissionFacts) string {
 	category, sqlstate := "other", "unavailable"
 	var postgresError *pgconn.PgError
 	switch {
@@ -321,7 +323,11 @@ func brokerAdmissionErrorDiagnostic(err error) string {
 			sqlstate = postgresError.Code
 		}
 	}
-	return fmt.Sprintf("broker fixture admission query failed: class=%s sqlstate=%s", category, sqlstate)
+	message := fmt.Sprintf("broker fixture admission query failed: class=%s sqlstate=%s", category, sqlstate)
+	if category == "deadline" && last.Clients > 0 {
+		message += fmt.Sprintf(" last_observed_clients=%d", last.Clients)
+	}
+	return message
 }
 
 func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixture {
@@ -340,7 +346,7 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 		})
 		if err != nil {
 			admin.Close(ctx)
-			t.Fatal(brokerAdmissionErrorDiagnostic(err))
+			t.Fatal(brokerAdmissionErrorDiagnostic(err, facts))
 		}
 		if !facts.clean() {
 			admin.Close(ctx)
