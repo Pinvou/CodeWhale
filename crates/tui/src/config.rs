@@ -10897,30 +10897,17 @@ fn provider_config_uses_xai_oauth(config: &ProviderConfig) -> bool {
 
 /// Whether a base URL points at a loopback/unspecified host, i.e. a local
 /// runtime rather than a hosted endpoint. Shared by the active-provider
-/// local-base-url check above and the `/provider` picker's custom-provider
-/// auth-optionality heuristic (#3830).
-pub(crate) fn base_url_uses_local_host(base_url: &str) -> bool {
-    let Some(host) = base_url_host(base_url) else {
-        return false;
-    };
-    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
-    if matches!(host.as_str(), "localhost" | "0.0.0.0") {
-        return true;
-    }
-    host.parse::<std::net::IpAddr>()
-        .is_ok_and(|addr| addr.is_loopback() || addr.is_unspecified())
-}
-
-fn base_url_host(base_url: &str) -> Option<&str> {
-    let without_scheme = base_url
-        .split_once("://")
-        .map_or(base_url, |(_, rest)| rest);
-    let authority = without_scheme.split('/').next()?.rsplit('@').next()?;
-    if let Some(rest) = authority.strip_prefix('[') {
-        return rest.split_once(']').map(|(host, _)| host);
-    }
-    authority.split(':').next().filter(|host| !host.is_empty())
-}
+/// local-base-url check above, the `/provider` picker's custom-provider
+/// auth-optionality heuristic (#3830), and — security-load-bearing — the
+/// client's plaintext-HTTP admission. One body lives in the config crate
+/// (`codewhale_config::base_url_uses_local_host`); this module re-exports
+/// it so every `crate::config::` call site keeps one name and the two
+/// formerly byte-identical copies cannot drift again (round 28: the
+/// backslash-in-authority disguise `http://evil.com\@localhost` — the
+/// config crate now refuses any authority containing `\`, because WHATWG
+/// ends the authority there and this string parse can no longer name the
+/// dialed host).
+pub(crate) use codewhale_config::base_url_uses_local_host;
 
 fn model_for_provider(provider: ApiProvider, normalized: String) -> String {
     let lowered = normalized.to_ascii_lowercase();

@@ -9581,3 +9581,27 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     .unwrap();
     assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
 }
+
+#[test]
+fn base_url_host_extraction_refuses_backslash_authorities() {
+    // WHATWG (url-2.5.9 parser.rs — the parser reqwest runs) terminates
+    // the authority at a backslash in special schemes exactly like `/`,
+    // `?`, or `#`, so `http://evil.com\@localhost` dials `evil.com` with
+    // path `/@localhost/` while a naive `rsplit('@')` reads the path's
+    // userinfo segment and answers `localhost` (round 28 blocker — the
+    // predicate feeds the plaintext-HTTP admission). An authority
+    // containing `\` cannot be parsed into the dialed host, so the honest
+    // answer is not-loopback. Userinfo without a backslash still splits
+    // the same way WHATWG does.
+    assert!(base_url_uses_local_host("http://localhost:8080"));
+    assert!(base_url_uses_local_host("http://me@localhost"));
+    assert!(base_url_uses_local_host("http://[::1]:9000"));
+    // userinfo without a backslash: the wire dials localhost, so the
+    // predicate answers loopback — the same answer WHATWG gives.
+    assert!(base_url_uses_local_host("http://evil.com@localhost"));
+    assert!(!base_url_uses_local_host("http://localhost.evil.com"));
+    assert!(!base_url_uses_local_host("http://evil.com\\@localhost"));
+    assert!(!base_url_uses_local_host("http://evil.com\\\\@localhost"));
+    assert!(!base_url_uses_local_host("http://localhost\\@evil.com"));
+    assert!(!base_url_uses_local_host("HTTP://LOCALHOST.attacker.com"));
+}

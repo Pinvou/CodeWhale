@@ -107,8 +107,12 @@ the counts are order-independent, and the per-request pair-judge budget
 resets at every preparation over a stable catalog order — so on a stable
 strict route the tools bytes are identical every step after the first
 preparation; the shaping runs on a per-request clone and never mutates the
-registry. One boundary is deliberate (round 25): the pattern-compile memo
-persists across requests while the per-request compile budget resets, so a
+registry, and the pair-judge budget pools per tool (round 28) so no
+catalog order can change a later tool's verdict. One boundary is
+deliberate (round 25): the pattern-compile memo persists across requests
+while the per-request compile budget resets (the memo is entry-bounded at
+512 sources ≈ 8 MB of keys per thread, refuses rather than evicts at the
+bound, and the cached automata are the unaccounted part), so a
 pattern that abstained on a budget-refused first pass can be judged on a
 later pass and flip its tool's verdict — the bytes then differ between the
 first preparation and a warm one without a declared change. (The memo is

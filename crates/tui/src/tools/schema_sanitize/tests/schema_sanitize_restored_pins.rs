@@ -5,8 +5,9 @@
 // `crates/tui/src/tools/schema_sanitize.rs` at the PR base, so the test-name
 // census and the historical pins are restored exactly. Name-for-name the set
 // is: base-minus-head census (by test fn name) minus the two tests the PR's
-// own mechanisms supersede — see the accompanying REPORT.md for the full
-// reconciliation (a third qualified-name-only entry,
+// own mechanisms supersede — the full reconciliation lives in the PR's
+// review records (no in-tree REPORT.md ships) (a third qualified-name-only
+// entry,
 // `xai_union_defect_walk_computes_each_subtree_once`, survives byte-identical
 // at head under `kimi_tests` and is therefore not re-grafted here).
 //

@@ -1570,13 +1570,21 @@ mod dialect_seam_tests {
                 sha256(&canonical_json(&reference)),
                 "{provider} preview body must hash identically to the production builder"
             );
+            // Round 28: the DeepSeek Messages dialect omits `tool_choice`
+            // while thinking is on the wire (first-party contract rejects
+            // the pair); the other lanes keep it.
+            let expected_tool_choice = if provider == "deepseek-anthropic" {
+                None
+            } else {
+                Some("auto")
+            };
             assert_eq!(
                 prepared
                     .body
                     .get("tool_choice")
                     .and_then(|value| value.get("type"))
                     .and_then(serde_json::Value::as_str),
-                Some("auto"),
+                expected_tool_choice,
                 "{provider} tool_choice must come from the final Messages body"
             );
 

@@ -7696,18 +7696,6 @@ struct DoctorStrictToolModeStatus {
     recommended_base_url: Option<String>,
 }
 
-/// The launch surface a fresh session would serve: the provider re-point
-/// and the model chain the app's launch path applies (`tui/app/init.rs`),
-/// read from the same persisted settings a launch reads. The doctor
-/// predicts "what a session launched now would use", so a route remembered
-/// through `/model` → "remember as my default" — which writes
-/// settings.toml only, a document `Config` never loads — must key the
-/// verdict: answering from the config document alone reported a chat-model
-/// verdict for a launch that actually serves a `responses`-dialect model,
-/// the drift the round-18 selector fix closed for config.toml and this
-/// chain closes for the settings channel. Returns the launch provider, the
-/// full launch identity record (the route resolvers key on it — see
-/// `doctor_api_target`), and the launch model.
 /// The provider identity a session launched now would serve: the config's
 /// active identity, re-pointed by the settings chain exactly as
 /// `doctor_launch_surface` does. Every doctor section that names a
@@ -7755,6 +7743,18 @@ fn doctor_launch_identity(config: &Config) -> crate::config::ProviderIdentity {
     identity
 }
 
+/// The launch surface a fresh session would serve: the provider re-point
+/// and the model chain the app's launch path applies (`tui/app/init.rs`),
+/// read from the same persisted settings a launch reads. The doctor
+/// predicts "what a session launched now would use", so a route remembered
+/// through `/model` → "remember as my default" — which writes
+/// settings.toml only, a document `Config` never loads — must key the
+/// verdict: answering from the config document alone reported a chat-model
+/// verdict for a launch that actually serves a `responses`-dialect model,
+/// the drift the round-18 selector fix closed for config.toml and this
+/// chain closes for the settings channel. Returns the launch provider, the
+/// full launch identity record (the route resolvers key on it — see
+/// `doctor_api_target`), and the launch model.
 fn doctor_launch_surface(
     config: &Config,
 ) -> (
@@ -7978,7 +7978,9 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                  standard normalizes to the official host — a trailing-dot FQDN, \
                  percent-escaped or non-ASCII host bytes, an explicit default \
                  port — also land here while the request still reaches the \
-                 official API; point the setting at the canonical spelling \
+                 official API, as do spellings the gate refuses outright \
+                 (whitespace around or inside the URL, query or fragment \
+                 strings); point the setting at the canonical spelling \
                  to get the reshaping"
             ),
             recommended_base_url: None,
@@ -15165,6 +15167,35 @@ mod doctor_endpoint_tests {
                 .message
                 .contains("omitted on thinking-enabled requests"),
             "the DeepseekCN chat shape suppresses `tool_choice`: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn custom_endpoint_verdict_names_the_gate_refused_spellings() {
+        // Round 28: the verdict message names not only the WHATWG-normalized
+        // official-host spellings but also the classes the GATE refuses
+        // outright (whitespace, query/fragment) — a user with a padded URL
+        // previously found no spelling named by the verdict the docs point
+        // at.
+        let config = Config {
+            provider: Some("deepseek-cn".to_string()),
+            strict_tool_mode: Some(true),
+            base_url: Some(" https://api.example.cn/v1 ".to_string()),
+            ..Default::default()
+        };
+        let status = doctor_strict_tool_mode_status(&config);
+        assert_eq!(status.status, "custom_endpoint", "{}", status.message);
+        assert!(
+            status
+                .message
+                .contains("whitespace around or inside the URL"),
+            "{}",
+            status.message
+        );
+        assert!(
+            status.message.contains("query or fragment"),
+            "{}",
             status.message
         );
     }

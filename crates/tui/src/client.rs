@@ -13490,6 +13490,29 @@ mod tests {
                     .to_string()
                     .contains("Refusing insecure base URL")
             );
+            // Round 28: a backslash in the authority ends it for WHATWG —
+            // `http://evil.com\@localhost` dials evil.com with path
+            // `/@localhost/` — so the extractor refuses any authority
+            // containing `\` instead of reading the path's userinfo
+            // segment as the host. The reversed spelling fails closed
+            // too (the parse cannot name the dialed host either way).
+            let backslash = validate_base_url_security("http://evil.com\\@localhost")
+                .expect_err("backslash-disguised host must not auto-allow");
+            assert!(backslash.to_string().contains("Refusing insecure base URL"));
+            let double_backslash = validate_base_url_security("http://evil.com\\\\@localhost")
+                .expect_err("double-backslash disguise must not auto-allow");
+            assert!(
+                double_backslash
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
+            let backslash_remote = validate_base_url_security("http://localhost\\@evil.com")
+                .expect_err("backslash authority must not parse as loopback");
+            assert!(
+                backslash_remote
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
             // Other schemes keep refusing even on a loopback host: the
             // local-host arm keys on the http scheme.
             let ftp = validate_base_url_security("ftp://localhost/file")

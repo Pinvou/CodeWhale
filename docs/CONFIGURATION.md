@@ -753,14 +753,17 @@ Messages route) also set
 strict contract: optional parameters are removed from the schema (each
 removal is reported in the tool description — up to 20 names individually,
 the remainder counted), non-numeric `const` values land on
-`enum`, and conditional-requirement tables (`dependentRequired`) are stripped.
-A second keyword family widens **silently** — removed with no per-tool note
-because dropping them only widens what the endpoint accepts:
-`dependentRequired`, draft-7 name-array `dependencies`, `uniqueItems`, the
+`enum`, and conditional-requirement tables are stripped or stripped
+silently (below). A second keyword family widens **silently** — removed
+with no per-tool note because dropping them only widens what the endpoint
+accepts: `dependentRequired`, draft-7 name-array `dependencies`, boolean
+`false` entries fail closed instead (round 28), `uniqueItems`, the
 property/containment count bounds (`minProperties`/`maxProperties`/
 `minContains`/`maxContains`), the length and item-count bounds
 (`minLength`/`maxLength`/`minItems`/`maxItems`), `format` values outside the
-documented set, and draft-4 boolean exclusive bounds.
+documented set, draft-4 boolean exclusive bounds, and well-formed bounds/
+`pattern`/`format` values sitting beside a declared type they cannot apply
+to (round 28: the domain-mismatch strip, silent by design).
 Two carve-outs: on thinking-enabled chat requests to the DeepSeek dialect the
 `tool_choice` key is omitted entirely (the wire rejects the combination), and
 on routes whose model resolves to the Responses endpoint the wire hardcodes
@@ -768,9 +771,10 @@ on routes whose model resolves to the Responses endpoint the wire hardcodes
 `responses_dialect` verdict reports this). `required` applies to every other
 request on the route. URL spellings the URL standard would normalize —
 a trailing-dot host, percent-escaped or non-ASCII host bytes, an explicit
-`:443`, whitespace, query strings — degrade out of scope (the doctor's
-`custom_endpoint` verdict reports them): point the setting at the
-canonical spelling to get the reshaping.
+`:443` — and spellings the gate refuses outright — whitespace around or
+inside the URL, query or fragment strings, and any non-https scheme —
+degrade out of scope (the doctor's `custom_endpoint` verdict names them):
+point the setting at the canonical spelling to get the reshaping.
 
 Tools whose schema cannot be represented faithfully under the strict subset —
 root alternatives, required nullables, or tools whose runtime demands
@@ -779,8 +783,9 @@ schema-optional parameters (`update_goal`, `send_later`, `agent`,
 keep their original schema and ship without the strict flag, so they stay
 callable non-strict. `agent` (the model-facing sub-agent surface) carries
 its per-action requirements in a `dependentSchemas` table the strict
-contract cannot express, so under strict every call but `roster`/`status`
-would be rejected — the tool ships non-strict instead. `agents/message` and
+contract cannot express, so under strict every targeted call would be
+rejected (only `roster`, a scope-less `status`, and the vacuous `wait`
+answer) — the tool ships non-strict instead. `agents/message` and
 `agents/followup` are model-hidden (never offered to the model), so their
 entries are defense-in-depth. `send_later`'s read-only `list` action would
 have stayed usable and is dropped with the tool — one honest omission
@@ -825,9 +830,14 @@ rejects a missing `note` for append and revise; `retire` ignores the field
 but the schema now demands it — the over-require is deliberate, one
 honest schema over a per-action split the strict subset cannot express,
 and an all-optional schema
-would leave strict mode nothing to keep). The `codewhale doctor` strict-mode
+would leave strict mode nothing to keep). `purge_context` builds its request outside the gated funnel and ships
+`strict: None` on every provider (its hardcoded ungated flag predates the
+gate and would have reached non-DeepSeek providers while its optional
+refinement parameters violate the strict subset on official routes).
+The `codewhale doctor` strict-mode
 verdict grades the current route: `disabled` (setting off), `ready`
-(official beta host), `fallback_non_beta` (official non-beta path — the
+(official beta host, the `api.deepseeki.com/beta` compat host included),
+`fallback_non_beta` (official non-beta path — the
 strict flag is stripped at the wire, reshaping and `required` still apply),
 `official_route` (an Anthropic-family provider or a non-canonical official
 path — the flag is forwarded), `responses_dialect`, `provider_mismatch`
