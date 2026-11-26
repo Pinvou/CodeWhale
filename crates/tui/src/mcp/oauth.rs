@@ -1324,14 +1324,27 @@ impl OauthLoginFlow {
                     )
                 })?
                 .context("OAuth callback was cancelled")?;
-            let OauthCallbackResult { code, state } = match callback {
+            let OauthCallbackResult {
+                code,
+                state,
+                issuer,
+            } = match callback {
                 CallbackResult::Success(callback) => callback,
                 CallbackResult::Error(error) => return Err(anyhow!(error)),
             };
 
             self.oauth_state
-                .handle_callback(&code, &state)
+                .handle_callback_with_issuer(&code, &state, issuer.as_deref())
                 .await
+                .map_err(|error| match error {
+                    AuthError::AuthorizationServerMismatch { .. } => {
+                        anyhow!("OAuth callback issuer does not match the authorization server")
+                    }
+                    AuthError::AuthorizationServerMissingIssuer { .. } => {
+                        anyhow!("OAuth callback is missing the required issuer")
+                    }
+                    error => anyhow!(error),
+                })
                 .context("handling MCP OAuth callback")?;
 
             let (client_id, credentials) = self
@@ -1412,7 +1425,7 @@ fn spawn_callback_server(
                     let _ = write_http_response(
                         &mut stream,
                         200,
-                        "Authentication complete. You may close this window.",
+                        "Authorization response received. Return to CodeWhale for the result.",
                     )
                     .await;
                     if let Some(tx) = tx_opt.take() {
@@ -1487,6 +1500,7 @@ async fn write_http_response(
 struct OauthCallbackResult {
     code: String,
     state: String,
+    issuer: Option<String>,
 }
 
 enum CallbackResult {
@@ -1531,7 +1545,17 @@ fn parse_oauth_callback(path: &str, expected_callback_path: &str) -> CallbackOut
     }
 
     if let (Some(code), Some(state)) = (code, state) {
-        return CallbackOutcome::Success(OauthCallbackResult { code, state });
+        let mut issuers = url::form_urlencoded::parse(query.as_bytes())
+            .filter_map(|(key, value)| (key == "iss").then_some(value));
+        let issuer = issuers.next().map(|value| value.into_owned());
+        if issuer.as_deref() == Some("") || issuers.next().is_some() {
+            return CallbackOutcome::Invalid;
+        }
+        return CallbackOutcome::Success(OauthCallbackResult {
+            code,
+            state,
+            issuer,
+        });
     }
     if error.is_some() || error_description.is_some() {
         return CallbackOutcome::Error(OAuthProviderError::new(error, error_description));
@@ -1646,12 +1670,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_oauth_callback_accepts_provider_error() {
-        let parsed = parse_oauth_callback(
-            "/callback/id?error=invalid_scope&error_description=nope",
+    fn parse_oauth_callback_preserves_one_response_issuer() {
+        let outcome = parse_oauth_callback(
+            "/callback/id?code=abc&state=xyz&%69ss=https%3A%2F%2Fissuer.example%2Ftenant",
             "/callback/id",
         );
-        assert!(matches!(parsed, CallbackOutcome::Error(_)));
+        assert_eq!(
+            outcome,
+            CallbackOutcome::Success(OauthCallbackResult {
+                code: "abc".to_owned(),
+                state: "xyz".to_owned(),
+                issuer: Some("https://issuer.example/tenant".to_owned()),
+            })
+        );
+        for invalid_query in ["iss", "iss=", "iss=one&%69ss=two"] {
+            let outcome = parse_oauth_callback(
+                &format!("/callback/id?code=abc&state=xyz&{invalid_query}"),
+                "/callback/id",
+            );
+            assert_eq!(outcome, CallbackOutcome::Invalid);
+        }
+    }
+
+    #[test]
+    fn parse_oauth_callback_accepts_provider_error() {
+        for extra in ["", "&iss="] {
+            let parsed = parse_oauth_callback(
+                &format!("/callback/id?error=invalid_scope&error_description=nope{extra}"),
+                "/callback/id",
+            );
+            assert!(matches!(parsed, CallbackOutcome::Error(_)));
+        }
     }
 
     #[test]

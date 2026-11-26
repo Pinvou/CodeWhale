@@ -6126,6 +6126,10 @@ impl OAuthMcpMock {
     }
 
     async fn spawn() -> Self {
+        Self::spawn_with_response_issuer(false).await
+    }
+
+    async fn spawn_with_response_issuer(require_response_issuer: bool) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
 
@@ -6237,6 +6241,7 @@ impl OAuthMcpMock {
                             "token_endpoint": format!("http://{addr}/token"),
                             "registration_endpoint": format!("http://{addr}/register"),
                             "response_types_supported": ["code"],
+                            "authorization_response_iss_parameter_supported": require_response_issuer,
                         });
                         let served_issuer = if omit_issuer.load(AtomicOrdering::SeqCst) {
                             None
@@ -6696,6 +6701,69 @@ async fn stored_tokens_flip_to_auth_required_when_the_issuer_mismatches() {
         "no token exchange may run against metadata that fails issuer validation"
     );
 
+    mock.task.abort();
+}
+
+#[tokio::test]
+async fn selfserve_oauth_passes_response_issuer_to_the_sdk() {
+    let _env = crate::test_support::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", dir.path());
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _loopback = lock_mcp_loopback_tests().await;
+
+    let mock = OAuthMcpMock::spawn_with_response_issuer(true).await;
+    let config = mock_oauth_server_config(mock.addr);
+    let server_url = mock.url();
+    let issuer = format!("http://{}", mock.addr);
+    for (response_issuer, expected_error) in [
+        (None, Some("missing the required issuer")),
+        (
+            Some("https://other-issuer.invalid"),
+            Some("does not match the authorization server"),
+        ),
+        (Some(issuer.as_str()), None),
+    ] {
+        let login =
+            oauth::begin_oauth_login_for_server_tool("wikiserver", &config, None, None, None)
+                .await
+                .unwrap();
+        let authorization = reqwest::Url::parse(login.authorization_url()).unwrap();
+        let query: std::collections::HashMap<_, _> = authorization.query_pairs().collect();
+        let mut callback = reqwest::Url::parse(query["redirect_uri"].as_ref()).unwrap();
+        callback
+            .query_pairs_mut()
+            .append_pair("code", "cw-test-code")
+            .append_pair("state", query["state"].as_ref());
+        if let Some(response_issuer) = response_issuer {
+            callback
+                .query_pairs_mut()
+                .append_pair("iss", response_issuer);
+        }
+        test_http_client().get(callback).send().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), login.finish())
+            .await
+            .expect("callback was delivered to the flow");
+        if let Some(expected_error) = expected_error {
+            let error = result.expect_err("the SDK must reject an invalid issuer");
+            assert!(format!("{error:#}").contains(expected_error));
+            assert!(!format!("{error:#}").contains("other-issuer.invalid"));
+            assert_eq!(mock.token_requests.load(AtomicOrdering::SeqCst), 0);
+            assert!(
+                oauth::load_oauth_tokens("wikiserver", &server_url)
+                    .unwrap()
+                    .is_none()
+            );
+        } else {
+            result.expect("the SDK should accept the registered issuer");
+            assert_eq!(mock.token_requests.load(AtomicOrdering::SeqCst), 1);
+            assert!(
+                oauth::load_oauth_tokens("wikiserver", &server_url)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
     mock.task.abort();
 }
 
