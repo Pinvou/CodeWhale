@@ -93,29 +93,35 @@ pub(super) fn browser_last_error_hint(raw: &str, now: u64) -> Option<(&'static s
         .find(|(candidate, _)| *candidate == code)
 }
 
-fn bind_work_session_pptx_output(config: &mut serde_json::Value, session_id: &str) -> bool {
+fn bind_work_session_artifact_output(
+    config: &mut serde_json::Value,
+    session_id: &str,
+    package: &str,
+    tool: &str,
+) -> Result<bool, ()> {
     use crate::features::sessions::validators::validate_session_id;
 
     if validate_session_id(session_id).is_err() {
-        return false;
+        return Ok(false);
     }
     let Some(server) = config
-        .pointer_mut("/servers/pptx")
+        .get_mut("servers")
+        .and_then(|servers| servers.get_mut(package))
         .and_then(|entry| entry.as_object_mut())
     else {
-        return false;
+        return Ok(false);
     };
     let Ok(entry) = serde_json::from_value::<deepseek_tui::mcp::McpServerConfig>(
         serde_json::Value::Object(server.clone()),
     ) else {
-        return false;
+        return Ok(false);
     };
     let Some(command) = entry.command.as_deref() else {
-        return false;
+        return Ok(false);
     };
     if entry.url.is_some()
         || !entry.is_enabled()
-        || !entry.is_tool_enabled("make_pptx")
+        || !entry.is_tool_enabled(tool)
         || (command != paths::python_command()
             && paths::managed_python_command().ok().as_deref() != Some(command))
         || entry
@@ -123,7 +129,7 @@ fn bind_work_session_pptx_output(config: &mut serde_json::Value, session_id: &st
             .keys()
             .any(|key| key.eq_ignore_ascii_case("PINVOU3_SESSION_ARTIFACTS"))
     {
-        return false;
+        return Ok(false);
     }
     let python_runner = paths::bundle_mcp_python_runner();
     let python_envs = paths::marketplace_python_envs_dir();
@@ -148,31 +154,52 @@ fn bind_work_session_pptx_output(config: &mut serde_json::Value, session_id: &st
         {
             script
         }
-        _ => return false,
+        _ => return Ok(false),
     };
     let script = std::path::Path::new(script);
-    let managed = paths::bundle_mcp_package_dir("pptx").join("server.py");
+    let managed = paths::bundle_mcp_package_dir(package).join("server.py");
     let legacy = paths::bundle_mcp_servers_dir()
-        .join("pptx")
+        .join(package)
         .join("server.py");
     // The server name can also belong to a user-defined connector. Only
     // entries targeting the installed or legacy bundled script are scoped.
     if script != managed.as_path() && script != legacy.as_path() {
-        return false;
+        return Ok(false);
     }
+    // An interrupted upgrade can leave the legacy registration or an
+    // outdated managed script in place. The old Gongwen server ignores the
+    // session argument, so only launch the verified installed revision.
+    let managed_gongwen = if package == "gongwen" {
+        let spec = mcp_catalog::spec_for_builtin_probe(package).ok_or(())?;
+        let installed_dir = managed.parent().ok_or(())?;
+        for (name, source) in spec.files {
+            let installed =
+                crate::platform::filesystem::read_private_data_file(&installed_dir.join(name))
+                    .map_err(|_| ())?;
+            if installed.as_str() != *source {
+                return Err(());
+            }
+        }
+        Some(managed.to_str().ok_or(())?)
+    } else {
+        None
+    };
     let destination = paths::session_artifacts_dir(session_id);
     let Some(destination) = destination.to_str() else {
-        return false;
+        return Ok(false);
     };
     // The engine expands ${...} in environment values. The launcher must
     // receive this locally derived path literally, including such components.
     let Some(args) = server.get_mut("args").and_then(|args| args.as_array_mut()) else {
-        return false;
+        return Ok(false);
     };
+    if let Some(script) = managed_gongwen {
+        *args.last_mut().ok_or(())? = serde_json::json!(script);
+    }
     args.push(serde_json::json!(format!(
         "--session-artifacts-dir={destination}"
     )));
-    true
+    Ok(true)
 }
 
 impl Pinvou3Bundle {
@@ -1418,7 +1445,7 @@ impl Pinvou3Bundle {
 
     /// Returns a conversation-scoped Work-mode MCP configuration. It matches the global
     /// Work-mode configuration, with this conversation's identity in the browser wrapper
-    /// and its private output directory in the bundled PPT server's arguments.
+    /// and its private output directory in the bundled document servers' arguments.
     pub fn work_mode_mcp_config_path_for_session(&self, session_id: &str) -> PathBuf {
         self.write_work_mode_mcp_config(Some(session_id)).0
     }
@@ -1433,14 +1460,17 @@ impl Pinvou3Bundle {
         if config_path != self.mcp_json.as_path() {
             return Ok(None);
         }
-        let (path, missing_ppt_scope) = self.write_work_mode_mcp_config(Some(session_id));
-        if missing_ppt_scope {
-            return Err("pptx_session_profile_unavailable");
+        let (path, missing_artifact_scope) = self.write_work_mode_mcp_config(Some(session_id));
+        if let Some(error) = missing_artifact_scope {
+            return Err(error);
         }
         Ok((path != self.mcp_json).then_some(path))
     }
 
-    fn write_work_mode_mcp_config(&self, session_id: Option<&str>) -> (PathBuf, bool) {
+    fn write_work_mode_mcp_config(
+        &self,
+        session_id: Option<&str>,
+    ) -> (PathBuf, Option<&'static str>) {
         let base = self.mcp_json.clone();
         let browser_entry = self.browser_mcp_entry_for_session(session_id);
         // Fall back to the global configuration when parsing fails (for example, a manual
@@ -1457,17 +1487,35 @@ impl Pinvou3Bundle {
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
             {
                 Some(v) if v.is_object() => v,
-                _ => return (base, false),
+                _ => return (base, None),
             };
         let has_reserved_browser = mcp
             .get("servers")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|servers| servers.contains_key("browser"));
         // Remote Chat inventories the actual controlled session's artifact directory.
-        // Scope the PPT writer even when Browser MCP is unavailable.
-        let scoped_pptx = session_id.is_some_and(|id| bind_work_session_pptx_output(&mut mcp, id));
-        if browser_entry.is_none() && !has_reserved_browser && !scoped_pptx {
-            return (base, false);
+        // Scope document writers even when Browser MCP is unavailable.
+        let mut missing_artifact_scope = None;
+        if let Some(id) = session_id {
+            for (package, tool, unavailable) in [
+                ("pptx", "make_pptx", "pptx_session_profile_unavailable"),
+                (
+                    "gongwen",
+                    "make_gongwen",
+                    "gongwen_session_profile_unavailable",
+                ),
+            ] {
+                match bind_work_session_artifact_output(&mut mcp, id, package, tool) {
+                    Ok(true) => {
+                        missing_artifact_scope.get_or_insert(unavailable);
+                    }
+                    Ok(false) => {}
+                    Err(()) => return (base, Some(unavailable)),
+                }
+            }
+        }
+        if browser_entry.is_none() && !has_reserved_browser && missing_artifact_scope.is_none() {
+            return (base, None);
         }
         let work_path = session_id.map_or_else(paths::browser_work_mcp_json, |session_id| {
             paths::browser_session_mcp_json(session_id)
@@ -1517,7 +1565,7 @@ impl Pinvou3Bundle {
                     .map(|existing| existing == json)
                     .unwrap_or(false)
                 {
-                    return (work_path, false);
+                    return (work_path, None);
                 }
                 // The content includes a full global mcp.json copy and may contain secrets
                 // in user-defined server environments. Create it as 0600 immediately and
@@ -1525,16 +1573,16 @@ impl Pinvou3Bundle {
                 if crate::platform::filesystem::atomic_write_private(&work_path, json.as_bytes())
                     .is_ok()
                 {
-                    return (work_path, false);
+                    return (work_path, None);
                 }
                 // On write failure, return the global configuration. Returning the
                 // session-specific path could make the Engine load stale or missing data;
                 // the global fallback degrades by omitting browser tools instead of failing.
-                (base, scoped_pptx)
+                (base, missing_artifact_scope)
             }
             // Serialization of a Value should not fail, but use the same global fallback
             // as a write failure if it does.
-            Err(_) => (base, scoped_pptx),
+            Err(_) => (base, missing_artifact_scope),
         }
     }
 
@@ -1700,9 +1748,7 @@ impl Pinvou3Bundle {
         match crate::features::marketplace::store::BundleStore::new().records() {
             Ok(records) => {
                 for record in records.iter().filter(|r| r.installed) {
-                    if crate::features::marketplace::mcp_catalog::spec_for_builtin_probe(&record.id)
-                        .is_none()
-                    {
+                    if mcp_catalog::spec_for_builtin_probe(&record.id).is_none() {
                         continue; // 非内嵌包（自定义/上传），无内嵌资源可校验
                     }
                     // 上传/未知来源的记录即使 id 撞内嵌目录也不得重释放：重释放

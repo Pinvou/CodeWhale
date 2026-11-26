@@ -8,7 +8,7 @@
 写作(文种/话术/序号)由 skill 指导模型产出进字段;此 server 只做确定性套版与校验,
 一个字不改写内容。渲染细节见同目录 gbt9704_styles.py。
 """
-import sys, os, io, json, re
+import sys, os, io, json, re, stat, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gbt9704_styles  # noqa: E402
@@ -167,13 +167,29 @@ def _unique_path(d, base, ext=".docx"):
     """文件名碰撞时自动加 (2)(3)…,避免跨会话同标题相互覆盖丢件。"""
     p = os.path.join(d, base + ext)
     n = 2
-    while os.path.exists(p):
+    while os.path.lexists(p):
         p = os.path.join(d, "%s (%d)%s" % (base, n, ext))
         n += 1
     return p
 
 
+_session_artifacts_dir = None
+
+
 def _artifacts_dir():
+    if _session_artifacts_dir is not None:
+        if not os.path.isabs(_session_artifacts_dir):
+            raise OSError("Invalid session output directory")
+        # Match the bundled PPT writer. The sessions root may be relocated,
+        # but redirects below it can send a document to the wrong session.
+        for path in (os.path.dirname(_session_artifacts_dir), _session_artifacts_dir):
+            os.makedirs(path, exist_ok=True)
+            metadata = os.lstat(path)
+            if not stat.S_ISDIR(metadata.st_mode) or (
+                getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise OSError("Redirected session output directory")
+        return _session_artifacts_dir
     # 落盘:优先 app 注入的会话产物目录;否则 ~/.pinvou3 默认。绝不用 cwd(release 下是程序目录,不可写)。
     default = os.path.join(os.path.expanduser("~"), ".pinvou3", "sessions", "default", "artifacts")
     art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or default
@@ -274,9 +290,25 @@ def make_gongwen(filename=None, **fields):
                 "hint": "存在 error 级硬伤,未渲染。请按 issues 补全字段后重调 make_gongwen。"}
 
     fname = _sanitize_filename(filename or d.get("标题") or "公文")
-    out = _unique_path(_artifacts_dir(), fname)
+    if _session_artifacts_dir is not None and fname.startswith((".", "~$")):
+        # Session inventories skip hidden files and office lock files.
+        fname = "公文-" + fname
     try:
-        gbt9704_styles.render_gongwen(d, out)
+        directory = _artifacts_dir()
+    except OSError:
+        return {"ok": False, "error": "无法创建已配置的公文产物目录。"}
+    try:
+        if _session_artifacts_dir is None:
+            out = _unique_path(directory, fname)
+            gbt9704_styles.render_gongwen(d, out)
+        else:
+            # Remote capture inventories direct files. A partial render must
+            # never appear in that inventory.
+            with tempfile.TemporaryDirectory(prefix=".gongwen-", dir=directory) as stage:
+                pending = os.path.join(stage, "document.docx")
+                gbt9704_styles.render_gongwen(d, pending)
+                out = _unique_path(directory, fname)
+                os.replace(pending, out)
     except Exception as e:
         return {"ok": False, "error": "套版渲染失败:%s" % e}
     return {"ok": True, "path": out, "文种": d.get("文种"), "validate": v,
@@ -373,6 +405,11 @@ def _handle(msg):
 
 
 def main():
+    global _session_artifacts_dir
+    prefix = "--session-artifacts-dir="
+    _session_artifacts_dir = next(
+        (arg[len(prefix):] for arg in sys.argv[1:] if arg.startswith(prefix)), None
+    )
     for line in sys.stdin:
         line = line.lstrip("﻿").strip()
         if not line:
