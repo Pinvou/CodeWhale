@@ -145,17 +145,23 @@ test("incident HTTP drill-down never associates legacy missing traces and retain
   // same fingerprint must reopen the group and be visible in both exports and rows.
   const recurrenceAt = fixedAt + 1;
   t.mock.method(Date, "now", () => recurrenceAt);
-  const newEvents = [fixedAt, recurrenceAt].map((occurred_at, index) => {
-    const id = `beh_related_recurrence_${index}`;
-    return { ...events[0], event_id: id, diagnostic_id: id, occurred_at };
-  });
-  const recurrence = await fetch(base + "/behavior/events", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${credential.device_token}` },
-    body: JSON.stringify({ device_id: credential.device_id, events: newEvents }),
-  });
-  assert.equal(recurrence.status, 200);
-  assert.deepEqual((await recurrence.json()).results.map(result => result.status), ["accepted", "accepted"]);
+  const recordSample = async (id, occurred_at) => {
+    const event = { ...events[0], event_id: id, diagnostic_id: id, occurred_at };
+    const response = await fetch(base + "/behavior/events", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${credential.device_token}` },
+      body: JSON.stringify({ device_id: credential.device_id, events: [event] }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).results.map(result => result.status), ["accepted"]);
+  };
+  await recordSample("beh_related_recurrence_0", fixedAt);
+  const atBoundary = await (await fetch(base + "/behavior/failures?include_fixed=1", { headers })).json();
+  assert.deepEqual(atBoundary.rows.map(row => [row.fingerprint, row.status, row.last_seen]), [
+    [fingerprint, "fixed", fixedAt],
+  ]);
+
+  await recordSample("beh_related_recurrence_1", recurrenceAt);
 
   const reopened = await (await fetch(base + "/behavior/failures", { headers })).json();
   assert.deepEqual(reopened.rows.map(row => [row.fingerprint, row.status, row.count]), [[fingerprint, "open", 1]]);
