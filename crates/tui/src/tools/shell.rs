@@ -7776,7 +7776,9 @@ fn enforce_readonly_argv_operands(
 /// disk. Walk the pattern the way the shell does (component by component,
 /// `*` matching within one name, hidden entries only when the component asks
 /// for them, symlinked directories followed) and judge every match by its
-/// resolved location the moment it is produced. No match is inert: the shell
+/// resolved location the moment it is produced. The matching folds case
+/// because the Windows lanes bind operands case-insensitively — see
+/// [`readonly_star_match`]. No match is inert: the shell
 /// either errors (zsh `nomatch`) or hands the literal spelling to a program
 /// that finds no file.
 ///
@@ -8154,8 +8156,20 @@ fn collect_readonly_glob_matches(
 }
 
 /// Match one path component against a pattern whose only wildcard is `*`
-/// (any run of characters, including none).
+/// (any run of characters, including none). The comparison folds case: the
+/// Windows lanes bind wildcard operands through FindFirstFile and the
+/// provider matcher, which fold case on the volume, so a case-variant name
+/// a case-sensitive walk would skip (`*.txt` against an entry `NOTES.TXT`)
+/// still expands and is read there — with folding, that entry is judged at
+/// its resolved location exactly like any other candidate, and a symlinked
+/// outside target refuses. POSIX expansions are case-sensitive, so folding
+/// over-approximates them: the extra candidates are judged like any other
+/// match, and refusal still requires a candidate resolving outside the
+/// workspace (the same fail-safe direction as the quoted-value and
+/// trailing-slash over-approximations the gate already takes).
 fn readonly_star_match(pattern: &str, name: &str) -> bool {
+    let pattern = pattern.to_lowercase();
+    let name = name.to_lowercase();
     let mut pieces = pattern.split('*');
     let first = pieces.next().unwrap_or("");
     let Some(mut rest) = name.strip_prefix(first) else {

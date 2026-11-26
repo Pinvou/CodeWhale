@@ -2895,6 +2895,70 @@ fn readonly_operand_gate_folds_through_in_workspace_symlink_destination() {
     assert!(error.contains("outside_workspace"), "{error}");
 }
 
+/// The Windows lanes bind wildcard operands case-insensitively (PowerShell
+/// and cmd.exe expand through FindFirstFile/the provider matcher, which
+/// fold case on the volume), so a workspace entry whose name differs from
+/// the probe's pattern only in case is bound and read there while a
+/// case-sensitive walk skips it unjudged. The walker must judge that
+/// case-variant candidate at its resolved location: a symlink spelled
+/// `NOTES.TXT` pointing outside refuses the lowercase `*.txt` probe exactly
+/// like its exact-case twin, and folding alone never refuses — a folded
+/// candidate that resolves inside stays admitted.
+#[cfg(unix)]
+#[test]
+fn readonly_glob_walk_judges_case_variant_outside_symlink() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    // The canonicalized root, like every production caller: on a host whose
+    // temp root sits behind a symlink (macOS `/var` → `/private/var`), a raw
+    // spelling makes every in-workspace match resolve against an aliased root.
+    let roots = [workspace
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.path().to_path_buf())];
+
+    // Exact-case twin (the shape every lane already refused) stays refused:
+    // the control proving folding did not weaken the original judgment.
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("notes.txt"),
+    )
+    .expect("exact-case outside symlink");
+    let error = enforce_readonly_workspace_operands("cat *.txt", &roots, workspace.path())
+        .expect_err("the exact-case outside symlink must refuse as before")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+    std::fs::remove_file(workspace.path().join("notes.txt")).expect("remove exact-case link");
+
+    // The case-variant spelling: the probe matches it only under case
+    // folding, which is exactly how the Windows lanes bind it. The link's
+    // target resolves outside, so the folded judgment refuses.
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("NOTES.TXT"),
+    )
+    .expect("case-variant outside symlink");
+    let error = enforce_readonly_workspace_operands("cat *.txt", &roots, workspace.path())
+        .expect_err("the case-variant outside symlink must be judged like any candidate")
+        .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+    std::fs::remove_file(workspace.path().join("NOTES.TXT")).expect("remove case-variant link");
+
+    // Folding alone is not a refusal: a folded candidate that resolves
+    // inside stays admitted (the POSIX lane may run this probe inertly, and
+    // the over-approximation only ever adds judged candidates).
+    std::fs::write(workspace.path().join("LOCAL.TXT"), "inside").expect("folded-inside file");
+    enforce_readonly_workspace_operands("cat *.txt", &roots, workspace.path())
+        .expect("a folded candidate resolving inside stays admitted");
+}
+
 /// The gh stage exemption is literal-operand-only: a `*` after the program
 /// word would let the shell expand a workspace entry into a
 /// `HOST/OWNER/REPO` position at runtime, past the host the network policy
