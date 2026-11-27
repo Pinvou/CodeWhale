@@ -2016,13 +2016,23 @@ impl AcpServer {
             thinking: None,
             reasoning_effort,
             stream: Some(true),
-            temperature: None,
+            // Agent 回合的默认采样温度（2026-11-02 拍板）：不显式下发时多数推理
+            // 服务端按 temperature=1.0 处理——随机性最大，还略降 MTP 类引擎的
+            // 投机接受率（TensorFold 10-30 性能报告②）。Agent 用途需要稳定输出，
+            // 0.3 兼顾确定性与多样性。副作用说明：本地引擎卡片的 LMM_TEMPERATURE
+            // 旋钮改的是服务端缺省，显式请求值会覆盖它——需要引擎侧自定义采样时
+            // 在模型配置层显式设置（未来引入用户级采样配置后由用户值优先）。
+            temperature: Some(DEFAULT_AGENT_TEMPERATURE),
             top_p: None,
         };
 
         client.create_message_stream(request).await
     }
 }
+
+/// Agent 回合未显式配置采样时的下发温度（2026-11-02 拍板值 0.3）。理由与
+/// 副作用见请求构造处的注释。
+const DEFAULT_AGENT_TEMPERATURE: f32 = 0.3;
 
 fn resolve_acp_route_facts(
     config: &Config,
@@ -2633,6 +2643,15 @@ impl JsonRpcResponseIdPolicy {
 
 #[cfg(test)]
 mod tests {
+    /// 2026-11-02 拍板：Agent 回合默认下发 temperature=0.3（不显式带采样参数时
+    /// 服务端按 1.0 处理——随机性最大且略降 MTP 接受率）。钉住拍板值防漂移；
+    /// 序列化契约（Some(t) → body.temperature）由 client 侧 Kimi 固定采样
+    /// 用例覆盖。
+    #[test]
+    fn agent_turn_default_temperature_is_the_ratified_value() {
+        assert_eq!(DEFAULT_AGENT_TEMPERATURE, 0.3);
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
