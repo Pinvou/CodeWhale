@@ -88,7 +88,13 @@ pub struct MessageResponse {
 }
 
 /// True when the provider ended generation because its output allowance was
-/// exhausted. Providers use several wire spellings for the same condition.
+/// exhausted. Providers use several wire spellings for the same condition,
+/// including the OpenAI-shim `model_length` (review round 4: kept in step
+/// with the engine turn loop's wider local alias set in
+/// `stop_reason_is_output_limit`, which additionally accepts `output_limit`
+/// and `max_completion_tokens`; that residual difference is deliberate —
+/// those two spellings have no in-tree provider or fixture, and widening the
+/// shared incomplete-handling for them is unproven).
 #[must_use]
 pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
     reason.is_some_and(|reason| {
@@ -98,7 +104,7 @@ pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
             .unwrap_or_else(|| reason.trim());
         matches!(
             reason.to_ascii_lowercase().as_str(),
-            "length" | "max_tokens" | "max_output_tokens"
+            "length" | "max_tokens" | "max_output_tokens" | "model_length"
         )
     })
 }
@@ -879,8 +885,10 @@ mod tests {
             "length",
             "max_tokens",
             "max_output_tokens",
+            "model_length",
             " MAX_TOKENS ",
             "incomplete:max_output_tokens",
+            "incomplete:model_length",
         ] {
             assert!(is_output_limit_stop_reason(Some(reason)), "{reason}");
         }
@@ -897,6 +905,7 @@ mod tests {
             "model_context_window_exceeded"
         )));
         assert!(is_incomplete_stop_reason(Some("max_tokens")));
+        assert!(is_incomplete_stop_reason(Some("model_length")));
         assert!(!is_incomplete_stop_reason(Some("end_turn")));
         assert_eq!(
             stop_reason_detail(Some("incomplete:content_filter")),

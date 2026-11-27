@@ -1221,9 +1221,16 @@ fn moonshot_schema_type_is_object(schema_type: Option<&Value>) -> bool {
     }
 }
 
-fn moonshot_parameters_prove_object(schema: &Value) -> bool {
+pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
     const MAX_REFERENCE_DEPTH: usize = 64;
-    const MAX_PROOF_STEPS: usize = 512;
+    // Each `anyOf`/`oneOf` branch costs its Evaluate plus the composition
+    // continuation (~2 steps per branch), so the step budget is sized to the
+    // widest union the relaxed budgets admit (MFJS_MAX_ANY_OF_ITEMS = 500):
+    // 1024 ≈ 2 × 500 + slack. The original 512 cap proved true only up to
+    // ~254 branches — half the advertised width — so strict:false tools with
+    // 255–500-branch unions passed every budget and then silently failed the
+    // object proof and dropped off the wire (round-4 review P2-2).
+    const MAX_PROOF_STEPS: usize = 1024;
 
     let root = schema;
     let mut tasks = vec![ObjectProofTask::Evaluate {
@@ -1568,10 +1575,69 @@ fn prefix_digit_led_tool_names_for_moonshot(
     (dropped, minted_names)
 }
 
+/// Drop LATER tools whose decoded identity an earlier survivor already owns.
+///
+/// The codec behind `to_api_tool_name` is injective, so two survivors can
+/// share one decoded identity only by carrying the SAME final wire spelling:
+/// two registry entries with the same name (an MCP tool exposed twice, a
+/// duplicated catalog entry), or two same-named digit-led entries that mint
+/// identically. (A digit-led name whose mint would collide with a DIFFERENT
+/// sibling's encoded spelling is already dropped upstream by
+/// [`prefix_digit_led_tool_names_for_moonshot`].) Before this dedupe, such a
+/// request shipped two same-named tools and
+/// `moonshot_response_tool_owners` bailed the WHOLE request. Per-tool
+/// degradation keeps owner resolution unambiguous (first survivor wins) and
+/// the request shippable: the later duplicate is dropped like the schema and
+/// mint-collision drops, reported under its registry spelling through the
+/// same `omitted_tool_names` machinery.
+fn drop_duplicate_moonshot_decoded_identities(
+    chat_tools: &mut Vec<Value>,
+    minted_names: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut dropped = Vec::new();
+    chat_tools.retain_mut(|tool| {
+        let Some(name) = tool
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            // A missing final name is left for the strict outbound backstop
+            // in `moonshot_response_tool_owners` to refuse.
+            return true;
+        };
+        // The mint and wire-name filters upstream only emit canonical codec
+        // spellings, so this decode cannot fail in practice; an unexpected
+        // failure is the backstop's strict refusal, not a silent pass.
+        let Ok(decoded) = try_from_api_tool_name(&name) else {
+            return true;
+        };
+        if seen.insert(decoded.clone()) {
+            return true;
+        }
+        let registry = minted_names
+            .iter()
+            .find(|(_, minted)| minted.as_str() == name.as_str())
+            .map(|(registry, _)| registry.clone())
+            .unwrap_or_else(|| decoded.clone());
+        tracing::warn!(
+            tool = %registry,
+            decoded_identity = %decoded,
+            "dropping Moonshot tool from this request: another tool already owns this decoded identity"
+        );
+        dropped.push(registry);
+        false
+    });
+    dropped
+}
+
 /// Map each response-visible decoded identity to its exact registry owner.
 /// The final tools array is authoritative; mint restoration additionally
 /// requires this request's decoded mint-owner map. Duplicate decoded
-/// identities are rejected instead of resolved by map iteration order.
+/// identities are rejected instead of resolved by map iteration order — the
+/// request builder dedupes them per-tool upstream
+/// ([`drop_duplicate_moonshot_decoded_identities`]), so this strict bail is
+/// a backstop for any future caller that skips the builder.
 fn moonshot_response_tool_owners(
     body: &Value,
     mint_owners: &std::collections::HashMap<String, String>,
@@ -1623,25 +1689,51 @@ fn moonshot_response_tool_name(
     })
 }
 
+/// Count a REPLAYED (cache-hit) blocking response's tool-call blocks whose
+/// names this request's owner map cannot resolve — the same counting the
+/// fresh-parse path performs in `parse_chat_message_for_route_with_owners`.
+/// A cache hit returns before that parse runs, so replaying a response that
+/// carries raw unowned names would lose the bounded diagnostic entirely; the
+/// count feeds the identical warn without changing the cache entry type
+/// (round-4 review P3).
+fn moonshot_cached_response_unowned_tool_count(
+    response: &MessageResponse,
+    owners: &std::collections::HashMap<String, String>,
+) -> usize {
+    response
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { name, .. } => Some(name),
+            _ => None,
+        })
+        .filter(|name| moonshot_response_tool_name(name, owners).is_err())
+        .count()
+}
+
 /// Reconcile replayed assistant calls with this request's owner map. A raw
 /// digit-led registry name may only be minted when that exact owner survived;
 /// an already-prefixed spelling must be owned either by a live mint or by a
 /// raw tool on this request. Otherwise the old identity is ambiguous and is
 /// passed through untouched rather than rebound by the current catalog. The
 /// same INBOUND resilience covers calls whose name is missing, fails the
-/// canonical decode, violates the final wire-name pattern, or exceeds the
-/// final wire contract: they are inert replay context (dispatch keys on
-/// RESPONSE spellings, never on history), and one malformed entry must not
-/// make the whole request unbuildable. OUTBOUND enforcement — the pattern,
+/// canonical decode, violates the final wire-name pattern, exceeds the
+/// final wire contract, or names a stale non-digit-led identity that is
+/// simply not offered this turn (a stale valid name re-encodes to itself, so
+/// the untouched pass-through is byte-identical): they are inert replay
+/// context (dispatch keys on RESPONSE spellings, never on history), and one
+/// malformed entry must not make the whole request unbuildable. Every such
+/// entry feeds the single bounded warn. OUTBOUND enforcement — the pattern,
 /// length, and collision checks over THIS request's tools array in
-/// [`moonshot_response_tool_owners`] — stays strict.
+/// [`moonshot_response_tool_owners`] — stays strict. Returns the number of
+/// pass-through entries (the bounded-warn count).
 fn apply_moonshot_history_tool_call_identities(
     body: &mut Value,
     mint_owners: &std::collections::HashMap<String, String>,
-) -> Result<()> {
+) -> Result<usize> {
     let response_owners = moonshot_response_tool_owners(body, mint_owners)?;
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return Ok(());
+        return Ok(0);
     };
     // History tool-call names that this request cannot resolve to an owner
     // are inert context: the provider accepts replayed names outside the
@@ -1686,21 +1778,24 @@ fn apply_moonshot_history_tool_call_identities(
                 passed_through += 1;
                 continue;
             }
-            let mint_shaped = decoded.len() > 1
-                && decoded.starts_with('_')
-                && decoded.as_bytes()[1].is_ascii_digit();
             let final_decoded = if digit_led {
                 let Some(owner) = mint_owners.get(&decoded) else {
                     passed_through += 1;
                     continue;
                 };
                 owner.clone()
-            } else {
-                if mint_shaped && !response_owners.contains_key(&decoded) {
-                    passed_through += 1;
-                    continue;
-                }
+            } else if response_owners.contains_key(&decoded) {
                 decoded
+            } else {
+                // Unowned valid identity: a mint-shaped spelling whose owner
+                // dropped out, or a stale non-digit-led name from an earlier
+                // catalog. It re-encodes to itself, so leaving the name
+                // untouched is byte-identical — but it counts toward the same
+                // bounded pass-through warn as the missing/decode-fail/
+                // pattern classes so the pass-through never goes undiagnosed
+                // (round-4 review P3-10).
+                passed_through += 1;
+                continue;
             };
             let final_wire = to_api_tool_name(&final_decoded);
             if !moonshot_wire_name_is_valid(&final_wire) {
@@ -1718,7 +1813,7 @@ fn apply_moonshot_history_tool_call_identities(
             "Moonshot replay: {passed_through} history tool-call name(s) have no owner in this request (or are missing/violate the wire contract); left untouched"
         ));
     }
-    Ok(())
+    Ok(passed_through)
 }
 
 /// The final Chat Completions wire payload for one request.
@@ -1799,9 +1894,10 @@ pub(crate) fn build_chat_wire_body(
         body["top_p"] = json!(top_p);
     }
     let mut omitted_tool_names = Vec::new();
-    // Registry spellings that survived schema sanitization (pre-prefix):
-    // identity for the forced-choice check, distinct from the minted
-    // aliases below (review thread on 5897491074).
+    // Decoded identities (raw registry spellings) of the tools that survived
+    // schema sanitization, pre-prefix: the comparison space for the
+    // forced-choice check, distinct from the minted aliases below (review
+    // thread on 5897491074).
     let mut moonshot_offered_registry_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut moonshot_minted_names: std::collections::HashMap<String, String> =
@@ -1851,22 +1947,41 @@ pub(crate) fn build_chat_wire_body(
                     tool.get("function")
                         .and_then(|function| function.get("name"))
                         .and_then(Value::as_str)
-                        .map(str::to_owned)
+                })
+                .map(|wire_name| {
+                    // Canonicalize the ENCODED wire spelling to its decoded
+                    // identity — the raw registry spelling the forced-choice
+                    // check speaks. The codec round-trips
+                    // (`to_api_tool_name(try_from_api_tool_name(w)) == w`),
+                    // so wire `get--latest` lands as registry `get-latest`
+                    // and compares like-for-like with a forced raw name
+                    // (round-4 review P2-6).
+                    try_from_api_tool_name(wire_name).unwrap_or_else(|_| wire_name.to_owned())
                 })
                 .collect();
             let (collision_dropped, minted_names) =
                 prefix_digit_led_tool_names_for_moonshot(&mut chat_tools, &registry_names);
             omitted_tool_names.extend(collision_dropped);
             moonshot_minted_names = minted_names;
+            let duplicate_dropped =
+                drop_duplicate_moonshot_decoded_identities(&mut chat_tools, &moonshot_minted_names);
             // The forced-choice check must answer against the tools THIS
             // request finally advertises: a raw spelling dropped by the
             // final wire-name validation above is absent from the wire even
             // though it survived schema sanitization, so forcing it would
             // emit a tool_choice the provider rejects wholesale (review
-            // 4689524191).
+            // 4689524191). Drop reports may arrive in either spelling (the
+            // schema drops are encoded, the mint drops are encoded pre-mint),
+            // so each is canonicalized the same way as the set.
             for dropped in &omitted_tool_names {
-                moonshot_offered_registry_names.remove(dropped);
+                let dropped_identity =
+                    try_from_api_tool_name(dropped).unwrap_or_else(|_| dropped.clone());
+                moonshot_offered_registry_names.remove(&dropped_identity);
             }
+            // The dedupe reports ride the same receipt but never shrink the
+            // offered set: the FIRST survivor still owns the dropped entry's
+            // identity, so a forced choice naming it stays live.
+            omitted_tool_names.extend(duplicate_dropped);
         }
         if provider != crate::config::ApiProvider::Moonshot {
             for tool in &mut chat_tools {
@@ -1941,12 +2056,24 @@ pub(crate) fn build_chat_wire_body(
             // A forced call must name the same wire spelling the tools array
             // carries (see `prefix_digit_led_tool_names_for_moonshot`), both
             // so the documented pattern holds and so the dropped-tool check
-            // below compares like against like.
+            // below compares like against like. A `type:"tool"` choice is
+            // already canonical codec output, but an OpenAI-shaped
+            // `type:"function"` choice passes `map_tool_choice_for_chat`
+            // verbatim and can arrive in its RAW registry spelling
+            // (`get-latest`), which never matched the encoded offered set and
+            // bailed the whole request even though the tool was on the wire
+            // (round-4 review P2-6). Canonicalize through the same codec
+            // before naming the wire and before any comparison; a
+            // non-canonical forced name fails the decode and keeps its
+            // spelling, which the offered checks below refuse.
+            let forced_identity =
+                try_from_api_tool_name(&forced).unwrap_or_else(|_| forced.clone());
+            let encoded_forced = to_api_tool_name(&forced_identity);
             let digit_led = forced.as_bytes().first().is_some_and(u8::is_ascii_digit);
             let wire_name = if digit_led {
-                format!("_{forced}")
+                format!("_{encoded_forced}")
             } else {
-                forced.clone()
+                encoded_forced.clone()
             };
             if wire_name
                 != *mapped
@@ -1961,7 +2088,9 @@ pub(crate) fn build_chat_wire_body(
             // offers under the forced spelling. A digit-led forced name is
             // live only when THAT registry tool survived to mint that
             // exact wire name (a collision or length drop shadows it even
-            // though a namesake twin advertises the same spelling); a
+            // though a namesake twin advertises the same spelling); the
+            // mint map is keyed by the tools' ENCODED pre-mint spellings,
+            // so the lookup re-encodes the canonical identity to match. A
             // non-digit-led forced name is live only when the registry
             // entry with THAT name itself survived — a minted alias of a
             // different digit-led survivor must not answer for it, or a
@@ -1970,10 +2099,10 @@ pub(crate) fn build_chat_wire_body(
             // exact-match precedence (review thread on 5897491074).
             let forced_is_offered = if digit_led {
                 moonshot_minted_names
-                    .get(&forced)
+                    .get(&encoded_forced)
                     .is_some_and(|minted| minted == &wire_name)
             } else {
-                moonshot_offered_registry_names.contains(&forced)
+                moonshot_offered_registry_names.contains(&forced_identity)
             };
             if !forced_is_offered {
                 bail!(
@@ -2073,6 +2202,20 @@ impl DeepSeekClient {
                 &wire_body,
             );
             if let Some(cached) = crate::llm_response_cache::response_cache().get(&key) {
+                // A cache hit skips the parse below, where the bounded
+                // unowned-tools warn lives; replaying a response that carries
+                // raw unowned names would otherwise lose the diagnostic
+                // (round-4 review P3). The cache key pins this exact wire
+                // body, so the owners computed above are the ones the cached
+                // blocks were parsed against. Same counting semantics as the
+                // parse path, one bounded warn.
+                let unowned =
+                    moonshot_cached_response_unowned_tool_count(&cached, &response_tool_owners);
+                if unowned > 0 {
+                    crate::logging::warn(format!(
+                        "Moonshot response contains {unowned} tool call(s) for tools not offered by this request; passed to dispatch as unknown-tool errors"
+                    ));
+                }
                 return Ok(cached);
             }
             Some(key)
@@ -10490,6 +10633,384 @@ mod alias_thinking_detection_tests {
         );
     }
 
+    /// A stale non-digit-led history name that decodes, passes the wire
+    /// pattern, and re-encodes to itself used to pass through with NO
+    /// accounting, unlike the missing-name, decode-failure, pattern-violation,
+    /// and digit-led classes which all fed the bounded warn. It stays inert —
+    /// the untouched pass-through is byte-identical — but now feeds the same
+    /// one-warn-per-build counter (round-4 review P3-10).
+    #[test]
+    fn moonshot_stale_valid_history_name_counts_into_the_bounded_pass_through() {
+        let mut body = json!({
+            "tools": [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}],
+            "messages": [
+                {"role": "assistant", "tool_calls": [
+                    {"id": "call-owned", "type": "function", "function": {"name": "probe", "arguments": "{}"}},
+                    {"id": "call-stale", "type": "function", "function": {"name": "old_tool", "arguments": "{}"}}
+                ]}
+            ]
+        });
+        let mint_owners = std::collections::HashMap::new();
+        let passed = super::apply_moonshot_history_tool_call_identities(&mut body, &mint_owners)
+            .expect("a stale valid name is inert replay context, not a build failure");
+        assert_eq!(
+            passed, 1,
+            "exactly the stale entry counts into the single bounded warn"
+        );
+        let calls = body["messages"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(
+            calls[0]["function"]["name"],
+            json!("probe"),
+            "the owned history call resolves to its owner"
+        );
+        assert_eq!(
+            calls[1]["function"]["name"],
+            json!("old_tool"),
+            "the stale name passes through untouched (its re-encoding is byte-identical)"
+        );
+    }
+
+    /// Two tools whose DECODED identities collide used to ship together and
+    /// make `moonshot_response_tool_owners` bail the WHOLE request. The
+    /// builder now degrades per tool: the LATER duplicate is dropped through
+    /// the same `omitted_tool_names` machinery as the schema and collision
+    /// drops, the first survivor keeps the wire, and owner resolution stays
+    /// unambiguous (round-4 review P2-5).
+    #[test]
+    fn moonshot_duplicate_decoded_identities_degrade_per_tool() {
+        // Two same-named digit-led entries mint to ONE wire spelling.
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            digit_led_name_probe_tool("3d_render"),
+        ]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("a decoded-identity collision must degrade per tool, not sink the request");
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "the later duplicate must be dropped: {tools:?}"
+        );
+        assert_eq!(
+            tools[0]["function"]["name"],
+            json!("_3d_render"),
+            "the first survivor keeps the minted wire spelling"
+        );
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["3d_render".to_string()],
+            "the dropped duplicate is reported under its registry spelling"
+        );
+
+        // Forcing the survivor's identity still ships: the dedupe drop
+        // reports on the receipt without revoking the identity the first
+        // survivor owns.
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.reasoning_effort = Some("off".to_string());
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            digit_led_name_probe_tool("3d_render"),
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the surviving identity ships");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render")
+        );
+
+        // Two same-named non-digit-led entries collide trivially and keep
+        // the identity live for the forced-choice check.
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("shared_tool"),
+            digit_led_name_probe_tool("shared_tool"),
+        ]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("same-named entries degrade per tool");
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(tools.len(), 1, "only the first entry ships: {tools:?}");
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["shared_tool".to_string()],
+            "the second entry is reported like any other drop"
+        );
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.reasoning_effort = Some("off".to_string());
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("shared_tool"),
+            digit_led_name_probe_tool("shared_tool"),
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "shared_tool"}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the first survivor keeps the shared identity live for forced choice");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("shared_tool")
+        );
+    }
+
+    /// Forced named choice must compare the RAW registry spelling the caller
+    /// speaks, not the encoded wire spelling. A `type:"tool"` choice was
+    /// already encoded by the mapper, but an OpenAI-shaped `type:"function"`
+    /// choice passes through verbatim in its RAW spelling and used to bail
+    /// the whole request even though the hyphenated tool was on the wire
+    /// (round-4 review P2-6); a genuinely absent name must still refuse the
+    /// whole request, and a schema-dropped hyphenated tool is not offered.
+    #[test]
+    fn moonshot_forced_named_choice_compares_canonical_registry_spellings() {
+        // (a) type:"tool" forced choice on a hyphenated tool ships with the
+        // encoded tool_choice spelling the tools array carries.
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.reasoning_effort = Some("off".to_string());
+        request.tools = Some(vec![digit_led_name_probe_tool("get-latest")]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "get-latest"}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing an offered hyphenated tool must ship");
+        assert_eq!(
+            body.body["tools"][0]["function"]["name"],
+            json!("get--latest")
+        );
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("get--latest")
+        );
+
+        // (b) OpenAI-shaped type:"function" choice arrives in its RAW
+        // registry spelling and still ships, now canonicalized onto the wire.
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.reasoning_effort = Some("off".to_string());
+        request.tools = Some(vec![digit_led_name_probe_tool("get-latest")]);
+        request.tool_choice = Some(json!({
+            "type": "function",
+            "function": {"name": "get-latest"}
+        }));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the raw forced spelling must compare like-for-like (round-4 P2-6)");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("get--latest"),
+            "the raw forced name is rewritten to the wire spelling"
+        );
+
+        // (c) A forced name that is genuinely absent still rejects the whole
+        // request.
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.reasoning_effort = Some("off".to_string());
+        request.tools = Some(vec![digit_led_name_probe_tool("get-latest")]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "ghost_tool"}));
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("a genuinely absent forced name must refuse");
+        assert!(error.to_string().contains("not offered"), "{error}");
+
+        // (d) A schema-dropped hyphenated tool is absent from the offered
+        // set: the request without forcing builds per-tool, and forcing the
+        // dropped name refuses instead of emitting a tool_choice the
+        // provider would reject wholesale.
+        let mut dropped = digit_led_name_probe_tool("get-latest");
+        dropped.input_schema = json!({
+            "anyOf": [
+                {"type": "object", "properties": {"value": {"type": "string"}}},
+                {"type": "string"}
+            ]
+        });
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![dropped, digit_led_name_probe_tool("probe")]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the schema drop stays per-tool");
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["get--latest".to_string()],
+            "the schema drop report carries the encoded wire spelling"
+        );
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.reasoning_effort = Some("off".to_string());
+        request.tools = Some(vec![{
+            let mut dropped = digit_led_name_probe_tool("get-latest");
+            dropped.input_schema = json!({
+                "anyOf": [
+                    {"type": "object", "properties": {"value": {"type": "string"}}},
+                    {"type": "string"}
+                ]
+            });
+            dropped
+        }]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "get-latest"}));
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing a schema-dropped tool must refuse");
+        assert!(error.to_string().contains("not offered"), "{error}");
+    }
+
+    /// A blocked Moonshot cache hit returns before the parse that counts
+    /// unowned response tools, so a replayed response carrying raw unowned
+    /// names used to lose the bounded diagnostic entirely. The hit path now
+    /// counts the cached blocks against the same owner map with the same
+    /// semantics (round-4 review P3) — without changing the cache entry
+    /// type.
+    #[test]
+    fn moonshot_cached_response_unowned_tool_count_matches_the_parse_path() {
+        let owners = std::collections::HashMap::from([("probe".to_string(), "probe".to_string())]);
+        let response_with = |names: &[&str]| crate::models::MessageResponse {
+            id: "chatcmpl-cache".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: names
+                .iter()
+                .map(|name| crate::models::ContentBlock::ToolUse {
+                    id: format!("call-{name}"),
+                    name: (*name).to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                })
+                .collect(),
+            model: "probe".to_string(),
+            stop_reason: Some("tool_calls".to_string()),
+            stop_sequence: None,
+            container: None,
+            usage: crate::models::Usage::default(),
+        };
+        assert_eq!(
+            super::moonshot_cached_response_unowned_tool_count(
+                &response_with(&["ghost_tool", "probe"]),
+                &owners
+            ),
+            1,
+            "one unowned raw-name block is counted once, next to its owned sibling"
+        );
+        assert_eq!(
+            super::moonshot_cached_response_unowned_tool_count(&response_with(&["probe"]), &owners),
+            0,
+            "owned blocks are never counted"
+        );
+    }
+
+    /// End-to-end: a seeded cache entry answers the blocking request without
+    /// transport, and the hit path counts its unowned blocks with the same
+    /// owner map the fresh parse would have used.
+    #[tokio::test]
+    async fn moonshot_cache_hit_replays_and_counts_unowned_tools() {
+        let client = crate::client::DeepSeekClient::new(&crate::config::Config {
+            provider: Some("moonshot".into()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    api_key: Some("cache-hit-unowned-fixture-key".to_string()),
+                    base_url: Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
+                    model: Some(crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string()),
+                    ..crate::config::ProviderConfig::default()
+                },
+                ..crate::config::ProvidersConfig::default()
+            }),
+            ..Default::default()
+        })
+        .expect("fixture client");
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("probe")]);
+        let prepared = client
+            .prepare_outbound_request(request, false)
+            .expect("fixture prepared request");
+        let owners =
+            super::moonshot_response_tool_owners(&prepared.body, &prepared.moonshot_mint_owners)
+                .expect("fixture owners");
+        let wire_body = serde_json::to_vec(&prepared.body).expect("serialize fixture wire body");
+        let key = crate::llm_response_cache::ResponseCache::make_key(
+            client.api_provider.as_str(),
+            &client.base_url,
+            client.path_suffix.as_deref(),
+            &client.api_key,
+            &wire_body,
+        );
+        let cached = crate::models::MessageResponse {
+            id: "chatcmpl-cache-hit".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                crate::models::ContentBlock::ToolUse {
+                    id: "call-ghost".to_string(),
+                    name: "ghost_tool".to_string(),
+                    input: json!({"path": "scene.glb"}),
+                    caller: None,
+                    thought_signature: None,
+                },
+                crate::models::ContentBlock::Text {
+                    text: "done".to_string(),
+                    cache_control: None,
+                },
+            ],
+            model: crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string(),
+            stop_reason: Some("tool_calls".to_string()),
+            stop_sequence: None,
+            container: None,
+            usage: crate::models::Usage::default(),
+        };
+        crate::llm_response_cache::response_cache().put(key, cached);
+        let replayed = client
+            .create_message_chat(&prepared, true)
+            .await
+            .expect("the seeded cache entry must answer without transport");
+        assert_eq!(
+            super::moonshot_cached_response_unowned_tool_count(&replayed, &owners),
+            1,
+            "the replayed response carries one unowned raw-name block, so the hit path emits the bounded warn"
+        );
+        assert!(
+            replayed.content.iter().any(|block| matches!(
+                block,
+                crate::models::ContentBlock::ToolUse { name, .. } if name == "ghost_tool"
+            )),
+            "the cache hit replays the stored blocks verbatim: {:?}",
+            replayed.content
+        );
+    }
+
     #[test]
     fn overseas_kimi_ai_endpoint_keeps_the_document_parameter_whitelist() {
         // Widening the sampling strip to the overseas host must NOT widen the
@@ -12050,6 +12571,106 @@ mod image_block_wire_tests {
                 "depth {index}"
             );
         }
+    }
+
+    /// The proof-step budget must cover the widest union the relaxed budgets
+    /// admit. Each `anyOf` branch costs its Evaluate plus the composition
+    /// continuation (~2 steps per branch), so the old 512-step cap proved a
+    /// root union true only up to ~254 branches — half of
+    /// `MFJS_MAX_ANY_OF_ITEMS` (500) — and strict:false tools with wider
+    /// unions passed every budget, failed the proof, and dropped off the wire
+    /// silently (round-4 review P2-2). At 1024 the boundary sits at 510
+    /// branches: the full 500-branch budget proves, and runaway schemas still
+    /// fail closed.
+    #[test]
+    fn moonshot_proof_steps_cover_the_relaxed_any_of_budget() {
+        let branch = json!({"type": "object"});
+        let proves = |branches: usize| {
+            super::moonshot_parameters_prove_object(&json!({
+                "anyOf": vec![branch.clone(); branches]
+            }))
+        };
+        assert!(
+            proves(500),
+            "the 500-branch union the relaxed budgets admit (MFJS_MAX_ANY_OF_ITEMS) must prove"
+        );
+        assert!(
+            proves(510),
+            "2 × 510 steps + the root tasks stay within 1024"
+        );
+        assert!(!proves(511), "the step cap still fails closed past 1024");
+        assert!(
+            !proves(2000),
+            "a runaway union is rejected by the step cap, not by walking forever"
+        );
+    }
+
+    /// End-to-end: a strict:false Moonshot tool whose root `anyOf` holds 490
+    /// trivial object branches — a width the OLD proof-step budget could not
+    /// prove — passes every relaxed budget, proves the object root, and ships
+    /// on the wire with its schema preserved verbatim (round-4 review P2-2).
+    #[test]
+    fn moonshot_relaxed_wide_union_ships_within_the_proof_step_budget() {
+        let branch = json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"]
+        });
+        let union_schema = json!({
+            "anyOf": vec![branch; 490],
+            "default": {"value": "probe"}
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "wide_union".to_string(),
+            description: "probe".to_string(),
+            input_schema: union_schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: Some(false),
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "probe".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the 490-branch union proves the object root under the raised step budget");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "the wide union must not be dropped: {:?}",
+            body.omitted_tool_names
+        );
+        let function = &body.body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(
+            function["parameters"], union_schema,
+            "relaxed semantics ship the schema verbatim"
+        );
     }
 }
 

@@ -507,7 +507,7 @@ OpenRouter completions 和静态注册表行包括自 2026 年 4 月起通过 Op
 | `fireworks` | `accounts/fireworks/models/deepseek-v4-pro` | 是 | 是 |
 | `siliconflow` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | 是 | 是 |
 | `arcee` | `trinity-large-thinking`, `trinity-large-preview`；提供商提示的自定义模型 ID 原样通过 | 是 | `trinity-large-thinking` 是；`trinity-large-preview` 否 |
-| `moonshot` | `kimi-k3`（默认）, `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6` | 是 | 是 |
+| `moonshot` | `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k3`（默认）, `k3`, `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`, `k3.1-pro`, `k3.1-pro-highspeed`；裸 `k3` / `k3.1-pro` / `k3.1-pro-highspeed` 是 Kimi Code 会员拼法 | 是 | 是 |
 | `zai` | `GLM-5.3`, `GLM-5.2`, `GLM-5.1`, `GLM-5-Turbo`；提供商提示的自定义模型 ID 原样通过 | 是 | 是 |
 | `stepfun` | `step-3.7-flash` | 是 | 否 |
 | `minimax` | `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2` | 是 | 是 |
@@ -537,9 +537,9 @@ AtlasCloud 与配置层保持相同的默认模型，并为 Pro 和 Flash 行添
 
 Moonshot schema 和请求整形只覆盖 OpenAI 兼容 Chat Completions，不改变 Responses 或 Anthropic Messages 适配器。
 
-`function.strict = true` 或省略 `strict` 时，Codewhale 采用已发布 [MFJS 规范](https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.md)、[walle 校验器](https://github.com/MoonshotAI/walle)和当前受支持 Kimi 模型契约三者中更严格的交集。交集之外的纯注解会被移除；无法保留的约束不会被静默丢弃；不兼容的工具会逐个丢弃并告警，而不是让整个请求失败。服务端实测接受某 schema 不会放宽该契约。
+`function.strict = true` 或省略 `strict` 时，Codewhale 采用已发布 [MFJS 规范](https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.md)、[walle 校验器](https://github.com/MoonshotAI/walle)和当前受支持 Kimi 模型契约三者中更严格的交集。交集之外的纯注解会被移除；无法保留的约束不会被静默丢弃；不兼容的工具会逐个丢弃并告警，而不是让整个请求失败。服务端实测接受某 schema 不会放宽该契约。MCP 提供的工具，其参数 schema 携带边界（`minimum`、`maximum`、`minLength`、`maxLength`、`minItems`、`maxItems`）时会从 Moonshot 请求中丢弃，直到提供它的 MCP 服务器修剪掉这些边界为止；更早的构建会静默剥离这些边界并按放宽后的 schema 发送。
 
-显式 `function.strict = false` 是官方非严格 API 入口。参数能证明 JSON object 根时，Codewhale 原样保留原始 schema 和 description，包括组合、边界、默认值及依赖关键字。`strict:false` schema 的根无法证明 object 时，该工具会被丢弃并告警，而不是猜测改写为另一种结构。该字段属于每个工具的 JSON 定义，不是 provider TOML 设置。
+显式 `function.strict = false` 是官方非严格 API 入口。参数能证明 JSON object 根时，Codewhale 原样保留原始 schema 和 description，包括组合、边界、默认值及依赖关键字。`strict:false` schema 的根无法证明 object 时，该工具会被丢弃并告警，而不是猜测改写为另一种结构。本地 object 证明接受的关键字仍可能被 Moonshot 服务端拒绝；在宽松泳道上，该拒绝会让整个请求失败，而不是丢弃该工具。该字段属于每个工具的 JSON 定义，不是 provider TOML 设置。
 
 ## 能力元数据
 

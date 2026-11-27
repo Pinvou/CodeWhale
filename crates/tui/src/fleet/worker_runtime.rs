@@ -2982,9 +2982,10 @@ mod tests {
         // accept an explicit tier through the exact-membership predicate: the
         // bare ids are deliberately blind in `model_supports_reasoning`, so
         // `provider_capability` alone cannot vouch for this route (review
-        // 6061318874). Both K3-era membership spellings ride the same
-        // predicate.
-        for model in ["k3", "k3-256k"] {
+        // 6061318874). All four membership spellings ride the same gate — the
+        // K3-era pair through `is_exact_kimi_code_k3_route`, the K3.1 pair
+        // through `is_kimi_code_k31_route`.
+        for model in ["k3", "k3-256k", "k3.1-pro", "k3.1-pro-highspeed"] {
             let config = moonshot_route_config("https://api.kimi.com/coding/v1");
             let mut profile = agent_profile(
                 "kimi-builder",

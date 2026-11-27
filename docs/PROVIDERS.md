@@ -899,7 +899,7 @@ endpoint when the endpoint supports model listing.
 | `fireworks` | `accounts/fireworks/models/deepseek-v4-pro` | yes | yes |
 | `siliconflow` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | yes | yes |
 | `arcee` | `trinity-large-thinking`, `trinity-large-preview`; provider-hinted custom model IDs pass through | yes | yes for `trinity-large-thinking`; no for `trinity-large-preview` |
-| `moonshot` | `kimi-k3` (default), `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6` | yes | yes |
+| `moonshot` | `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k3` (default), `k3`, `kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`, `k3.1-pro`, `k3.1-pro-highspeed`; bare `k3` / `k3.1-pro` / `k3.1-pro-highspeed` are the Kimi Code membership spellings | yes | yes |
 | `zai` | `GLM-5.3`, `GLM-5.3-Flash`, `GLM-5.2`, `GLM-5.1`, `GLM-5-Turbo`; provider-hinted custom model IDs pass through | yes | yes |
 | `stepfun` | `step-3.7-flash` | yes | no |
 | `minimax` | `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2` | yes | yes |
@@ -941,14 +941,20 @@ supported Kimi model contracts. Pure annotations outside that intersection are
 removed, constraints that cannot be preserved are not silently discarded, and
 an incompatible tool is dropped individually with a warning instead of failing
 the whole request. Live acceptance by a server does not widen this contract.
+MCP-supplied tools whose parameter schemas carry bounds (`minimum`,
+`maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`) are dropped from
+Moonshot requests until the supplying MCP server trims them; earlier builds
+silently stripped those bounds and shipped the widened schema instead.
 
 Explicit `function.strict = false` is the official non-strict API entry. When
 its parameters prove a JSON object root, Codewhale preserves the original
 schema and description verbatim, including composition, bounds, defaults, and
 dependent keywords. A `strict:false` schema whose root cannot prove an object
 is dropped with a warning rather than being guessed into a different shape.
-This field belongs to each tool's JSON definition; it is not a provider TOML
-setting.
+A keyword the local object proof accepts can still be rejected by Moonshot's
+server; on the relaxed lane that rejection fails the whole request rather than
+dropping the tool. This field belongs to each tool's JSON definition; it is
+not a provider TOML setting.
 
 ## Capability Metadata
 

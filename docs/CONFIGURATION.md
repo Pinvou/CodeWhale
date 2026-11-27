@@ -1796,8 +1796,11 @@ contracts. An incompatible tool is dropped individually with a warning rather
 than widening the wire schema. Explicit `function.strict = false` is the
 official non-strict API entry: Codewhale preserves its original schema and
 description when its parameters prove a JSON object root, and fails closed for
-a root that does not. This is a tool JSON field, not a `[providers.moonshot]`
-TOML key. See [PROVIDERS.md](PROVIDERS.md#moonshotkimi-chat-completions-tool-schemas).
+a root that does not. A keyword the local object proof accepts can still be
+rejected by Moonshot's server; on the relaxed lane that rejection fails the
+whole request rather than dropping the tool. This is a tool JSON field, not a
+`[providers.moonshot]` TOML key.
+See [PROVIDERS.md](PROVIDERS.md#moonshotkimi-chat-completions-tool-schemas).
 
 ### Core keys (used by the TUI/engine)
 

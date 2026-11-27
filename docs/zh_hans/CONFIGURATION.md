@@ -1008,7 +1008,7 @@ DeepSeek V4 前缀缓存让 token 标签变得重要。这些数量保持分离�
 
 ### Moonshot/Kimi Chat Completions 工具 schema
 
-Moonshot schema 和请求整形只覆盖 OpenAI 兼容 Chat Completions，不改变 Responses 或 Anthropic Messages 适配器。工具的 `function.strict = true` 或省略 `strict` 时，Codewhale 采用已发布 MFJS 规范、walle 校验器和当前受支持 Kimi 模型契约三者中更严格的交集。不兼容的工具会逐个丢弃并告警，而不是放宽线协议 schema。显式 `function.strict = false` 是官方非严格 API 入口：参数能证明 JSON object 根时，Codewhale 保留原始 schema 和 description；无法证明时失败关闭。这是工具 JSON 字段，不是 `[providers.moonshot]` TOML 键。详见 [`PROVIDERS.md`](PROVIDERS.md#moonshotkimi-chat-completions-工具-schema)。
+Moonshot schema 和请求整形只覆盖 OpenAI 兼容 Chat Completions，不改变 Responses 或 Anthropic Messages 适配器。工具的 `function.strict = true` 或省略 `strict` 时，Codewhale 采用已发布 MFJS 规范、walle 校验器和当前受支持 Kimi 模型契约三者中更严格的交集。不兼容的工具会逐个丢弃并告警，而不是放宽线协议 schema。显式 `function.strict = false` 是官方非严格 API 入口：参数能证明 JSON object 根时，Codewhale 保留原始 schema 和 description；无法证明时失败关闭。本地 object 证明接受的关键字仍可能被 Moonshot 服务端拒绝；在宽松泳道上，该拒绝会让整个请求失败，而不是丢弃该工具。这是工具 JSON 字段，不是 `[providers.moonshot]` TOML 键。详见 [`PROVIDERS.md`](PROVIDERS.md#moonshotkimi-chat-completions-工具-schema)。
 
 ### 核心键(供 TUI/引擎使用)
 

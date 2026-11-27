@@ -65,7 +65,7 @@ base_url = "https://api.deepseek.com/beta"
 #   kimi-k2.7-code[-highspeed]      — previous-generation direct Moonshot/Kimi model IDs
 #   k3                              — Kimi Code membership K3 API model ID
 #   k3.1-pro[-highspeed]            — Kimi Code membership K3.1 API model IDs
-#   kimi-for-coding                 — Kimi Code membership K2.7 compatibility ID
+#   kimi-for-coding                 — Kimi Code membership K2.8 Preview compatibility ID
 #   kimi-for-coding-highspeed       — Kimi Code membership high-speed roster ID
 #   gpt-4.1                         — default generic OpenAI-compatible model ID
 #   deepseek-ai/deepseek-v4-flash   — default AtlasCloud model ID
@@ -679,8 +679,9 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 # base_url = "https://api.kimi.com/coding/v1" # or https://api.kimi.ai/coding/v1
 # model = "k3"                              # or k3.1-pro[-highspeed]
 # K3/K3.1 membership uses nested thinking.effort; off -> enabled/low.
-# Legacy kimi-for-coding off -> thinking disabled (vendor-documented
-# disabled form); kimi-for-coding-highspeed off -> enabled without an effort field.
+# Legacy kimi-for-coding off -> thinking disabled (vendor documents the
+# disabled form for K2.6; membership serving is observed disabled);
+# kimi-for-coding-highspeed off -> enabled without an effort field.
 # Dispatched auto selects a concrete tier; only an omitted reasoning setting
 # leaves the provider default in control.
 # Moderato plans are capped at 262144; Allegretto and above unlock up to 1048576.
@@ -689,7 +690,7 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 # Alternatively use model = "k3-256k" with context_window = 262144 for the fixed 256K route.
 # Omit context_window to keep Codewhale's safe 262144-token bare-k3 baseline.
 # `k3[1m]` is a Claude Code-only convention, not an API model ID; Codewhale rejects it.
-# Kimi Code K2.7 remains available to all members as model = "kimi-for-coding".
+# Kimi Code K2.8 Preview remains available to all members as model = "kimi-for-coding".
 # Kimi OAuth is not supported. Legacy auth_mode = "kimi_oauth" fails closed
 # to the API-key guidance above without probing Kimi CLI credential files.
 

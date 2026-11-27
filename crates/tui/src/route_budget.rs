@@ -315,9 +315,14 @@ pub(crate) fn effective_max_output_tokens_for_route(
 ) -> u32 {
     let window = route_context_window_tokens(provider, model, route_limits);
     let route_cap = route_output_limit_tokens(route_limits);
-    // The exact direct K3 route and K3.1 routes reporting the same maximum
-    // provide stronger evidence than their conservative static model rows.
-    // Automatic request sizing still goes through effective_max_output_tokens.
+    // The promotion keys on the route-reported cap being exactly the
+    // documented 1,048,576 K3/K3.1 maximum plus the `kimi-k3`/K3.1-family
+    // spelling — deliberately with no provider/endpoint conjunct: fresh route
+    // facts are authoritative, so an endpoint reporting the documented
+    // maximum for a documented-family spelling is treated as the documented
+    // surface. That concrete route fact provides stronger evidence than the
+    // conservative static model rows. Automatic request sizing still goes
+    // through effective_max_output_tokens.
     let compatibility_source = if route_cap == Some(crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS)
         && (model.eq_ignore_ascii_case("kimi-k3")
             || crate::config::is_kimi_k31_model_spelling(model))

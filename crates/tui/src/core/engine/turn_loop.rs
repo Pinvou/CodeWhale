@@ -6560,8 +6560,10 @@ impl Engine {
                             crate::logging::info("Restricted tool block stop (details redacted)");
                         } else {
                             crate::logging::info(format!(
-                                "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
-                                tool_state.name, tool_state.input_buffer, tool_state.input
+                                "Tool '{}' block stop. Buffer: {}, Current input: {:?}",
+                                tool_state.name,
+                                bounded_raw_arguments_excerpt(&tool_state.input_buffer),
+                                tool_state.input
                             ));
                         }
                         finalize_stream_tool_arguments(self.api_provider, tool_state);
@@ -6571,9 +6573,9 @@ impl Engine {
                                     "Restricted tool input parse failed (details redacted)",
                                 );
                             } else {
-                                crate::logging::warn(format!(
-                                    "Tool '{}' failed to parse final input buffer: '{}'",
-                                    tool_state.name, tool_state.input_buffer
+                                crate::logging::warn(tool_input_parse_failure_log(
+                                    &tool_state.name,
+                                    &tool_state.input_buffer,
                                 ));
                             }
                             let _ = self
@@ -7905,6 +7907,16 @@ fn resolve_tool_definition<'a>(
 /// Whether a provider stop reason names an output-length cap. Re-requesting
 /// after one only reproduces it, so those fail honestly (the user needs a
 /// larger max-tokens or a shorter turn) rather than retry.
+///
+/// This is the engine-local superset of the shared
+/// `models::is_output_limit_stop_reason`: both classify `length`,
+/// `max_tokens`, `max_output_tokens`, and the OpenAI-shim `model_length` as
+/// output limits (review round 4 unified `model_length` into the shared set
+/// so a clean `model_length` stop takes the same acceptance ladder as
+/// `length`). The two extra spellings here (`output_limit`,
+/// `max_completion_tokens`) are deliberately not in the shared set — they
+/// have no in-tree provider or fixture, and the acceptance ladder must not
+/// admit spellings no provider has been shown to emit.
 fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
     matches!(
         stop_reason
@@ -7922,11 +7934,11 @@ fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
 }
 
 /// The clean-shape core shared by the truncated-response ladder and the
-/// closed-tool invalidation: an output-limit stop (narrow spelling set, per
-/// models) that arrived with no counted stream error, no saved stream error,
-/// and no provider error frame. Both call sites must agree on what "clean"
-/// means or the acceptance and the tool-validity decisions drift apart
-/// (review 6061318874).
+/// closed-tool invalidation: an output-limit stop (shared `models.rs`
+/// spelling set) that arrived with no counted stream error, no saved stream
+/// error, and no provider error frame. Both call sites must agree on what
+/// "clean" means or the acceptance and the tool-validity decisions drift
+/// apart (review 6061318874).
 fn is_clean_output_limit_shape(
     stop_reason: Option<&str>,
     stream_errors: u32,
@@ -8118,6 +8130,18 @@ fn incomplete_stream_missing_field(
         .map(ToolError::missing_field)
 }
 
+/// The failure-path log line for a tool input buffer that failed to parse.
+/// The raw buffer never reaches the log unbounded: a hostile or broken
+/// multi-megabyte argument stream would otherwise duplicate itself into the
+/// verbose log, so the message carries the same bounded excerpt the
+/// model-facing malformed-arguments error uses (review round 4, P3-10).
+fn tool_input_parse_failure_log(tool_name: &str, buffer: &str) -> String {
+    format!(
+        "Tool '{tool_name}' failed to parse final input buffer: {}",
+        bounded_raw_arguments_excerpt(buffer)
+    )
+}
+
 fn finalize_stream_tool_arguments(provider: ApiProvider, tool_state: &mut ToolUseState) {
     if tool_state.input_buffer.trim().is_empty() {
         if provider == ApiProvider::Moonshot {
@@ -8215,6 +8239,31 @@ mod tests {
         assert!(auto.contains("Auto-review"), "{auto}");
         assert!(auto.contains("re-plan"), "{auto}");
         assert!(!auto.contains("wait for the user's approval"), "{auto}");
+    }
+
+    #[test]
+    fn tool_input_parse_failure_log_carries_only_the_bounded_excerpt() {
+        // The failure log must reuse the model-facing bounded excerpt: an
+        // oversized raw buffer must never be duplicated into the verbose log.
+        let buffer = "x".repeat(2_048);
+        let log = tool_input_parse_failure_log("bash", &buffer);
+        assert!(
+            log.starts_with("Tool 'bash' failed to parse final input buffer: "),
+            "{log}"
+        );
+        assert!(log.ends_with("(2048 bytes total)"), "{log}");
+        assert_eq!(
+            log,
+            format!(
+                "Tool 'bash' failed to parse final input buffer: {}",
+                bounded_raw_arguments_excerpt(&buffer)
+            ),
+            "the log must carry exactly the bounded excerpt, nothing else"
+        );
+        assert!(
+            !log.contains(&buffer),
+            "the raw buffer must not reach the log: {log}"
+        );
     }
 
     #[test]

@@ -5672,6 +5672,13 @@ pub(crate) fn build_cache_warmup_request(request: &MessageRequest) -> MessageReq
 pub(crate) use chat::CACHE_WARMUP_MAX_TOKENS;
 pub(crate) use chat::is_reasoning_replay_placeholder;
 
+/// Test-only bridge: the registry catalog oracle re-runs the production
+/// object-root proof on every `strict: false` built-in so a schema drift
+/// fails in CI instead of as a runtime wire drop (see
+/// `tools::registry::tests`).
+#[cfg(test)]
+pub(crate) use chat::moonshot_parameters_prove_object;
+
 #[cfg(test)]
 mod tests {
     use super::*;

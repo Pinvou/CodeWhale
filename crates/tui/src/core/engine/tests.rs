@@ -10221,6 +10221,167 @@ async fn clean_length_still_executes_a_closed_complete_tool_call() {
 }
 
 #[tokio::test]
+async fn clean_model_length_stop_still_executes_a_closed_complete_tool_call() {
+    // Review round 4: `model_length` must classify as an output-limit stop in
+    // the shared models predicate, exactly like `length`, so the acceptance
+    // ladder keeps an already-closed complete call executable. Before the
+    // unification the wide engine-local predicate knew the spelling but the
+    // narrow shared one did not, so a clean `model_length` stop invalidated
+    // the closed call (per-tool invalid_input) and skipped the ladder.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let followup = vec![
+        canned::message_start("after-tool"),
+        canned::text_block_start(0),
+        canned::text_delta(0, "done"),
+        canned::block_stop(0),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ];
+    let turn = vec![
+        canned::message_start("model-length-clean"),
+        canned::tool_use_block_start(0, "call-clean-model-length", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        canned::message_delta("model_length", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn, followup]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A clean model_length stop accepts the complete call.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send clean-model-length stream");
+
+    let mut started = false;
+    let mut completed_ok = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the clean-model-length continuation")
+    {
+        match event {
+            Event::ToolCallStarted { name, .. } if name == "tool_search" => started = true,
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the clean model_length call must execute: {result:?}"
+                );
+                completed_ok = true;
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(started);
+    assert!(
+        completed_ok,
+        "the clean model_length closed call must execute"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn model_length_stop_with_a_provider_error_fails_closed_instead_of_clean_model_length() {
+    // Review round 4: the model_length twin of
+    // `length_stop_with_a_provider_error_fails_closed_instead_of_clean_length`.
+    // A `model_length` stop followed by an error frame is a billed incomplete
+    // response: the acceptance ladder must not fire and the turn must fail
+    // closed instead of executing the closed call.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let turn = vec![
+        canned::message_start("model-length-error"),
+        canned::tool_use_block_start(0, "call-model-length", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        canned::message_delta("model_length", None),
+        StreamEvent::Error {
+            error: json!({"message": "provider interrupted at the model_length stop"}),
+        },
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A model_length stop with an error frame must fail closed.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send model_length+error stream");
+
+    let mut starts = 0;
+    let mut completions = 0;
+    let mut turn_failed = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the failed turn")
+    {
+        match event {
+            Event::ToolCallStarted { name, .. } if name == "tool_search" => starts += 1,
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                completions += 1;
+                let receipt = result.expect("the ladder answers per-tool");
+                assert!(
+                    receipt.content.contains("Not executed"),
+                    "the receipt must not carry tool output: {receipt:?}"
+                );
+                assert_eq!(
+                    receipt
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("side_effect_status"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("not_started"),
+                    "the billed incomplete response must not reach the tool: {receipt:?}"
+                );
+            }
+            Event::TurnComplete { status, .. } => {
+                turn_failed = status == TurnOutcomeStatus::Failed;
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert_eq!(
+        starts, 1,
+        "only the block-close announcement; execution is proven absent by the receipt"
+    );
+    assert_eq!(completions, 1);
+    assert!(
+        turn_failed,
+        "the turn must fail closed on the billed incomplete response"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn real_chat_tool_execution_requires_terminal_proof() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -37637,6 +37798,102 @@ async fn streaming_malformed_sibling_does_not_discard_the_valid_sibling() {
         )),
         "the valid sibling's tool result must survive into the replay"
     );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+// Review round 4 P2-7: the headline degrade claim — an unowned Moonshot
+// RESPONSE tool NAME (a ghost name this request never offered) — needs a
+// full engine trajectory, not only the layer pins (client decode, resolve
+// unit, missing-tool gate). The malformed-ARGS sibling above pins the parse
+// half; this pins the name half: the ghost call surfaces the STANDARD
+// unknown-tool receipt (the same text any hallucinated name gets, never a
+// specialized or turn-aborting error), the valid sibling still executes,
+// and the model recovers within the same turn.
+#[tokio::test]
+async fn moonshot_ghost_tool_name_gets_standard_receipt_and_same_turn_recovery() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let ghost_turn = vec![
+        canned::message_start("moonshot-ghost-name"),
+        canned::tool_use_block_start(0, "call-ghost", "ghost_tool"),
+        canned::tool_input_delta(0, r#"{"path":"scene.glb"}"#),
+        canned::block_stop(0),
+        canned::tool_use_block_start(1, "call-valid", "tool_search"),
+        canned::tool_input_delta(1, r#"{"query":"read"}"#),
+        canned::block_stop(1),
+        canned::message_delta("tool_use", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        ghost_turn,
+        canned::simple_text_turn("Recovered after the unknown tool."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config {
+        provider: Some("moonshot".to_string()),
+        default_text_model: Some("kimi-k3".to_string()),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Run the valid sibling despite the ghost tool name.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send ghost-name trajectory");
+
+    let mut ghost_error = None;
+    let mut valid_sibling_ran = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for ghost-name completion")
+    {
+        match event {
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the valid sibling must actually execute: {result:?}"
+                );
+                valid_sibling_ran = true;
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "ghost_tool" => {
+                ghost_error = Some(match result {
+                    Ok(receipt) => receipt.content,
+                    Err(error) => error.to_string(),
+                });
+            }
+            Event::TurnComplete { status, error, .. } => {
+                assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(
+        valid_sibling_ran,
+        "the valid sibling must have executed alongside the ghost call"
+    );
+    let error = ghost_error.expect("the ghost name surfaces a per-tool error receipt");
+    assert!(
+        error.contains("not available in the current tool catalog"),
+        "the ghost name must get the standard unknown-tool receipt: {error}"
+    );
+
+    // The model's same-turn retry must land: exactly one follow-up request
+    // after the ghost receipt.
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 2);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
 }
