@@ -3638,6 +3638,19 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
     {
         return None;
     }
+    // Round 31 (fresh review): a raw line terminator in the source is a
+    // wire SyntaxError — the ECMA-262 class grammar's
+    // RegularExpressionClassChar excludes LineTerminator, so
+    // `new RegExp("[a\nb]")` never compiles there — while this side
+    // compiles the class and judges members against it. The same drift
+    // family as the flags above: the judge abstains and lets the wire
+    // reject the schema on its own terms.
+    if pattern
+        .chars()
+        .any(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+    {
+        return None;
+    }
     // Round 23: a static EXPANSION screen before compiling. The judge's
     // real cost is member length × NFA-program size, and the NFA's state
     // count grows with the PRODUCT of nested bounded-repeat upper bounds —
@@ -3996,6 +4009,18 @@ fn value_satisfies_string_constraints(
     // the enum path never allowed. An over-cap string fails the judge
     // (conservative direction: a judged constraint is present).
     if value.len() > ENUM_PAIR_MEMBER_BYTES_CAP {
+        return false;
+    }
+    // Round 31 (fresh review): the wire matches per UTF-16 code unit and
+    // this oracle per Unicode scalar value. A value containing a
+    // surrogate pair (an astral character) cannot be judged exactly
+    // against any count-sensitive construct — `^.$` matches one unit on
+    // the wire and rejects the member, where the oracle accepted it and
+    // shipped the tool strict callable by nothing. A judged pattern is
+    // present, so the member refuses (the fail-closed direction, like
+    // every judge residual); values beside NO pattern, and values without
+    // astral characters, keep the exact oracle path.
+    if pattern.is_some() && value.chars().any(|c| c.len_utf16() == 2) {
         return false;
     }
     if let Some(pattern) = pattern
@@ -20203,6 +20228,56 @@ mod strict_fixwave_r31 {
             "the authored refusal survives: {}",
             schema
         );
+    }
+
+    #[test]
+    fn astral_member_under_a_count_sensitive_pattern_refuses() {
+        // Round 31 (fresh review, pattern lane): the wire matches per
+        // UTF-16 code unit, the oracle per scalar value. ECMA `.` matches
+        // ONE unit, so `^.$` rejects the two-unit member on the wire —
+        // the oracle accepted it and shipped the tool strict callable by
+        // nothing. A judged pattern is present, so the member now refuses.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string",
+                "enum": ["\u{1F600}"], "pattern": "^.$"}},
+            "required": ["q"]
+        }));
+        assert!(!all, "the wire rejects the only member; the judge may not admit it");
+        assert_eq!(strict, None);
+        // Keep-sides: a scalar member under the same pattern still judges
+        // exactly, and an astral member with NO pattern keeps shipping.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string", "enum": ["a"], "pattern": "^.$"}},
+            "required": ["q"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string", "enum": ["\u{1F600}"]}},
+            "required": ["q"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn raw_line_terminator_pattern_abstains_like_the_drift_families() {
+        // Round 31: `[a\nb]` is a wire SyntaxError (the ECMA class grammar
+        // excludes LineTerminator) where this side compiled the class and
+        // judged members by it. The judge abstains — the member ships
+        // unjudged, exactly like the flag-drift family — and the wire
+        // rejects the schema on its own terms.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string",
+                "enum": ["zzz"], "pattern": "[ab]\n-z"}},
+            "required": ["q"]
+        }));
+        assert!(all, "the member is not judged by a wire-SyntaxError source");
+        assert_eq!(strict, Some(true));
     }
 
     #[test]
