@@ -13704,3 +13704,30 @@ fn picker_and_request_path_disagree_when_the_secret_slot_marker_is_missing() -> 
     println!("CAPTURED first-fix: {:?}", resolution.first_fix());
     Ok(())
 }
+
+/// The shared K3.1 spelling matcher normalizes case and insignificant
+/// padding: pin both legs on every roster id, including the direct-platform
+/// spellings whose budget-level pin (route_budget's downgrade-guard test)
+/// exercises only the case leg. Deleting `.trim()` or the case folding from
+/// the matcher must turn this red here, at the matcher's own home.
+#[test]
+fn kimi_k31_model_spelling_normalizes_case_and_padding() {
+    for id in [
+        "kimi-k3.1-pro",
+        "kimi-k3.1-pro-highspeed",
+        "k3.1-pro",
+        "k3.1-pro-highspeed",
+    ] {
+        assert!(is_kimi_k31_model_spelling(id), "{id} must match verbatim");
+        assert!(
+            is_kimi_k31_model_spelling(&id.to_ascii_uppercase()),
+            "{id} must match case-insensitively"
+        );
+        assert!(
+            is_kimi_k31_model_spelling(&format!("  {id}  ")),
+            "{id} must match through insignificant padding"
+        );
+    }
+    assert!(!is_kimi_k31_model_spelling("kimi-k3.1"));
+    assert!(!is_kimi_k31_model_spelling(" k3 "));
+}

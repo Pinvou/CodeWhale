@@ -237,8 +237,13 @@ impl ProviderNativeSearchClient {
         // Polling is not another inference dispatch. A search adapter can be
         // constructed from a request-local client, so explicitly drop any
         // inherited logical operation rather than relying on its caller.
+        // Reforge the permit cell the same way, matching the isolated path:
+        // this clone must never acquire against a cell shared with the
+        // client it was cloned from, or a 429 suspend/resume here could
+        // park that client's in-flight operation.
         let mut call = self.inner.clone();
         call.operation_id = None;
+        call.operation_permit = std::sync::Arc::default();
         let response = call
             .send_with_retry(|| {
                 call.http_client

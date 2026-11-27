@@ -39,6 +39,10 @@ const MAX_SESSION_GOAL_OBJECTIVE_CHARS: usize = 8_192;
 const MAX_SESSION_GOAL_FILE_BYTES: u64 = 64 * 1_024;
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 1;
 const CURRENT_QUEUE_SCHEMA_VERSION: u32 = 1;
+/// How many leading bytes `load_session_metadata` reads before falling back
+/// to a full-file read. Shared with the tests so a production change to the
+/// window cannot silently strand the fixtures on a stale copy of the value.
+const SESSION_METADATA_PREFIX_BYTES: usize = 64 * 1_024;
 
 const fn default_session_schema_version() -> u32 {
     CURRENT_SESSION_SCHEMA_VERSION
@@ -1736,11 +1740,10 @@ impl SessionManager {
     fn load_session_metadata(path: &Path) -> std::io::Result<SessionMetadata> {
         use std::io::Read;
 
-        const PREFIX_BYTES: usize = 64 * 1024;
         let mut file = fs::File::open(path)?;
-        let mut buf = Vec::with_capacity(PREFIX_BYTES);
+        let mut buf = Vec::with_capacity(SESSION_METADATA_PREFIX_BYTES);
         file.by_ref()
-            .take(PREFIX_BYTES as u64)
+            .take(SESSION_METADATA_PREFIX_BYTES as u64)
             .read_to_end(&mut buf)?;
 
         if let Some(metadata) = extract_top_level_metadata(&buf) {
@@ -4700,7 +4703,7 @@ mod tests {
 
     #[test]
     fn load_session_metadata_full_file_fallback_preserves_metadata() {
-        const PREFIX_BYTES: usize = 64 * 1024;
+        let prefix_bytes = SESSION_METADATA_PREFIX_BYTES;
         let dir = tempfile::tempdir().expect("temp dir");
         let session = create_saved_session_with_id_and_mode(
             "fallback".to_string(),
@@ -4715,20 +4718,20 @@ mod tests {
         let prefix = format!(r#"{{"metadata":{metadata},"messages":[],"payload":""#);
         let split_utf8 = format!(
             "{prefix}{}🙂\"}}",
-            "x".repeat(PREFIX_BYTES - 1 - prefix.len())
+            "x".repeat(prefix_bytes - 1 - prefix.len())
         );
         let metadata_last = format!(
             r#"{{"messages":[],"payload":"{}","metadata":{metadata}}}"#,
-            "x".repeat(PREFIX_BYTES)
+            "x".repeat(prefix_bytes)
         );
-        assert!(std::str::from_utf8(&split_utf8.as_bytes()[..PREFIX_BYTES]).is_err());
+        assert!(std::str::from_utf8(&split_utf8.as_bytes()[..prefix_bytes]).is_err());
 
         for (name, document) in [("split-utf8", split_utf8), ("metadata-last", metadata_last)] {
             // Both are valid sessions with an unknown legacy field, but the
             // prefix alone cannot yield metadata. The full read must retain it.
             let saved: SavedSession = serde_json::from_str(&document).expect("valid session");
             assert_eq!(saved.metadata.id, session.metadata.id);
-            assert!(extract_top_level_metadata(&document.as_bytes()[..PREFIX_BYTES]).is_none());
+            assert!(extract_top_level_metadata(&document.as_bytes()[..prefix_bytes]).is_none());
             let path = dir.path().join(format!("{name}.json"));
             fs::write(&path, document.as_bytes()).expect("write session");
             let loaded = SessionManager::load_session_metadata(&path).expect("load metadata");
