@@ -19327,7 +19327,10 @@ mod strict_fixwave_r29 {
                 "enum": ["ba.x]"]}},
             "required": ["u"]
         }));
-        assert!(all, "the member inside the negated-empty shape clears: {all}");
+        assert!(
+            all,
+            "the member inside the negated-empty shape clears: {all}"
+        );
         assert_eq!(strict, Some(true));
         let (all, strict) = verdict(json!({
             "type": "object",
@@ -19336,7 +19339,10 @@ mod strict_fixwave_r29 {
                 "enum": ["b"]}},
             "required": ["u"]
         }));
-        assert!(!all, "a member outside the negated-empty shape fails closed");
+        assert!(
+            !all,
+            "a member outside the negated-empty shape fails closed"
+        );
         assert_eq!(strict, None);
     }
 
@@ -19832,7 +19838,10 @@ mod strict_fixwave_r30 {
         // Control: a member one branch admits keeps the union shipping —
         // the conjunct is not a blanket union refusal.
         let (all, strict) = verdict(pinned_union(json!({"a": "x"})));
-        assert!(all, "a member a branch admits keeps the union callable: {all}");
+        assert!(
+            all,
+            "a member a branch admits keeps the union callable: {all}"
+        );
         assert_eq!(strict, Some(true));
     }
 
@@ -19842,17 +19851,26 @@ mod strict_fixwave_r30 {
         // the one instance the wire can carry, so the branch must admit
         // exactly that value.
         let mut schema = pinned_union(json!({"a": "unused"}));
-        schema["properties"]["u"].as_object_mut().expect("union node").remove("enum");
+        schema["properties"]["u"]
+            .as_object_mut()
+            .expect("union node")
+            .remove("enum");
         schema["properties"]["u"]["const"] = json!({"a": 1});
         let (all, strict) = verdict(schema);
         assert!(!all, "no branch admits the const instance");
         assert_eq!(strict, None);
         // Control: an admitted const instance ships.
         let mut schema = pinned_union(json!({"a": "unused"}));
-        schema["properties"]["u"].as_object_mut().expect("union node").remove("enum");
+        schema["properties"]["u"]
+            .as_object_mut()
+            .expect("union node")
+            .remove("enum");
         schema["properties"]["u"]["const"] = json!({"a": "x"});
         let (all, strict) = verdict(schema);
-        assert!(all, "an admitted const instance keeps the union callable: {all}");
+        assert!(
+            all,
+            "an admitted const instance keeps the union callable: {all}"
+        );
         assert_eq!(strict, Some(true));
     }
 
@@ -19861,7 +19879,10 @@ mod strict_fixwave_r30 {
         // A `$ref` branch stands for its definition on the wire, so the
         // pinned-value conjunct resolves it the same way the closure check
         // does: a definition that admits the pin covers, one that refuses
-        // it does not.
+        // it does not. Two branches (a bare single-branch `$ref` union is
+        // collapsed by the lossless pass, which lands the reference
+        // keyword beside judged siblings and fails closed through the
+        // ref-sibling rule before this conjunct runs).
         let admitting = json!({
             "type": "object",
             "properties": {"u": {
@@ -19869,7 +19890,11 @@ mod strict_fixwave_r30 {
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"],
                 "enum": [{"a": "x"}],
-                "anyOf": [{"$ref": "#/$defs/str_a"}]
+                "anyOf": [
+                    {"$ref": "#/$defs/str_a"},
+                    {"type": "object", "properties": {"a": {"type": "boolean"}},
+                     "required": ["a"], "additionalProperties": false}
+                ]
             }},
             "required": ["u"],
             "$defs": {"str_a": {"type": "object",
@@ -19886,7 +19911,11 @@ mod strict_fixwave_r30 {
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"],
                 "enum": [{"a": 1}],
-                "anyOf": [{"$ref": "#/$defs/str_a"}]
+                "anyOf": [
+                    {"$ref": "#/$defs/str_a"},
+                    {"type": "object", "properties": {"a": {"type": "boolean"}},
+                     "required": ["a"], "additionalProperties": false}
+                ]
             }},
             "required": ["u"],
             "$defs": {"str_a": {"type": "object",
@@ -19894,7 +19923,10 @@ mod strict_fixwave_r30 {
                 "required": ["a"], "additionalProperties": false}}
         });
         let (all, strict) = verdict(refusing);
-        assert!(!all, "the definition refuses the pinned member: callable by nothing");
+        assert!(
+            !all,
+            "the definition refuses the pinned member: callable by nothing"
+        );
         assert_eq!(strict, None);
     }
 }
