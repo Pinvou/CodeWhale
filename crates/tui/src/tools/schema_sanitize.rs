@@ -9,7 +9,8 @@
 //! The default sanitizer runs in-place on every schema returned by
 //! `ToolRegistry::tools_for_api()` before the registry hands them off.
 //! Provider-specific helpers below add stricter DeepSeek and OpenAI Responses
-//! compatibility passes where their request shapes need it, and a narrower
+//! compatibility passes where their request shapes need it, an xAI pass that
+//! rehearses root unions for its flattening fallback, and a narrower
 //! Anthropic Messages pass that strips only the root composition keywords
 //! that validator is recorded rejecting.
 //!
@@ -60,7 +61,7 @@ use crate::models::Tool;
 /// - Collapse `{"anyOf":[X, {"type":"null"}]}` → `X ∪ {"nullable": true}`
 /// - Inject `"properties": {}` on bare-object schemas
 /// - Prune dangling `required` entries
-/// - Collapse single-element `oneOf` / `allOf`
+/// - Collapse single-element `oneOf` / `allOf` / `anyOf`
 /// - Walk recursively through all subschemas
 pub fn sanitize(schema: &mut Value) {
     sanitize_in_instance(schema, &[]);
@@ -416,9 +417,11 @@ const STRICT_REF_MAX_HOPS: usize = 16;
 /// a branch whose shared property `$ref`s the union node itself). Without a
 /// bound such a schema recurses forever on the per-request path and the
 /// process aborts on stack overflow (uncatchable). Any schema that needs
-/// this much joint depth is a cycle or junk — the judge abstains
-/// compatible-by-default past the bound, the same hostile-input line the
-/// hop, member, and alternative caps draw.
+/// this much joint depth is a cycle or junk. Past the bound the judge
+/// fails closed where either side carries a judged constraint (round 23
+/// — the abstention landed exactly on the unsatisfiable case), the same
+/// hostile-input line the call budget draws and the direction the hop,
+/// member, and alternative caps take beside judged constraints.
 const STRICT_PAIR_JUDGE_MAX_DEPTH: usize = 128;
 
 /// Total pair-judge call budget, refilled per tool at the preparation
@@ -848,8 +851,8 @@ impl DefectWalk {
                         // node, so a definition literally named `oneOf`
                         // fired R2 on its VALUE and a definition named
                         // `title`/`examples` went invisible to the walk.
-                        "properties" | "$defs" | "definitions" | "$def"
-                        | "patternProperties" | "dependentSchemas" => {
+                        "properties" | "$defs" | "definitions" | "$def" | "patternProperties"
+                        | "dependentSchemas" => {
                             if let Some(map) = child.as_object() {
                                 for subschema in map.values() {
                                     if let Some(reason) =
@@ -1940,8 +1943,8 @@ fn strip_annotation_keywords(value: &mut Value) {
                     // `example` to match the DefectWalk's instance-data
                     // line — annotations inside literal data must not be
                     // stripped from the clone.
-                    "properties" | "$defs" | "definitions" | "$def"
-                    | "patternProperties" | "dependentSchemas" => {
+                    "properties" | "$defs" | "definitions" | "$def" | "patternProperties"
+                    | "dependentSchemas" => {
                         if let Some(map) = child.as_object_mut() {
                             for subschema in map.values_mut() {
                                 strip_annotation_keywords(subschema);
@@ -3503,7 +3506,7 @@ fn ref_siblings_carry_judged_pins(obj: &Map<String, Value>) -> bool {
 /// per tool at [`prepare_tools_for_strict_mode`] (round 28 — the
 /// per-preparation pool let one schema drain the budget and silently
 /// strip strict mode from every later tool in the catalog); the compile
-/// budget beside which it used to reset stays request-shared.
+/// budget beside which it used to reset pools per tool since round 29.
 fn pair_budget_take() -> usize {
     PAIR_JUDGE_CALLS_LEFT.with(|cell| {
         let left = cell.get();
@@ -4906,15 +4909,14 @@ fn node_pins_cover_branch(obj: &Map<String, Value>, branch: &Value, root: &Value
     })
 }
 
-/// Whether one side's `enum` value stays within the pair judge's
-/// membership-scan cap: at most [`ENUM_PAIR_MEMBER_BYTES_CAP`] serialized
-/// most [`ENUM_PAIR_MEMBER_BYTES_CAP`] serialized bytes. The count cap
-/// alone made the worst case a function of member BYTES — 256 members of
-/// 60 KB strings each are 4 GB of `Value` equality per pair call within
-/// the catalog budget — so the scan is bounded by total size, not count.
-/// Past either cap the membership judgment abstains compatible-by-default
-/// (a keep decision, never an overclosure: abstention can only miss an
-/// unsatisfiability detection, never reject a satisfiable schema).
+/// Serialized-size cap for one side's `enum` value in the pair judge's
+/// membership scan; the sole bound since round 24 — the member-COUNT cap
+/// that guarded the quadratic scan the hash oracle replaced is gone, and
+/// the byte cap alone made the worst case a function of member BYTES
+/// (256 members of 60 KB strings each are 4 GB of `Value` equality per
+/// pair call within the catalog budget). Past the cap the side refuses —
+/// fail-closed wherever a judged constraint is present (round 23), the
+/// same direction the enum arms draw past their caps.
 /// Serialized byte length of `value`, an UPPER bound that stops counting
 /// once `total` passes `cap` (round 31): the cap predicate's cumulative
 /// early-exit bounds how many members serialize, but a single oversized
@@ -5251,8 +5253,9 @@ fn pinned_object_value_compatible_with(
 /// unwound level then fires its sibling/properties recursion, giving the
 /// unwinding an exponential call tree (probed: unbounded depth aborts the
 /// process on stack overflow; depth cap alone hangs the request). Past
-/// either bound the judge abstains compatible-by-default, the same
-/// hostile-input line the hop, member, and alternative caps draw.
+/// either bound the judge fails closed where a judged constraint is
+/// present (round 23) — the same hostile-input line the hop, member, and
+/// alternative caps draw beside judged constraints.
 fn schema_pair_satisfiable(
     a: &Value,
     b: &Value,
@@ -20208,7 +20211,10 @@ mod strict_fixwave_r31 {
             "required": ["u"],
             "$defs": {"str": {"type": "string"}}
         }));
-        assert!(!all, "the callable-by-nothing union must fail the tool closed");
+        assert!(
+            !all,
+            "the callable-by-nothing union must fail the tool closed"
+        );
         assert_eq!(strict, None);
     }
 
@@ -20267,7 +20273,10 @@ mod strict_fixwave_r31 {
             schema
         );
         assert!(
-            schema.get("properties").and_then(|p| p.get("tags")).is_none(),
+            schema
+                .get("properties")
+                .and_then(|p| p.get("tags"))
+                .is_none(),
             "the branch keys must not escape the authored closure: {}",
             schema
         );
@@ -20377,11 +20386,13 @@ mod strict_fixwave_r31 {
         });
         strip_annotation_keywords(&mut clone);
         assert_eq!(
-            clone["definitions"]["title"]["type"], json!("object"),
+            clone["definitions"]["title"]["type"],
+            json!("object"),
             "the definition named title survives the strip"
         );
         assert_eq!(
-            clone["definitions"]["title"]["description"], json!(null),
+            clone["definitions"]["title"]["description"],
+            json!(null),
             "annotations INSIDE a definition are still stripped"
         );
         // The literal-skip alignment: annotations inside instance data
@@ -20448,7 +20459,10 @@ mod strict_fixwave_r31 {
                 "enum": ["\u{1F600}"], "pattern": "^.$"}},
             "required": ["q"]
         }));
-        assert!(!all, "the wire rejects the only member; the judge may not admit it");
+        assert!(
+            !all,
+            "the wire rejects the only member; the judge may not admit it"
+        );
         assert_eq!(strict, None);
         // Keep-sides: a scalar member under the same pattern still judges
         // exactly, and an astral member with NO pattern keeps shipping.
