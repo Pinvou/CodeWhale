@@ -14822,7 +14822,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_judgment_terminates_on_a_disjoint_anyof_leaf_tree() {
+    fn coverage_judgment_terminates_and_fails_closed_on_a_disjoint_anyof_leaf_tree() {
         // The round-18 chase made the pair judge explore an OR-tree: a
         // binary anyOf tree whose every leaf disjoins the covering
         // branch's leaf pays 2^depth pair calls. The tree is expressed
@@ -14857,10 +14857,18 @@ mod tests {
             "$defs": Value::Object(defs)
         });
         let mut tool = test_tool("probe", schema);
-        // Termination is the point; the abstained judgment counts the
-        // branch as covering, so the tool ships strict.
+        // Termination is the point — and the verdict is part of the
+        // contract (round 31; the old comment asserted nothing while
+        // claiming the opposite direction). Every leaf disjoins the
+        // covering branch's leaf (`string` via the alias tree vs
+        // `boolean`), so the union genuinely admits nothing; the
+        // exhausted pair judgment fails closed beside those judged
+        // constraints (round 23) and the tool refuses. A regression to
+        // either wedge or abstain-compatible is a behavior change the
+        // pin now catches.
         let verdict = prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
-        let _ = verdict;
+        assert!(!verdict, "termination holds");
+        assert_eq!(tool.strict, None);
     }
 
     #[test]
