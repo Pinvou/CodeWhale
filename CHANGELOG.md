@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Base-URL route security: the loopback/host extraction behind the
+  plaintext-HTTP admission now reads the authority the request actually
+  dials. `http://evil.com\@localhost` (WHATWG ends the authority at a
+  backslash) and `http://x#@localhost` (WHATWG ends it at `?`/`#`)
+  previously answered "localhost" while the wire dialed the attacker's
+  host, auto-allowing cleartext HTTP — and with it the bearer key — to a
+  remote endpoint; lookalike hosts like `http://localhost.evil.com` were
+  auto-allowed by prefix matching. The extraction now splits on the full
+  WHATWG terminator set, refuses authorities containing `\`
+  (fail-closed), and loopback admission is an exact host-boundary
+  judgment with case-normalized scheme checks.
+- The per-config `wire = "anthropic"` key and the endpoint it selects no
+  longer disagree: on the Fixed-wire family tables (Minimax, Modelstudio
+  Token/Coding Plan) the dialect key gates both the endpoint resolver and
+  the dispatch wire, so a configured route cannot speak chat into its own
+  Anthropic endpoint; on ModelAware kinds (Deepseek, OpencodeZen) the key
+  stays out of the wire answer because dispatch re-derives the dialect
+  from the route candidate per model.
 - API-backed `[search]` providers now visibly degrade directly to the
   keyless Bing tail instead of routing through DuckDuckGo when
   unavailable: DuckDuckGo is unreachable from mainland-China networks

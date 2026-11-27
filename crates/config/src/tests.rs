@@ -9590,9 +9590,14 @@ fn base_url_host_extraction_refuses_backslash_authorities() {
     // path `/@localhost/` while a naive `rsplit('@')` reads the path's
     // userinfo segment and answers `localhost` (round 28 blocker — the
     // predicate feeds the plaintext-HTTP admission). An authority
-    // containing `\` cannot be parsed into the dialed host, so the honest
-    // answer is not-loopback. Userinfo without a backslash still splits
-    // the same way WHATWG does.
+    // containing `\` is REFUSED, not parsed: the parse declines to name
+    // the dialed host and answers not-loopback, fail-closed. That is a
+    // policy, not an impossibility claim — WHATWG consumes a leading
+    // `/`-`\` run after the scheme (parser.rs:439-458), so
+    // `http://\@localhost` really does dial the host the text names, and
+    // refusing it only withholds loopback privileges (usability, never
+    // safety). Userinfo without a backslash still splits the same way
+    // WHATWG does.
     assert!(base_url_uses_local_host("http://localhost:8080"));
     assert!(base_url_uses_local_host("http://me@localhost"));
     assert!(base_url_uses_local_host("http://[::1]:9000"));
@@ -9604,6 +9609,13 @@ fn base_url_host_extraction_refuses_backslash_authorities() {
     assert!(!base_url_uses_local_host("http://evil.com\\\\@localhost"));
     assert!(!base_url_uses_local_host("http://localhost\\@evil.com"));
     assert!(!base_url_uses_local_host("HTTP://LOCALHOST.attacker.com"));
+    // The refusal is authority-scoped: WHATWG dials localhost for both of
+    // these (the backslash lives in the path, percent-encoded or literal),
+    // so the predicate must keep answering loopback — a future edit moving
+    // the `\` check to the whole string would break legitimate loopback
+    // URLs while passing every assertion above.
+    assert!(base_url_uses_local_host("http://localhost/%5C@evil.com"));
+    assert!(base_url_uses_local_host("http://localhost/\\@evil.com"));
 }
 
 #[test]
