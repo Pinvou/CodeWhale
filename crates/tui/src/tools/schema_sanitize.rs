@@ -3389,6 +3389,20 @@ const REF_SIBLING_JUDGED_KEYWORDS: &[&str] = &[
     "properties",
     "required",
     "additionalProperties",
+    // Round 31 (fresh review): the composition spellings. The wholesale
+    // resolution below REPLACES a `$ref` side with its definition and
+    // silently drops the side's own union sibling from the judgment — a
+    // branch `{"$ref": "#/str", "anyOf": [{"enum": ["a"]},
+    // {"type": "boolean"}]}` was judged as bare `str` against
+    // `{"enum": ["b"]}`, admitted `"b"`, and shipped a union whose
+    // property admits nothing. Judging the conjunction would mean
+    // intersecting every definition hop with every alternative — the
+    // node-level composition arm witnesses `$ref`-with-composition NODES
+    // separately, but the pair judge has no such witness, so the pair
+    // refuses like every other unjudgeable judged-conjunction.
+    "anyOf",
+    "oneOf",
+    "allOf",
 ];
 
 /// Round 27: whether this node pairs a `$ref` with a judged sibling pin —
@@ -19928,5 +19942,155 @@ mod strict_fixwave_r30 {
             "the definition refuses the pinned member: callable by nothing"
         );
         assert_eq!(strict, None);
+    }
+}
+
+#[cfg(test)]
+mod strict_fixwave_r31 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    #[test]
+    fn ref_side_union_sibling_fails_closed_at_the_pair() {
+        // Round 31 (fresh review, judges lane): wholesale resolution
+        // REPLACES a `$ref` side with its definition and silently drops
+        // the side's own union sibling — `str ∧ (enum ["a"] ∨ boolean)`
+        // was judged as bare `str`, admitted `"b"`, and the coverage arm
+        // shipped a union whose property admits nothing. The composition
+        // spellings are judged siblings now: the pair refuses, exactly
+        // like the round-27 `maximum`-beside-`$ref` case.
+        let root = json!({"$defs": {"str": {"type": "string"}}});
+        let mut budget = 1024usize;
+        for sibling in ["anyOf", "oneOf", "allOf"] {
+            let side = json!({
+                "$ref": "#/$defs/str",
+                sibling: [{"enum": ["a"]}, {"type": "boolean"}]
+            });
+            assert!(
+                !schema_pair_satisfiable(&side, &json!({"enum": ["b"]}), &root, 0, &mut budget),
+                "the {sibling} sibling must refuse the pair, not vanish into resolution"
+            );
+            let mut budget = 1024usize;
+            assert!(
+                schema_pair_satisfiable(&side, &json!({"enum": ["a"]}), &root, 0, &mut budget)
+                    == false,
+                "the sibling conjunct is unjudgeable in BOTH directions, satisfiable or not"
+            );
+        }
+        // Keep-side: a bare `$ref` with no composition sibling keeps the
+        // resolution path — `"b"` is a string, so the pair stays
+        // compatible and the coverage arm keeps judging.
+        let mut budget = 1024usize;
+        assert!(schema_pair_satisfiable(
+            &json!({"$ref": "#/$defs/str"}),
+            &json!({"enum": ["b"]}),
+            &root,
+            0,
+            &mut budget
+        ));
+    }
+
+    #[test]
+    fn ref_side_union_sibling_poisons_the_funnel_one_branch() {
+        // The funnel-level reproduction (round-30 probe shape): the node
+        // pin `a` carries `$ref` + `anyOf`, the branch demands
+        // `a: enum ["b"]` — the intersection is empty, so the union ships
+        // strict callable by nothing unless the pair refuses.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/str", "anyOf": [
+                        {"enum": ["a"]}, {"type": "boolean"}
+                    ]}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false}
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": {"str": {"type": "string"}}
+        }));
+        assert!(!all, "the callable-by-nothing union must fail the tool closed");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn ref_side_union_sibling_poisons_the_funnel_two_branches() {
+        // The two-branch variant: a single branch would collapse beside
+        // the node and take a different path, so the round-30 probe used
+        // two to defeat the collapse. Both must refuse.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/str", "anyOf": [
+                        {"enum": ["a"]}, {"type": "boolean"}
+                    ]}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false}
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": {"str": {"type": "string"}}
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn bare_ref_property_still_resolves_through_the_coverage_arm() {
+        // Keep-side at the funnel level: the M1 trace WITHOUT the union
+        // sibling — a bare `$ref` property judged against the branch's
+        // enum through resolution — stays compatible and ships strict.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/str"}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "object", "properties": {"a": {"enum": ["c"]}},
+                         "required": ["a"], "additionalProperties": false}
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": {"str": {"type": "string"}}
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
     }
 }
