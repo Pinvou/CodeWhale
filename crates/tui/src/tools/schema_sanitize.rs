@@ -20188,8 +20188,7 @@ mod strict_fixwave_r31 {
             );
             let mut budget = 1024usize;
             assert!(
-                schema_pair_satisfiable(&side, &json!({"enum": ["a"]}), &root, 0, &mut budget)
-                    == false,
+                !schema_pair_satisfiable(&side, &json!({"enum": ["a"]}), &root, 0, &mut budget),
                 "the sibling conjunct is unjudgeable in BOTH directions, satisfiable or not"
             );
         }
@@ -20353,7 +20352,7 @@ mod strict_fixwave_r31 {
             );
             sanitize(&mut schema);
             assert_eq!(
-                schema.get(&key).and_then(|v| v.as_array()).map(Vec::len),
+                schema.get(key).and_then(|v| v.as_array()).map(Vec::len),
                 Some(0),
                 "the empty {key} false schema must keep the union closed: {}",
                 schema
