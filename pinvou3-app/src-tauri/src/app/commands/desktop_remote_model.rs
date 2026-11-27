@@ -444,6 +444,7 @@ mod tests {
         let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
         let home = tempfile::tempdir().unwrap();
+        // SAFETY: this test holds the crate-wide ENV_LOCK.
         unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
         let path = crate::platform::paths::settings_path();
         let mut first = model("first");
@@ -498,6 +499,7 @@ mod tests {
         let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
         let home = tempfile::tempdir().unwrap();
+        // SAFETY: this test holds the crate-wide ENV_LOCK.
         unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
         let path = crate::platform::paths::settings_path();
         let mut active = model("active");
@@ -547,6 +549,7 @@ mod tests {
         let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
         let home = tempfile::tempdir().unwrap();
+        // SAFETY: this test holds the crate-wide ENV_LOCK.
         unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
         let path = crate::platform::paths::settings_path();
         let mut prefs = UserPrefs::default();
@@ -595,6 +598,7 @@ mod tests {
         let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
         let home = tempfile::tempdir().unwrap();
+        // SAFETY: this test holds the crate-wide ENV_LOCK.
         unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
         let path = crate::platform::paths::settings_path();
         let mut prefs = UserPrefs::default();

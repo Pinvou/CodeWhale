@@ -117,7 +117,9 @@ fn isolated_store_scope_restores_existing_and_absent_home_on_success_and_panic()
     for initial in [None, Some(owned_home.path().as_os_str().to_owned())] {
         // SAFETY: ENV_LOCK is held until the outer restore guard has dropped.
         match &initial {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         for panic in [false, true] {

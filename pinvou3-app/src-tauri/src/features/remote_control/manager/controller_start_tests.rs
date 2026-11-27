@@ -167,6 +167,8 @@ impl RemoteControlManager {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("ws://{}/relay", listener.local_addr().unwrap());
         // The app driver invokes only this exact test in a private child.
+        // SAFETY: this test runs alone in a private child process (see note
+        // above); no other thread races these env writes.
         unsafe {
             std::env::set_var("PINVOU3_HOME", directory.path());
             std::env::set_var("PINVOU_REMOTE_RELAY_WS_URL", &url);

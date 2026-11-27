@@ -593,6 +593,7 @@ mod tests {
     impl EnvHomeGuard {
         fn set(path: &Path) -> Self {
             let previous = std::env::var_os("PINVOU3_HOME");
+            // SAFETY: every caller acquires ENV_LOCK before constructing this guard.
             unsafe { std::env::set_var("PINVOU3_HOME", path) };
             Self(previous)
         }
@@ -601,7 +602,9 @@ mod tests {
     impl Drop for EnvHomeGuard {
         fn drop(&mut self) {
             match self.0.take() {
+                // SAFETY: every caller holds ENV_LOCK for the guard's whole lifetime.
                 Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                // SAFETY: every caller holds ENV_LOCK for the guard's whole lifetime.
                 None => unsafe { std::env::remove_var("PINVOU3_HOME") },
             }
         }

@@ -1355,6 +1355,7 @@ mod tests {
             proxy.forget_session(&sid);
             server.abort();
         }
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             match previous_home {
                 Some(value) => std::env::set_var("PINVOU3_HOME", value),

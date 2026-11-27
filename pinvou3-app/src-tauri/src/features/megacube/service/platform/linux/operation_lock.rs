@@ -148,8 +148,8 @@ mod tests {
             Command::new("python3").args(["-c", "import fcntl,sys\nf=open(sys.argv[1],'r+')\ntry: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(17)\n", lock_path.to_str().unwrap()]).status().unwrap().code() == Some(if busy {17} else {0})
         };
         assert!(probe(true));
-        // SAFETY: F_GETFD only reads flags of a live owned descriptor.
         assert_ne!(
+            // SAFETY: F_GETFD only reads descriptor flags of an fd owned by this fixture.
             unsafe { libc::fcntl(guard._shared.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );

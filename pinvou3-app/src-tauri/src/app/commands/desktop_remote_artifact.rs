@@ -3182,7 +3182,9 @@ mod tests {
         );
 
         match previous {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
@@ -3282,7 +3284,9 @@ mod tests {
         assert!(runtime.code_captures.lock().is_empty());
 
         match previous {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
@@ -3294,6 +3298,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
 
         let store = SessionStore::boot_at_test_dir(home.path()).unwrap();
@@ -3360,7 +3365,9 @@ mod tests {
         }
 
         match previous {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
@@ -3489,7 +3496,9 @@ mod tests {
             runtime.clear_connection(&test_lease().connection_id);
         }
         match previous {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }

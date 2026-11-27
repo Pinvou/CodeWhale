@@ -844,6 +844,7 @@ mod tests {
             let listener = UnixListener::bind(&socket).unwrap();
             listener.set_nonblocking(true).unwrap();
             let previous = std::env::var_os("CMSD_SOCKET");
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             unsafe {
                 std::env::set_var("CMSD_SOCKET", &socket);
             }
@@ -939,6 +940,8 @@ mod tests {
             if let Some(thread) = self.thread.take() {
                 thread.join().unwrap();
             }
+            // SAFETY: ENV_LOCK is held; the fixture's _environment guard
+            // outlives this drop body, so env writes are serialized in-process.
             unsafe {
                 match self.previous.as_ref() {
                     Some(value) => std::env::set_var("CMSD_SOCKET", value),

@@ -203,7 +203,9 @@ mod tests {
         let r = query("/v1/status").await;
         // SAFETY: 同上。
         match saved {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(v) => unsafe { std::env::set_var(key, v) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var(key) },
         }
         assert!(!r.available);

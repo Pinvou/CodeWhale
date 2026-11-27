@@ -3382,8 +3382,8 @@ pub(crate) mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("archive.sqlite3");
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: c_path is a live, NUL-terminated private temporary pathname.
         assert_eq!(
+            // SAFETY: mkfifo on a fixture path owned by this test; the result is asserted.
             unsafe { super::platform_libc::mkfifo(c_path.as_ptr(), 0o600) },
             0
         );

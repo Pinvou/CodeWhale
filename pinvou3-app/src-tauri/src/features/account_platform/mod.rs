@@ -2284,6 +2284,7 @@ mod tests {
                 }
             });
             independent_env_config(&base);
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             unsafe {
                 std::env::set_var(IDENTITY_URL_ENV, base.as_str());
             }
@@ -2328,6 +2329,7 @@ mod tests {
                 (status, body)
             });
             independent_env_config(&base);
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             unsafe {
                 std::env::set_var(IDENTITY_URL_ENV, base.as_str());
             }
@@ -2378,6 +2380,7 @@ mod tests {
                 }
             });
             independent_env_config(&base);
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             unsafe {
                 std::env::set_var(IDENTITY_URL_ENV, base.as_str());
             }
@@ -2402,6 +2405,7 @@ mod tests {
             (201, r#"{"authorization_token":"PUBLIC_SYNTHETIC_GRANT"}"#)
         });
         independent_env_config(&base);
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::set_var(IDENTITY_URL_ENV, base.as_str());
         }
@@ -3586,6 +3590,8 @@ mod tests {
     }
 
     fn independent_env_config(url: &Url) {
+        // SAFETY: every caller acquires ENV_LOCK at the top of its test
+        // before invoking this helper; env writes are serialized in-process.
         unsafe {
             for (key, value) in [
                 (CLIENT_ID_ENV, "controlled-desktop"),
@@ -3912,6 +3918,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         independent_env_config(&url);
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
         }
@@ -4000,6 +4007,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         independent_env_config(&url);
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
         }
@@ -4246,6 +4254,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         independent_env_config(&url);
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
         }
@@ -4317,6 +4326,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         independent_env_config(&url);
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::set_var(TOKEN_GATEWAY_URL_ENV, url.as_str());
         }

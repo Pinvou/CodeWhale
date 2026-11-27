@@ -1195,6 +1195,7 @@ mod tests {
         match prev {
             // SAFETY: 同上，持有 ENV_LOCK。
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
