@@ -384,8 +384,9 @@ const STRICT_REF_MAX_HOPS: usize = 16;
 /// hop, member, and alternative caps draw.
 const STRICT_PAIR_JUDGE_MAX_DEPTH: usize = 128;
 
-/// Total pair-judge call budget per REQUEST PREPARATION, taken by each
-/// coverage/composition judgment and handed back after it (see
+/// Total pair-judge call budget, refilled per tool at the preparation
+/// loop (round 28), taken by each coverage/composition judgment and
+/// handed back after it (see
 /// [`pair_budget_take`]; round 23 — the budget used to be created fresh
 /// per judged pair, and a fresh budget at every composition node let a
 /// wide schema pay nodes × 256 pair calls per request, measured 1.34 s
@@ -475,10 +476,16 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
         // drain r28 fixed). The memo still makes compiles one-time across
         // the preparation, so legitimate catalogs pay each distinct
         // pattern once and later tools mostly memo-hit. Within one tool
-        // the pool stays finite: a union-heavy schema can exhaust it and
-        // fail its own later subtrees closed — order-dependent
-        // availability inside the tool, never a wrong verdict.
-        PATTERN_COMPILES_THIS_REQUEST.with(|counter| counter.set(0));
+        // the pool stays finite: a union-heavy schema can exhaust it after
+        // the budget's distinct patterns, and past it the judge abstains
+        // compatible like every other compile skip — the one disclosed
+        // exception (see `compiled_documented_pattern`'s budget comment),
+        // so within the exhausted tool a member violating a
+        // not-yet-compiled pattern can still ship strict. That residual
+        // is order-dependent availability and the disclosed abstain
+        // direction, never a silent guess: the judge never answers a
+        // pattern it could not compile.
+        PATTERN_COMPILES_THIS_TOOL.with(|counter| counter.set(0));
         PAIR_JUDGE_CALLS_LEFT.with(|cell| cell.set(STRICT_PAIR_JUDGE_CALL_BUDGET));
         ANYOF_VALUE_CHASE_CALLS_LEFT.with(|cell| cell.set(STRICT_ANYOF_VALUE_CHASE_BUDGET));
         if STRICT_UNUSABLE_TOOLS.contains(&tool.name.as_str()) {
@@ -2533,13 +2540,13 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
                 // One call budget for the whole coverage judgment: shared
                 // across every branch's value-compat pair walk, so a wide
                 // union cannot multiply a fresh budget per branch. The
-                // budget is per REQUEST PREPARATION, not per node (round
-                // 23): a fresh budget at every composition node let a wide
-                // schema pay branches × 256 pair calls per request —
-                // measured 1.34 s per request for a ~1 MB 3,000-node
-                // document — so each judgment takes what remains of the
-                // preparation's budget and hands the unconsumed remainder
-                // back.
+                // budget is refilled per tool at the preparation loop
+                // (round 28), not per node (round 23): a fresh budget at
+                // every composition node let a wide schema pay branches ×
+                // 256 pair calls per request — measured 1.34 s per request
+                // for a ~1 MB 3,000-node document — so each judgment takes
+                // what remains of the tool's budget and hands the
+                // unconsumed remainder back.
                 let mut budget = pair_budget_take();
                 let coverage = obj
                     .get("anyOf")
@@ -2560,6 +2567,12 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
                                     && branch_properties_value_compatible(
                                         union_properties, branch, root, &mut budget,
                                     )
+                                    // The node's own value pins ride along: an
+                                    // instance carries one of them AND one branch's
+                                    // shape, and the enum/const judge arms read the
+                                    // pins only against the node's own properties —
+                                    // the branch-side half lives here.
+                                    && node_pins_cover_branch(obj, branch, root)
                             })
                         })
                     });
@@ -3279,8 +3292,8 @@ fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
 // the leak is bounded by the table it serves (512 keys), while a rotation
 // of >512 distinct patterns cannot thrash the hot half the way the
 // clear-on-lookup shape did (measured 1.63 s per request, recurring).
-// (3) A per-request compile budget bounds even that tail: past
-// `STRICT_PATTERN_COMPILE_BUDGET` compiles in one request the judge
+// (3) A per-tool compile budget (round 29) bounds even that tail: past
+// `STRICT_PATTERN_COMPILE_BUDGET` compiles within one tool the judge
 // abstains compatible-by-default — the pattern still ships and binds on
 // the wire, the judge does not guess — so no wire-legal schema can make
 // request preparation pay seconds per call forever.
@@ -3288,7 +3301,7 @@ thread_local! {
     static COMPILED_PATTERNS: std::cell::RefCell<
         std::collections::HashMap<&'static str, Option<regex::Regex>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
-    static PATTERN_COMPILES_THIS_REQUEST: std::cell::Cell<usize> =
+    static PATTERN_COMPILES_THIS_TOOL: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     static PAIR_JUDGE_CALLS_LEFT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
@@ -3298,7 +3311,7 @@ thread_local! {
     static PATTERN_LEAKED_KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Compiles one request preparation may pay before the pattern judge
+/// Compiles one tool's preparation may pay before the pattern judge
 /// abstains compatible: 128 screened compiles (see the expansion screen in
 /// `compile_documented_pattern` — the screen is what bounds both the
 /// compile cost and the match cost; the pre-screen worst legal compile
@@ -3388,7 +3401,7 @@ fn pair_budget_give_back(unconsumed: usize) {
 #[cfg(test)]
 fn pattern_compile_counters_for_test() -> (usize, usize) {
     let leaked = PATTERN_LEAKED_KEYS.with(|counter| counter.get());
-    let compiles = PATTERN_COMPILES_THIS_REQUEST.with(|counter| counter.get());
+    let compiles = PATTERN_COMPILES_THIS_TOOL.with(|counter| counter.get());
     (compiles, leaked)
 }
 
@@ -3418,7 +3431,16 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
         if let Some(compiled) = cache.get(pattern) {
             return compiled.clone();
         }
-        let budget_left = PATTERN_COMPILES_THIS_REQUEST.with(|counter| {
+        // The 16 KB source cap is checked BEFORE the budget tick (round
+        // 30): an over-cap pattern can never compile, so charging its
+        // rejection to the compile budget let a tool with 128 distinct
+        // over-cap sources burn the whole pool on free rejections and
+        // starve its later judgeable patterns — availability, order
+        // dependent, and the pool's own comment claims no such spend.
+        if pattern.len() > 16_384 {
+            return None;
+        }
+        let budget_left = PATTERN_COMPILES_THIS_TOOL.with(|counter| {
             let compiles = counter.get();
             if compiles < STRICT_PATTERN_COMPILE_BUDGET {
                 counter.set(compiles + 1);
@@ -3442,7 +3464,10 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
         // but per thread, not "8 MB once per process" (round 25 wording;
         // round 24 raised the cap with the screen carrying the cost
         // bound).
-        if pattern.len() <= 16_384 && cache.len() < 512 {
+        if cache.len() < 512 {
+            // Over-cap sources never reach this line (the cap check above
+            // the budget tick returns first), so every cached miss is a
+            // leak worth its key.
             let key: &'static str = String::leak(pattern.to_string());
             #[cfg(test)]
             PATTERN_LEAKED_KEYS.with(|counter| counter.set(counter.get() + 1));
@@ -3622,29 +3647,47 @@ fn ecma_dot_exact_pattern(pattern: &str) -> String {
                 }
             }
             '[' => {
-                in_class = true;
-                out.push('[');
-                // First-`]`-literal: both engines read `[]` / `[^]` as a
-                // literal `]` member (regex-syntax parse.rs — "an empty
-                // class is impossible to write"; ECMA-262 Annex B's
-                // RegularExpressionClass). Consume it so the class stays
-                // open and a dot after it stays class-internal — the
-                // round-29 blocker shipped because this tracker closed
-                // the class there and rewrote a wire-internal dot into a
-                // nested class, compiling the judge to a strictly wider
-                // automaton (`[]a.x]` matched `b` on this side only).
-                if chars.peek() == Some(&'^') {
-                    out.push('^');
+                // ECMA-262 Annex B: a class whose first member position
+                // holds `]` is not a literal-`]` class — `[]` is the EMPTY
+                // class, matching no character (so any pattern containing
+                // it matches nothing), and `[^]` is its negation, matching
+                // every character. Rust cannot spell either (regex-syntax
+                // takes a leading `]` as a member — parse_set_class_open,
+                // "an empty class is impossible to write"), so translate
+                // both exactly: `[]` → `[^\s\S]`, `[^]` → `[\s\S]`. The
+                // class is CLOSED at the marker: the bytes after it are
+                // body, where a `.` expands to the ECMA-exact dot class
+                // and a `]` is an ECMA body literal (escaped below).
+                // Round 29 read the marker as a literal-`]` member on the
+                // false premise that both engines do (V8-verified: they
+                // do not), which judged the family under Rust semantics —
+                // `[]a.x]` + `enum:["]"]` shipped strict callable by
+                // nothing while `^[^]$` failed a wire-satisfiable schema.
+                let negated = chars.peek() == Some(&'^');
+                if negated {
                     chars.next();
                 }
                 if chars.peek() == Some(&']') {
-                    out.push(']');
                     chars.next();
+                    out.push_str(if negated { "[\\s\\S]" } else { "[^\\s\\S]" });
+                } else {
+                    in_class = true;
+                    out.push('[');
+                    if negated {
+                        out.push('^');
+                    }
                 }
             }
-            ']' => {
+            ']' if in_class => {
                 in_class = false;
                 out.push(']');
+            }
+            ']' => {
+                // A `]` outside any class is an ECMA body literal (Annex B
+                // allows it there); Rust rejects the bare byte, so escape
+                // it — the same judgment either way, one more family the
+                // judge can answer instead of abstaining on.
+                out.push_str("\\]");
             }
             '.' if !in_class => out.push_str("[^\n\r\u{2028}\u{2029}]"),
             other => out.push(other),
@@ -3746,17 +3789,19 @@ fn has_stacked_quantifier(pattern: &str) -> bool {
         }
         match byte {
             b'[' => {
-                in_class = true;
                 after = Adjacency::None;
-                // First-`]`-literal (both dialects — see
-                // `ecma_dot_exact_pattern`): a leading `]` is a member,
-                // not the close.
+                // ECMA `[]` / `[^]` are the empty / negated-empty classes,
+                // CLOSED at the marker (see `ecma_dot_exact_pattern`) —
+                // the bytes after one are body, so a quantifier or a
+                // stacked spelling out there is tracked as such.
                 let mut cursor = index + 1;
                 if bytes.get(cursor) == Some(&b'^') {
                     cursor += 1;
                 }
                 if bytes.get(cursor) == Some(&b']') {
                     index = cursor;
+                } else {
+                    in_class = true;
                 }
             }
             b'*' | b'+' | b'?' => {
@@ -3819,16 +3864,18 @@ fn has_class_set_operation(pattern: &str) -> bool {
         }
         match byte {
             b'[' if !in_class => {
-                in_class = true;
-                // First-`]`-literal (both dialects — see
-                // `ecma_dot_exact_pattern`): a leading `]` is a member,
-                // not the close, and not a nested-class opener.
+                // ECMA `[]` / `[^]` are the empty / negated-empty classes,
+                // CLOSED at the marker (see `ecma_dot_exact_pattern`) —
+                // nothing is inside, and a following `&&`/`--`/`~~` run is
+                // body literals on both sides, not a set operation.
                 let mut cursor = index + 1;
                 if bytes.get(cursor) == Some(&b'^') {
                     cursor += 1;
                 }
                 if bytes.get(cursor) == Some(&b']') {
                     index = cursor;
+                } else {
+                    in_class = true;
                 }
             }
             b'[' => return true,
@@ -4633,6 +4680,58 @@ fn branch_properties_value_compatible(
         branch_properties.get(name).is_none_or(|branch_schema| {
             schema_pair_satisfiable(node_schema, branch_schema, root, 0, &mut *budget)
         })
+    })
+}
+
+/// Whether the union node's own value pins (an `enum`, else a `const`)
+/// keep this branch reachable. An instance satisfies a union node through
+/// a branch only if it carries one of the node's pinned values AND that
+/// value satisfies the branch — the branch's scalar keywords through the
+/// value funnel, its property schemas through the pinned-object judge.
+/// The coverage arm's key-set and per-name schema-pair judgments are
+/// blind to the pins: the enum/const judge arms read a pinned member
+/// against the node's OWN properties, and the composition arm skips
+/// properties-bearing unions, so a node pinning `enum: [{"a": 1}]` beside
+/// branches whose `a` demands a string or a boolean covered on paper and
+/// shipped `strict: true` callable by nothing. One clearing member keeps
+/// the union callable (the model picks which member to send); none fails
+/// the tool closed. A `$ref` branch is judged through its resolved
+/// definition, and an unresolvable one covers nothing — the same line the
+/// closure check draws. Pins past the judge caps are a judged constraint
+/// this scan would have owned, so they cover nothing (fail-closed), the
+/// same direction the enum arms draw past their caps.
+fn node_pins_cover_branch(obj: &Map<String, Value>, branch: &Value, root: &Value) -> bool {
+    let Some(target) = resolved_branch_definition(branch, root) else {
+        return false;
+    };
+    let Some(target_obj) = target.as_object() else {
+        return false;
+    };
+    // The instance is the `const` when one is present (the const/enum
+    // cross-check owns disagreement above), else one of the `enum`
+    // members; no pins impose nothing here.
+    let pin_values: Vec<&Value> = if let Some(const_value) = obj.get("const") {
+        vec![const_value]
+    } else if let Some(members) = obj.get("enum").and_then(Value::as_array) {
+        if !enum_members_within_judge_cap(members) {
+            return false;
+        }
+        members.iter().collect()
+    } else {
+        return true;
+    };
+    let branch_patterns = compiled_property_patterns(target_obj);
+    pin_values.iter().any(|value| {
+        value_clears_bounds_with(
+            value,
+            target_obj,
+            compiled_documented_pattern(target_obj).as_ref(),
+        ) && pinned_object_value_compatible_with(
+            value,
+            target_obj,
+            &branch_patterns,
+            PINNED_OBJECT_JUDGE_DEPTH,
+        )
     })
 }
 
@@ -19148,30 +19247,19 @@ mod strict_fixwave_r29 {
     }
 
     #[test]
-    fn first_bracket_literal_class_no_longer_widens_the_judge() {
-        // Round 29 (D1): the dot-rewrite class tracker used to close the
-        // class at the first `]`, so `[]a.x]` was rewritten with the
-        // ECMA-exact dot class INJECTED INSIDE the wire's class — Rust's
-        // nested-class union then compiled the judge to "everything
-        // except the four line terminators" while the wire admits only
-        // {], a, ., x}. An enum member the wire rejects cleared and the
-        // tool shipped strict callable by nothing. The tracker now
-        // consumes the literal first `]` (both engines read it as a
-        // member), so the judge compiles the source verbatim and answers
-        // exactly what the wire answers.
-        let (all, strict) = verdict(json!({
-            "type": "object",
-            "properties": {"u": {"type": "string",
-                "pattern": "[]a.x]",
-                "enum": ["b"]}},
-            "required": ["u"]
-        }));
-        assert!(
-            !all,
-            "a member the wire rejects must not clear: the judge is wire-exact"
-        );
-        assert_eq!(strict, None);
-        // Control: a member the wire's class admits still ships.
+    fn empty_and_negated_empty_classes_judge_the_ecma_wire() {
+        // Round 29 (D1) fixed the dot-rewrite tracker's class extent but
+        // justified the shape with a false premise: ECMA-262 Annex B does
+        // NOT read `[]` / `[^]` as a literal-`]` member class (V8-verified
+        // — `[]` is the EMPTY class, matching no character, so any pattern
+        // containing it matches nothing, and `[^]` matches every
+        // character). Round 30 translates both exactly (`[]` → `[^\s\S]`,
+        // `[^]` → `[\s\S]`, body `]` escaped), so the judge answers what
+        // the wire answers in both directions.
+        // `[]a.x]` matches NOTHING on the wire: every pinned member is
+        // wire-rejected, so the schema is callable by nothing and the
+        // tool fails closed — round 29 shipped this strict on a member
+        // the Rust-side reading admitted.
         let (all, strict) = verdict(json!({
             "type": "object",
             "properties": {"u": {"type": "string",
@@ -19180,14 +19268,31 @@ mod strict_fixwave_r29 {
             "required": ["u"]
         }));
         assert!(
-            all,
-            "a member inside the wire's class clears: {} strict is not set",
-            all
+            !all,
+            "the empty class matches nothing: no member is wire-admissible"
         );
+        assert_eq!(strict, None);
+        // Any member dies with the empty class, not just `]`.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "string",
+                "pattern": "[]a.x]",
+                "enum": ["ba.x]"]}},
+            "required": ["u"]
+        }));
+        assert!(!all, "the whole pattern is wire-dead: {all}");
+        assert_eq!(strict, None);
+        // `[^]a.x]` matches exactly the five-char shape `?a.x]`: a member
+        // inside it ships strict, a member outside it fails closed.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": {"type": "string",
+                "pattern": "[^]a.x]",
+                "enum": ["ba.x]"]}},
+            "required": ["u"]
+        }));
+        assert!(all, "the member inside the negated-empty shape clears: {all}");
         assert_eq!(strict, Some(true));
-        // The negated mirror now compiles verbatim too: the wire and the
-        // judge both read `[^]a.x]` as "not in {], a, ., x}", so "b"
-        // matches on both sides and the member ships.
         let (all, strict) = verdict(json!({
             "type": "object",
             "properties": {"u": {"type": "string",
@@ -19195,8 +19300,8 @@ mod strict_fixwave_r29 {
                 "enum": ["b"]}},
             "required": ["u"]
         }));
-        assert!(all, "the negated class is wire-exact after the fix: {all}");
-        assert_eq!(strict, Some(true));
+        assert!(!all, "a member outside the negated-empty shape fails closed");
+        assert_eq!(strict, None);
     }
 
     #[test]
@@ -19622,5 +19727,138 @@ mod strict_fixwave_r29 {
                 .is_some_and(|note| note.contains("Exactly one")),
             "the generic composition note fires for required-less branches: {note:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod strict_fixwave_r30 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    fn pinned_union(enum_value: Value) -> Value {
+        json!({
+            "type": "object",
+            "properties": {"u": {
+                "type": "object",
+                "properties": {"a": {"anyOf": [
+                    {"type": "number"}, {"type": "string"}, {"type": "boolean"}
+                ]}},
+                "required": ["a"],
+                "enum": [enum_value],
+                "anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}},
+                     "required": ["a"], "additionalProperties": false},
+                    {"type": "object", "properties": {"a": {"type": "boolean"}},
+                     "required": ["a"], "additionalProperties": false}
+                ]
+            }},
+            "required": ["u"]
+        })
+    }
+
+    #[test]
+    fn node_object_pins_conjunct_with_union_branch_properties() {
+        // Round 30 (fresh review, judges lane): the enum/const judge arms
+        // read a pinned object member against the node's OWN properties,
+        // the composition witness skips properties-bearing unions, and the
+        // coverage arm checked key sets and per-name schema pairs — none
+        // of them the pin against the BRANCH. `enum:[{"a": 1}]` beside
+        // branches whose `a` demands a string or a boolean covered on
+        // paper and shipped `strict: true` callable by nothing: the wire
+        // forces the member, and no branch accepts it. The coverage arm
+        // now conjuncts the node's pins per branch.
+        let (all, strict) = verdict(pinned_union(json!({"a": 1})));
+        assert!(
+            !all,
+            "no branch admits the pinned member: the union is callable by nothing"
+        );
+        assert_eq!(strict, None);
+        // Control: a member one branch admits keeps the union shipping —
+        // the conjunct is not a blanket union refusal.
+        let (all, strict) = verdict(pinned_union(json!({"a": "x"})));
+        assert!(all, "a member a branch admits keeps the union callable: {all}");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn node_const_object_pins_conjunct_with_union_branch_properties() {
+        // The const twin of the enum seam: a surviving object `const` is
+        // the one instance the wire can carry, so the branch must admit
+        // exactly that value.
+        let mut schema = pinned_union(json!({"a": "unused"}));
+        schema["properties"]["u"].as_object_mut().expect("union node").remove("enum");
+        schema["properties"]["u"]["const"] = json!({"a": 1});
+        let (all, strict) = verdict(schema);
+        assert!(!all, "no branch admits the const instance");
+        assert_eq!(strict, None);
+        // Control: an admitted const instance ships.
+        let mut schema = pinned_union(json!({"a": "unused"}));
+        schema["properties"]["u"].as_object_mut().expect("union node").remove("enum");
+        schema["properties"]["u"]["const"] = json!({"a": "x"});
+        let (all, strict) = verdict(schema);
+        assert!(all, "an admitted const instance keeps the union callable: {all}");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn ref_branches_judge_the_node_pins_through_their_definition() {
+        // A `$ref` branch stands for its definition on the wire, so the
+        // pinned-value conjunct resolves it the same way the closure check
+        // does: a definition that admits the pin covers, one that refuses
+        // it does not.
+        let admitting = json!({
+            "type": "object",
+            "properties": {"u": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "enum": [{"a": "x"}],
+                "anyOf": [{"$ref": "#/$defs/str_a"}]
+            }},
+            "required": ["u"],
+            "$defs": {"str_a": {"type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"], "additionalProperties": false}}
+        });
+        let (all, strict) = verdict(admitting);
+        assert!(all, "the definition admits the pinned member: {all}");
+        assert_eq!(strict, Some(true));
+        let refusing = json!({
+            "type": "object",
+            "properties": {"u": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "enum": [{"a": 1}],
+                "anyOf": [{"$ref": "#/$defs/str_a"}]
+            }},
+            "required": ["u"],
+            "$defs": {"str_a": {"type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"], "additionalProperties": false}}
+        });
+        let (all, strict) = verdict(refusing);
+        assert!(!all, "the definition refuses the pinned member: callable by nothing");
+        assert_eq!(strict, None);
     }
 }
