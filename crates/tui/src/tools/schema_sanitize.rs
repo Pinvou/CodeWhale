@@ -1502,12 +1502,35 @@ fn numbers_provably_disjoint(x: &serde_json::Number, y: &serde_json::Number) -> 
     false
 }
 
+/// Branch cap for the xAI rehearsal's union-defect walk (round 31): the
+/// R1/R2 arms are pairwise over branches, so an adversarial
+/// all-discriminated union cost O(B²)-O(B³) witness extractions per tool
+/// per request with no cap at all — the MFJS branch cap covers only the
+/// Moonshot lane. Past the cap the walk abstains, which is the
+/// NO-MUTATION answer: the rehearsal's verdict decides between
+/// pass-through and the flattening fallback, and no verdict keeps the
+/// authored schema exactly as it arrived.
+const XAI_DEFECT_BRANCH_CAP: usize = 500;
+
+/// Pair-proof budget for the R2 admission scan (round 31): past the
+/// branch cap a hostile under-cap union — every pair provably
+/// discriminated by its own pin — still paid B² proof walks per node.
+/// Each pair's proof walks both branches, so the budget bounds the total
+/// witness work; exhaustion abstains to pass-through, the same
+/// no-mutation line as the branch cap.
+const XAI_DEFECT_PAIR_PROOF_CAP: usize = 20_000;
+
 fn oneof_node_defect(
     branches: &[Value],
     enclosing: &serde_json::Map<String, Value>,
     path: &str,
     walk: &mut DefectWalk,
 ) -> Option<String> {
+    // Round 31: past the branch cap the walk abstains — pass-through is
+    // the no-mutation answer (see the cap's doc).
+    if branches.len() > XAI_DEFECT_BRANCH_CAP {
+        return None;
+    }
     // R1: identical branches.
     for (left, left_branch) in branches.iter().enumerate() {
         for (right, right_branch) in branches.iter().enumerate().skip(left + 1) {
@@ -2030,10 +2053,17 @@ fn unions_lack_pairwise_discrimination(
         branches,
     };
     let groups: Vec<Vec<&str>> = branches.iter().map(branch_required_names).collect();
+    let mut proofs = 0usize;
     for (left, left_group) in groups.iter().enumerate() {
         for (right, right_group) in groups.iter().enumerate() {
             if left == right {
                 continue;
+            }
+            proofs += 1;
+            if proofs > XAI_DEFECT_PAIR_PROOF_CAP {
+                // Round 31: exhaustion abstains to pass-through — the
+                // no-mutation answer, like the branch cap.
+                return None;
             }
             if !admission.pair_discriminated(
                 left,
@@ -20228,6 +20258,50 @@ mod strict_fixwave_r31 {
             "the authored refusal survives: {}",
             schema
         );
+    }
+
+    #[test]
+    fn oversized_union_defect_walk_abstains_to_pass_through() {
+        // Round 31 (fresh review, performance lane): the rehearsal's R1/R2
+        // arms are pairwise over branches with no cap — a 600-branch
+        // all-discriminated union (distinct `kind` consts, the cheapest
+        // proof per pair) paid O(B²) proof walks per node per request,
+        // recurring. Past the branch cap the walk abstains, which is the
+        // NO-MUTATION answer: pass-through keeps the authored union
+        // exactly as it arrived, and no defect is claimed.
+        let branches: Vec<Value> = (0..600)
+            .map(|kind| {
+                json!({
+                    "type": "object",
+                    "properties": {"kind": {"const": kind}},
+                    "required": ["kind"],
+                    "additionalProperties": false
+                })
+            })
+            .collect();
+        let schema = json!({"type": "object", "oneOf": branches});
+        let started = std::time::Instant::now();
+        assert_eq!(
+            oneof_semantic_defect(&schema),
+            None,
+            "an over-cap union claims no defect and takes no fallback"
+        );
+        assert!(
+            started.elapsed().as_millis() < 1_000,
+            "the cap must bound the walk, not just redirect it"
+        );
+        // Keep-side: an under-cap union still walks — two branches sharing
+        // a required group with distinct pins are the classic R1-family
+        // the walk exists to catch, and the under-cap shape above the
+        // proof budget is far away.
+        let defect = oneof_semantic_defect(&json!({
+            "type": "object",
+            "oneOf": [
+                {"type": "object", "properties": {"a": true}, "required": ["a"]},
+                {"type": "object", "properties": {"a": true}, "required": ["a"]}
+            ]
+        }));
+        assert!(defect.is_some(), "the under-cap walk still finds R1 twins");
     }
 
     #[test]
