@@ -1451,7 +1451,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             }));
           setToolAuthStates(prev => {
             const next = { ...prev };
-            authEntries.filter(Boolean).forEach(([id, status]) => { next[id] = status; });
+            authEntries.filter(entry => entry != null).forEach(([id, status]) => { next[id] = status; });
             return next;
           });
         } catch (e) {
@@ -2286,7 +2286,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             try {
               const bs = await invokeTauri('bundle_readiness', { bundleId: dlg.backendId });
               const b = (bs && bs.bundle) || null;
-              if (b) setSelectedTool(prev => ({ ...prev, title: b.name || prev.title, desc: b.description == null ? prev.desc : b.description }));
+              if (b) setSelectedTool(prev => (prev ? { ...prev, title: b.name || prev.title, desc: b.description == null ? prev.desc : b.description } : prev));
             } catch (err) {
               console.error('bundle_readiness refresh failed:', dlg.backendId, err);
             }
@@ -2730,7 +2730,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             copy={storeCopy}
             onOpenError={browserOpenFailed}
             onCancel={() => { if (configDialog?.backendId) finishToolConfiguration(configDialog.backendId, false); setConfigDialog(null); }}
-            onConfirm={(values) => { const bid = configDialog.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
+            onConfirm={(values) => { const bid = configDialog?.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
           />, document.body)}
           {createPortal(<TsObsidianGuide
             guide={obsidianGuide}
@@ -2740,9 +2740,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             onDownload={() => invokeTauri('open_external_url', { url: 'https://obsidian.md/' }).catch(() => {})}
             onRetry={async () => {
               let st = null;
-              try { st = await invokeTauri('detect_obsidian'); } catch (e) {}
-              if (st && st.state === 'ok') { const bid = obsidianGuide.backendId; setObsidianGuide(null); doInstall(bid, {}); }
-              else setObsidianGuide(g => g ? { ...g, ...(st || {}) } : g);
+              try { st = await invokeTauri('detect_obsidian'); } catch { /* silent: treat not-installed as a probe failure */ }
+              if (st && st.state === 'ok') { const bid = obsidianGuide?.backendId; setObsidianGuide(null); doInstall(bid, {}); }
+              else setObsidianGuide(g => g ? { ...g, ...st } : g);
             }}
           />, document.body)}
           {/* 预置技能更新二次确认:覆盖为商店最新版本,本地修改会丢失(WebView2 下

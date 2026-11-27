@@ -690,6 +690,7 @@ mod tests {
         let nested = root.join("nested weights");
         std::fs::create_dir_all(&mounted).unwrap();
         std::fs::create_dir_all(&nested).unwrap();
+        // SAFETY: libc::geteuid only reads the caller's real uid; no side effects.
         let report = scan_with_mounts(None, unsafe { libc::geteuid() }, || {
             Ok(mounts_at(&[&mounted, &nested.join("weights.bin")]))
         })
@@ -710,6 +711,7 @@ mod tests {
             let error = remove_with_io(
                 None,
                 candidate.to_str().unwrap(),
+                // SAFETY: libc::geteuid only reads the caller's real uid; no side effects.
                 unsafe { libc::geteuid() },
                 || {},
                 || {
@@ -737,6 +739,7 @@ mod tests {
         let (candidate, _) = seed_models_dir();
         let unavailable = || Err("orphan_mount_state_unavailable".into());
         assert_eq!(
+            // SAFETY: libc::geteuid only reads the caller's real uid; no side effects.
             scan_with_mounts(None, unsafe { libc::geteuid() }, unavailable).unwrap_err(),
             "orphan_mount_state_unavailable"
         );
@@ -744,6 +747,7 @@ mod tests {
             remove_with_io(
                 None,
                 candidate.to_str().unwrap(),
+                // SAFETY: libc::geteuid only reads the caller's real uid; no side effects.
                 unsafe { libc::geteuid() },
                 || {},
                 unavailable,
@@ -763,6 +767,7 @@ mod tests {
         let error = remove_with_io(
             None,
             candidate.to_str().unwrap(),
+            // SAFETY: libc::geteuid only reads the caller's real uid; no side effects.
             unsafe { libc::geteuid() },
             || {},
             mounts::Mounts::read,
@@ -932,6 +937,7 @@ mod tests {
             let error = remove_for_user_with_recheck(
                 None,
                 candidate.to_str().unwrap(),
+                // SAFETY: libc::geteuid only reads the caller's real uid; no side effects.
                 unsafe { libc::geteuid() },
                 || {
                     std::fs::rename(&candidate, &retained).unwrap();

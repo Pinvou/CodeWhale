@@ -3193,7 +3193,9 @@ mod tests {
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
         let result = run();
         match old_home {
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             Some(home) => unsafe { std::env::set_var("PINVOU3_HOME", home) },
+            // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         result
@@ -4524,6 +4526,7 @@ mod tests {
         match old_home {
             // SAFETY: holding ENV_LOCK; restore-side removal serialized.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: holding ENV_LOCK; restore-side removal serialized.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }

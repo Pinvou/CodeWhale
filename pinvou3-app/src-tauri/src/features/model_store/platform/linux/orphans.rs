@@ -504,6 +504,8 @@ mod tests {
         // A shell-owned sleep survives a leader-only test cleanup. Replace the
         // shell in place; explicit multi-process coverage uses the member below.
         cmd.arg("-c").arg("exec sleep 300");
+        // SAFETY: async-signal-safe setpgid between fork and exec; failure is
+        // surfaced via io::Error.
         unsafe {
             cmd.pre_exec(|| {
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))
@@ -527,6 +529,8 @@ mod tests {
         let pgid = leader.id() as i32;
         let mut command = Command::new("sleep");
         command.arg("300");
+        // SAFETY: async-signal-safe setpgid between fork and exec; failure is
+        // surfaced via io::Error.
         unsafe {
             command.pre_exec(move || {
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(pgid))

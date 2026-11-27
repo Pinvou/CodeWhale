@@ -217,6 +217,7 @@ export function AssistantMessageActions({ text, resolveText, copy, sessionId, tu
   };
 
   const handleMenuKeyDown = event => {
+    if (!menu) return; // handler is only attached to the rendered menu
     if (event.key === 'Tab') {
       closeMenu(menu.kind);
       return;

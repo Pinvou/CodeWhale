@@ -11055,6 +11055,7 @@ fn tighten_directory_permissions_fixes_wide_modes_and_skips_foreign() {
         use std::os::unix::ffi::OsStrExt as _;
         let c_path = std::ffi::CString::new(foreign.as_os_str().as_bytes()).unwrap();
         // 65534 = nobody/4294967294 沙箱惯用的非特权 uid。
+        // SAFETY: chown targets a fixture path created above; the result is asserted.
         (unsafe { libc::chown(c_path.as_ptr(), 65534, 65534) } == 0)
     };
 

@@ -2428,6 +2428,7 @@ mod tests {
         );
 
         // Explicit but missing configuration keeps repair/independent tools.
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe { std::env::set_var("CMSD_SOCKET", tmp.join("missing.sock")) };
         // SAFETY: ENV_LOCK is held and every changed key is captured above.
         unsafe {

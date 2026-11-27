@@ -1037,13 +1037,15 @@ assert.match(chunkedUpload, /device attachment exceeds \$\{MAX_FILE_BYTES\} byte
 // an envelope-seq hole; the listener must detect the jump and debounce-refetch
 // the authoritative timeline to self-heal (instead of waiting for a
 // reconnect/session reopen), merging the snapshot and rebasing the tracker.
-assert.match(codexView, /acpEventSeqTrackerRef\.current\.note\(incoming\.sessionId, incoming\.seq\) === 'gap'[\s\S]*?acpGapResyncRef\.current\.schedule\(incoming\.sessionId\)/,
+// The refs are init-once before any effect runs, so the tsc-hardening optional
+// chain on `.current` is a no-op at runtime; the pins accept both spellings.
+assert.match(codexView, /acpEventSeqTrackerRef\.current(?:\?\.|\.)note\(incoming\.sessionId, incoming\.seq\) === 'gap'[\s\S]*?acpGapResyncRef\.current(?:\?\.|\.)schedule\(incoming\.sessionId\)/,
   'the live acp:event listener must detect envelope-seq gaps and schedule a resync');
 assert.match(codexView, /createAcpGapResyncScheduler\(sessionId => \{[\s\S]*?resyncAcpSessionAfterGap\(sessionId\);[\s\S]*?\}, \{/,
   'the gap resync must go through the bounded-retry scheduler wrapping resyncAcpSessionAfterGap');
 assert.match(codexView, /mergeAcpTimelineSnapshot\(timeline, current, sessionId\)[\s\S]*?rebaseAcpEventSeqTracker\(sessionId, timeline\)/,
   'the gap resync must merge the authoritative snapshot and rebase the tracker');
-assert.match(codexView, /acpGapResyncRef\.current\.cancel\(\)/,
+assert.match(codexView, /acpGapResyncRef\.current(?:\?\.|\.)cancel\(\)/,
   'the pending gap resync must be cancelled on unmount');
 
 assert.match(bootstrap, /sendRaw\(\{ \.\.\.value, v: protocolVersion, lease_id: this\.leaseId \}\)/);
@@ -1297,27 +1299,34 @@ assert.match(bridge, /addSystemItem\(concurrentTurn[\s\S]{0,120}bt\("turnAlready
 assert.match(bridge, /var sid = state\.activeSessionId;/);
 assert.match(bridge, /if \(state\.activeSessionId !== sid\) return;/);
 assert.match(bridge, /remoteAdmissionKeys/);
-assert.match(bridge, /var activePlanCards = Object\.create\(null\)/);
-assert.match(bridge, /var hydratedKey = planCardHydrationKey\(hydratedPlan\)/);
-assert.match(bridge, /hydratedPlan\.cardState = "active"/);
-// T0-b: the live-hydration filter moved into the shared payload; pin the
-// plan_card branch in helpers and the lane delegation instead of the inline copy.
-assert.match(readSource(path.join(root, "src", "shared", "bridge-shared-helpers.js"), "utf8"), /if \(item\.type === "plan_card"\) return false/);
-assert.match(webBridge, /liveChatItemKeptForHydration\(item\)/);
+// Debtsweep L4 dedup: the plan-ticket reassignment block moved verbatim into
+// the shared base (commitReconciledWorkingSet); pin the shared body.
+assert.match(sharedBridgeHelpers, /(?:var|const|let) activePlanCards = Object\.create\(null\)/);
+assert.match(sharedBridgeHelpers, /(?:var|const|let) hydratedKey = planCardHydrationKey\(hydratedPlan\)/);
+assert.match(sharedBridgeHelpers, /hydratedPlan\.cardState = "active"/);
+// Wave 5 moved the hydration live-card filter into the shared base
+// (liveChatItemKeptForHydration); the L4 dedup moved its only web call site
+// (commitReconciledWorkingSet) there too, so the pin lives on the shared body
+// and the web cluster export.
+assert.match(sharedBridgeHelpers, /function liveChatItemKeptForHydration\(item\)/);
+assert.match(sharedBridgeHelpers, /if \(item\.type === "plan_card"\) return false/);
+assert.match(sharedBridgeHelpers, /liveChatItemKeptForHydration: b\.liveChatItemKeptForHydration, commitReconciledWorkingSet: b\.commitReconciledWorkingSet/);
 assert.match(bridge, /action === "accept_plan"/);
 assert.match(bridge, /acceptedMode = payload\.mode_state \|\| payload\.modeState/);
-assert.match(bridge, /planNotActive = errorText\.indexOf\("plan_not_active"\)/);
-assert.match(bridge, /planId = String\(p\.plan_id \|\| p\.planId \|\| ""\)\.trim\(\)/);
-assert.match(bridge, /readyMode = p\.mode_state \|\| p\.modeState/);
+assert.match(bridge, /planNotActive = errorText\.(?:indexOf\("plan_not_active"\)|includes\("plan_not_active"\))/);
+// Debtsweep L4 dedup: plan_ready payload + discardPlan moved verbatim into the
+// shared base; the body pins follow them there.
+assert.match(sharedBridgeHelpers, /planId = String\(p\.plan_id \|\| p\.planId \|\| ""\)\.trim\(\)/);
+assert.match(sharedBridgeHelpers, /readyMode = p\.mode_state \|\| p\.modeState/);
 assert.match(bridge, /listen\("chat:plan_resolved"/);
 assert.equal(allowedEvents.has('chat:plan_resolved'), true, 'plan resolution must reach the WebUI event bridge');
-assert.match(bridge, /planId: planTicket/);
-assert.match(bridge, /invoke\("discard_plan", \{ sessionId: sid, planId: planTicket \}\)/);
-const discardPlanBody = bridge.slice(bridge.indexOf('async function discardPlan'), bridge.indexOf('async function exitPlanToYolo'));
+assert.match(sharedBridgeHelpers, /planId: planTicket/);
+assert.match(sharedBridgeHelpers, /invoke\("discard_plan", \{ sessionId: sid, planId: planTicket \}\)/);
+const discardPlanBody = sharedBridgeHelpers.slice(sharedBridgeHelpers.indexOf('async function discardPlan'), sharedBridgeHelpers.indexOf('async function exitPlanToYolo'));
 assert.ok(discardPlanBody.indexOf('notify();') < discardPlanBody.indexOf('await invoke("discard_plan"'),
   'discard Plan must notify the frozen card before waiting on the remote invoke');
 assert.match(bridge, /function isActionablePlanCard\(sid, itemId, planId\)/);
-assert.match(bridge, /else if \(!card\.planResolutionConfirmed\)/);
+assert.match(sharedBridgeHelpers, /else if \(!card\.planResolutionConfirmed\)/);
 assert.match(toolRenderers, /!item\.resolved && !!item\.planId/);
 assert.match(toolRenderers, /acceptPlan\(item\.id, item\.planMarkdown, undefined, item\.planId\)/);
 assert.match(toolRenderers, /discardPlan\(item\.id, item\.planId\)/);

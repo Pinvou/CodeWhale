@@ -1787,6 +1787,10 @@ mod tests {
 
     #[test]
     fn saved_access_round_trips_and_env_overrides_it() {
+        // 锁顺序全仓统一：先 crate ENV_LOCK，isolated() 再握模型商店 ENV_TEST_LOCK。
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _iso = isolated();
         let saved = WorkerAccess {
             host: "192.168.10.42".into(),
@@ -1813,6 +1817,7 @@ mod tests {
                 true
             ))
         );
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::remove_var(ENV_HOST);
             std::env::remove_var(ENV_USER);
@@ -1864,6 +1869,10 @@ mod tests {
     /// `info` 是唯一不触网就能走通的子命令，用它验证同卡路径仍通。
     #[test]
     fn cli_rejects_subcommands_when_the_slot_belongs_to_another_card() {
+        // 锁顺序全仓统一：先 crate ENV_LOCK，isolated() 再握模型商店 ENV_TEST_LOCK。
+        let _env = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _iso = isolated();
         save_access(&WorkerAccess {
             host: "192.168.10.42".into(),
@@ -1878,11 +1887,13 @@ mod tests {
         assert_eq!(cli(&["info".into()]), 2);
         assert_eq!(cli(&["exec".into(), "true".into()]), 2);
         // 手动覆盖目标（ENV_HOST/ENV_USER）优先于槽，跨卡也放行
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::set_var(ENV_HOST, "10.9.9.9");
             std::env::set_var(ENV_USER, "sky");
         }
         assert_eq!(cli(&["info".into()]), 0);
+        // SAFETY: ENV_LOCK is held; env writes are serialized in-process.
         unsafe {
             std::env::remove_var(ENV_HOST);
             std::env::remove_var(ENV_USER);

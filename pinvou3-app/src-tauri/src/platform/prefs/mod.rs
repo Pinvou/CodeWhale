@@ -3507,6 +3507,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).expect("create temporary prefs home");
             let previous = std::env::var_os("PINVOU3_HOME");
+            // SAFETY: every caller acquires ENV_LOCK before creating this guard.
             unsafe { std::env::set_var("PINVOU3_HOME", &path) };
             Self { previous, path }
         }
@@ -3515,7 +3516,9 @@ mod tests {
     impl Drop for TemporaryPrefsHome {
         fn drop(&mut self) {
             match &self.previous {
+                // SAFETY: every caller holds ENV_LOCK for the guard's whole lifetime.
                 Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                // SAFETY: every caller holds ENV_LOCK for the guard's whole lifetime.
                 None => unsafe { std::env::remove_var("PINVOU3_HOME") },
             }
             let _ = std::fs::remove_dir_all(&self.path);

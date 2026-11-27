@@ -147,6 +147,8 @@ fn legacy_recovery_retains_plan_after_the_leader_exits_but_its_descendant_lives(
         .arg(&release);
     // Only the async-signal-safe setpgid syscall runs between fork and exec.
     // Match existing orphan fixtures, including user-mode emulation support.
+    // SAFETY: async-signal-safe setpgid between fork and exec; failure is
+    // surfaced via io::Error.
     unsafe {
         command.pre_exec(|| {
             nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
