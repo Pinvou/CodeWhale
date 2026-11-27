@@ -2,14 +2,16 @@
 
 Documentation and community site for [Codewhale](https://github.com/Hmbown/CodeWhale) — lives at **codewhale.net**.
 
-Next.js 15 (App Router) + Tailwind, deployed to Cloudflare Workers via [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare). Curated "Today's Dispatch" content is regenerated every 6 hours by a Cloudflare Cron Trigger that calls `deepseek-v4-flash` to summarise recent repo activity, and stored in Workers KV.
+Next.js 16 (App Router) + Tailwind, deployed to Cloudflare Workers via [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare). Curated "Today's Dispatch" content is regenerated every 6 hours by a Cloudflare Cron Trigger that calls `deepseek-v4-flash` to summarise recent repo activity, and stored in Workers KV.
 
 ## Local dev
 
-Requires Node `^22.12.0`, `^24.0.0`, or `>=26` — Vitest 5.1's supported
-range, declared in [`package.json`](package.json) `engines` so a
-mismatching local Node warns at install time instead of failing inside
-the test toolchain. CI runs Node 22.
+Requires Node `^22.13.0`, `^24.0.0`, or `>=26` — the combined supported
+range of the installed Vitest 5.1 and ESLint 10 toolchains (ESLint 10
+dropped Node 22.12; review 6027839559), declared in
+[`package.json`](package.json) `engines` so a mismatching local Node
+warns at install time instead of failing inside the test toolchain.
+CI runs Node 22.
 
 ```bash
 cd web
