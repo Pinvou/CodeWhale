@@ -8090,14 +8090,14 @@ fn sanitize_kimi_node(
                 sanitize_kimi_node(branch, defs)?;
             }
         }
-        if parent_type.is_some() && obj.get("anyOf").is_some() {
-            if obj
+        if parent_type.is_some()
+            && obj.get("anyOf").is_some()
+            && obj
                 .get("properties")
                 .and_then(Value::as_object)
                 .is_some_and(Map::is_empty)
-            {
-                obj.remove("properties");
-            }
+        {
+            obj.remove("properties");
         }
     }
     Ok(())
