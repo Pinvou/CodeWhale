@@ -13822,6 +13822,13 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
         ),
         (
             ApiProvider::Deepseek,
+            "https://api.deepseek.com:443/v1",
+            "even the WHATWG-default port folds away on the wire while the gate \
+             string-matches the configured text, so it conservatively withholds \
+             instead of guessing at the fold",
+        ),
+        (
+            ApiProvider::Deepseek,
             "https://user@api.deepseek.com/beta",
             "userinfo before the host defeats the prefix match and must stay out of scope",
         ),
@@ -13950,6 +13957,12 @@ fn deepseek_canonical_url_sets_stay_inside_the_official_host_gate() {
     // so no surface can recognize an endpoint the gate would reject, and
     // the beta set must stay disjoint from the non-beta set so the strip
     // decision cannot flip.
+    assert!(
+        !super::DEEPSEEK_CANONICAL_BETA_URLS.is_empty()
+            && !super::DEEPSEEK_CANONICAL_NON_BETA_URLS.is_empty(),
+        "an emptied set would vacuously pass the loops below and silently \
+         drop its surface's coverage"
+    );
     for url in super::DEEPSEEK_CANONICAL_BETA_URLS
         .iter()
         .chain(super::DEEPSEEK_CANONICAL_NON_BETA_URLS.iter())
@@ -14030,4 +14043,29 @@ fn official_host_gate_rejects_the_path_percent_encode_printables() {
     assert!(url_is_official_deepseek_host(
         "https://api.deepseek.com/beta"
     ));
+}
+
+#[test]
+fn minimax_wire_dialect_key_selects_the_endpoint_and_the_dispatch_together() {
+    // The base-URL resolver and the dispatch fn (`provider_wire_format_for_config`
+    // — for this Fixed(ChatCompletions) family, the non-ModelAware construction
+    // arm binds its answer directly) read the same `wire` key. Pinning the PAIR
+    // keeps one spelling from answering with two protocols: the regression this
+    // closes was exactly that split — the resolver picked the vendor Anthropic
+    // endpoint while dispatch spoke chat into it.
+    assert_eq!(
+        super::resolve_minimax_base_url_for_tui(None, ApiProvider::Minimax, Some("anthropic")),
+        super::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL
+    );
+    assert_eq!(
+        super::resolve_minimax_base_url_for_tui(None, ApiProvider::Minimax, None),
+        super::DEFAULT_MINIMAX_BASE_URL
+    );
+    let config = toml::from_str::<Config>("\n[providers.minimax]\nwire = \"anthropic\"\n")
+        .expect("minimax wire table parses");
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(ApiProvider::Minimax, Some(&config)),
+        codewhale_config::provider::WireFormat::AnthropicMessages,
+        "dispatch must answer the dialect the endpoint resolver selected for the same key"
+    );
 }

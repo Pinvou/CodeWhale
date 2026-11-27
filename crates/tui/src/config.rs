@@ -995,9 +995,9 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
 /// (Beta)" (<https://api-docs.deepseek.com/guides/tool_calls/>, fetched
 /// 2026-11-05). `api.deepseeki.com` is not an official host — the docs never
 /// mention it, and `docs/REBRAND.md` records it as a legacy typo kept only in
-/// URL heuristics for existing configs (#1079); it is accepted here to mirror
-/// the compat set the rest of the codebase already recognizes
-/// (`client.rs`, `client/chat.rs`, the doctor).
+/// URL heuristics for existing configs (see `docs/REBRAND.md`); it is accepted
+/// here to mirror the compat set the rest of the codebase already recognizes
+/// (`client.rs`, `client/chat.rs`, the doctor layer).
 pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) -> bool {
     if !matches!(
         provider,
@@ -1013,7 +1013,8 @@ pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) 
 /// (the chat strip), where the request is routed to
 /// `beta/chat/completions` (`client.rs`), where the Responses dialect
 /// resolves its URL (`client.rs`), and where the doctor reports the beta
-/// verdict — one constant so the four consumers cannot drift.
+/// verdict once the stack's doctor layer wires it — one constant so the
+/// consumers cannot drift.
 pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
     "https://api.deepseek.com/beta",
     "https://api.deepseeki.com/beta",
@@ -1126,8 +1127,10 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
 /// Whether the DeepSeek strict tool pipeline (schema reshaping plus
 /// `tool_choice: "required"`) acts on a route: the user flag AND the
 /// official-route gate. The engine turn-surface build, the child sub-agent
-/// surface, and the doctor all call this one predicate — there is no
-/// second composition to drift. The surfaces still choose their own
+/// surface, and the doctor all call this one predicate — at this layer the
+/// predicate and its pins land first, and the wiring lands with this
+/// stack's engine, subagent, and doctor layers — so there is no second
+/// composition to drift. The surfaces still choose their own
 /// ARGUMENTS: the engine feeds the session provider with the resolved
 /// route's URL, the child feeds its own config's provider and URL (the
 /// per-turn children receive the route-scoped config, off-turn follow-ups
@@ -3335,7 +3338,7 @@ pub struct Config {
     /// represent faithfully — root alternatives, required nullables
     /// (`nullable` / null-type union branches), or tools whose runtime
     /// demands schema-optional parameters (`update_goal`, `send_later`,
-    /// `agents/message`, `agents/followup`, `Web`) —
+    /// `agents/message`, `agents/followup`, `agent`, `Web`) —
     /// stay non-strict: they keep their original schema. `tool_choice`
     /// follows the route gate on the parent turn surface, not per-tool
     /// outcomes: it stays `required` on an in-scope route even when some
@@ -3344,7 +3347,9 @@ pub struct Config {
     /// `auto`, thinking-mode chat requests may drop `tool_choice`
     /// entirely, and the `/preview-request` surface mirrors this same
     /// route-gated selection — pre-existing surfaces this field does not
-    /// change.)
+    /// change. The scope gate is `strict_tool_mode_for_route`; the
+    /// schema-reshaping contract described here lands with this stack's
+    /// sanitizer layer.)
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars

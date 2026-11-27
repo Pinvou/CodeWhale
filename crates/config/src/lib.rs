@@ -5080,9 +5080,13 @@ pub fn base_url_uses_local_host(base_url: &str) -> bool {
 /// parser (what reqwest actually runs) terminates the authority at a
 /// backslash in special schemes just like `/`, `?`, or `#`, so
 /// `http://evil.com\@localhost` dials `evil.com` with path
-/// `/@localhost/` — an authority containing `\` means this parse CANNOT
-/// name the dialed host, and the honest answer is None (not loopback,
-/// not remote: unparseable). A userinfo `@` splits the same way WHATWG
+/// `/@localhost/` — an authority containing `\` is REFUSED, not parsed:
+/// the parse declines to name the dialed host and answers None
+/// (fail-closed). That is a policy, not an impossibility claim — WHATWG
+/// consumes a leading `/`-`\` run after the scheme (parser.rs:439-458),
+/// so `http://\@localhost` really does dial the host the text names, and
+/// refusing it only withholds loopback privileges (usability, never
+/// safety). A userinfo `@` splits the same way WHATWG
 /// does (everything before the LAST `@` is userinfo), so
 /// `http://localhost:8080` and `http://me@localhost` answer `localhost`.
 fn base_url_host(base_url: &str) -> Option<&str> {
