@@ -156,10 +156,19 @@ mod tests {
         });
         canonicalize_schema(&mut schema);
         assert_eq!(schema["required"], json!(["a", "z"]));
+        // Byte-level, not `Value` equality: serde_json Map comparison
+        // ignores object key order, and the regression this pin owns (the
+        // canonicalizer treating `examples` as schema and reordering the
+        // literal's keys) is exactly a reorder — a round-30 mutation
+        // removing the `examples`/`example` skip spellings left this pin
+        // green under `Value` equality while the bytes moved. (A byte
+        // compare on the pristine tree gives
+        // `[{"b":1,"a":[2,1]}]`; under the removal it is
+        // `[{"a":[2,1],"b":1}]`.)
         assert_eq!(
-            schema["properties"]["q"]["examples"],
-            json!([{"b": 1, "a": [2, 1]}]),
-            "the examples literal keeps manifest order verbatim"
+            schema["properties"]["q"]["examples"].to_string(),
+            r#"[{"b":1,"a":[2,1]}]"#,
+            "the examples literal keeps manifest order verbatim, byte for byte"
         );
     }
 
