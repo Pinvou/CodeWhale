@@ -60,15 +60,21 @@ ignore = [
 # Surviving duplicates after the 688 -> 669 shrink (see PR body):
 # - sha2 0.10 vs 0.11 — blocked on oauth2 (0.10) vs the workspace (0.11)
 # - thiserror 1 vs 2 — blocked on portable-pty 0.9 via filedescriptor 0.8 (v1) vs workspace v2
-# - toml 0.8 vs 1.1 + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace 1.1
+# - toml 0.8 vs 1.x + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace toml 1.x
 # - getrandom 0.3 vs 0.4 — blocked on ahash 0.8 and wezterm-blob-leases (0.3) vs the workspace (0.4)
+# - fancy-regex 0.16 vs 0.18 — blocked on syntect (0.16) vs jsonschema 0.46 (0.18)
 # The graph is the union of shipped targets ([graph]), so it is
 # host-independent: every target-gated lock duplicate that the union reaches
 # is visible on every host and gets a versioned skip below (a skip for a
 # crate outside the graph trips unmatched-skip, and a skip for a
-# single-version crate trips unnecessary-skip). The windows_* DLL and
-# windows-sys 0.42/0.61 lock entries stay unreachable from the union and
-# need no skips.
+# single-version crate trips unnecessary-skip). The windows_* DLL entries
+# the union sees are single-version (the rest are target-filtered) and the
+# windows-sys 0.42.0 entry stays unreachable from the union, so none of
+# them needs a skip; the 0.59.0 duplicate the union reaches (fd-lock and
+# teletypewriter 0.5.32, both cfg(windows)) is what the 0.52.0 skip below
+# silences, while 0.61.2 forms no duplicate — a version drops out of
+# duplicate detection once any of its instances sits under a skip-tree
+# root, and the portable-pty and rust-i18n roots below each reach one.
 multiple-versions = "warn"
 wildcards = "deny"
 # Explicitly allow the surviving duplicates so `cargo deny` does not warn
@@ -81,19 +87,20 @@ skip = [
     { name = "toml", version = "0.8.23" },
     { name = "toml_datetime", version = "0.6.11" },
     { name = "toml_edit", version = "0.22.27" },
-    { name = "winnow", version = "0.7.14" },
+    { name = "winnow", version = "0.7.15" },
     { name = "serde_spanned", version = "0.6.9" },
     # dirs 6 stays for shellexpand 3's tilde expansion and teletypewriter
-    # 0.5.28 (rio-vt's pty chain), both in the tui; the workspace is on 7.
+    # 0.5.32 (rio-vt's pty chain), both in the tui; the workspace is on 7.
     { name = "dirs", version = "6.0.0" },
+    # fancy-regex 0.16 stays for syntect 5; jsonschema 0.46 is on 0.18.
     { name = "fancy-regex", version = "0.16.2" },
     # getrandom 0.3 stays for ahash 0.8 (tui) and wezterm-blob-leases
     # (termwiz chain); the workspace's tempfile/uuid/secret-service are on 0.4.
     { name = "getrandom", version = "0.3.4" },
-    # miniz_oxide 0.8 stays for png 0.18 (via image/arboard); flate2 1.1.10 moved to 0.9.
+    # miniz_oxide 0.8 stays for png 0.18 (via image/arboard); flate2 1.1.11 moved to 0.9.
     { name = "miniz_oxide", version = "0.8.9" },
-    # windows-sys 0.52 stays for ring 0.17's windows-gated slice; fd-lock and
-    # teletypewriter 0.5.28 hold 0.59.
+    # windows-sys 0.52 stays for ring 0.17's aarch64-windows-gated slice; fd-lock and
+    # teletypewriter 0.5.32 hold 0.59.
     { name = "windows-sys", version = "0.52.0" },
     # bindgen ^0.72 — the build toolchain of rquickjs-sys 0.12 — pins
     # itertools 0.13, nom 7 (via cexpr 0.6) and shlex 1.3 against the
