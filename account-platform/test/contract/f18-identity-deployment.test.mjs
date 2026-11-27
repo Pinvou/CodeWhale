@@ -44,6 +44,30 @@ test('remote overlay freezes the same public issuer for Portal and token verifie
   assert.equal(overlay.services['token-gateway'].environment.OIDC_ISSUER, issuer);
 });
 
+test('Portal shares retained assets through a site-owned read-only claim and the existing Ingress', {
+  skip: process.env.PINVOU_TEST_KMS_HELM !== '1',
+}, () => {
+  const trust = ['keycloak.tlsSecretName=fixture-only-keycloak', 'keycloak.caConfigMap=fixture-only-keycloak-ca'];
+  const baseline = documents(render(trust));
+  const mounted = documents(render([...trust, 'portal.assetsExistingClaim=retained-portal-assets']));
+  const baselinePod = deployment(baseline, 'token-portal').spec.template.spec;
+  const pod = deployment(mounted, 'token-portal').spec.template.spec;
+  assert.equal(environment(baselinePod.containers[0]).PORTAL_SHARED_ASSETS_DIR, undefined);
+  assert.equal(baselinePod.volumes.some(volume => volume.name === 'portal-assets'), false);
+  assert.equal(environment(pod.containers[0]).PORTAL_SHARED_ASSETS_DIR, '/run/pinvou/portal-assets');
+  assert.deepEqual(pod.containers[0].volumeMounts.find(mount => mount.name === 'portal-assets'),
+    { name: 'portal-assets', mountPath: '/run/pinvou/portal-assets', readOnly: true });
+  assert.deepEqual(pod.volumes.find(volume => volume.name === 'portal-assets'),
+    { name: 'portal-assets', persistentVolumeClaim: { claimName: 'retained-portal-assets', readOnly: true } });
+  const ingress = items => items.filter(item => item.kind === 'Ingress');
+  assert.deepEqual(ingress(mounted), ingress(baseline));
+  assert.equal(deployment(mounted, 'account-service').spec.template.spec.volumes
+    .some(volume => volume.name === 'portal-assets'), false);
+  const invalid = render([...trust, 'portal.assetsExistingClaim=other/namespace']);
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /portal.assetsExistingClaim/);
+});
+
 test('production Identity chart satisfies its strict Keycloak input and network contracts', {
   skip: process.env.PINVOU_TEST_KMS_HELM !== '1',
 }, async t => {

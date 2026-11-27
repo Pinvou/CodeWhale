@@ -1,5 +1,63 @@
 # Account Platform Helm Chart
 
+## Portal static assets during rollout
+
+Set `portal.assetsExistingClaim` to a site-owned PersistentVolumeClaim in
+the release namespace. Every Portal replica mounts it read-only and serves
+`/assets/*` through the existing Portal Service and response middleware.
+The Portal image still supplies the HTML. Login, APIs and ingress rules
+do not change. An empty claim uses embedded assets as before.
+
+Provision a volume that can mount the same files on all Portal nodes,
+including during a rollout. Use a storage class that supports simultaneous
+mounts across nodes, such as ReadWriteMany with the Portal mounts set
+read-only. ReadWriteOnce alone does not guarantee simultaneous mounts across nodes.
+Grant write access only to a release publisher outside the Portal pods. Use
+a dedicated volume with no other service's files, symbolic links, or nested
+mounts. The filesystem must support atomic hard links in the destination
+directory. Provision `/mnt/portal-assets/assets` on the
+publisher's mount before publishing. Verify that the Portal runtime
+identity can traverse the document root and the assets directory and read
+the asset files. The publisher leaves directory permissions as provisioned.
+
+Before enabling the mount for the first time, publish the assets from every
+version that is serving HTML, can be rolled back to, or remains supported
+for already-open browser sessions. Obtain the exact trusted `static`
+directories used to build those images. In the released build checkout,
+this is `account-platform/internal/portal/static`. Retain it with the
+release record linking its build commit to the deployed image digest.
+Recover older assets from the corresponding verified build checkout or
+retained artifact. Stop the change if you cannot establish that binding.
+Before each subsequent Portal rollout, publish the next version and
+verify all retained sets under their original names.
+
+```sh
+python3 scripts/publish-portal-assets.py /release/current/static /mnt/portal-assets
+python3 scripts/publish-portal-assets.py /release/next/static /mnt/portal-assets
+python3 scripts/publish-portal-assets.py --check /release/current/static /mnt/portal-assets
+python3 scripts/publish-portal-assets.py --check /release/next/static /mnt/portal-assets
+```
+
+The publisher adds content-hashed files and rejects a different payload
+under an existing name. A publish that exits nonzero may have added some
+complete files. Leave the running release in place, resolve the
+failure, then repeat publication and verification before rollout.
+
+Adopt the mount first with a mount-capable Portal image built from the same
+embedded assets as the current deployment. Wait for all Portal replicas
+to use the mount before deploying an image with different asset hashes.
+A Portal process validates its complete embedded asset set against the
+mounted files before starting the HTTP listener. A missing or mismatched
+file prevents the new pod from becoming ready.
+
+Record the first healthy, mount-enabled Helm revision. Verify all retained
+assets over HTTPS, including lazy chunks, and test a forward rollout and
+rollback through the live ingress. During rollback select only a revision
+with the same claim and a mount-capable Portal image. To recover older
+application behavior, build a shared-assets-capable image of that revision.
+Keep both asset sets for open browser sessions and supported rollback
+releases. The publisher performs no garbage collection.
+
 This chart deploys Account Service, Billing Service, Token Gateway, Token Portal,
 Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.

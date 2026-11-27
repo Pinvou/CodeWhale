@@ -1715,6 +1715,7 @@ wait(github, context, {env}, resolve => queueMicrotask(resolve))
         )
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
+        self.assertTrue(_matches_paths_filter("scripts/publish-portal-assets.py", paths))
         frontend = self.pr_workflow.split("\n  frontend-setup:", maxsplit=1)[1].split(
             "\n  relay-test:", maxsplit=1
         )[0]
@@ -1723,6 +1724,11 @@ wait(github, context, {env}, resolve => queueMicrotask(resolve))
         )[0]
         self.assertNotIn("if:", gate)
         self.assertIn("npm run build:account-portal", gate)
+        self.assertIn(
+            "python3 ../scripts/publish-portal-assets.py --check "
+            "../account-platform/internal/portal/static ../account-platform/internal/portal/static",
+            gate,
+        )
         self.assertIn("git diff --exit-code -- ../account-platform/internal/portal/static", gate)
         self.assertIn("git ls-files --others --exclude-standard", gate)
         self.assertIn('test -z "$(git ls-files', gate)

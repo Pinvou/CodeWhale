@@ -895,6 +895,7 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/publish-portal-assets.py'
               - 'scripts/ci-frontend-bundle.py'
               - 'scripts/ci-frontend-cache-server.py'
               - 'scripts/lib/ci_frontend_cache.py'
@@ -1494,6 +1495,7 @@ jobs:
       - name: Verify embedded Account Portal assets are current
         run: |
           npm run build:account-portal
+          python3 ../scripts/publish-portal-assets.py --check ../account-platform/internal/portal/static ../account-platform/internal/portal/static
           git diff --exit-code -- ../account-platform/internal/portal/static
           test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
 

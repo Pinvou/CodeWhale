@@ -55,6 +55,8 @@ images:
   nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
 
 portal:
+  # Site-owned, pre-published shared Portal asset volume. Empty uses embedded assets.
+  assetsExistingClaim: ""
   operationRps: 100
   operationBurst: 200
   loginFlowCapacity: 65536
