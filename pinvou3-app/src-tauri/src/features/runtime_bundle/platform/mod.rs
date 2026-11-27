@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use include_dir::{Dir, include_dir};
 
-use crate::platform::paths;
+use crate::{features::marketplace::mcp_catalog, platform::paths};
 
 mod extraction;
 pub use extraction::Pinvou3Bundle;
@@ -3090,6 +3090,83 @@ mod tests {
             let config: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(profile).unwrap()).unwrap();
             assert_eq!(config["servers"]["pptx"], custom["servers"]["pptx"]);
+        });
+    }
+
+    #[test]
+    fn work_mcp_profiles_route_bundled_gongwen_and_reject_unscoped_fallback() {
+        crate::platform::test_support::with_temp_home("pinvou3-work-gongwen-output", || {
+            let bundle = Pinvou3Bundle::paths();
+            std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+            mcp_catalog::ensure_package_released("gongwen").unwrap();
+            let script = paths::bundle_mcp_package_dir("gongwen").join("server.py");
+            let site_packages = paths::marketplace_python_envs_dir()
+                .join("a".repeat(64))
+                .join("site-packages");
+            let base = serde_json::json!({"servers": {"gongwen": {
+                "command": paths::python_command(),
+                "args": ["-I", "-S", "-B", paths::bundle_mcp_python_runner(), site_packages, script],
+            }}});
+            std::fs::write(&bundle.mcp_json, base.to_string()).unwrap();
+
+            for id in ["gongwen-remote-a", "gongwen-remote-b"] {
+                let profile = bundle.work_mode_mcp_config_path_for_session(id);
+                assert_ne!(profile, bundle.mcp_json);
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(profile).unwrap()).unwrap();
+                let args = config["servers"]["gongwen"]["args"].as_array().unwrap();
+                assert_eq!(
+                    &args[..6],
+                    base["servers"]["gongwen"]["args"].as_array().unwrap()
+                );
+                assert_eq!(
+                    args[6],
+                    format!(
+                        "--session-artifacts-dir={}",
+                        paths::session_artifacts_dir(id).display()
+                    )
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(&bundle.mcp_json).unwrap(),
+                base.to_string()
+            );
+            let blocked_session = "gongwen-remote-blocked";
+            std::fs::create_dir_all(paths::browser_session_mcp_json(blocked_session)).unwrap();
+            let fallback = bundle.work_mode_mcp_config_path_for_session(blocked_session);
+            assert_eq!(fallback, bundle.mcp_json);
+            assert_eq!(
+                bundle.resolve_work_mode_mcp_fallback(blocked_session, &fallback),
+                Err("gongwen_session_profile_unavailable")
+            );
+
+            let mut legacy = base;
+            let legacy_script = paths::bundle_mcp_servers_dir().join("gongwen/server.py");
+            legacy["servers"]["gongwen"]["args"][5] = serde_json::json!(legacy_script);
+            std::fs::write(&bundle.mcp_json, legacy.to_string()).unwrap();
+            let upgraded_profile = bundle.work_mode_mcp_config_path_for_session("gongwen-legacy");
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(upgraded_profile).unwrap()).unwrap();
+            assert_eq!(
+                config["servers"]["gongwen"]["args"][5],
+                serde_json::json!(&script)
+            );
+            assert_eq!(
+                std::fs::read_to_string(&bundle.mcp_json).unwrap(),
+                legacy.to_string()
+            );
+
+            std::fs::write(
+                &script,
+                b"# Old script ignores the session directory argument.\n",
+            )
+            .unwrap();
+            let fallback = bundle.work_mode_mcp_config_path_for_session("gongwen-stale");
+            assert_eq!(fallback, bundle.mcp_json);
+            assert_eq!(
+                bundle.resolve_work_mode_mcp_fallback("gongwen-stale", &fallback),
+                Err("gongwen_session_profile_unavailable")
+            );
         });
     }
 

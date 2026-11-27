@@ -5227,6 +5227,7 @@ jobs:
             'features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_contract' \
             'features::marketplace::scope::tests::' \
             'work_mcp_profiles_route_bundled_pptx_to_each_session_artifact_directory' \
+            'work_mcp_profiles_route_bundled_gongwen_and_reject_unscoped_fallback' \
             'work_mcp_rejects_global_pptx_fallback_when_session_profile_is_unwritable' \
             'before_landing' \
             'before_anything_lands' \

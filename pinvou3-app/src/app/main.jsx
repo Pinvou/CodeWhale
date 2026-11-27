@@ -31,7 +31,7 @@ import { useModalIsolation } from '../hooks/useModalIsolation.js';
 const LazyModelAccessController = lazy(() => import('../features/settings/ModelAccessController.jsx').then(m => ({ default: m.ModelAccessController })));
 import { modelAccessAppliesToView } from '../shared/model-access-scope.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
-import { CHAT_RECOVERY_COPY, PPTX_PROFILE_UNAVAILABLE_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
+import { CHAT_RECOVERY_COPY, GONGWEN_PROFILE_UNAVAILABLE_COPY, PPTX_PROFILE_UNAVAILABLE_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfirm, WORKSPACE_KIND_BOUND } from '../features/projects/projectGrouping.js';
@@ -1500,6 +1500,7 @@ const App = () => {
         window.PinvouTauriBridgeStrings = misc.tauriBridge;
         window.PinvouChatRecoveryCopy = CHAT_RECOVERY_COPY;
         window.PinvouPptxProfileUnavailableCopy = PPTX_PROFILE_UNAVAILABLE_COPY;
+        window.PinvouGongwenProfileUnavailableCopy = GONGWEN_PROFILE_UNAVAILABLE_COPY;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
