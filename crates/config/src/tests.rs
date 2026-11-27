@@ -9641,3 +9641,45 @@ fn base_url_host_extraction_ends_authority_at_query_and_fragment() {
     assert!(base_url_uses_local_host("http://localhost#/whatever"));
     assert!(base_url_uses_local_host("http://localhost?x=1"));
 }
+
+#[test]
+fn base_url_uses_local_host_folds_case_for_admission() {
+    // The host comparison case-folds before the exact match; dropping the
+    // fold would refuse uppercase spellings the wire dials as loopback —
+    // a usability regression that passes every uppercase NEGATIVE pin in
+    // this file (those fail the exact match with or without the fold).
+    // These are the positive cases that catch it.
+    assert!(base_url_uses_local_host("HTTP://LOCALHOST:8080"));
+    assert!(base_url_uses_local_host("http://LocalHost"));
+    // Negative control that must stay negative under any case spelling.
+    assert!(!base_url_uses_local_host("HTTP://LOCALHOST.EVIL.COM"));
+}
+
+#[test]
+fn deepseek_canonical_sets_stay_populated_beta_disjoint_non_beta() {
+    // The Deepseek arm consumes the shared canonical lists directly (round
+    // 2: the six-URL set existed in two crates with no cross-pin; the
+    // matcher now reads these very lists). Each member's "official" answer
+    // is pinned with literals by
+    // `deepseek_official_endpoint_family_shares_canonical_model_namespace`,
+    // so content drift trips that test; this pin guards the LIST-LEVEL
+    // invariants: the sets stay populated (an emptied set would vacuously
+    // pass every consuming loop in both crates) and the beta list keeps
+    // its property so the beta/non-beta split the chat wire relies on
+    // cannot silently re-shape.
+    assert!(
+        !DEEPSEEK_CANONICAL_BETA_URLS.is_empty() && !DEEPSEEK_CANONICAL_NON_BETA_URLS.is_empty(),
+        "an emptied set would vacuously pass the consuming loops and \
+         silently drop their coverage"
+    );
+    for url in DEEPSEEK_CANONICAL_BETA_URLS {
+        assert!(url.ends_with("/beta"), "{url} must be a beta endpoint");
+        assert!(
+            !DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(url),
+            "{url} must not appear in the non-beta set"
+        );
+    }
+    for url in DEEPSEEK_CANONICAL_NON_BETA_URLS {
+        assert!(!url.ends_with("/beta"), "{url} must not be a beta endpoint");
+    }
+}

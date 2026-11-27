@@ -1528,10 +1528,13 @@ pub(crate) fn chat_shape_provider_for(
 
 impl DeepSeekClient {
     fn is_local_ds4_model(&self, model: &str) -> bool {
-        // Delegate to the same predicate the wire and the doctor use
-        // (`chat_shape_provider_for`), so the DS4 model list lives in one
-        // place; the `Custom` guard keeps a natively-configured Deepseek
-        // provider from counting as the local-DS4 shape.
+        // Delegate to the same predicate the wire uses
+        // (`chat_shape_provider_for`; the doctor quotes it once the doctor
+        // layer lands), so the DS4 model list lives in one place. The
+        // `Custom` guard here is load-bearing, not redundant: the predicate
+        // passes a non-Custom provider through UNCHANGED, so a native
+        // Deepseek client would satisfy the `== ApiProvider::Deepseek`
+        // comparison below with none of the DS4 conditions met.
         self.api_provider == ApiProvider::Custom
             && chat_shape_provider_for(
                 self.api_provider,
@@ -2436,29 +2439,45 @@ fn provider_default_wire_format(api_provider: ApiProvider) -> WireFormat {
 /// directly), and the base-URL resolvers (`resolve_*_base_url_for_tui`)
 /// select the vendor Anthropic endpoint from the very same key — so the
 /// key must gate the dialect here too, or one spelling gets a chat
-/// dispatch into an Anthropic endpoint. ModelAware kinds (Deepseek,
-/// OpencodeZen) are the other direction (round 23): dispatch re-derives
-/// the wire from the route candidate per model and never constructs
-/// through that arm, so a `wire = "anthropic"` on `[providers.deepseek]`
-/// used to flip THIS answer while every live dispatch path kept speaking
-/// chat — the doctor's round-22 wire-keyed verdict quoted a dialect no
-/// live client spoke (probed: the flag stripped on the chat wire while
-/// the doctor claimed the Messages wire forwarded it) — and the key stays
-/// out of their answer. Keying the function on what dispatch actually
-/// resolves keeps every consumer — client construction, the doctor
-/// verdicts (the stack's doctor layer quotes this same function), the
-/// capability report — on the dialect the session really speaks; the
+/// dispatch into an Anthropic endpoint. The key is read from each
+/// provider's OWN config table — the same table its resolver reads —
+/// never through the catalog collapse: `catalog_identity` folds
+/// `ModelstudioCodingPlan` onto TokenPlan, and a catalog-keyed read made
+/// the Coding Plan session answer the Token Plan table (or vice versa)
+/// while its resolver answered the coding table (round 2). ModelAware
+/// kinds (Deepseek, OpencodeZen) are the other direction (round 23):
+/// dispatch re-derives the wire from the route candidate per model and
+/// never constructs through that arm, so a `wire = "anthropic"` on
+/// `[providers.deepseek]` used to flip THIS answer while every live
+/// dispatch path kept speaking chat — the doctor's round-22 wire-keyed
+/// verdict quoted a dialect no live client spoke (probed: the flag
+/// stripped on the chat wire while the doctor claimed the Messages wire
+/// forwarded it). Since the round-2 wave the DeepSeek resolver no longer
+/// reads the key either, so the key is inert end to end for ModelAware
+/// kinds: the vendor-Messages opt-in on DeepSeek is the
+/// `deepseek-anthropic` identity, not the wire key (a key-driven endpoint
+/// flip strands DeepSeek's forced chat endpoint key on the vendor
+/// Anthropic route — chat payloads on a Messages-only host). Keying the
+/// function on the table the resolver reads keeps construction on the
+/// dialect the endpoint was selected for; the doctor call site lands with
+/// the doctor layer, and `provider_capability_with_wire` (which applies
+/// the key to Custom only) does not yet mirror the built-in override. The
 /// Custom half of the override is unchanged and honored.
 pub(crate) fn provider_wire_format_for_config(
     api_provider: ApiProvider,
     config: Option<&crate::config::Config>,
 ) -> WireFormat {
     let catalog = api_provider.catalog_identity();
-    let wire = config.and_then(|cfg| cfg.provider_wire_dialect(catalog));
+    // The provider's OWN table — what its resolver reads — not the catalog
+    // collapse: `catalog_identity` folds ModelstudioCodingPlan onto
+    // TokenPlan, so a catalog-keyed read split the Coding Plan dialect from
+    // the endpoint its resolver selected (round 2).
+    let wire = config.and_then(|cfg| cfg.provider_wire_dialect(api_provider));
     // The wire key selects the Anthropic dialect exactly where it also
     // selects the endpoint: the Fixed(ChatCompletions) families, whose
-    // resolvers read the same key. ModelAware kinds are excluded — see the
-    // round-23 note above.
+    // resolvers read the same key from the same table. ModelAware kinds are
+    // excluded, and since round 2 their resolver does not read the key
+    // either — see the round-23 note above.
     let model_aware = api_provider.metadata().is_some_and(|provider| {
         provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
     });
