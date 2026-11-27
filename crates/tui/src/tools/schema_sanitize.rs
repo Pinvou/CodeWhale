@@ -843,7 +843,13 @@ impl DefectWalk {
                     match key.as_str() {
                         // Name → schema maps: field names are not schemas, so
                         // the map is never read as a union-bearing node.
-                        "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                        // Round 31: `definitions`/`$def` join the family —
+                        // the generic arm walked the map itself as a schema
+                        // node, so a definition literally named `oneOf`
+                        // fired R2 on its VALUE and a definition named
+                        // `title`/`examples` went invisible to the walk.
+                        "properties" | "$defs" | "definitions" | "$def"
+                        | "patternProperties" | "dependentSchemas" => {
                             if let Some(map) = child.as_object() {
                                 for subschema in map.values() {
                                     if let Some(reason) =
@@ -1927,7 +1933,15 @@ fn strip_annotation_keywords(value: &mut Value) {
                 match key.as_str() {
                     // Name → schema maps: the keys are field names, never
                     // schema keywords; only the values are schemas.
-                    "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                    // Round 31: `definitions`/`$def` join the family (the
+                    // generic arm let the removal loop delete a definition
+                    // NAMED `title`/`examples` from the rehearsal clone),
+                    // and the literal skip gains `default`/`examples`/
+                    // `example` to match the DefectWalk's instance-data
+                    // line — annotations inside literal data must not be
+                    // stripped from the clone.
+                    "properties" | "$defs" | "definitions" | "$def"
+                    | "patternProperties" | "dependentSchemas" => {
                         if let Some(map) = child.as_object_mut() {
                             for subschema in map.values_mut() {
                                 strip_annotation_keywords(subschema);
@@ -1940,7 +1954,7 @@ fn strip_annotation_keywords(value: &mut Value) {
                     }
                     // Instance data: stripping inside it would corrupt the
                     // very constraint the value expresses.
-                    "const" | "enum" => {}
+                    "const" | "enum" | "default" | "examples" | "example" => {}
                     _ => strip_annotation_keywords(child),
                 }
             }
@@ -20304,6 +20318,44 @@ mod strict_fixwave_r31 {
             "the authored refusal survives: {}",
             schema
         );
+    }
+
+    #[test]
+    fn rehearsal_walkers_treat_definitions_maps_as_name_maps() {
+        // Round 31 (fresh review, generic-walk lane): both rehearsal
+        // walkers hand-copied their name-map family without the
+        // `definitions`/`$def` spellings. The defect walk read the MAP
+        // itself as a union-bearing node — a definition literally named
+        // `oneOf` fired R2 on its value and forced the flattening
+        // fallback for an otherwise pass-through schema — and the
+        // annotation strip's removal loop deleted a definition NAMED
+        // `title`/`examples` from the clone.
+        assert_eq!(
+            oneof_semantic_defect(&json!({
+                "definitions": {"oneOf": [{"type": "object"}, {"type": "object"}]}
+            })),
+            None,
+            "a definition named oneOf is data-keyed, not a union node"
+        );
+        let mut clone = json!({
+            "definitions": {
+                "title": {"description": "kept-as-schema", "type": "object"}
+            }
+        });
+        strip_annotation_keywords(&mut clone);
+        assert_eq!(
+            clone["definitions"]["title"]["type"], json!("object"),
+            "the definition named title survives the strip"
+        );
+        assert_eq!(
+            clone["definitions"]["title"]["description"], json!(null),
+            "annotations INSIDE a definition are still stripped"
+        );
+        // The literal-skip alignment: annotations inside instance data
+        // stay verbatim on the clone.
+        let mut clone = json!({"example": {"title": "literal", "type": 1}});
+        strip_annotation_keywords(&mut clone);
+        assert_eq!(clone["example"]["title"], json!("literal"));
     }
 
     #[test]
