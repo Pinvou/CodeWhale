@@ -3557,22 +3557,25 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
         // over-cap sources burn the whole pool on free rejections and
         // starve its later judgeable patterns — availability, order
         // dependent, and the pool's own comment claims no such spend.
+        // Round 31: the drift/expansion screens live in the compile body
+        // BEHIND the tick there too, for the same reason — a run of
+        // wire-SyntaxError or over-expansion sources can never produce a
+        // verdict, so charging their rejection let 128 of them starve the
+        // tool's later fully-judgeable patterns.
         if pattern.len() > 16_384 {
             return None;
         }
-        let budget_left = PATTERN_COMPILES_THIS_TOOL.with(|counter| {
-            let compiles = counter.get();
-            if compiles < STRICT_PATTERN_COMPILE_BUDGET {
-                counter.set(compiles + 1);
-                true
-            } else {
-                false
-            }
-        });
-        if !budget_left {
-            return None;
-        }
-        let compiled = compile_documented_pattern(pattern);
+        // Round 31: the tick lives INSIDE the compile body, behind the
+        // cap and every screen — a source that can never reach a verdict
+        // (over-cap, drift-screened, over-expansion) no longer spends the
+        // pool, so a run of wire-SyntaxError sources cannot starve the
+        // tool's later fully-judgeable patterns. Exhaustion is signalled
+        // separately and deliberately NOT cached: the answer is not
+        // final, and a refilled tool must retry the source next request.
+        let compiled = match compile_documented_pattern(pattern) {
+            PatternCompileOutcome::Final(compiled) => compiled,
+            PatternCompileOutcome::BudgetExhausted => return None,
+        };
         // Only a cacheable miss leaks its key: a source over the compile
         // cap can never compile, so caching it would grow the table — and
         // the leak — with no judging benefit, and a table at its bound
@@ -3598,7 +3601,17 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
 }
 
 /// The uncached compile body of [`compiled_documented_pattern`].
-fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
+enum PatternCompileOutcome {
+    /// A compiled oracle, or a screened-out source: either way the answer
+    /// is final for the thread's lifetime and worth negative-caching.
+    Final(Option<regex::Regex>),
+    /// The pool was empty at the tick (which sits behind the cap and
+    /// every screen): the answer is NOT final — a refilled tool must
+    /// retry this source, so the caller must not negative-cache it.
+    BudgetExhausted,
+}
+
+fn compile_documented_pattern(pattern: &str) -> PatternCompileOutcome {
     // Compile work scales with the pattern source, and a judge site pays
     // it per node (or per pair call) on the per-request path. Past this
     // bound the judge abstains compatible-by-default; the pattern still
@@ -3614,7 +3627,7 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
     // lets real validated patterns be judged; the expansion screen and
     // the per-request compile budget remain the actual cost bounds.
     if pattern.len() > 16_384 {
-        return None;
+        return PatternCompileOutcome::Final(None);
     }
     // Regex-dialect drift the judge cannot paper over: a case-insensitive
     // flag folds Unicode case Rust-side where ECMA-262's Canonicalize does
@@ -3680,7 +3693,7 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
         || has_stacked_quantifier(pattern)
         || has_class_set_operation(pattern)
     {
-        return None;
+        return PatternCompileOutcome::Final(None);
     }
     // Round 31 (fresh review): a raw line terminator in the source is a
     // wire SyntaxError — the ECMA-262 class grammar's
@@ -3693,7 +3706,7 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
         .chars()
         .any(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
     {
-        return None;
+        return PatternCompileOutcome::Final(None);
     }
     // Round 23: a static EXPANSION screen before compiling. The judge's
     // real cost is member length × NFA-program size, and the NFA's state
@@ -3739,7 +3752,7 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
             }
         }
         if expansion > STRICT_PATTERN_EXPANSION_LIMIT {
-            return None;
+            return PatternCompileOutcome::Final(None);
         }
         index += 1;
     }
@@ -3747,9 +3760,22 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
     // bounds the NFA compile and REJECTED a 4,000-literal flat
     // alternation (~4 KB source) while the hostile nested bounded repeat
     // slipped through it — the wrong bound in the wrong place. The
-    // expansion screen above is the cost bound; the per-request compile
-    // budget bounds how many screened patterns a preparation pays.
-    regex::Regex::new(&ecma_dot_exact_pattern(pattern)).ok()
+    // expansion screen above is the cost bound. Round 31: the budget
+    // tick sits HERE, behind the cap and every screen — a source that
+    // can never reach a verdict no longer spends the pool.
+    let budget_left = PATTERN_COMPILES_THIS_TOOL.with(|counter| {
+        let compiles = counter.get();
+        if compiles < STRICT_PATTERN_COMPILE_BUDGET {
+            counter.set(compiles + 1);
+            true
+        } else {
+            false
+        }
+    });
+    if !budget_left {
+        return PatternCompileOutcome::BudgetExhausted;
+    }
+    PatternCompileOutcome::Final(regex::Regex::new(&ecma_dot_exact_pattern(pattern)).ok())
 }
 
 /// Round 28: the compile copy is ECMA-exact in the `.` dimension. Rust's
@@ -8047,12 +8073,19 @@ mod strict_fixwave_r23 {
         // deterministically (the judge abstains, the pattern still binds
         // on the wire) while a normal pattern compiles untouched.
         let hostile = format!("{}z", "(a{1,100})".repeat(8));
+        use super::PatternCompileOutcome;
         assert!(
-            super::compile_documented_pattern(&hostile).is_none(),
+            matches!(
+                super::compile_documented_pattern(&hostile),
+                PatternCompileOutcome::Final(None)
+            ),
             "the nested-bounded repeat is rejected by the expansion screen"
         );
         assert!(
-            super::compile_documented_pattern("^a[0-9]+z$").is_some(),
+            matches!(
+                super::compile_documented_pattern("^a[0-9]+z$"),
+                PatternCompileOutcome::Final(Some(_))
+            ),
             "a normal pattern compiles untouched"
         );
     }
