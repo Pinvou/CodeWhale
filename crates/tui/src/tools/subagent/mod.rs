@@ -13334,13 +13334,32 @@ async fn run_subagent(
             messages.push(child_completion_runtime_message(&child_completions));
         }
 
-        let tools = tool_surface.request_tools(
-            tool_registry.deferred_catalog_for_model(&agent_type),
-            runtime
+        let request_route = runtime
+            .client
+            .effective_route_envelope(&runtime.model, chrono::Utc::now());
+        // The strict pipeline encodes DeepSeek's strict-mode contract, so it
+        // acts only on official DeepSeek-family routes — the same predicate
+        // the parent turn applies. Elsewhere it would strip keywords the
+        // other provider documents (`minItems`/`maxItems` on OpenAI) and
+        // remove optional properties no other contract asks to remove. The
+        // child feeds its own config's URL beside the client's effective
+        // provider; no config means no official route, and the gate fails
+        // closed like every divergence.
+        let strict_tool_mode = {
+            let flag = runtime
                 .api_config
                 .as_ref()
                 .and_then(|config| config.strict_tool_mode)
-                .unwrap_or(false),
+                .unwrap_or(false);
+            let base_url = runtime
+                .api_config
+                .as_deref()
+                .map_or(String::new(), crate::config::Config::deepseek_base_url);
+            crate::config::strict_tool_mode_for_route(flag, request_route.provider, &base_url)
+        };
+        let tools = tool_surface.request_tools(
+            tool_registry.deferred_catalog_for_model(&agent_type),
+            strict_tool_mode,
         );
         let request_active_tool_names = tool_surface.active_names.clone();
         let has_tools = !tools.is_empty();
@@ -13349,9 +13368,6 @@ async fn run_subagent(
         // its own `work_update` calls returned, which are already in
         // `messages`. Nothing synthetic is appended per step.
         let mut request_messages = messages.clone();
-        let request_route = runtime
-            .client
-            .effective_route_envelope(&runtime.model, chrono::Utc::now());
         let image_input = runtime
             .api_config
             .as_deref()
