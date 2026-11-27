@@ -6112,6 +6112,16 @@ impl Engine {
                                 // Roll back the error counter — this one
                                 // didn't surface to the user.
                                 stream_errors = stream_errors.saturating_sub(1);
+                                // The dead stream's terminal delta must not
+                                // classify the retry: a stop-reason-only
+                                // prefix is not actionable content (so the
+                                // retry fires) but it lands in `stop_reason`,
+                                // and a clean retry that ends with the bare
+                                // `[DONE]` sentinel never sends a fresh delta
+                                // to overwrite it. The fresh stream owns the
+                                // terminal state (round-6 review).
+                                stop_reason = None;
+                                saw_message_stop = false;
                                 continue;
                             }
                             Err(retry_err) => {
@@ -6695,12 +6705,15 @@ impl Engine {
                 && !rate_limit_interrupted
                 && pending_resume.is_none()
                 && !self.cancel_token.is_cancelled()
-                && is_incomplete_stop_reason(stop_reason.as_deref())
-                && is_clean_output_limit_shape(
-                    stop_reason.as_deref(),
-                    stream_errors,
-                    frame_error_seen,
-                ));
+                && ((is_incomplete_stop_reason(stop_reason.as_deref())
+                    && is_clean_output_limit_shape(
+                        stop_reason.as_deref(),
+                        stream_errors,
+                        frame_error_seen,
+                    ))
+                    || (stop_reason_is_output_limit(stop_reason.as_deref())
+                        && stream_errors == 0
+                        && !frame_error_seen)));
         if !closed_tools_stay_valid {
             let open_tool_indices: std::collections::HashSet<usize> =
                 current_tool_indices.values().copied().collect();
@@ -7954,9 +7967,14 @@ fn stop_reason_is_output_limit(stop_reason: Option<&str>) -> bool {
 /// The clean-shape core shared by the truncated-response ladder and the
 /// closed-tool invalidation: an output-limit stop (shared `models.rs`
 /// spelling set) that arrived with no counted stream error, no saved stream
-/// error, and no provider error frame. Both call sites must agree on what
-/// "clean" means or the acceptance and the tool-validity decisions drift
-/// apart (review 6061318874).
+/// error, and no provider error frame. The acceptance ladder uses this
+/// shared form alone — it must not admit spellings no provider has been
+/// shown to emit. The closed-tool rescue additionally accepts the
+/// engine-local superset spellings (`output_limit`,
+/// `max_completion_tokens`) under the same clean conditions, so the
+/// allow-predicate (`stream_stop_reason_allows_tool_execution`) and the
+/// rescue agree on what a clean output-limit stop means for tool validity
+/// (round-6 review).
 fn is_clean_output_limit_shape(
     stop_reason: Option<&str>,
     stream_errors: u32,

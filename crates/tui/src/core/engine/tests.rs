@@ -10382,6 +10382,172 @@ async fn model_length_stop_with_a_provider_error_fails_closed_instead_of_clean_m
 }
 
 #[tokio::test]
+async fn clean_output_limit_superset_stop_keeps_a_closed_call_executable() {
+    // Round-6 review: `stream_stop_reason_allows_tool_execution` (the allow
+    // predicate) and the closed-tool rescue used different spelling sets —
+    // a clean stop with the engine-local superset spellings
+    // (`output_limit`, `max_completion_tokens`) failed the allow predicate
+    // but was also invisible to the rescue, so a cleanly-closed complete
+    // call was invalidated with a false "stream ended without normal
+    // completion" receipt. The rescue now accepts the same superset under
+    // the same clean conditions, and a clean `output_limit` stop keeps the
+    // closed call executable exactly like a clean `length` stop.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let followup = vec![
+        canned::message_start("after-tool"),
+        canned::text_block_start(0),
+        canned::text_delta(0, "done"),
+        canned::block_stop(0),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ];
+    let turn = vec![
+        canned::message_start("output-limit-clean"),
+        canned::tool_use_block_start(0, "call-output-limit", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        canned::message_delta("output_limit", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn, followup]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A clean output_limit stop accepts the complete call.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send output_limit stream");
+
+    let mut completed_ok = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the output_limit continuation")
+    {
+        match event {
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the clean output_limit closed call must execute: {result:?}"
+                );
+                completed_ok = true;
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(
+        completed_ok,
+        "the clean output_limit closed call must execute"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn transparent_retry_does_not_inherit_the_dead_stream_stop_reason() {
+    // Round-6 review: `stop_reason` was declared outside the stream event
+    // loop and survived the transparent stream retry. A stop-reason-only
+    // prefix is not actionable content, so the retry fires, but a clean
+    // retry that never sends a fresh terminal delta cannot overwrite the
+    // dead stream's stale reason — a stale incomplete-class reason then
+    // failed the retried stream's valid, cleanly-closed tool calls. The
+    // retry now resets the stream-scoped terminal state, and the clean
+    // retried turn executes its tool call.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    // Stream A: a terminal delta with no actionable content, then the
+    // transport dies — the transparent-retry shape.
+    let dead = vec![
+        canned::message_start("dead-prefix"),
+        canned::message_delta("content_filter", None),
+    ];
+    // Stream B: the clean retry — complete tool call, MessageStop, and no
+    // fresh terminal delta (the bare-[DONE] shape the chat lane pins), so
+    // the classification must come from stream A unless the retry reset it.
+    let retried = vec![
+        canned::message_start("clean-retry"),
+        canned::tool_use_block_start(0, "call-retry", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        canned::block_stop(0),
+        canned::message_stop(),
+    ];
+    let followup = vec![
+        canned::message_start("after-tool"),
+        canned::text_block_start(0),
+        canned::text_delta(0, "done"),
+        canned::block_stop(0),
+        canned::message_delta("stop", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![]));
+    mock.push_failing_stream(dead);
+    mock.push_turn(retried);
+    mock.push_turn(followup);
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A transparent retry must not inherit the dead stream's stop reason.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send dead-prefix stream");
+
+    let mut completed_ok = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the retried turn")
+    {
+        match event {
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the clean retried call must execute: {result:?}"
+                );
+                completed_ok = true;
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert_eq!(
+        mock.call_count(),
+        3,
+        "dead stream + transparent retry + the post-tool follow-up turn: the \
+         dead stream must be retried exactly once, transparently"
+    );
+    assert!(
+        completed_ok,
+        "the clean retried stream must execute its closed call"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn real_chat_tool_execution_requires_terminal_proof() {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

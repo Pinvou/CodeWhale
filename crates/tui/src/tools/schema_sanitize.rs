@@ -2220,16 +2220,17 @@ fn collapse_nullable_unions(schema: &mut Value) {
                 continue;
             }
             let parent_has_type = outer.contains_key("type");
+            let outer_declines_null = outer.get("nullable") == Some(&Value::Bool(false));
             let Some(non_null) = nons[0].as_object() else {
                 continue;
             };
-            let Some(mut merged) = merge_schema_intersection(&outer, non_null) else {
+            let Some(mut merged) = merge_schema_intersection(outer, non_null) else {
                 continue;
             };
             // A concrete parent type already excludes the null branch. The
             // exact intersection is therefore just the non-null schema.
             if !parent_has_type {
-                if outer.get("nullable") == Some(&Value::Bool(false)) {
+                if outer_declines_null {
                     // The parent explicitly forbids null while a null branch
                     // survives the merge: the intersection is unsatisfiable,
                     // so decline instead of widening the parent back to
@@ -2255,8 +2256,13 @@ const MFJS_MAX_MERGE_WORK: usize = 100_000;
 /// Merge two schemas that constrain the same instance. Disjoint keywords
 /// combine directly; collisions need a real intersection or the merge is
 /// declined. Returning `None` leaves the original composition untouched.
+///
+/// Takes `outer` by value: the merge builds its result from the caller's
+/// working copy in place, so a declined merge just drops the copy instead of
+/// paying a second full deep clone of the node on every attempt (round-6
+/// review).
 fn merge_schema_intersection(
-    outer: &Map<String, Value>,
+    outer: Map<String, Value>,
     inner: &Map<String, Value>,
 ) -> Option<Map<String, Value>> {
     let mut work = 0usize;
@@ -2264,21 +2270,21 @@ fn merge_schema_intersection(
 }
 
 fn merge_schema_intersection_bounded(
-    outer: &Map<String, Value>,
+    outer: Map<String, Value>,
     inner: &Map<String, Value>,
     work: &mut usize,
 ) -> Option<Map<String, Value>> {
     // Declaring a new named property changes the domain of a constraining
     // additionalProperties keyword on either side. Merging different property
     // sets would therefore turn previously rejected keys into accepted ones.
-    let outer_properties = schema_property_names(outer);
+    let outer_properties = schema_property_names(&outer);
     let inner_properties = schema_property_names(inner);
     let property_sets_differ = match (&outer_properties, &inner_properties) {
         (Some(outer), Some(inner)) => outer != inner,
         _ => true,
     };
     if property_sets_differ
-        && (additional_properties_constrains(outer) || additional_properties_constrains(inner))
+        && (additional_properties_constrains(&outer) || additional_properties_constrains(inner))
     {
         return None;
     }
@@ -2299,7 +2305,9 @@ fn merge_schema_intersection_bounded(
         return None;
     }
 
-    let mut merged = outer.clone();
+    // `outer` is the caller's private working copy, so the merged result is
+    // built in place — no second deep clone of the node per attempt.
+    let mut merged = outer;
     for (key, inner_value) in inner {
         let Some(outer_value) = merged.get(key).cloned() else {
             merged.insert(key.clone(), inner_value.clone());
@@ -2320,11 +2328,27 @@ fn merge_schema_intersection_bounded(
             "enum" => {
                 let outer_values = outer_value.as_array()?;
                 let inner_values = inner_value.as_array()?;
+                // The cap bounds element visits, not pair counts: each
+                // charged pair comparison recursively walks both operands,
+                // so compound members must charge by their serialized size
+                // or ~100k pairs of large values cost ~10^10 element visits
+                // on the byte-uncapped registry lane (round-6 review).
+                // Sizes are computed once per element — O(document)
+                // overall — and the pre-arm whole-array equality shortcut
+                // above stays a single linear pass per key.
+                let operand_size = |value: &Value| {
+                    serde_json::to_vec(value)
+                        .map(|encoded| encoded.len().max(1))
+                        .unwrap_or(usize::MAX)
+                };
+                let outer_sizes: Vec<usize> = outer_values.iter().map(operand_size).collect();
+                let inner_sizes: Vec<usize> = inner_values.iter().map(operand_size).collect();
                 let mut intersection = Vec::new();
-                for candidate in outer_values {
+                for (outer_index, candidate) in outer_values.iter().enumerate() {
                     let mut matched = false;
-                    for value in inner_values {
-                        *work = work.saturating_add(1);
+                    for (inner_index, value) in inner_values.iter().enumerate() {
+                        *work = work
+                            .saturating_add(outer_sizes[outer_index].max(inner_sizes[inner_index]));
                         if *work > MFJS_MAX_MERGE_WORK {
                             return None;
                         }
@@ -2383,7 +2407,7 @@ fn merge_schema_intersection_bounded(
                         } else {
                             match (outer_schema.as_object(), inner_schema.as_object()) {
                                 (Some(outer), Some(inner)) => Value::Object(
-                                    merge_schema_intersection_bounded(outer, inner, work)?,
+                                    merge_schema_intersection_bounded(outer.clone(), inner, work)?,
                                 ),
                                 _ => return None,
                             }
@@ -2607,7 +2631,7 @@ fn collapse_single_element_unions(schema: &mut Value) {
             *obj = inner.clone();
             continue;
         }
-        if let Some(merged) = merge_schema_intersection(&outer, inner) {
+        if let Some(merged) = merge_schema_intersection(outer, inner) {
             *obj = merged;
         }
     }
@@ -3543,7 +3567,10 @@ mod tests {
     #[test]
     fn required_merge_unions_deduplicated_names_in_order() {
         let merge = |outer: Value, inner: Value| {
-            merge_schema_intersection(outer.as_object().unwrap(), inner.as_object().unwrap())
+            merge_schema_intersection(
+                outer.as_object().cloned().unwrap(),
+                &inner.as_object().cloned().unwrap(),
+            )
         };
         let merged = merge(
             json!({"type": "object", "required": ["b", "a"]}),
@@ -3571,9 +3598,11 @@ mod tests {
         let merged = merge_schema_intersection(
             json!({"type": "object", "required": ["private-field-anchor"]})
                 .as_object()
+                .cloned()
                 .unwrap(),
-            json!({"type": "object", "required": inner_names})
+            &json!({"type": "object", "required": inner_names})
                 .as_object()
+                .cloned()
                 .unwrap(),
         )
         .expect("50_000 charged name comparisons sit under the cap");
@@ -3597,9 +3626,11 @@ mod tests {
         let merged = merge_schema_intersection(
             json!({"type": "object", "required": ["private-field-anchor"]})
                 .as_object()
+                .cloned()
                 .unwrap(),
-            json!({"type": "object", "required": inner_names})
+            &json!({"type": "object", "required": inner_names})
                 .as_object()
+                .cloned()
                 .unwrap(),
         );
 
@@ -3617,14 +3648,17 @@ mod tests {
         // merge declines so the original union form survives; annotations
         // beside the reference stay mergeable.
         let merged = merge_schema_intersection(
-            json!({"type": "object"}).as_object().unwrap(),
-            json!({"$ref": "#/$defs/A"}).as_object().unwrap(),
+            json!({"type": "object"}).as_object().cloned().unwrap(),
+            &json!({"$ref": "#/$defs/A"}).as_object().cloned().unwrap(),
         );
         assert!(merged.is_none(), "type beside $ref is not mergeable");
 
         let annotated = merge_schema_intersection(
-            json!({"description": "payload"}).as_object().unwrap(),
-            json!({"$ref": "#/$defs/A"}).as_object().unwrap(),
+            json!({"description": "payload"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            &json!({"$ref": "#/$defs/A"}).as_object().cloned().unwrap(),
         )
         .expect("an annotation beside a $ref is the whitelist's own allowance");
         assert_eq!(annotated.get("$ref"), Some(&json!("#/$defs/A")));
@@ -7965,6 +7999,15 @@ mod tests {
 /// an emptied union for validation to misreport as a resource failure.
 /// `oneOf` is deliberately not rewritten.
 pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParameterSchemaError> {
+    // Recursion protection for the walk below: the guard runs once here
+    // instead of at every recursion node — re-walking the full subtree per
+    // node made the pass O(n·d) with a transient allocation per node, and
+    // the entry budgets already bound the root depth (round-6 review).
+    // Mutations below can only add depth bounded by the input structure,
+    // and `validate_mfjs_parameters` re-checks the final depth.
+    if !schema_within_structural_depth_limit(schema) {
+        return Ok(());
+    }
     // Branch-level `$ref` projection resolves against the root `$defs`.
     // Snapshot them once (the lane's byte budget bounds the copy) so the
     // walk can read the author's declared targets without borrowing against
@@ -7981,9 +8024,6 @@ fn sanitize_kimi_node(
     schema: &mut serde_json::Value,
     defs: &serde_json::Map<String, Value>,
 ) -> Result<(), KimiParameterSchemaError> {
-    if !schema_within_structural_depth_limit(schema) {
-        return Ok(());
-    }
     if let Some(obj) = schema.as_object_mut() {
         for map_key in ["properties", "$defs"] {
             if let Some(children) = obj.get_mut(map_key).and_then(Value::as_object_mut) {
@@ -8000,16 +8040,9 @@ fn sanitize_kimi_node(
         {
             sanitize_kimi_node(additional, defs)?;
         }
-        if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-            for branch in branches {
-                sanitize_kimi_node(branch, defs)?;
-            }
-        }
 
-        let Some(parent_type) = obj.get("type").and_then(Value::as_str).map(str::to_string) else {
-            return Ok(());
-        };
-        if obj.get("anyOf").is_some_and(Value::is_array) {
+        let parent_type = obj.get("type").and_then(Value::as_str).map(str::to_string);
+        if parent_type.is_some() && obj.get("anyOf").is_some_and(Value::is_array) {
             // Bool-schema branches fail MFJS validation verbatim and would
             // take the whole tool with them; the exact projections are
             // trivial. A `true` branch admits every instance, so the whole
@@ -8042,24 +8075,36 @@ fn sanitize_kimi_node(
                 // only written back when every branch carries the exact
                 // intersection — a branch must never ship after its parent
                 // constraint lost its wire carrier (round-5 review).
-                if project_typed_union_branches(branches, &parent_type, defs)? {
+                if project_typed_union_branches(branches, parent_type.as_deref().unwrap(), defs)? {
                     obj.remove("type");
                 }
             }
         }
-        if obj
-            .get("properties")
-            .and_then(Value::as_object)
-            .is_some_and(Map::is_empty)
-            && obj.contains_key("anyOf")
-        {
-            obj.remove("properties");
+        // The projection above runs BEFORE this descent: a branch killed by
+        // its own nested union is dropped there, so the walk below never
+        // enters a branch whose subtree is unsatisfiable — walking it first
+        // raised `ContradictoryParentUnion` for the whole tool even though
+        // the enclosing union keeps live branches (round-6 review).
+        if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+            for branch in branches {
+                sanitize_kimi_node(branch, defs)?;
+            }
+        }
+        if parent_type.is_some() && obj.get("anyOf").is_some() {
+            if obj
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty)
+            {
+                obj.remove("properties");
+            }
         }
     }
     Ok(())
 }
 
 /// Outcome of projecting one branch of a typed union onto the parent type.
+#[derive(Debug)]
 enum BranchProjection {
     /// The branch carries the exact intersection after in-place projection.
     Keep,
@@ -8162,10 +8207,11 @@ fn resolve_kimi_ref_target<'a>(
 /// Bool-schema branches are projected exactly: `false` admits no instance
 /// and is removed, `true` admits every instance so the union collapses onto
 /// its effective type. A branch that cannot be projected exactly reports
-/// [`BranchProjection::AbortNode`]; a nested union whose parent-excluded
-/// branches all vanish surfaces the
-/// [`KimiParameterSchemaError::ContradictoryParentUnion`] diagnosis instead
-/// of leaving an empty union behind.
+/// [`BranchProjection::AbortNode`]; a branch whose own nested union has no
+/// live branch left is itself unsatisfiable and drops from the enclosing
+/// union, which surfaces the
+/// [`KimiParameterSchemaError::ContradictoryParentUnion`] diagnosis only
+/// when no live branch remains there.
 fn intersect_kimi_branch_type(
     branch: &mut Value,
     parent_type: &str,
@@ -8187,30 +8233,48 @@ fn intersect_kimi_branch_type(
             }
         }
         Some(Value::Array(members)) => {
-            // Exact projection of an array-form `type`: keep the members
-            // that survive the parent intersection, narrowed to it; drop the
-            // branch when none do; abort on a member that is not a plain
-            // string. Verbatim-keeping used to ship the branch un-narrowed,
-            // dropping the parent constraint (round-5 review, same class as
-            // the `$ref` carrier hole).
-            let mut survivors = Vec::with_capacity(members.len());
+            // Exact projection of an array-form `type`: narrow to the single
+            // MFJS carrier the surviving members share. Every survivor is
+            // either the parent type itself or a strictly narrower subtype,
+            // so the broadest survivor — the parent whenever any member
+            // survives as it — subsumes the rest, and the branch stamps that
+            // plain string. Re-shipping the narrowed array failed MFJS
+            // validation outright (`MissingType` standalone, the
+            // union-sibling whitelist beside a nested `anyOf`), dropping the
+            // whole tool (round-6 review); verbatim-keeping used to ship the
+            // branch un-narrowed, dropping the parent constraint (round-5
+            // review, same class as the `$ref` carrier hole). Falling
+            // through — instead of returning early — lets a nested union
+            // take the same projection the plain-string path uses, so
+            // `type` never ships beside the union keyword.
+            let mut survivor: Option<String> = None;
             for member in members {
                 match member.as_str() {
                     Some(member_type) => {
                         if let Some(effective) = intersect_schema_types(parent_type, member_type) {
-                            survivors.push(Value::String(effective.to_string()));
+                            let effective = effective.to_string();
+                            if effective == parent_type {
+                                survivor = Some(effective);
+                                break;
+                            }
+                            match &survivor {
+                                Some(existing) if *existing != effective => {
+                                    // Unreachable over the JSON type lattice:
+                                    // only the parent subsumes a narrowed
+                                    // survivor. Fail closed rather than pick.
+                                    return Ok(BranchProjection::AbortNode);
+                                }
+                                _ => survivor = Some(effective),
+                            }
                         }
                     }
                     None => return Ok(BranchProjection::AbortNode),
                 }
             }
-            if survivors.is_empty() {
-                return Ok(BranchProjection::Drop);
+            match survivor {
+                Some(effective_type) => effective_type,
+                None => return Ok(BranchProjection::Drop),
             }
-            obj.insert("type".into(), Value::Array(survivors));
-            // A branch-level `type` beside a nested `anyOf` fails MFJS
-            // validation; the narrowed array is exact either way.
-            return Ok(BranchProjection::Keep);
         }
         // An unrepresentable `type` form cannot be intersected exactly.
         Some(_) => return Ok(BranchProjection::AbortNode),
@@ -8241,10 +8305,26 @@ fn intersect_kimi_branch_type(
         if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
             branches.retain(|branch| !branch.is_boolean());
             if branches.is_empty() {
-                return Err(KimiParameterSchemaError::ContradictoryParentUnion);
+                // Every nested branch was a provably disjoint `false`, so
+                // this branch admits no instance under the parent: it drops
+                // from the enclosing union instead of failing the whole
+                // tool. The walk that owns the enclosing union surfaces
+                // `ContradictoryParentUnion` only when no live branch
+                // remains (round-6 review).
+                return Ok(BranchProjection::Drop);
             }
-            if !project_typed_union_branches(branches, &effective_type, defs)? {
-                return Ok(BranchProjection::AbortNode);
+            match project_typed_union_branches(branches, &effective_type, defs) {
+                Ok(true) => {}
+                Ok(false) => return Ok(BranchProjection::AbortNode),
+                Err(KimiParameterSchemaError::ContradictoryParentUnion) => {
+                    // The nested walk only reports this when every nested
+                    // branch was provably disjoint, so this branch is
+                    // unsatisfiable under the parent and drops exactly; the
+                    // enclosing union keeps its live branches and reports
+                    // the diagnosis itself if none remain.
+                    return Ok(BranchProjection::Drop);
+                }
+                Err(error) => return Err(error),
             }
         }
         obj.remove("type");
@@ -8654,7 +8734,14 @@ fn normalize_kimi_compatibility(
         None => {}
         Some(Some(false)) => {}
         Some(Some(true)) if is_root => {
-            return Err(KimiParameterSchemaError::InvalidNullable);
+            // Function parameters are required to be an object at the root;
+            // null was never a valid wire instance there, so the marker
+            // admits nothing the wire does not already admit and is dropped
+            // exactly. The registry collapse stamps this marker on every
+            // `anyOf: [{type: object, ...}, {type: null}]` root (the
+            // standard Pydantic-Optional shape), so erroring here dropped
+            // those tools from every Moonshot request instead of shipping
+            // the exact object schema (round-6 review).
         }
         Some(Some(true)) => {
             let non_null = Value::Object(std::mem::take(obj));
@@ -9898,8 +9985,14 @@ mod kimi_tests {
     #[test]
     fn kimi_sanitize_narrows_array_typed_branches_to_the_parent_intersection() {
         // Same carrier rule for array-form `type` branches: members are
-        // narrowed to their exact intersection with the parent, a fully
-        // disjoint array is a dead branch, and nothing ships un-narrowed.
+        // narrowed to their exact intersection with the parent, which is
+        // always a single MFJS carrier — the parent whenever any member
+        // survives as it, else the narrowed subtype — and the projection
+        // falls through to the nested-union walk so `type` never ships
+        // beside a union keyword. Re-shipping the narrowed array failed
+        // validation outright and dropped the whole tool (round-6 review),
+        // so this pin runs the full parameters pipeline, validator
+        // included.
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -9911,18 +10004,42 @@ mod kimi_tests {
             }
         });
 
-        sanitize_for_kimi(&mut schema).expect("array-form types project exactly");
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("array-form types project onto a shippable wire form");
 
         let a = &schema["properties"]["a"];
         assert!(!a.as_object().unwrap().contains_key("type"));
         assert_eq!(
             a["anyOf"],
-            json!([{"type": ["object"]}]),
-            "the surviving member is narrowed to the intersection"
+            json!([{"type": "object"}]),
+            "the surviving member is narrowed to the intersection as a string"
         );
         let b = &schema["properties"]["b"];
         assert!(!b.as_object().unwrap().contains_key("type"));
-        assert_eq!(b["anyOf"], json!([{"type": ["integer"]}]));
+        assert_eq!(b["anyOf"], json!([{"type": "integer"}]));
+
+        // The common Optional[X] spelling: an array-form branch beside a
+        // nested union narrows onto the carrier string and the nested union
+        // projects exactly (null branch dies, the branch `type` is
+        // absorbed), so the property ships instead of the tool dropping.
+        let mut optional = json!({
+            "type": "object",
+            "properties": {
+                "c": {
+                    "type": "object",
+                    "anyOf": [{"type": ["object", "null"]}, {"type": "null"}]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut optional)
+            .expect("array-form + nested union projects exactly");
+        let c = &optional["properties"]["c"];
+        assert!(!c.as_object().unwrap().contains_key("type"));
+        assert_eq!(
+            c["anyOf"],
+            json!([{"type": "object"}]),
+            "the null branch dies and the array-form member stamps its carrier"
+        );
 
         let mut all_dead = json!({
             "type": "object",
@@ -9946,6 +10063,93 @@ mod kimi_tests {
         let a = &unrepresentable["properties"]["a"];
         assert_eq!(a["type"], "object");
         assert_eq!(a["anyOf"], json!([{"type": ["string", 3]}]));
+    }
+
+    #[test]
+    fn kimi_lane_ships_a_dead_nested_union_branch_by_dropping_the_branch() {
+        // Round-6 review: a branch killed by its own nested union used to
+        // raise the tool-fatal `ContradictoryParentUnion` even though the
+        // node is satisfiable — dropping that one branch is the exact
+        // projection. The diagnosis is reserved for the node whose whole
+        // union dies.
+        let mut satisfiable = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [
+                    {"type": "object"},
+                    {"type": "object", "anyOf": [{"type": "null"}]}
+                ]}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut satisfiable)
+            .expect("the live branch keeps the node satisfiable");
+        let a = &satisfiable["properties"]["a"];
+        assert!(!a.as_object().unwrap().contains_key("type"));
+        assert_eq!(
+            a["anyOf"],
+            json!([{"type": "object"}]),
+            "only the live branch ships"
+        );
+
+        // When every branch dies the node is genuinely unsatisfiable and
+        // the tool-fatal diagnosis stands.
+        let mut all_dead = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [
+                    {"type": "object", "anyOf": [{"type": "null"}]},
+                    {"type": "object", "anyOf": [{"type": "string"}]}
+                ]}
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi(&mut all_dead).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion,
+            "a fully dead union still reports the contradiction"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_ships_a_root_nullable_marker_from_the_registry_collapse() {
+        // Round-6 review: the shared registry collapse stamps `nullable:
+        // true` on every `anyOf: [{type: object, ...}, {type: null}]` root
+        // (the standard Pydantic-Optional shape). At an object-only root
+        // the marker admits nothing the wire does not already admit, so it
+        // is dropped exactly; erroring here dropped those tools from every
+        // Moonshot request.
+        let mut collapsed = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "nullable": true
+        });
+        sanitize_for_kimi_parameters(&mut collapsed)
+            .expect("a root nullable marker ships as the exact object schema");
+        assert!(collapsed.get("nullable").is_none(), "the marker is dropped");
+        assert_eq!(
+            collapsed,
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"]
+            })
+        );
+
+        // End-to-end through the shared registry lane that produces the
+        // collapsed form.
+        let mut pydantic_root = json!({
+            "anyOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut pydantic_root);
+        sanitize_for_kimi_parameters(&mut pydantic_root)
+            .expect("the registry-collapsed Optional root ships");
+        assert_eq!(
+            pydantic_root["type"], "object",
+            "the collapsed root keeps its object schema"
+        );
     }
 
     #[test]
@@ -12619,6 +12823,68 @@ mod review_wave_tests {
             "≈500k comparisons exceed the 100_000 merge-work cap: the merge \
              must decline and preserve the original union, not collapse it \
              to the five shared values"
+        );
+    }
+
+    #[test]
+    fn enum_merge_work_is_charged_by_comparison_cost_not_pair_count() {
+        // Round-6 review: each charged pair comparison recursively walks
+        // both operands, so pricing the cap at one unit per pair let ~100k
+        // pairs of compound members cost ~10^10 element visits on the
+        // byte-uncapped registry lane. The cap is now charged by the
+        // operands' serialized size: the SAME pair count completes for tiny
+        // members and declines for compound ones, and a mutated cap that
+        // reverts to pair-count pricing completes the compound case and
+        // flips the first assertion.
+        let compound_member = |tag: &str| -> Value {
+            // ~40 KB objects sharing a long prefix and differing only at
+            // the last key, so no pair comparison short-circuits early.
+            let mut fields = serde_json::Map::new();
+            for index in 0..400 {
+                fields.insert(
+                    format!("field-{index:04}"),
+                    Value::String(format!("{tag}-payload-{index:04}-value")),
+                );
+            }
+            fields.insert("tail".into(), Value::String(format!("{tag}-tail")));
+            Value::Object(fields)
+        };
+        let compound = json!({
+            "type": "object",
+            "enum": [compound_member("outer-a"), compound_member("outer-b"), compound_member("outer-c")],
+            "anyOf": [{
+                "type": "object",
+                "enum": [compound_member("inner-a"), compound_member("inner-b"), compound_member("inner-c")]
+            }]
+        });
+        let mut worked = compound.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked["enum"], compound["enum"],
+            "the outer enum must survive the declined merge verbatim"
+        );
+        assert_eq!(
+            worked["anyOf"][0]["enum"], compound["anyOf"][0]["enum"],
+            "9 compound pairs at ~17 KB per operand exceed the 100_000 \
+             byte-charged merge-work cap: the merge must decline and \
+             preserve the original union instead of collapsing it"
+        );
+
+        // Control: the same 3 × 3 pair count with tiny members — the pair
+        // loop completes (declining only on the empty intersection), so the
+        // collapse behaves exactly as it did before the size-charging.
+        let small = json!({
+            "type": "string",
+            "enum": ["outer-a", "outer-b", "outer-c"],
+            "anyOf": [{"type": "string", "enum": ["inner-a", "inner-b", "inner-c"]}]
+        });
+        let mut worked = small.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, small,
+            "9 tiny pairs stay under the cap: the merge must decline only \
+             on the empty intersection, preserving the union — both \
+             spellings differ, so the union form survives identically"
         );
     }
 

@@ -317,10 +317,12 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
         } else {
             // `/model` normally resolves against the active provider's
             // catalog-default endpoint so it retains the existing local
-            // provider/model validation. The endpoint-sensitive model
-            // endpoint-sensitive model selections must be checked against the
-            // committed Moonshot endpoint before any default-route fallback.
-            // Other providers retain their catalog-default resolution.
+            // provider/model validation. The endpoint-sensitive Moonshot
+            // model selections must be checked against the committed
+            // Moonshot endpoint before any default-route fallback (a
+            // membership route must not silently validate a direct-platform
+            // id against the direct catalog). Other providers retain their
+            // catalog-default resolution.
             let route_base_url = (app.api_provider == ApiProvider::Moonshot)
                 .then(|| app.active_route_base_url.clone())
                 .filter(|base_url| !base_url.trim().is_empty());

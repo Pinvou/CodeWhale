@@ -1277,13 +1277,15 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
     // successfully, keyed by node address. The serde_json tree is immutable
     // for the whole proof, so `&Value` addresses are stable keys; they are
     // only compared, never dereferenced, so no unsafe is involved. The
-    // judgment is path-independent — `$ref`s resolve absolutely against the
-    // document root and the walk carries no instance or path context — so a
-    // node that proved true once proves true at every site that reaches it
-    // again within this tree (only `$ref` sharing can revisit a node). A
-    // verdict is recorded only after the node's entire closure proved true,
-    // so reusing it never admits anything a fresh re-proof would reject;
-    // only the step cost is saved (round-5 review P2-1).
+    // A verdict is recorded only after the node's entire closure proved true
+    // with zero cycle-guard or reference-depth rejections (any such
+    // rejection forces the branch false instead), and such a cycle-clean
+    // proof is stack-context-free — that is the exact property that makes
+    // the recorded TRUE reusable at every reaching site, even though the
+    // guards themselves are path-dependent and a fresh re-proof at a deeper
+    // stack could fail closed on them (round-6 review; the earlier
+    // "path-independent" wording overstated it). Only the step cost is
+    // saved (round-5 review P2-1).
     //
     // The address memo alone cannot help INLINE nested unions, though —
     // Pydantic-style schemas repeat the same nested union by VALUE across
@@ -2731,9 +2733,13 @@ impl DeepSeekClient {
             // line (the stream closed straight after the last `data:` line, or
             // that line lacked a trailing newline). Without this the final delta
             // — last tokens, finish_reason, and usage — is silently dropped.
-            // Skipped after `[DONE]`, whose frame was already processed, and
-            // after a fail-closed UTF-8 error.
-            if !saw_done && !decode_failed {
+            // Skipped after `[DONE]`, whose frame was already processed, after
+            // a fail-closed UTF-8 error, and after a transport failure: a
+            // failed stream has already surfaced its `Err` item, and parsing
+            // buffered tail frames after it would yield terminal events (a
+            // stop reason, new blocks) past the failure the engine saved
+            // (round-6 review).
+            if !saw_done && !decode_failed && !stream_failed {
                 match flush_sse_line(&mut byte_buf) {
                     Ok(Some(line)) => {
                         if let Some(data) = extract_sse_data_value(&line) {
@@ -5803,6 +5809,22 @@ fn parse_sse_data_frame_counted(
 /// The parameters are the per-stream parse threads themselves (`&mut` state
 /// plus two route flags); threading them through a struct would only move
 /// the same count behind a field access, so the lint is allowed explicitly.
+/// Bound an in-band provider error frame's message text to the HTTP-status
+/// error-body budget: the frame is provider-controlled and previously
+/// flowed into logs, the error event, and the saved turn outcome unbounded,
+/// inconsistent with the bounded status-path siblings (round-6 review).
+fn bounded_frame_message(message: &str) -> String {
+    let mut bound = ERROR_BODY_MAX_BYTES.min(message.len());
+    while bound > 0 && !message.is_char_boundary(bound) {
+        bound -= 1;
+    }
+    let mut bounded = message[..bound].to_string();
+    if bound < message.len() {
+        bounded.push('\u{2026}');
+    }
+    bounded
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parse_sse_chunk(
@@ -5927,9 +5949,22 @@ fn parse_sse_chunk_with_reasoning_style_owners_counted(
     // is now surfaced through the same `StreamEvent::Error` contract the
     // Anthropic path uses (#3014, ops R3).
     if let Some(error) = chunk.get("error") {
+        // The frame is provider-controlled and flows into logs, the error
+        // event, and the saved turn outcome — bound its message text to the
+        // same budget as the HTTP-status error bodies instead of carrying
+        // the frame verbatim (round-6 review; the engine surfaces only the
+        // `message` field).
         let error = match error {
-            Value::Object(_) => error.clone(),
-            Value::String(message) => serde_json::json!({ "message": message }),
+            Value::Object(object) => {
+                let mut bounded = object.clone();
+                if let Some(Value::String(message)) = bounded.get_mut("message") {
+                    *message = bounded_frame_message(message);
+                }
+                Value::Object(bounded)
+            }
+            Value::String(message) => {
+                serde_json::json!({ "message": bounded_frame_message(message) })
+            }
             _ => serde_json::json!({ "message": "provider stream error" }),
         };
         events.push(StreamEvent::Error { error });

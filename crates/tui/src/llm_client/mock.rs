@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, anyhow};
 use async_stream::try_stream;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 
 use crate::models::{
     ContentBlock, MessageDelta, MessageRequest, MessageResponse, StreamEvent, Usage,
@@ -67,6 +67,11 @@ pub type CannedTurn = Vec<StreamEvent>;
 /// A queued mock response step.
 pub enum FauxStep {
     Canned(CannedTurn),
+    /// A stream that yields the canned events verbatim and then dies with a
+    /// transport error — no auto-appended `MessageStop`, no clean close. This
+    /// is the mid-stream-drop shape the engine's transparent-retry and
+    /// drop-resume policies exist for; `Canned` always completes cleanly.
+    FailingStream(CannedTurn),
     /// Build a canned turn from the live outgoing request.
     ///
     /// Tests can assert DeepSeek V4's thinking-mode tool-call invariant here:
@@ -131,6 +136,15 @@ impl MockLlmClient {
     }
 
     /// Push a canned turn onto the back of the queue.
+    /// Push a canned stream that emits the events and then dies with a
+    /// transport error (no clean close, no auto-appended `MessageStop`).
+    pub fn push_failing_stream(&self, turn: CannedTurn) {
+        self.canned
+            .lock()
+            .expect("MockLlmClient.canned mutex poisoned")
+            .push_back(FauxStep::FailingStream(turn));
+    }
+
     pub fn push_turn(&self, turn: CannedTurn) {
         self.canned
             .lock()
@@ -217,6 +231,7 @@ impl MockLlmClient {
         match step {
             FauxStep::Canned(turn) => turn,
             FauxStep::Factory(factory) => factory(request),
+            FauxStep::FailingStream(turn) => turn,
         }
     }
 
@@ -266,8 +281,13 @@ impl LlmClient for MockLlmClient {
             ));
         };
 
+        let failing = matches!(step, FauxStep::FailingStream(_));
         let turn = self.turn_from_step(step, &request);
-        Ok(stream_from_canned(turn))
+        if failing {
+            Ok(stream_from_canned_failing(turn))
+        } else {
+            Ok(stream_from_canned(turn))
+        }
     }
 
     async fn health_check(&self) -> Result<bool> {
@@ -277,6 +297,21 @@ impl LlmClient for MockLlmClient {
 
 /// Wrap a canned event vector as a stream that yields each event in order and
 /// auto-appends `MessageStop` if the trailing event is not already one.
+/// A canned stream that dies with a transport error after emitting its
+/// events verbatim — the mid-stream-drop shape the engine's transparent
+/// retry (round-6 review) and drop-resume policies consume. Unlike
+/// [`stream_from_canned`] it never auto-appends a `MessageStop`.
+fn stream_from_canned_failing(turn: CannedTurn) -> StreamEventBox {
+    let events = turn
+        .into_iter()
+        .map(Ok::<StreamEvent, anyhow::Error>)
+        .collect::<Vec<_>>();
+    let s = futures_util::stream::iter(events).chain(futures_util::stream::once(async {
+        Err(anyhow!("MockLlmClient: canned transport failure"))
+    }));
+    Box::pin(s) as Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'static>>
+}
+
 fn stream_from_canned(turn: CannedTurn) -> StreamEventBox {
     let s = try_stream! {
         let has_stop = matches!(turn.last(), Some(StreamEvent::MessageStop));
