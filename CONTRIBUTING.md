@@ -5,9 +5,10 @@ Thank you for your interest in contributing to codewhale! This document provides
 > **Fork note (Pinvou/CodeWhale):** this repository is the Pinvou fork.
 > Its `main` branch mirrors upstream and receives no fork work; internal
 > maintenance pull requests target the protected public maintenance branch
-> **`pinvou3-clean`** (fork lifecycle: `docs/fork-policy.md` in the parent
-> workspace). The process below is the inherited upstream contribution
-> process and applies to upstream contributions.
+> **`pinvou3-clean`** (this tree carries no fork-policy document — the
+> branch rule above is the whole contract a clone needs). The process
+> below is the inherited upstream contribution process and applies to
+> upstream contributions.
 
 ## Getting Started
 
