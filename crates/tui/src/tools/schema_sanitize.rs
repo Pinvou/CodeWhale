@@ -199,7 +199,8 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
 /// contracts are pinned beside each tool's real schema (goal.rs,
 /// send_later.rs, subagent/coord.rs, web_tool.rs); this list's exact
 /// membership is pinned against a literal list in this file's tests. The
-/// shape-level census (core/engine/tests.rs) covers a different axis —
+/// shape-level census (it lands with the per-tool schema-honesty split,
+/// in `core/engine/tests.rs`) will cover a different axis —
 /// removal notes and empty strict shapes on the tools that ship strict —
 /// and cannot see a runtime contract, so a tool with this class of
 /// runtime-required-optional-parameter breakage needs its own per-tool
@@ -225,9 +226,11 @@ const STRICT_UNUSABLE_TOOLS: &[&str] = &[
 /// naming what stopped working, rejection and degradation alike. Keys are
 /// the model-visible tool names the catalog ships (`to_api_tools` filters
 /// `model_visible`, so the hidden capital-B `Bash` never appears here);
-/// the full-catalog census iterates this constant against the real
-/// processed catalog, so a deleted or miskeyed entry fails the build's
-/// tests instead of silently degrading.
+/// the full-catalog census will iterate this constant against the real
+/// processed catalog so a deleted or miskeyed entry fails the build's
+/// tests instead of silently degrading (the census lands with the
+/// per-tool schema-honesty split; until then the lists are curated
+/// by hand).
 pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
     (
         "Git",
@@ -401,16 +404,21 @@ const STRICT_PAIR_JUDGE_CALL_BUDGET: usize = 1024;
 /// Chase budget for the value funnel's `anyOf` alternatives (round 29):
 /// the chase recurses through the union tree per pinned value, and a
 /// pathological nesting would otherwise multiply frame counts. Shared
-/// per tool like the pair budget; exhaustion fails closed — the same
-/// line every budget here draws for a judged constraint.
+/// per tool like the pair budget; exhaustion fails closed for a judged
+/// constraint. (The pattern-compile budget is the one disclosed
+/// exception: its exhaustion abstains compatible — the pattern still
+/// ships and binds on the wire, the judge just stops guessing — see the
+/// compile-pool notes on `prepare_tools_for_strict_mode`.)
 const STRICT_ANYOF_VALUE_CHASE_BUDGET: usize = 4096;
 
 /// The literal-keyword keys whose values are DATA (enum members, defaults,
 /// examples), not schemas. Shared by every walker alongside
 /// [`STRICT_NAME_MAP_KEYS`] for the same drift reasons, and pinned the
-/// same way. `pub(crate)` so the census helper in `core/engine/tests.rs`
-/// consumes the same copy instead of hand-rolling the list — the
-/// hand-copied invariant class this constant exists to retire.
+/// same way. `pub(crate)` so the full-catalog census consumer can share
+/// this one copy instead of hand-rolling the list — the hand-copied
+/// invariant class this constant exists to retire (the census lands with
+/// the per-tool schema-honesty split; nothing outside this module reads
+/// the constant yet).
 pub(crate) const STRICT_LITERAL_KEYS: &[&str] =
     &["enum", "const", "default", "examples", "example"];
 
@@ -2027,8 +2035,9 @@ fn unions_lack_pairwise_discrimination(
 /// properties are merged into the object and the dropped exactly-one /
 /// at-least-one constraint is surfaced as a description note so the model
 /// still knows which parameter groups apply. Every stripped composition is
-/// surfaced: its specific required-group note when the branches carry two
-/// or more labeled groups, otherwise the generic sentence — merged
+/// surfaced: its specific required-group note when the branches carry
+/// labeled groups (a single group discloses too — dropping it still
+/// relaxed the authored contract), otherwise the generic sentence — merged
 /// properties or not (review 4539837534): a union of
 /// `additionalProperties:false` branches whose properties merge into the
 /// root accepts a mixture no original branch admits, so the model must
@@ -2048,12 +2057,14 @@ fn unions_lack_pairwise_discrimination(
 ///
 /// Returns the same style of description note as [`sanitize_for_responses`].
 pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
-    // The specific required-group sentences for the keywords that carry
-    // two or more labeled groups, captured at entry exactly as the
-    // first-match note read them; which keywords actually SURVIVE to be
-    // stripped is decided after the shared normalization (a nullable-union
-    // collapse can erase a composition entirely, and a composition that
-    // never reaches the wire takes no note with it).
+    // The specific required-group sentences for the composition keywords
+    // that carry labeled groups — a single group discloses too, because
+    // dropping it still relaxed the authored contract — captured at
+    // entry exactly as the first-match note read them; which keywords
+    // actually SURVIVE to be stripped is decided after the shared
+    // normalization (a nullable-union collapse can erase a composition
+    // entirely, and a composition that never reaches the wire takes no
+    // note with it).
     let mut specific_notes: std::collections::HashMap<&'static str, String> =
         std::collections::HashMap::new();
     if let Some(obj) = schema.as_object() {
@@ -2124,8 +2135,9 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
     // schema's own declaration, so it keeps local authority.
     prune_dangling_required(schema, &[], true);
     // One note per STRIPPED root composition keyword, in the recorded
-    // keyword order: the specific sentence when that keyword carried two or
-    // more labeled groups, otherwise the generic sentence (review 4539837534
+    // keyword order: the specific sentence when that keyword carried
+    // labeled groups (a single one discloses too), otherwise the generic
+    // sentence (review 4539837534
     // — merged properties do not compensate for the dropped composition, and
     // a property-less composition erases the argument contract outright).
     // Aggregating across ALL stripped keywords keeps the model informed of
@@ -5428,8 +5440,10 @@ fn numeric_bounds_contradiction(obj: &Map<String, Value>) -> bool {
     // path — which reads it uncrossed — never got to speak (a satisfiable
     // dual-spelling union failed closed). The f64 fallback stays
     // monotonicity-safe for the exact spellings it still sees (x < y
-    // implies f64(x) <= f64(y), so a projected crossing is a true
-    // crossing).
+    // implies f64(x) <= f64(y)): a projected crossing on a strict-
+    // inequality pair is a true crossing, while a projected tie on the
+    // equal-crossing pairs may call a live window empty — the same
+    // conservative tie rule `numeric_windows_cross` discloses.
     let pair_crosses =
         |lower: Option<&Value>, upper: Option<&Value>, equal_crosses: bool| -> bool {
             match (lower.and_then(bounds_number), upper.and_then(bounds_number)) {
@@ -6681,6 +6695,10 @@ fn required_group_label(names: &[String]) -> String {
     label
 }
 
+/// A safe, provider-facing reason that Kimi parameters could not be emitted.
+///
+/// These diagnostics deliberately never include the schema or `$ref` value:
+/// tool schemas can be supplied by MCP servers and may contain private data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum KimiParameterSchemaError {
     #[error("Moonshot function parameters root must be a JSON object schema")]
@@ -6863,6 +6881,17 @@ fn resolve_mfjs_reference<'a>(document: &'a Value, reference: &str) -> Option<&'
         .filter(|target| target.is_object())
 }
 
+/// Normalize a tool's function schema for Kimi / Moonshot API compatibility.
+///
+/// Kimi's API enforces stricter JSON Schema validation: when a schema uses
+/// `anyOf` / `oneOf`, the `type` field must be placed inside each item rather
+/// than on the parent object.  This function walks the schema root and any
+/// nested objects, pushing `"type": "object"` down into `anyOf` / `oneOf`
+/// items when present.
+///
+/// Invariant: only mutates objects that carry a top-level `type` + an
+/// `anyOf` or `oneOf` array — pure schemas without conditional alternatives
+/// are left untouched.
 pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
     if let Some(obj) = schema.as_object_mut() {
         // Recurse first so a type injected into this object's alternatives is
@@ -6921,6 +6950,29 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
     }
 }
 
+/// Normalize a complete Kimi / Moonshot `function.parameters` object.
+///
+/// Function parameters have an additional MFJS constraint: the root must end
+/// as a plain `type: "object"` schema. Root composition is flattened using the
+/// same compatibility pass as Responses and xAI, while supported nested
+/// `anyOf` branches remain nested. Internal root `$ref` values are resolved
+/// and inlined before normalization so we never manufacture the invalid
+/// `type + allOf($ref)` shape rejected by MFJS.
+///
+/// One pipeline serves every Moonshot route (api.moonshot.cn / ai platform,
+/// api.kimi.com and api.kimi.ai coding endpoints): the documents behind those
+/// routes all point at the same MFJS specification, so the wire contract is
+/// uniform. Keywords the specification does not list are either stripped
+/// (annotation and unlisted bound keywords, whose removal is a
+/// semantics-lossless or soft-constraint-losing simplification) or drop the
+/// whole tool with a projection warning (composition and pattern keywords
+/// with no simplification equivalent).
+///
+/// Unsupported, unresolved, cyclic, and non-object root references fail
+/// closed with a non-secret diagnostic instead of being sent to Moonshot.
+///
+/// MFJS differences from JSON Schema:
+/// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md>
 pub fn sanitize_for_kimi_parameters(
     parameters: &mut Value,
 ) -> Result<Option<String>, KimiParameterSchemaError> {
@@ -14675,35 +14727,7 @@ mod tests {
         let _ = prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
     }
 }
-/// Normalize a tool's function schema for Kimi / Moonshot API compatibility.
-///
-/// Kimi's API enforces stricter JSON Schema validation: when a schema uses
-/// `anyOf` / `oneOf`, the `type` field must be placed inside each item rather
-/// than on the parent object.  This function walks the schema root and any
-/// nested objects, pushing `"type": "object"` down into `anyOf` / `oneOf`
-/// items when present.
-///
-/// Invariant: only mutates objects that carry a top-level `type` + an
-/// `anyOf` or `oneOf` array — pure schemas without conditional alternatives
-/// are left untouched.
-/// A safe, provider-facing reason that Kimi parameters could not be emitted.
-///
-/// These diagnostics deliberately never include the schema or `$ref` value:
-/// tool schemas can be supplied by MCP servers and may contain private data.
-/// Normalize a complete Kimi / Moonshot `function.parameters` object.
-///
-/// Function parameters have an additional MFJS constraint: the root must end
-/// as a plain `type: "object"` schema. Root composition is flattened using the
-/// same compatibility pass as Responses and xAI, while supported nested
-/// `anyOf` branches remain nested. Internal root `$ref` values are resolved and
-/// inlined before normalization so we never manufacture the invalid
-/// `type + allOf($ref)` shape rejected by MFJS.
-///
-/// Unsupported, unresolved, cyclic, and non-object root references fail
-/// closed with a non-secret diagnostic instead of being sent to Moonshot.
-///
-/// MFJS differences from JSON Schema:
-/// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md>
+
 fn sanitize_kimi_parameters_candidate(
     parameters: &mut Value,
 ) -> Result<Option<String>, KimiParameterSchemaError> {

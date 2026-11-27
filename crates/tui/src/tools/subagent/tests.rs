@@ -6047,13 +6047,16 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
 
     // Strict mode ships the agent tool unchanged and non-strict: the gate
     // fails the dependentSchemas action contract closed (and the runtime
-    // name list would fail it closed anyway — the removal pass would strip
-    // every optional parameter the runtime demands). The role enum
-    // therefore survives on the wire only through the production funnel,
-    // never through a raw reshape of the tool's schema.
+    // name list would fail the real `agent` tool closed anyway — the
+    // removal pass would strip every optional parameter the runtime
+    // demands). The role enum therefore survives on the wire only through
+    // the production funnel, never through a raw reshape of the tool's
+    // schema. The probe runs under a NON-listed name so the pin
+    // discriminates the gate itself, not the `STRICT_UNUSABLE_TOOLS`
+    // fallback.
     let mut funnel_tool = crate::models::Tool {
         tool_type: None,
-        name: "agent".to_string(),
+        name: "agent_role_enum_probe".to_string(),
         description: "probe".to_string(),
         input_schema: agent_schema.clone(),
         allowed_callers: None,
