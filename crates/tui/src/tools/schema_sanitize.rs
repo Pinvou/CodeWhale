@@ -3241,7 +3241,13 @@ fn collapse_nullable_unions(schema: &mut Value) {
                     }
                 }
             }
-            obj.insert("nullable".into(), Value::Bool(true));
+            // Round 31: an authored `nullable: false` refuses the very
+            // null this branch carries — the union's admitted language
+            // was parent ∧ survivor ∧ ¬null, and the merged shape keeps
+            // that refusal instead of being clobbered open here.
+            if obj.get("nullable") != Some(&Value::Bool(false)) {
+                obj.insert("nullable".into(), Value::Bool(true));
+            }
         }
     }
 }
@@ -3275,8 +3281,28 @@ fn parent_keyword_collides(obj: &Map<String, Value>, key: &str, branch_value: &V
             return false;
         }
         if is_empty_container(parent) {
-            return parent.is_object()
-                && obj.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+            // Round 31: an empty container still asserts nothing — the
+            // branch's constraint is strictly more specific and the merge
+            // stays lossless — EXCEPT in two families. A schema-form
+            // `additionalProperties` constrains every key OUTSIDE
+            // `properties`; after a properties merge those keys live
+            // inside `properties` and the constraint stops applying, so
+            // `{"properties": {}, "additionalProperties": {"type":
+            // "number"}}` merged with a tags-array branch flipped
+            // `{"tags": []}` from rejected to accepted (the bool-false
+            // form already collided; `true` constrains nothing and stays
+            // mergeable). And `enum: []` / `anyOf: []` / `oneOf: []` are
+            // the FALSE schema — they admit nothing, which a branch value
+            // must not merge open (`allOf: []` is the identity and
+            // `required: []` asserts no names, so both stay mergeable).
+            if parent.is_object() {
+                return obj.get("additionalProperties").is_some_and(|ap| match ap {
+                    Value::Bool(false) => true,
+                    Value::Object(_) => key == "properties",
+                    _ => false,
+                });
+            }
+            return matches!(key, "enum" | "anyOf" | "oneOf");
         }
         true
     })
@@ -20065,6 +20091,118 @@ mod strict_fixwave_r31 {
         }));
         assert!(!all);
         assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn schema_form_additional_properties_collides_with_empty_properties() {
+        // Round 31 (fresh review, generic-walk lane): the empty-`properties`
+        // leniency collided only beside the BOOL-false spelling, so a
+        // schema-form `additionalProperties` let the branch's properties
+        // merge INSIDE `properties` — and keys inside `properties` no
+        // longer answer to the parent's `additionalProperties` schema.
+        // The original rejects `{"tags": []}` (array ∧ number); the
+        // merged shape accepted it, silently, on every lane.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {"type": "number"},
+            "anyOf": [
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_some(),
+            "the schema-form closure must keep the authored union: {}",
+            schema
+        );
+        assert!(
+            schema.get("properties").and_then(|p| p.get("tags")).is_none(),
+            "the branch keys must not escape the authored closure: {}",
+            schema
+        );
+        // The strict lane refuses the composition instead of shipping the
+        // widened shape.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {"type": "number"},
+            "anyOf": [
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]},
+                {"type": "null"}
+            ]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+        // Keep-side: `additionalProperties: true` constrains nothing, so
+        // the documented lossless collapse still serves the merge.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true,
+            "anyOf": [
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_none() && schema["nullable"] == json!(true),
+            "the true-form closure must keep merging losslessly: {}",
+            schema
+        );
+    }
+
+    #[test]
+    fn empty_false_schema_arrays_are_not_merged_open() {
+        // Round 31: `enum: []` / `anyOf: []` / `oneOf: []` admit NOTHING.
+        // The empty-container leniency treated them as asserting nothing
+        // and let a branch value merge over them, resurrecting a schema
+        // the author killed.
+        for key in ["enum", "anyOf"] {
+            let mut schema = Value::Object(
+                [
+                    (key.to_string(), json!([])),
+                    (
+                        "oneOf".to_string(),
+                        json!([{"type": "string", "enum": ["a"]}]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            sanitize(&mut schema);
+            assert_eq!(
+                schema.get(&key).and_then(|v| v.as_array()).map(Vec::len),
+                Some(0),
+                "the empty {key} false schema must keep the union closed: {}",
+                schema
+            );
+        }
+    }
+
+    #[test]
+    fn authored_nullable_false_survives_the_null_collapse() {
+        // Round 31: the null-branch collapse inserted `nullable: true`
+        // unconditionally, flipping an authored refusal of null into an
+        // admission — the marker must keep the author's answer.
+        let mut schema = json!({
+            "type": "string",
+            "nullable": false,
+            "anyOf": [{"type": "string"}, {"type": "null"}]
+        });
+        sanitize(&mut schema);
+        assert_eq!(schema.get("anyOf"), None, "the union still collapses");
+        assert_eq!(
+            schema.get("nullable"),
+            Some(&json!(false)),
+            "the authored refusal survives: {}",
+            schema
+        );
     }
 
     #[test]
