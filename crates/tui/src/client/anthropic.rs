@@ -259,10 +259,21 @@ impl DeepSeekClient {
         // the pair; the Messages dialect now mirrors that on
         // DeepseekAnthropic routes: when thinking is on the wire, the strict
         // surface's `{"type":"any"}` is omitted and tool choice falls back
-        // to the server default. A thinking-off request keeps `required` —
-        // that pairing is the strict gate's contract. Other Messages
-        // providers keep the pre-existing pairing untouched. The write runs
-        // after the shaping so the on-wire thinking state is final.
+        // to the server default. DeepSeek's Anthropic-API documents reject
+        // the FORCED choices beside thinking — `any`: "in thinking mode …
+        // returns a 400 error when only client tools are declared", `tool`:
+        // "returns a 400 error in thinking mode" — while `auto` stays
+        // supported there, so omitting all values is the chat dialect's own
+        // over-suppression mirrored (the server default makes it
+        // behavior-neutral for `auto`);
+        // https://api-docs.deepseek.com/guides/anthropic_api, fetched
+        // 2026-11-27. A thinking-off request keeps `required` — that
+        // pairing is the strict gate's contract. Other Messages providers
+        // keep the pre-existing pairing untouched (out of this change's
+        // scope; only the DeepSeek-gated strict pipeline produces a forced
+        // choice today, so no reachable non-DeepSeek lane carries one). The
+        // write runs after the shaping so the on-wire thinking state is
+        // final.
         if let Some(tool_choice) = request.tool_choice.as_ref() {
             let thinking_on_wire = body
                 .get("thinking")
@@ -1289,12 +1300,17 @@ mod tests {
     #[test]
     fn deepseek_anthropic_omits_tool_choice_while_thinking_is_on_the_wire() {
         // Round 28: the Messages dialect mirrors the chat dialect's
-        // thinking suppression — first-party Anthropic rejects the
-        // thinking + tool_choice pair, and the strict surface's
-        // `{"type":"any"}` shipped beside `thinking` on a DeepseekAnthropic
-        // route was a 400 every turn. Thinking OFF keeps `required` (the
-        // strict gate's contract); other providers keep the pre-existing
-        // pairing.
+        // thinking suppression — DeepSeek's Anthropic-API documents reject
+        // the FORCED choices beside thinking (`any`/`tool` return 400 in
+        // thinking mode; `auto`/`none` stay valid), and the strict
+        // surface's `{"type":"any"}` shipped beside `thinking` on a
+        // DeepseekAnthropic route was a 400 every turn. Thinking OFF keeps
+        // `required` (the strict gate's contract). The MiniMax contrast
+        // below pins the pre-existing pairing on lanes this change does
+        // not own: no non-DeepSeek lane can produce a forced choice today
+        // (only the DeepSeek-gated strict pipeline maps `required` to
+        // `any`), so the pairing kept there is `auto`-shaped in practice
+        // even though the fixture spells it `required`.
         let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
 
         let mut request = request_with("deepseek-v4-pro", Some("high"), None, None);

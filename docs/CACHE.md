@@ -120,21 +120,36 @@ per OS thread, so the boundary is per thread: two preparations on
 different threads hold independent memos; every stability claim above
 holds per thread.) Catalogs within
 the compile budget (the default catalog is far below it) never see the
-boundary. The engine's declared change reasons are `model`, `mode`,
-`goal`, `system`, `resume`, and `tool_surface` (plus the
-`mcp-session-boot` install edge) — there is no `provider` or `route`
-declared reason, and no translation or verbosity field. A provider
-retype or a re-planned route does not flip the gate in place: either
-change respawns the engine, and the new session re-pins its prefix as
-`initial` (round 29 — this paragraph previously invented
-`change:provider`/`change:route` fields the tree has never had, and
-described provider flips as in-place re-declarations). A gate flip a
-declared reason genuinely accompanies — a model switch that moves the
-route with it — re-declares through `model`; the one transition with no
-declared reason is a config-file endpoint edit between sessions, which
-the respawn absorbs. A flip inside the same scope (the canonical beta ↔
-non-beta path) leaves the shaped bytes identical and produces no drift
-at all.
+boundary.
+
+Every prefix change the engine makes is declared with a reason string,
+and the gate accepts any declared string, re-pinning in place as
+`change:<reason>`. Two emitters feed it. The per-turn header policy diffs
+the explicit prompt inputs and names exactly what differed — `provider`,
+`model`, `route`, `mode`, `goal`, `translation`, `verbosity`, joined with
+`+` when several differ (`model+route`), and `system` for the launch pin
+when no context is pinned yet
+(`core/engine.rs::explicit_prompt_context_change_reason`) — so an
+in-session `/translate` toggle re-declares in place as
+`change:translation`, and a model switch that moves the route limits with
+it declares `model+route`, not bare `model`. Direct declarations add
+`resume` (a session resume, or the conversation carried across an engine
+respawn through `Op::SyncSession`), `tool_surface`, and the
+`mcp-session-boot` install edge; the feature-gated benchmark path adds
+`benchmark_final_only` (`#[cfg(feature = "benchmark-eval-controls")]`).
+A provider retype or a re-planned route made through the surface
+switchers does not flip the gate in place: either change respawns the
+engine, and the fresh engine re-pins — as `resume` when the conversation
+is carried over, as `initial` only on an empty one. The one transition
+with no declared reason is a config-file endpoint edit between sessions,
+which the respawn absorbs. A flip inside the same scope (the canonical
+beta ↔ non-beta path) leaves the shaped bytes identical and produces no
+drift at all. (Round 30: this paragraph previously claimed the tree had
+no `provider`/`route` declared reason and no `translation`/`verbosity`
+field, and that respawned sessions re-pin as `initial`; both halves were
+wrong — the composer at `explicit_prompt_context_change_reason` has
+always emitted those fields, and a carried conversation re-pins as
+`resume`.)
 
 ## Permissions fragment budget compatibility
 

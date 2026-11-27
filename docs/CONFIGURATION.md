@@ -753,11 +753,12 @@ Messages route) also set
 strict contract: optional parameters are removed from the schema (each
 removal is reported in the tool description — up to 20 names individually,
 the remainder counted), non-numeric `const` values land on
-`enum`, and conditional-requirement tables are stripped or stripped
-silently (below). A second keyword family widens **silently** — removed
-with no per-tool note because dropping them only widens what the endpoint
-accepts: `dependentRequired`, draft-7 name-array `dependencies`, boolean
-`false` entries fail closed instead (round 28), `uniqueItems`, the
+`enum`, and conditional-requirement tables are dropped — some with a
+per-tool note, some silently; the split is below. A second keyword family
+widens **silently** — removed with no per-tool note because dropping them
+only widens what the endpoint accepts: `dependentRequired`, draft-7
+name-array `dependencies` (a boolean-`false` `dependencies` entry fails
+closed instead — round 28), `uniqueItems`, the
 property/containment count bounds (`minProperties`/`maxProperties`/
 `minContains`/`maxContains`), the length and item-count bounds
 (`minLength`/`maxLength`/`minItems`/`maxItems`), `format` values outside the

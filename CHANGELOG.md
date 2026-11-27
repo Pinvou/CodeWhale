@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key either (that opt-in is the `deepseek-anthropic` identity — a
   key-driven flip stranded DeepSeek's forced chat endpoint key on the
   Messages-only host).
+- `codewhale doctor` route JSON: the `wire_protocol` line no longer
+  reports the static-policy placeholder `model_aware` — it names the
+  dispatch dialect the resolved route's candidate actually binds
+  (`chat_completions`/`responses`/`anthropic_messages`), falling back to
+  the static composition only when route resolution failed. Consumers
+  keying on the literal `model_aware` value must switch to the concrete
+  labels.
 - API-backed `[search]` providers now visibly degrade directly to the
   keyless Bing tail instead of routing through DuckDuckGo when
   unavailable: DuckDuckGo is unreachable from mainland-China networks
