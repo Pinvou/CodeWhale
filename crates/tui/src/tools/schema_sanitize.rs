@@ -4875,6 +4875,53 @@ fn node_pins_cover_branch(obj: &Map<String, Value>, branch: &Value, root: &Value
 /// Past either cap the membership judgment abstains compatible-by-default
 /// (a keep decision, never an overclosure: abstention can only miss an
 /// unsatisfiability detection, never reject a satisfiable schema).
+/// Serialized byte length of `value`, an UPPER bound that stops counting
+/// once `total` passes `cap` (round 31): the cap predicate's cumulative
+/// early-exit bounds how many members serialize, but a single oversized
+/// member was still fully `to_vec`d on every call — a ~1 MB member × the
+/// per-tool pair budget ≈ a GB of allocation churn per hostile tool per
+/// request, recurring. Exact for every spelling the compact serializer
+/// emits absent control characters; strings charge each escape-needing
+/// byte its full `\uXXXX` width, so the count can only over-charge —
+/// and an over-charge lands on the predicate's conservative side.
+fn serialized_len_capped(value: &Value, cap: usize, total: &mut usize) {
+    if *total > cap {
+        return;
+    }
+    match value {
+        Value::Null => *total += 4,
+        Value::Bool(b) => *total += if *b { 4 } else { 5 },
+        Value::Number(n) => *total += n.to_string().len(),
+        Value::String(s) => {
+            *total += s.len() + 2;
+            *total += s
+                .bytes()
+                .filter(|&b| b < 0x20 || b == b'"' || b == b'\\')
+                .count()
+                * 6;
+        }
+        Value::Array(items) => {
+            *total += 2 + items.len().saturating_sub(1);
+            for item in items {
+                serialized_len_capped(item, cap, total);
+                if *total > cap {
+                    return;
+                }
+            }
+        }
+        Value::Object(map) => {
+            *total += 2 + map.len().saturating_sub(1);
+            for (key, item) in map {
+                *total += key.len() + 3;
+                serialized_len_capped(item, cap, total);
+                if *total > cap {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 fn enum_members_within_judge_cap(members: &[Value]) -> bool {
     // Round 24: the member-COUNT cap is gone — the count cap existed to
     // bound the quadratic value-equality scan, which the hash-based
@@ -4885,16 +4932,15 @@ fn enum_members_within_judge_cap(members: &[Value]) -> bool {
     // `to_vec` measured (members + separators + brackets) — a hostile
     // 256 × 16 KB enum still decides at its first oversized member
     // instead of paying the full 4 MB serialization per call per request
-    // (measured 19.8 s per node before the byte cap).
+    // (measured 19.8 s per node before the byte cap). Round 31: the
+    // per-member measure is the bounded walk above, so even the FIRST
+    // oversized member costs O(cap) instead of its own full size.
     let separators = members.len().saturating_sub(1) + 2;
     let mut member_bytes = 0usize;
     for member in members {
-        match serde_json::to_vec(member) {
-            Ok(bytes) => member_bytes += bytes.len(),
-            // A value that cannot serialize cannot be judged; abstain on
-            // the safe side like a cap overshoot.
-            Err(_) => return false,
-        }
+        let mut member_len = 0usize;
+        serialized_len_capped(member, ENUM_PAIR_MEMBER_BYTES_CAP, &mut member_len);
+        member_bytes += member_len;
         if member_bytes + separators > ENUM_PAIR_MEMBER_BYTES_CAP {
             return false;
         }
