@@ -6566,6 +6566,7 @@ impl Engine {
                                 tool_state.input
                             ));
                         }
+                        let empty_input_buffer = tool_state.input_buffer.trim().is_empty();
                         finalize_stream_tool_arguments(self.api_provider, tool_state);
                         if tool_state.input_parse_error.is_some() {
                             if self.active_turn_tool_security.is_some() {
@@ -6585,6 +6586,23 @@ impl Engine {
                                     tool_state.name
                                 )))
                                 .await;
+                        } else if empty_input_buffer {
+                            // Round-5 R-F3: the finalize refactor dropped
+                            // base's warn for a tool block that closed with
+                            // an empty input buffer. A Moonshot empty buffer
+                            // lands in the parse-error arm above, so this arm
+                            // is the non-Moonshot path that keeps the initial
+                            // input — the exact diagnostic base logged.
+                            if self.active_turn_tool_security.is_some() {
+                                crate::logging::warn(
+                                    "Restricted tool input buffer is empty (details redacted)",
+                                );
+                            } else {
+                                crate::logging::warn(tool_input_buffer_empty_log(
+                                    &tool_state.name,
+                                    &tool_state.input,
+                                ));
+                            }
                         } else if self.active_turn_tool_security.is_some() {
                             crate::logging::info("Restricted tool final input (details redacted)");
                         } else {
@@ -8142,6 +8160,15 @@ fn tool_input_parse_failure_log(tool_name: &str, buffer: &str) -> String {
     )
 }
 
+/// The log line for a tool-use block that closed with an empty input buffer
+/// (round 5, R-F3): base warned on this path so a provider streaming a tool
+/// call with no argument deltas at all stayed diagnosable. Non-Moonshot
+/// providers keep the initial input in that case, so the message carries it
+/// the same way base did.
+fn tool_input_buffer_empty_log(tool_name: &str, input: &serde_json::Value) -> String {
+    format!("Tool '{tool_name}' input buffer is empty, using initial input: {input:?}")
+}
+
 fn finalize_stream_tool_arguments(provider: ApiProvider, tool_state: &mut ToolUseState) {
     if tool_state.input_buffer.trim().is_empty() {
         if provider == ApiProvider::Moonshot {
@@ -8239,6 +8266,18 @@ mod tests {
         assert!(auto.contains("Auto-review"), "{auto}");
         assert!(auto.contains("re-plan"), "{auto}");
         assert!(!auto.contains("wait for the user's approval"), "{auto}");
+    }
+
+    #[test]
+    fn tool_input_buffer_empty_log_names_the_tool_and_the_initial_input() {
+        // Round-5 R-F3 pin: the finalize refactor dropped base's warn for a
+        // tool block that closed with an empty input buffer. The restored
+        // diagnostic must keep both key facts — which tool closed empty, and
+        // that the call would run on the initial input.
+        let log = tool_input_buffer_empty_log("bash", &serde_json::Value::Null);
+        assert!(log.contains("Tool 'bash'"), "{log}");
+        assert!(log.contains("input buffer is empty"), "{log}");
+        assert!(log.contains("using initial input"), "{log}");
     }
 
     #[test]

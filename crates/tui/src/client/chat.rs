@@ -1188,6 +1188,10 @@ enum ObjectProofTask<'a> {
         depth: usize,
     },
     ChooseComposition {
+        // The schema node this composition walk is proving. The judgment
+        // completes when the walk returns true, and that completion is what
+        // the node memos record (address memo and content memo).
+        subject: &'a Value,
         options: Vec<ObjectComposition<'a>>,
         next: usize,
         references: Vec<String>,
@@ -1221,6 +1225,37 @@ fn moonshot_schema_type_is_object(schema_type: Option<&Value>) -> bool {
     }
 }
 
+/// Whether a schema subtree carries no `$ref` key anywhere in its closure.
+///
+/// The content memo below may only cache judgments for reference-free
+/// subtrees: a `$ref`-carrying subtree's judgment depends on the active
+/// reference stack (cycle detection) and on absolute targets that live
+/// outside the subtree's own content, so the same content judged in
+/// different reference contexts could settle differently. With zero `$ref`
+/// keys the walk resolves nothing, so identical content provably yields the
+/// identical verdict. The walk is a plain iterative traversal over every
+/// object member and array element — that covers `properties`, `items`,
+/// `additionalProperties`, and every composition branch without enumerating
+/// keywords (and taints a `"$defs"` block too, correctly: its `$ref`s would
+/// resolve outside the subtree's content). Any `$ref` key marks the subtree
+/// tainted, whatever its value type — conservative, never a false reuse.
+fn moonshot_schema_value_is_reference_free(schema: &Value) -> bool {
+    let mut pending = vec![schema];
+    while let Some(current) = pending.pop() {
+        match current {
+            Value::Object(map) => {
+                if map.contains_key("$ref") {
+                    return false;
+                }
+                pending.extend(map.values());
+            }
+            Value::Array(members) => pending.extend(members.iter()),
+            _ => {}
+        }
+    }
+    true
+}
+
 pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
     const MAX_REFERENCE_DEPTH: usize = 64;
     // Each `anyOf`/`oneOf` branch costs its Evaluate plus the composition
@@ -1229,9 +1264,45 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
     // 1024 ≈ 2 × 500 + slack. The original 512 cap proved true only up to
     // ~254 branches — half the advertised width — so strict:false tools with
     // 255–500-branch unions passed every budget and then silently failed the
-    // object proof and dropped off the wire (round-4 review P2-2).
+    // object proof and dropped off the wire (round-4 review P2-2). A branch
+    // that carries its own NESTED untyped union costs more than 2 steps, so
+    // the per-branch model only holds when nested subtrees are not re-proved:
+    // the address memo below amortizes a `$ref`-shared subtree to one proof
+    // plus constant dispatch steps per reaching branch, and the content memo
+    // below that amortizes identical INLINE subtrees (Pydantic-style repeats
+    // with no `$ref` at all) the same way (round-5 review F1).
     const MAX_PROOF_STEPS: usize = 1024;
 
+    // Nodes whose "admits only objects" judgment has already completed
+    // successfully, keyed by node address. The serde_json tree is immutable
+    // for the whole proof, so `&Value` addresses are stable keys; they are
+    // only compared, never dereferenced, so no unsafe is involved. The
+    // judgment is path-independent — `$ref`s resolve absolutely against the
+    // document root and the walk carries no instance or path context — so a
+    // node that proved true once proves true at every site that reaches it
+    // again within this tree (only `$ref` sharing can revisit a node). A
+    // verdict is recorded only after the node's entire closure proved true,
+    // so reusing it never admits anything a fresh re-proof would reject;
+    // only the step cost is saved (round-5 review P2-1).
+    //
+    // The address memo alone cannot help INLINE nested unions, though —
+    // Pydantic-style schemas repeat the same nested union by VALUE across
+    // hundreds of distinct branches with no `$ref` sharing, so every node is
+    // still visited exactly once and a legal relaxed tool stayed over budget
+    // (round-5 review F1). A second, content-keyed memo closes that gap:
+    // `Value` is `Hash + Eq`, so a completed judgment can be reused wherever
+    // the same subtree content reappears. Sound only when the cached subtree
+    // is entirely `$ref`-free (the insert rule enforced by
+    // [`moonshot_schema_value_is_reference_free`]): with no `$ref` anywhere
+    // in the subtree, the judgment depends on nothing but the content, so
+    // identical content ⇒ identical verdict; a `$ref`-carrying subtree can
+    // settle differently per reference context and is never content-cached.
+    // The pointer memo stays for the `$ref` path, where it is the cheap
+    // short-circuit. Cost model: a query hashes the queried subtree once
+    // (O(subtree)), so the memos total O(reach × subtree) ≤ O(n × depth) —
+    // the same class as the other schema walks in this file.
+    let mut proven: std::collections::HashSet<*const Value> = std::collections::HashSet::new();
+    let mut proven_content: std::collections::HashSet<Value> = std::collections::HashSet::new();
     let root = schema;
     let mut tasks = vec![ObjectProofTask::Evaluate {
         schema,
@@ -1251,6 +1322,13 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                 references,
                 depth,
             } => {
+                // Content memo hit: this very task still costs its one
+                // dispatch step, but the whole sub-proof of an already-proved
+                // identical subtree is skipped.
+                if proven_content.contains(schema) {
+                    result = Some(true);
+                    continue;
+                }
                 if depth > MAX_REFERENCE_DEPTH {
                     return false;
                 }
@@ -1259,6 +1337,10 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                     continue;
                 };
                 if moonshot_schema_type_is_object(object.get("type")) {
+                    proven.insert(std::ptr::from_ref(schema));
+                    if moonshot_schema_value_is_reference_free(schema) {
+                        proven_content.insert(schema.clone());
+                    }
                     result = Some(true);
                     continue;
                 }
@@ -1273,6 +1355,15 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                         result = Some(false);
                         continue;
                     };
+                    // A memoized target skips its whole sub-proof: instead of
+                    // pushing an Evaluate that would only re-derive the
+                    // stored verdict, complete this evaluation directly —
+                    // the parent continuation reads `result` either way, and
+                    // the memoized node's proof consumes no steps.
+                    if proven.contains(&std::ptr::from_ref(target)) {
+                        result = Some(true);
+                        continue;
+                    }
                     let mut references = references;
                     references.push(reference.to_string());
                     tasks.push(ObjectProofTask::Evaluate {
@@ -1293,6 +1384,7 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                     options.push(ObjectComposition::AnyOf(branches));
                 }
                 tasks.push(ObjectProofTask::ChooseComposition {
+                    subject: schema,
                     options,
                     next: 0,
                     references,
@@ -1300,12 +1392,22 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                 });
             }
             ObjectProofTask::ChooseComposition {
+                subject,
                 options,
                 next,
                 references,
                 depth,
             } => {
                 if result == Some(true) {
+                    // An option just proved this subject admits only objects:
+                    // the judgment is complete, so record the verdict for
+                    // reuse before handing it to the parent continuation —
+                    // by address for the `$ref` path, by content whenever the
+                    // subject subtree is entirely `$ref`-free.
+                    proven.insert(std::ptr::from_ref(subject));
+                    if moonshot_schema_value_is_reference_free(subject) {
+                        proven_content.insert(subject.clone());
+                    }
                     result = Some(true);
                     continue;
                 }
@@ -1315,6 +1417,7 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                 };
                 result = None;
                 tasks.push(ObjectProofTask::ChooseComposition {
+                    subject,
                     options,
                     next: next + 1,
                     references: references.clone(),
@@ -1365,12 +1468,19 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                     depth,
                 });
                 if !found_object {
-                    result = None;
-                    tasks.push(ObjectProofTask::Evaluate {
-                        schema: &branches[next],
-                        references,
-                        depth,
-                    });
+                    // Memoized branch: its successful verdict is delivered
+                    // directly instead of pushing an Evaluate task, so the
+                    // shared subtree costs no proof steps on this revisit.
+                    if proven.contains(&std::ptr::from_ref(&branches[next])) {
+                        result = Some(true);
+                    } else {
+                        result = None;
+                        tasks.push(ObjectProofTask::Evaluate {
+                            schema: &branches[next],
+                            references,
+                            depth,
+                        });
+                    }
                 }
             }
             ObjectProofTask::AnyOf {
@@ -1397,12 +1507,18 @@ pub(crate) fn moonshot_parameters_prove_object(schema: &Value) -> bool {
                     depth,
                 });
                 if !found_non_object {
-                    result = None;
-                    tasks.push(ObjectProofTask::Evaluate {
-                        schema: &branches[next],
-                        references,
-                        depth,
-                    });
+                    // Memoized branch: same direct-verdict delivery as the
+                    // allOf arm above.
+                    if proven.contains(&std::ptr::from_ref(&branches[next])) {
+                        result = Some(true);
+                    } else {
+                        result = None;
+                        tasks.push(ObjectProofTask::Evaluate {
+                            schema: &branches[next],
+                            references,
+                            depth,
+                        });
+                    }
                 }
             }
         }
@@ -1696,6 +1812,22 @@ fn moonshot_response_tool_name(
 /// carries raw unowned names would lose the bounded diagnostic entirely; the
 /// count feeds the identical warn without changing the cache entry type
 /// (round-4 review P3).
+///
+/// The membership test runs in the identity domain the fresh parse RESOLVED
+/// INTO, not back in the raw wire domain. With owners, a fresh parse replaces
+/// every owned call's raw wire spelling with the map's REGISTRY owner, so the
+/// cached blocks store registry spellings for owned calls and raw wire
+/// spellings only for calls that failed resolution. Re-running
+/// [`moonshot_response_tool_name`] on a stored name would re-check the wire
+/// pattern against a post-resolution spelling and misread a minted tool's
+/// digit-led registry identity (`3d_render` — the fresh parse's own Ok
+/// replacement value) as a pattern violation, warning on every replay of an
+/// owned call. The fresh parse counted the RAW wire spelling it received;
+/// the replay side compares the stored name against the owner map's registry
+/// identities directly (round-5 review C2-F1). The two domains agree on every
+/// block except one diagnostics-only corner: a raw echo of a minted tool's
+/// registry spelling (wire-invalid, so the fresh parse counted it) matches
+/// the registry identity here and stays silent on replay.
 fn moonshot_cached_response_unowned_tool_count(
     response: &MessageResponse,
     owners: &std::collections::HashMap<String, String>,
@@ -1707,7 +1839,7 @@ fn moonshot_cached_response_unowned_tool_count(
             ContentBlock::ToolUse { name, .. } => Some(name),
             _ => None,
         })
-        .filter(|name| moonshot_response_tool_name(name, owners).is_err())
+        .filter(|name| !owners.values().any(|registry| registry == *name))
         .count()
 }
 
@@ -2105,8 +2237,31 @@ pub(crate) fn build_chat_wire_body(
                 moonshot_offered_registry_names.contains(&forced_identity)
             };
             if !forced_is_offered {
+                // The forced name can miss the offered set through every
+                // per-tool drop path, not just two of them: schema
+                // sanitization, an unnamed entry, the wire-name pattern or a
+                // mint collision, the duplicate-decoded-identity dedupe — or
+                // the forced spelling itself failing canonical decode. Name
+                // them all and surface the same bounded omitted receipt the
+                // projection warn carries, so an operator can tell a typo'd
+                // forced name from a degraded catalog (round-5 review C1-F1).
+                let omitted_note = if omitted_tool_names.is_empty() {
+                    "no catalog tools were dropped from this request".to_string()
+                } else {
+                    let bounded_omitted =
+                        crate::core::events::bounded_tool_projection_warning_names(
+                            &omitted_tool_names,
+                        );
+                    format!(
+                        "tools omitted from this request: {}",
+                        crate::core::events::tool_projection_warning_tool_list(
+                            &bounded_omitted,
+                            omitted_tool_names.len(),
+                        )
+                    )
+                };
                 bail!(
-                    "Moonshot cannot force tool '{wire_name}' because it is not offered on this request (schema-incompatible or shadowed by a wire-name collision)"
+                    "Moonshot cannot force tool '{wire_name}' because it is not offered on this request (dropped as schema-incompatible, unnamed, wire-name-pattern-violating, mint-colliding, or a duplicate decoded identity, or the forced name fails canonical decode; {omitted_note})"
                 );
             }
         }
@@ -2208,9 +2363,15 @@ impl DeepSeekClient {
                 // (round-4 review P3). The cache key pins this exact wire
                 // body, so the owners computed above are the ones the cached
                 // blocks were parsed against. Same counting semantics as the
-                // parse path, one bounded warn.
-                let unowned =
-                    moonshot_cached_response_unowned_tool_count(&cached, &response_tool_owners);
+                // parse path, one bounded warn — and the same domain: the
+                // fresh parse counts only when the owners map exists
+                // (Moonshot), so an empty map must not count every tool
+                // block of a generic provider's replay.
+                let unowned = if self.api_provider == ApiProvider::Moonshot {
+                    moonshot_cached_response_unowned_tool_count(&cached, &response_tool_owners)
+                } else {
+                    0
+                };
                 if unowned > 0 {
                     crate::logging::warn(format!(
                         "Moonshot response contains {unowned} tool call(s) for tools not offered by this request; passed to dispatch as unknown-tool errors"
@@ -10889,6 +11050,68 @@ mod alias_thinking_detection_tests {
         assert!(error.to_string().contains("not offered"), "{error}");
     }
 
+    /// The forced-choice refusal must enumerate every per-tool drop path —
+    /// schema sanitization, unnamed entries, wire-name pattern and mint
+    /// collisions, duplicate decoded identities, plus the forced spelling
+    /// itself failing canonical decode — instead of naming two of them, and
+    /// must carry the same bounded omitted receipt the projection warn uses
+    /// (round-5 review C1-F1).
+    #[test]
+    fn moonshot_forced_choice_refusal_enumerates_drop_causes_and_the_omitted_receipt() {
+        let build_error = |tool_choice: serde_json::Value, tools: Vec<crate::models::Tool>| {
+            let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+            // An explicit off keeps the named choice away from the
+            // thinking-mode refusal so the request reaches the offered-tool
+            // predicate this test pins (mirrors the neighboring test).
+            request.reasoning_effort = Some("off".to_string());
+            request.tools = Some(tools);
+            request.tool_choice = Some(tool_choice);
+            crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                false,
+            )
+            .err()
+            .expect("forcing an unoffered tool must refuse")
+            .to_string()
+        };
+        let mut dropped = digit_led_name_probe_tool("schema_dropped");
+        dropped.input_schema = json!({
+            "anyOf": [
+                {"type": "object", "properties": {"value": {"type": "string"}}},
+                {"type": "string"}
+            ]
+        });
+        let error = build_error(
+            json!({"type": "tool", "name": "schema_dropped"}),
+            vec![dropped, digit_led_name_probe_tool("probe")],
+        );
+        assert!(error.contains("not offered"), "{error}");
+        assert!(error.contains("schema-incompatible"), "{error}");
+        assert!(error.contains("unnamed"), "{error}");
+        assert!(error.contains("wire-name-pattern-violating"), "{error}");
+        assert!(error.contains("mint-colliding"), "{error}");
+        assert!(error.contains("duplicate decoded identity"), "{error}");
+        assert!(error.contains("fails canonical decode"), "{error}");
+        assert!(
+            error.contains("tools omitted from this request: schema_dropped"),
+            "the refusal carries the bounded omitted receipt: {error}"
+        );
+        // A forced name that was never in the catalog refuses with the same
+        // cause enumeration and an explicit empty receipt instead of
+        // implying an unnamed drop.
+        let error = build_error(
+            json!({"type": "tool", "name": "never_offered"}),
+            vec![digit_led_name_probe_tool("probe")],
+        );
+        assert!(error.contains("not offered"), "{error}");
+        assert!(
+            error.contains("no catalog tools were dropped from this request"),
+            "{error}"
+        );
+    }
+
     /// A blocked Moonshot cache hit returns before the parse that counts
     /// unowned response tools, so a replayed response carrying raw unowned
     /// names used to lose the bounded diagnostic entirely. The hit path now
@@ -10930,6 +11153,30 @@ mod alias_thinking_detection_tests {
             super::moonshot_cached_response_unowned_tool_count(&response_with(&["probe"]), &owners),
             0,
             "owned blocks are never counted"
+        );
+        // A minted digit-led tool's cache-hit blocks store the REGISTRY
+        // spelling the fresh parse resolved into (the owner map's value).
+        // Re-running the wire-pattern check on that post-resolution name
+        // misread it as a pattern violation and warned on every replay of an
+        // owned call; the identity comparison keeps it owned (round-5 review
+        // C2-F1).
+        let minted_owners =
+            std::collections::HashMap::from([("_3d_render".to_string(), "3d_render".to_string())]);
+        assert_eq!(
+            super::moonshot_cached_response_unowned_tool_count(
+                &response_with(&["3d_render"]),
+                &minted_owners
+            ),
+            0,
+            "a minted tool's stored registry spelling stays owned on replay"
+        );
+        assert_eq!(
+            super::moonshot_cached_response_unowned_tool_count(
+                &response_with(&["3d_render", "ghost_tool"]),
+                &minted_owners
+            ),
+            1,
+            "a genuinely unowned name still counts exactly once next to an owned minted sibling"
         );
     }
 
@@ -11007,6 +11254,104 @@ mod alias_thinking_detection_tests {
                 crate::models::ContentBlock::ToolUse { name, .. } if name == "ghost_tool"
             )),
             "the cache hit replays the stored blocks verbatim: {:?}",
+            replayed.content
+        );
+    }
+
+    /// End-to-end: a cache hit for a request that minted a digit-led tool
+    /// keeps the owned call's stored REGISTRY spelling (`3d_render` — the
+    /// fresh parse's Ok replacement value) owned, so the replay emits no
+    /// unowned-tools warn, while a genuinely unowned sibling name still
+    /// counts exactly once. Re-running the wire-pattern check on the stored
+    /// name used to misread every owned minted replay as unknown-tool
+    /// (round-5 review C2-F1).
+    #[tokio::test]
+    async fn moonshot_cache_hit_keeps_minted_tool_calls_owned() {
+        let client = crate::client::DeepSeekClient::new(&crate::config::Config {
+            provider: Some("moonshot".into()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    api_key: Some("cache-hit-minted-fixture-key".to_string()),
+                    base_url: Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
+                    model: Some(crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string()),
+                    ..crate::config::ProviderConfig::default()
+                },
+                ..crate::config::ProvidersConfig::default()
+            }),
+            ..Default::default()
+        })
+        .expect("fixture client");
+        let mut request = sampling_probe_request(crate::config::MOONSHOT_KIMI_K2_6_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
+        let prepared = client
+            .prepare_outbound_request(request, false)
+            .expect("fixture prepared request");
+        assert_eq!(
+            prepared.body["tools"][0]["function"]["name"],
+            json!("_3d_render"),
+            "the fixture wire carries the minted spelling"
+        );
+        let owners =
+            super::moonshot_response_tool_owners(&prepared.body, &prepared.moonshot_mint_owners)
+                .expect("fixture owners");
+        assert_eq!(
+            owners.get("_3d_render").map(String::as_str),
+            Some("3d_render"),
+            "the owner map is keyed by the decoded minted wire spelling and valued by the registry owner"
+        );
+        let wire_body = serde_json::to_vec(&prepared.body).expect("serialize fixture wire body");
+        let key = crate::llm_response_cache::ResponseCache::make_key(
+            client.api_provider.as_str(),
+            &client.base_url,
+            client.path_suffix.as_deref(),
+            &client.api_key,
+            &wire_body,
+        );
+        // The seeded entry mirrors a fresh parse's storage: the owned call's
+        // name was replaced with the registry owner, the unowned call kept
+        // its raw wire spelling.
+        let cached = crate::models::MessageResponse {
+            id: "chatcmpl-cache-minted".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                crate::models::ContentBlock::ToolUse {
+                    id: "call-minted".to_string(),
+                    name: "3d_render".to_string(),
+                    input: json!({"path": "scene.glb"}),
+                    caller: None,
+                    thought_signature: None,
+                },
+                crate::models::ContentBlock::ToolUse {
+                    id: "call-ghost".to_string(),
+                    name: "ghost_tool".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+            model: crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string(),
+            stop_reason: Some("tool_calls".to_string()),
+            stop_sequence: None,
+            container: None,
+            usage: crate::models::Usage::default(),
+        };
+        crate::llm_response_cache::response_cache().put(key, cached);
+        let replayed = client
+            .create_message_chat(&prepared, true)
+            .await
+            .expect("the seeded cache entry must answer without transport");
+        assert_eq!(
+            super::moonshot_cached_response_unowned_tool_count(&replayed, &owners),
+            1,
+            "only the genuinely unowned name counts, so the minted sibling emits no warn"
+        );
+        assert!(
+            replayed.content.iter().any(|block| matches!(
+                block,
+                crate::models::ContentBlock::ToolUse { name, .. } if name == "3d_render"
+            )),
+            "the owned minted call replays verbatim: {:?}",
             replayed.content
         );
     }
@@ -12605,6 +12950,100 @@ mod image_block_wire_tests {
         );
     }
 
+    /// The proof must survive NESTED untyped unions when a wide union's
+    /// branches share one inner schema. Each branch's dispatch costs ~2 steps,
+    /// but re-proving the shared inner union per branch costs ~11, so a legal
+    /// relaxed schema (~146 branches, every `anyOf` node far under the
+    /// 500-branch budget) exhausted the 1024-step cap and failed closed
+    /// (round-5 review P2-1). The node memo records a completed verdict keyed
+    /// by the node's stable address — sound because the judgment is
+    /// path-independent (`$ref`s resolve absolutely) and recorded only after
+    /// the node's whole closure proved true — so every further branch that
+    /// reaches the shared subtree costs only its dispatch steps, while the
+    /// step cap still fails closed on runaway width.
+    #[test]
+    fn moonshot_proof_memoizes_shared_nested_untyped_unions_within_the_budget() {
+        let inner = json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"]
+                },
+                {"type": "object"}
+            ]
+        });
+        let proves = |branches: usize| {
+            super::moonshot_parameters_prove_object(&json!({
+                "anyOf": vec![json!({"$ref": "#/$defs/branch"}); branches],
+                "$defs": {"branch": inner.clone()}
+            }))
+        };
+        assert!(
+            proves(146),
+            "a 146-branch union of $ref-shared nested untyped unions proves inside the budget"
+        );
+        assert!(
+            !proves(2000),
+            "runaway width still fails closed under the step cap even with the memo"
+        );
+    }
+
+    /// The address memo only helps nodes that are REVISITED (`$ref` sharing),
+    /// so the Pydantic-style inline shape — a wide union whose branches each
+    /// carry their own nested untyped union by VALUE, identical across
+    /// branches — paid the full first proof per branch and still tripped the
+    /// step cap (round-5 review F1). The content memo reuses the completed
+    /// verdict of a `$ref`-FREE subtree wherever the same content reappears,
+    /// so identical inline branches cost their dispatch steps after the
+    /// first. Content-distinct branches have no reusable verdict, and the
+    /// cap still bounds their total proof work (fail-closed, honestly
+    /// semantic — those schemas keep costing O(branch × subtree)).
+    #[test]
+    fn moonshot_proof_content_memo_covers_inline_nested_untyped_unions_within_the_budget() {
+        let proves_identical = |branches: usize| {
+            super::moonshot_parameters_prove_object(&json!({
+                "anyOf": (0..branches)
+                    .map(|_| {
+                        json!({
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {"value": {"type": "string"}},
+                                    "required": ["value"]
+                                },
+                                {"type": "object"}
+                            ]
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }))
+        };
+        assert!(
+            proves_identical(146),
+            "146 branches of identical inline nested untyped unions prove within the budget"
+        );
+        let distinct = json!({
+            "anyOf": (0..200)
+                .map(|index| {
+                    json!({
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {(format!("value_{index}")): {"type": "string"}}
+                            },
+                            {"type": "object"}
+                        ]
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            !super::moonshot_parameters_prove_object(&distinct),
+            "content-distinct inline unions have no reusable verdict and stay capped"
+        );
+    }
+
     /// End-to-end: a strict:false Moonshot tool whose root `anyOf` holds 490
     /// trivial object branches — a width the OLD proof-step budget could not
     /// prove — passes every relaxed budget, proves the object root, and ships
@@ -12663,6 +13102,159 @@ mod image_block_wire_tests {
         assert!(
             body.omitted_tool_names.is_empty(),
             "the wide union must not be dropped: {:?}",
+            body.omitted_tool_names
+        );
+        let function = &body.body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(
+            function["parameters"], union_schema,
+            "relaxed semantics ship the schema verbatim"
+        );
+    }
+
+    /// End-to-end: a strict:false Moonshot tool whose parameter root is a
+    /// 146-branch union whose branches all `$ref`-share one nested untyped
+    /// union passes every relaxed budget, proves the object root under the
+    /// node memo (the per-branch re-proof used to exhaust the step budget and
+    /// drop the tool), and ships on the wire with its schema preserved
+    /// verbatim (round-5 review P2-1).
+    #[test]
+    fn moonshot_relaxed_shared_nested_union_ships_within_the_proof_step_budget() {
+        let union_schema = json!({
+            "anyOf": vec![json!({"$ref": "#/$defs/nested_branch"}); 146],
+            "$defs": {
+                "nested_branch": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                            "required": ["value"]
+                        },
+                        {"type": "object"}
+                    ]
+                }
+            }
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "shared_nested_union".to_string(),
+            description: "probe".to_string(),
+            input_schema: union_schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: Some(false),
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "probe".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the shared nested union proves the object root under the node memo");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "the shared nested union must not be dropped: {:?}",
+            body.omitted_tool_names
+        );
+        let function = &body.body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(
+            function["parameters"], union_schema,
+            "relaxed semantics ship the schema verbatim"
+        );
+    }
+
+    /// End-to-end: the Pydantic-style INLINE shape — a strict:false Moonshot
+    /// tool whose parameter root is a 146-branch union whose branches each
+    /// carry their own nested untyped union by value (no `$defs`, no `$ref`)
+    /// — passes every relaxed budget, proves the object root under the
+    /// content memo, and ships on the wire with its schema preserved
+    /// verbatim (round-5 review F1).
+    #[test]
+    fn moonshot_relaxed_inline_nested_union_ships_within_the_proof_step_budget() {
+        let union_schema = json!({
+            "anyOf": (0..146)
+                .map(|_| {
+                    json!({
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {"value": {"type": "string"}},
+                                "required": ["value"]
+                            },
+                            {"type": "object"}
+                        ]
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "inline_nested_union".to_string(),
+            description: "probe".to_string(),
+            input_schema: union_schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: Some(false),
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "probe".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("the inline nested union proves the object root under the content memo");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "the inline nested union must not be dropped: {:?}",
             body.omitted_tool_names
         );
         let function = &body.body["tools"][0]["function"];

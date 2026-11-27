@@ -4554,6 +4554,26 @@ impl DeepSeekClient {
             ) == format!("{base_url}/chat/completions")
             && self.api_key == api_key
     }
+    /// The blocking path's once-per-request mirror of the streaming
+    /// [`crate::models::StreamEvent::ToolProjectionWarning`]:
+    /// `finish_prepared_stream` prepends the typed event so a transcript can
+    /// render it, but `perform_message` returns a bare `MessageResponse` with
+    /// no event channel, so the same per-tool drop receipt used to vanish
+    /// silently there. The identical bounded message text rides the verbose
+    /// log instead, keyed off the same `omitted_tool_names` seam (round-5
+    /// review C1-F2).
+    fn blocking_tool_projection_warning(prepared: &PreparedOutboundRequest) -> Option<String> {
+        (!prepared.omitted_tool_names.is_empty()).then(|| {
+            crate::core::events::tool_projection_warning_message(
+                &prepared.endpoint.provider_display,
+                &crate::core::events::bounded_tool_projection_warning_names(
+                    &prepared.omitted_tool_names,
+                ),
+                prepared.omitted_tool_names.len(),
+            )
+        })
+    }
+
     async fn perform_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         let _inference = self.acquire_remote_control_inference_permit().await;
         let _permit = self.acquire_provider_request_permit().await;
@@ -4565,6 +4585,9 @@ impl DeepSeekClient {
         let cacheable = self.request_idempotency_header.is_none()
             && crate::llm_response_cache::request_is_cacheable(&request);
         let prepared = self.prepare_outbound_request(request, false)?;
+        if let Some(warning) = Self::blocking_tool_projection_warning(&prepared) {
+            logging::warn(warning);
+        }
         match prepared.dialect {
             WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
             WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
@@ -8413,6 +8436,71 @@ mod tests {
         assert!(
             !body.to_string().contains("private-regex-9901"),
             "omitted schema values must not reach the wire: {body}"
+        );
+    }
+
+    /// The blocking path mirrors the streaming side's once-per-request
+    /// projection warning: the same `omitted_tool_names` seam, the same
+    /// provider display and bounded name sample, the same message text. The
+    /// streaming path rides a typed stream event, but `perform_message`
+    /// returns a bare `MessageResponse` with no event channel, so its drop
+    /// receipt used to vanish silently (round-5 review C1-F2).
+    #[test]
+    fn moonshot_blocking_path_builds_the_projection_warning_off_the_same_seam() {
+        let client = moonshot_request_boundary_client(
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+            "http://127.0.0.1:9".to_string(),
+        );
+        let mut request =
+            k3_request_fixture(crate::config::MOONSHOT_KIMI_K2_6_MODEL, Some("off"), false);
+        let good = test_tool("compatible_lookup");
+        let mut bad = test_tool("mcp_pattern_tool");
+        bad.input_schema = json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "patternProperties": {"^private-regex-9902$": {"type": "string"}}
+        });
+        request.tools = Some(vec![good, bad]);
+        let prepared = client
+            .prepare_outbound_request(request, false)
+            .expect("a per-tool drop keeps the request sendable");
+        assert_eq!(prepared.omitted_tool_names, vec!["mcp_pattern_tool"]);
+        let warning = DeepSeekClient::blocking_tool_projection_warning(&prepared)
+            .expect("a dropped tool must produce the blocking projection warning");
+        assert!(
+            warning.starts_with("Warning: ")
+                && warning
+                    .contains("omitted incompatible tools for this request: mcp_pattern_tool"),
+            "the text is the streaming-side message verbatim: {warning}"
+        );
+        assert!(
+            warning.contains("Moonshot"),
+            "the provider display rides the same endpoint identity as the stream event: {warning}"
+        );
+        assert!(
+            warning.contains("mcp_pattern_tool"),
+            "the bounded name sample names the dropped tool: {warning}"
+        );
+        assert!(
+            !warning.contains("private-regex-9902"),
+            "schema values must not leak into the diagnostic: {warning}"
+        );
+        assert_eq!(
+            warning.matches("mcp_pattern_tool").count(),
+            1,
+            "one bounded sample entry, so one warn per request carries it"
+        );
+
+        // Nothing omitted -> no warning on the blocking path either.
+        let clean = k3_request_fixture(crate::config::MOONSHOT_KIMI_K2_6_MODEL, Some("off"), false);
+        let prepared = client
+            .prepare_outbound_request(clean, false)
+            .expect("clean request prepares");
+        assert!(prepared.omitted_tool_names.is_empty());
+        assert!(
+            DeepSeekClient::blocking_tool_projection_warning(&prepared).is_none(),
+            "a clean request must not warn"
         );
     }
 

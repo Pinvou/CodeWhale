@@ -37894,6 +37894,38 @@ async fn moonshot_ghost_tool_name_gets_standard_receipt_and_same_turn_recovery()
     // after the ghost receipt.
     let requests = mock.captured_requests();
     assert_eq!(requests.len(), 2);
+    // Round-5 R-F1 pin: the standard receipt must actually reach request 2's
+    // replay history (r4 made the replay a bounded pass-through, so the
+    // receipt travels as a `tool_result` block keyed by the ghost call id).
+    // Without this pin the test only proves the receipt surfaced in events —
+    // a replay regression would still pass.
+    let ghost_replay = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } if tool_use_id == "call-ghost" => Some((content, *is_error)),
+            _ => None,
+        })
+        .expect("request 2 must replay the ghost call's receipt as a tool_result");
+    assert_eq!(
+        ghost_replay.1,
+        Some(true),
+        "the ghost receipt must replay as an errored tool_result: {:?}",
+        ghost_replay.0
+    );
+    assert!(
+        ghost_replay
+            .0
+            .contains("Tool 'ghost_tool' is not available in the current tool catalog"),
+        "request 2's replay must carry the standard unknown-tool receipt: {:?}",
+        ghost_replay.0
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
 }

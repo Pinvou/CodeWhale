@@ -77,7 +77,12 @@ fn catalog_family_candidates(
         {
             Some("trinity-mini".to_string())
         }
-        ApiProvider::Moonshot if lower == "kimi-k2.7-code" => Some("kimi-k2.6".to_string()),
+        // Keys are exact wire ids (`lower == …`), so kimi-k3 never spills onto
+        // kimi-k3.1-pro and friends. K3.1 stays unmapped on purpose: its
+        // pricing is unknown, so single-tier fallback is the conservative call.
+        ApiProvider::Moonshot if matches!(lower.as_str(), "kimi-k2.7-code" | "kimi-k3") => {
+            Some("kimi-k2.6".to_string())
+        }
         ApiProvider::Minimax | ApiProvider::MinimaxAnthropic if lower == "minimax-m2.7" => {
             Some("MiniMax-M2.7-highspeed".to_string())
         }
@@ -2345,6 +2350,7 @@ mod tests {
             (ApiProvider::XiaomiMimo, "mimo-v2.5-pro", "mimo-v2.5"),
             (ApiProvider::Arcee, "trinity-large-thinking", "trinity-mini"),
             (ApiProvider::Moonshot, "kimi-k2.7-code", "kimi-k2.6"),
+            (ApiProvider::Moonshot, "kimi-k3", "kimi-k2.6"),
             (
                 ApiProvider::Minimax,
                 "MiniMax-M2.7",
@@ -2381,6 +2387,53 @@ mod tests {
         ] {
             assert_eq!(provider_router_candidates(provider, model).cheap, None);
         }
+    }
+
+    #[test]
+    fn moonshot_default_kimi_k3_resolves_children_to_kimi_k2_6_cheap_tier() {
+        use crate::config::ApiProvider;
+
+        // The Moonshot default is kimi-k3; the mapping must keep the
+        // provider's cheap tier alive for it, or auto-router children and
+        // heuristic subtasks silently pay big-tier prices.
+        assert_eq!(crate::config::DEFAULT_MOONSHOT_MODEL, "kimi-k3");
+        let candidates = provider_router_candidates(
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_MODEL,
+        );
+        assert_eq!(candidates.big, "kimi-k3");
+        assert_eq!(candidates.cheap.as_deref(), Some("kimi-k2.6"));
+
+        // Short and routine subtask prompts ride the cheap tier.
+        for prompt in ["hi", "explain this diff line by line"] {
+            assert_eq!(
+                auto_model_heuristic_for_candidates(prompt, "kimi-k3", &candidates),
+                "kimi-k2.6",
+                "prompt {prompt:?}"
+            );
+        }
+        // Complex work stays on the parent model.
+        assert_eq!(
+            auto_model_heuristic_for_candidates(
+                "please implement the auth module",
+                "kimi-k3",
+                &candidates
+            ),
+            "kimi-k3"
+        );
+    }
+
+    #[test]
+    fn moonshot_kimi_k3_1_pro_has_no_cheap_tier_mapping() {
+        use crate::config::ApiProvider;
+
+        // K3.1 pricing is unknown, so the mapping stays conservative:
+        // kimi-k3.1-pro resolves single-tier (cheap = None) instead of
+        // guessing the K3 cheap tier applies. Exact-id keys make this the
+        // natural behavior — no prefix leakage from the kimi-k3 entry.
+        let candidates = provider_router_candidates(ApiProvider::Moonshot, "kimi-k3.1-pro");
+        assert_eq!(candidates.big, "kimi-k3.1-pro");
+        assert_eq!(candidates.cheap, None);
     }
 
     #[test]

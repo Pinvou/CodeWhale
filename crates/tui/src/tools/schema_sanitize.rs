@@ -1949,11 +1949,11 @@ fn branch_required_would_be_pruned(branch: &Value) -> bool {
         .and_then(Value::as_object)
         .map(|props| props.keys().collect())
         .unwrap_or_default();
-    required.iter().any(|entry| {
-        !entry
-            .as_str()
-            .is_some_and(|name| known_keys.iter().any(|known| *known == name))
-    })
+    let known_keys: std::collections::HashSet<&str> =
+        known_keys.into_iter().map(|known| known.as_str()).collect();
+    required
+        .iter()
+        .any(|entry| !entry.as_str().is_some_and(|name| known_keys.contains(name)))
 }
 
 /// Sanitize a schema for OpenAI Responses function tools.
@@ -2561,19 +2561,19 @@ fn prune_dangling_required(
         .and_then(|v| v.as_object())
         .map(|props| props.keys().cloned().collect())
         .unwrap_or_default();
-    let known_keys: &[String] = if obj.contains_key("properties") && declared_local {
-        &local_keys
-    } else {
-        enclosing_properties
-    };
+    // Set membership keeps the required prune linear in the schema size on
+    // the shared (uncapped-by-bytes) registry lane instead of an
+    // O(required × properties) scan per node (round-5 review).
+    let known_keys: std::collections::HashSet<&str> =
+        if obj.contains_key("properties") && declared_local {
+            local_keys.iter().map(String::as_str).collect()
+        } else {
+            enclosing_properties.iter().map(String::as_str).collect()
+        };
     let Some(required) = obj.get_mut("required").and_then(|v| v.as_array_mut()) else {
         return;
     };
-    required.retain(|entry| {
-        entry
-            .as_str()
-            .is_some_and(|k| known_keys.iter().any(|known| known == k))
-    });
+    required.retain(|entry| entry.as_str().is_some_and(|k| known_keys.contains(k)));
     if required.is_empty() {
         obj.remove("required");
     }
@@ -2618,13 +2618,15 @@ fn enforce_strict_subset(schema: &mut Value) {
         strip_unsupported_strict_keywords(obj);
         if is_object_schema(obj) {
             let originally_required = required_names(obj);
+            // Set membership keeps the strict-subset pass linear instead of
+            // an O(properties × required) scan per node (round-5 review).
+            let required_set: std::collections::HashSet<&str> =
+                originally_required.iter().map(String::as_str).collect();
             let properties = ensure_properties_object(obj);
             let mut property_names: Vec<String> = properties.keys().cloned().collect();
             property_names.sort();
             for property_name in &property_names {
-                if !originally_required
-                    .iter()
-                    .any(|required| required == property_name)
+                if !required_set.contains(property_name.as_str())
                     && let Some(property_schema) = properties.get_mut(property_name)
                 {
                     mark_nullable(property_schema);
@@ -7948,8 +7950,14 @@ mod tests {
 }
 
 /// Intersect a parent `type` with every nested `anyOf` branch. Branches with
-/// a provably disjoint type are removed; untyped `$ref` branches are kept
-/// verbatim and bool-schema branches are projected exactly (a `false` branch
+/// a provably disjoint type are removed; an untyped `$ref` branch ships
+/// verbatim only when its resolved target carries the parent type exactly —
+/// any other `$ref` (unresolvable, strictly broader than the intersection,
+/// or without a plain-string target type) aborts the whole node so
+/// validation rejects the retained `type` + `anyOf` pair instead of a
+/// branch whose parent constraint lost its wire carrier — array-form
+/// `type` branches are narrowed to the intersection exactly, and
+/// bool-schema branches are projected exactly (a `false` branch
 /// is removed, a `true` branch collapses the union onto the parent type) so
 /// a representable contract does not fail validation as a whole. A parent
 /// type that conflicts with EVERY branch is reported as
@@ -7957,6 +7965,22 @@ mod tests {
 /// an emptied union for validation to misreport as a resource failure.
 /// `oneOf` is deliberately not rewritten.
 pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParameterSchemaError> {
+    // Branch-level `$ref` projection resolves against the root `$defs`.
+    // Snapshot them once (the lane's byte budget bounds the copy) so the
+    // walk can read the author's declared targets without borrowing against
+    // the in-flight mutations.
+    let defs = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    sanitize_kimi_node(schema, &defs)
+}
+
+fn sanitize_kimi_node(
+    schema: &mut serde_json::Value,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<(), KimiParameterSchemaError> {
     if !schema_within_structural_depth_limit(schema) {
         return Ok(());
     }
@@ -7964,21 +7988,21 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParam
         for map_key in ["properties", "$defs"] {
             if let Some(children) = obj.get_mut(map_key).and_then(Value::as_object_mut) {
                 for child in children.values_mut() {
-                    sanitize_for_kimi(child)?;
+                    sanitize_kimi_node(child, defs)?;
                 }
             }
         }
         if let Some(items) = obj.get_mut("items") {
-            sanitize_for_kimi(items)?;
+            sanitize_kimi_node(items, defs)?;
         }
         if let Some(additional) = obj.get_mut("additionalProperties")
             && additional.is_object()
         {
-            sanitize_for_kimi(additional)?;
+            sanitize_kimi_node(additional, defs)?;
         }
         if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
             for branch in branches {
-                sanitize_for_kimi(branch)?;
+                sanitize_kimi_node(branch, defs)?;
             }
         }
 
@@ -8005,31 +8029,21 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParam
                     });
             if union_is_vacuous {
                 obj.remove("anyOf");
-            } else {
-                if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-                    branches.retain(|branch| !branch.is_boolean());
-                    if branches.is_empty() {
-                        return Err(KimiParameterSchemaError::ContradictoryParentUnion);
-                    }
+            } else if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+                branches.retain(|branch| !branch.is_boolean());
+                if branches.is_empty() {
+                    return Err(KimiParameterSchemaError::ContradictoryParentUnion);
                 }
-                obj.remove("type");
-                if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-                    let mut contradiction = None;
-                    branches.retain_mut(|branch| {
-                        match intersect_kimi_branch_type(branch, &parent_type) {
-                            Ok(keep) => keep,
-                            Err(error) => {
-                                contradiction.get_or_insert(error);
-                                false
-                            }
-                        }
-                    });
-                    if let Some(error) = contradiction {
-                        return Err(error);
-                    }
-                    if branches.is_empty() {
-                        return Err(KimiParameterSchemaError::ContradictoryParentUnion);
-                    }
+                // All-or-nothing: a branch that cannot be projected exactly
+                // (an unresolvable or over-broad `$ref`, an unrepresentable
+                // `type` form) aborts the node, which is left as
+                // `{type, anyOf}` for the validator's union-sibling whitelist
+                // to reject with its precise diagnosis. The projection is
+                // only written back when every branch carries the exact
+                // intersection — a branch must never ship after its parent
+                // constraint lost its wire carrier (round-5 review).
+                if project_typed_union_branches(branches, &parent_type, defs)? {
+                    obj.remove("type");
                 }
             }
         }
@@ -8045,33 +8059,161 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParam
     Ok(())
 }
 
-/// Apply a same-instance parent type to a branch. Nested unions receive the
-/// constraint recursively instead of gaining an invalid `type + anyOf` pair.
-/// An untyped `$ref` branch is left verbatim — stamping the parent type onto
-/// it would manufacture the `type` + `$ref` sibling pair the validator's
-/// ref-sibling whitelist rejects (round-4 review). Bool-schema branches are
-/// projected exactly: `false` admits no instance and is removed, `true`
-/// admits every instance so the union collapses onto its effective type.
-/// Malformed nodes stay in place for the validator to reject; a nested union
-/// whose parent-excluded branches all vanish surfaces the
+/// Outcome of projecting one branch of a typed union onto the parent type.
+enum BranchProjection {
+    /// The branch carries the exact intersection after in-place projection.
+    Keep,
+    /// The branch is provably disjoint from the parent type.
+    Drop,
+    /// The branch cannot be projected exactly; the enclosing union must be
+    /// left verbatim so its retained `type` beside `anyOf` fails validation
+    /// closed instead of a constraint-free branch shipping.
+    AbortNode,
+}
+
+/// Project every branch of a typed union all-or-nothing. Returns whether the
+/// projection applied: `false` means some branch could not be represented
+/// exactly and the caller must leave the union's `type` in place (the
+/// validator then rejects the `type`-beside-`anyOf` pair with its precise
+/// diagnosis). A provably disjoint branch is dropped; a union whose branches
+/// all vanish reports
+/// [`KimiParameterSchemaError::ContradictoryParentUnion`]. The projected
+/// branches are only written back once every branch projected, so an abort
+/// never leaves a half-projected union behind.
+fn project_typed_union_branches(
+    branches: &mut Vec<Value>,
+    parent_type: &str,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<bool, KimiParameterSchemaError> {
+    let original = branches.clone();
+    let mut kept = Vec::with_capacity(original.len());
+    for mut branch in original {
+        match intersect_kimi_branch_type(&mut branch, parent_type, defs) {
+            Ok(BranchProjection::Keep) => kept.push(branch),
+            Ok(BranchProjection::Drop) => {}
+            Ok(BranchProjection::AbortNode) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    if kept.is_empty() {
+        return Err(KimiParameterSchemaError::ContradictoryParentUnion);
+    }
+    *branches = kept;
+    Ok(true)
+}
+
+/// Project a `$ref` branch of a typed union. The wire allows `$ref` only
+/// beside annotations and `type` only beside the union keyword, so the
+/// parent constraint has no carrier of its own: it survives only inside the
+/// resolved target. An untyped `$ref` therefore ships verbatim when its
+/// target provably carries the intersection, drops when it is provably
+/// disjoint, and aborts the node whenever exactness cannot be proven
+/// (round-5 review: verbatim-keeping used to widen the wire).
+fn project_ref_branch(
+    obj: &mut serde_json::Map<String, Value>,
+    parent_type: &str,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<BranchProjection, KimiParameterSchemaError> {
+    let Some(target) = obj
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| resolve_kimi_ref_target(defs, reference))
+    else {
+        return Ok(BranchProjection::AbortNode);
+    };
+    match target.get("type").and_then(Value::as_str) {
+        Some(target_type) => match intersect_schema_types(parent_type, target_type) {
+            // The target itself carries the intersection exactly: the
+            // reference ships verbatim (the shape round-4 pinned).
+            Some(effective) if effective == target_type => Ok(BranchProjection::Keep),
+            // The intersection is strictly narrower than the target; no
+            // verbatim spelling is exact, so the node aborts closed.
+            Some(_) => Ok(BranchProjection::AbortNode),
+            None => Ok(BranchProjection::Drop),
+        },
+        // A target without a plain-string `type` cannot prove exactness.
+        None => Ok(BranchProjection::AbortNode),
+    }
+}
+
+/// Resolve a branch-level `#/$defs/<name>` reference against the root
+/// `$defs`, admitting one decoded single-name segment exactly like
+/// [`resolve_mfjs_reference`] does (round-4 review).
+fn resolve_kimi_ref_target<'a>(
+    defs: &'a serde_json::Map<String, Value>,
+    reference: &str,
+) -> Option<&'a Value> {
+    let name = reference.strip_prefix("#/$defs/")?;
+    let decoded = name.replace("~1", "/").replace("~0", "~");
+    if decoded.is_empty() || decoded.contains('/') {
+        return None;
+    }
+    defs.get(&decoded).filter(|target| target.is_object())
+}
+
+/// Apply a same-instance parent type to one branch of a typed union. Nested
+/// unions receive the constraint recursively instead of gaining an invalid
+/// `type + anyOf` pair. An untyped `$ref` branch is projected through its
+/// resolved target (see [`project_ref_branch`]); a `$ref` that already
+/// carries a `type` keeps the plain typed-branch path, where a disjoint
+/// spelling is dropped and a satisfiable one is stamped for the validator's
+/// ref-sibling whitelist to judge. Array-form `type` members are narrowed to
+/// their exact intersection with the parent instead of shipping un-narrowed.
+/// Bool-schema branches are projected exactly: `false` admits no instance
+/// and is removed, `true` admits every instance so the union collapses onto
+/// its effective type. A branch that cannot be projected exactly reports
+/// [`BranchProjection::AbortNode`]; a nested union whose parent-excluded
+/// branches all vanish surfaces the
 /// [`KimiParameterSchemaError::ContradictoryParentUnion`] diagnosis instead
-/// of leaving an empty union behind. Returns whether the branch survives.
+/// of leaving an empty union behind.
 fn intersect_kimi_branch_type(
     branch: &mut Value,
     parent_type: &str,
-) -> Result<bool, KimiParameterSchemaError> {
+    defs: &serde_json::Map<String, Value>,
+) -> Result<BranchProjection, KimiParameterSchemaError> {
     let Some(obj) = branch.as_object_mut() else {
-        return Ok(true);
+        // Non-object branches stay for the validator to reject verbatim.
+        return Ok(BranchProjection::Keep);
     };
     if obj.contains_key("$ref") && !obj.contains_key("type") {
-        return Ok(true);
+        return project_ref_branch(obj, parent_type, defs);
     }
-    let effective_type = match obj.get("type").and_then(Value::as_str) {
-        Some(branch_type) => match intersect_schema_types(parent_type, branch_type) {
-            Some(effective) => effective.to_string(),
-            None => return Ok(false),
-        },
-        None if obj.contains_key("type") => return Ok(true),
+    let type_node = obj.get("type").cloned();
+    let effective_type = match type_node.as_ref() {
+        Some(Value::String(branch_type)) => {
+            match intersect_schema_types(parent_type, branch_type) {
+                Some(effective) => effective.to_string(),
+                None => return Ok(BranchProjection::Drop),
+            }
+        }
+        Some(Value::Array(members)) => {
+            // Exact projection of an array-form `type`: keep the members
+            // that survive the parent intersection, narrowed to it; drop the
+            // branch when none do; abort on a member that is not a plain
+            // string. Verbatim-keeping used to ship the branch un-narrowed,
+            // dropping the parent constraint (round-5 review, same class as
+            // the `$ref` carrier hole).
+            let mut survivors = Vec::with_capacity(members.len());
+            for member in members {
+                match member.as_str() {
+                    Some(member_type) => {
+                        if let Some(effective) = intersect_schema_types(parent_type, member_type) {
+                            survivors.push(Value::String(effective.to_string()));
+                        }
+                    }
+                    None => return Ok(BranchProjection::AbortNode),
+                }
+            }
+            if survivors.is_empty() {
+                return Ok(BranchProjection::Drop);
+            }
+            obj.insert("type".into(), Value::Array(survivors));
+            // A branch-level `type` beside a nested `anyOf` fails MFJS
+            // validation; the narrowed array is exact either way.
+            return Ok(BranchProjection::Keep);
+        }
+        // An unrepresentable `type` form cannot be intersected exactly.
+        Some(_) => return Ok(BranchProjection::AbortNode),
         None => parent_type.to_string(),
     };
     if obj.get("anyOf").is_some_and(Value::is_array) {
@@ -8094,37 +8236,22 @@ fn intersect_kimi_branch_type(
         if union_is_vacuous {
             obj.remove("anyOf");
             obj.insert("type".into(), Value::String(effective_type));
-            return Ok(true);
+            return Ok(BranchProjection::Keep);
         }
         if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
             branches.retain(|branch| !branch.is_boolean());
             if branches.is_empty() {
                 return Err(KimiParameterSchemaError::ContradictoryParentUnion);
             }
+            if !project_typed_union_branches(branches, &effective_type, defs)? {
+                return Ok(BranchProjection::AbortNode);
+            }
         }
         obj.remove("type");
-        if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-            let mut contradiction = None;
-            branches.retain_mut(|nested| {
-                match intersect_kimi_branch_type(nested, &effective_type) {
-                    Ok(keep) => keep,
-                    Err(error) => {
-                        contradiction.get_or_insert(error);
-                        false
-                    }
-                }
-            });
-            if let Some(error) = contradiction {
-                return Err(error);
-            }
-            if branches.is_empty() {
-                return Err(KimiParameterSchemaError::ContradictoryParentUnion);
-            }
-        }
     } else {
         obj.insert("type".into(), Value::String(effective_type));
     }
-    Ok(true)
+    Ok(BranchProjection::Keep)
 }
 
 /// A safe, provider-facing reason that Kimi parameters could not be emitted.
@@ -8147,7 +8274,7 @@ pub enum KimiParameterSchemaError {
     UnsupportedNestedAllOf,
     #[error("Moonshot function parameters contain conflicting nested union composition")]
     ConflictingNestedUnion,
-    #[error("Moonshot function parameters parent type conflicts with every anyOf branch")]
+    #[error("Moonshot function parameters contain a contradictory typed union branch")]
     ContradictoryParentUnion,
     #[error("Moonshot function parameters contain an unsupported const literal")]
     UnsupportedConstLiteral,
@@ -9632,10 +9759,11 @@ mod kimi_tests {
     #[test]
     fn kimi_sanitize_keeps_untyped_ref_branches_of_a_typed_parent_union() {
         // Round-4 review: an untyped `$ref` branch is exactly representable
-        // as a union member. Stamping the parent type onto it used to
-        // manufacture the `type` + `$ref` sibling pair the MFJS
-        // ref-sibling whitelist rejects, trading a resolvable reference for
-        // a misleading `InvalidReference`.
+        // as a union member when its resolved target carries the parent
+        // type. Stamping the parent type onto it used to manufacture the
+        // `type` + `$ref` sibling pair the MFJS ref-sibling whitelist
+        // rejects, trading a resolvable reference for a misleading
+        // `InvalidReference`.
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -9654,7 +9782,7 @@ mod kimi_tests {
         let payload = &schema["properties"]["payload"];
         assert!(
             !payload.as_object().unwrap().contains_key("type"),
-            "the parent type is carried by the walk, not restamped on the branch"
+            "the verbatim reference target carries the parent type exactly"
         );
         let any_of = payload["anyOf"].as_array().unwrap();
         assert_eq!(any_of.len(), 1, "the disjoint string branch is removed");
@@ -9663,6 +9791,161 @@ mod kimi_tests {
             json!({"$ref": "#/$defs/A"}),
             "the reference branch ships verbatim"
         );
+    }
+
+    #[test]
+    fn kimi_sanitize_drops_a_ref_branch_disjoint_from_the_typed_parent() {
+        // Round-5 review: verbatim-keeping an untyped `$ref` branch whose
+        // target does not carry the parent type shipped a constraint-free
+        // branch — the parent type has no wire carrier beside `$ref` or the
+        // union keyword. A provably disjoint target is a dead branch and is
+        // dropped exactly like a disjoint typed branch.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "anyOf": [{"$ref": "#/$defs/S"}, {"type": "object"}]
+                }
+            },
+            "$defs": {"S": {"type": "string"}}
+        });
+
+        sanitize_for_kimi(&mut schema).expect("a disjoint ref branch projects as dead");
+
+        let payload = &schema["properties"]["payload"];
+        assert!(!payload.as_object().unwrap().contains_key("type"));
+        assert_eq!(payload["anyOf"], json!([{"type": "object"}]));
+    }
+
+    #[test]
+    fn kimi_sanitize_aborts_a_node_when_a_ref_target_is_broader_than_the_parent() {
+        // The intersection (`integer`) is strictly narrower than the target
+        // (`number`); no verbatim spelling is exact, so the node keeps its
+        // `type` + `anyOf` pair and the whole tool fails closed at
+        // validation instead of widening the wire to every number.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "anyOf": [{"$ref": "#/$defs/N"}]
+                }
+            },
+            "$defs": {"N": {"type": "number"}}
+        });
+
+        sanitize_for_kimi(&mut schema)
+            .expect("the sanitizer defers the rejection to the validator");
+
+        let count = &schema["properties"]["count"];
+        assert_eq!(
+            count["type"], "integer",
+            "the parent type must stay on the node when a branch cannot project"
+        );
+        assert_eq!(count["anyOf"], json!([{"$ref": "#/$defs/N"}]));
+
+        let mut candidate = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "anyOf": [{"$ref": "#/$defs/N"}]}
+            },
+            "$defs": {"N": {"type": "number"}}
+        });
+        let error = sanitize_for_kimi_parameters(&mut candidate)
+            .expect_err("an over-broad ref target must fail the tool closed");
+        assert_eq!(
+            error,
+            KimiParameterSchemaError::InvalidKeywordValue,
+            "the retained type+anyOf pair is what the union-sibling whitelist rejects"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_aborts_a_node_on_an_unresolvable_ref_branch() {
+        // Same carrier rule for an unresolvable reference: exactness cannot
+        // be proven, so the node keeps `type` + `anyOf` and validation
+        // rejects the tool closed.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "anyOf": [{"$ref": "#/$defs/Missing"}]
+                }
+            }
+        });
+
+        sanitize_for_kimi(&mut schema)
+            .expect("the sanitizer defers the rejection to the validator");
+
+        let count = &schema["properties"]["count"];
+        assert_eq!(count["type"], "integer");
+        assert_eq!(count["anyOf"], json!([{"$ref": "#/$defs/Missing"}]));
+
+        let mut candidate = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "anyOf": [{"$ref": "#/$defs/Missing"}]}
+            }
+        });
+        assert!(
+            sanitize_for_kimi_parameters(&mut candidate).is_err(),
+            "an unresolvable branch reference must fail the tool closed"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_narrows_array_typed_branches_to_the_parent_intersection() {
+        // Same carrier rule for array-form `type` branches: members are
+        // narrowed to their exact intersection with the parent, a fully
+        // disjoint array is a dead branch, and nothing ships un-narrowed.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "anyOf": [{"type": ["string", "object"]}, {"type": "string"}]
+                },
+                "b": {"type": "number", "anyOf": [{"type": ["string", "integer"]}]}
+            }
+        });
+
+        sanitize_for_kimi(&mut schema).expect("array-form types project exactly");
+
+        let a = &schema["properties"]["a"];
+        assert!(!a.as_object().unwrap().contains_key("type"));
+        assert_eq!(
+            a["anyOf"],
+            json!([{"type": ["object"]}]),
+            "the surviving member is narrowed to the intersection"
+        );
+        let b = &schema["properties"]["b"];
+        assert!(!b.as_object().unwrap().contains_key("type"));
+        assert_eq!(b["anyOf"], json!([{"type": ["integer"]}]));
+
+        let mut all_dead = json!({
+            "type": "object",
+            "properties": {"a": {"type": "object", "anyOf": [{"type": ["string"]}]}}
+        });
+        assert_eq!(
+            sanitize_for_kimi(&mut all_dead).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion
+        );
+
+        // A member that is not a plain string cannot be intersected; the
+        // node aborts closed instead of shipping un-narrowed.
+        let mut unrepresentable = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [{"type": ["string", 3]}]}
+            }
+        });
+        sanitize_for_kimi(&mut unrepresentable)
+            .expect("the sanitizer defers the rejection to the validator");
+        let a = &unrepresentable["properties"]["a"];
+        assert_eq!(a["type"], "object");
+        assert_eq!(a["anyOf"], json!([{"type": ["string", 3]}]));
     }
 
     #[test]
@@ -12358,7 +12641,7 @@ mod review_wave_tests {
             assert!(
                 error
                     .to_string()
-                    .contains("conflicts with every anyOf branch"),
+                    .contains("contradictory typed union branch"),
                 "{label}: the message must name the conflict, got: {error}"
             );
         };
