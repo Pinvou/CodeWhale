@@ -746,15 +746,20 @@ strict_tool_mode = true
 
 Off by default. When enabled, requests routed to an **official DeepSeek-family
 route** (provider-typed DeepSeek — the `deepseek`, legacy `deepseek-cn`, and
-`deepseek-anthropic` typings — on a canonical path of `api.deepseek.com` or
-the legacy `api.deepseeki.com` alias, including the Anthropic-compatible
-Messages route) also set
+`deepseek-anthropic` typings — on the official `api.deepseek.com` hosts (any
+path: the gate is deliberately broader than the canonical URL lists, so a
+non-canonical official path keeps the flag forwarded — the `official_route`
+verdict below) or the legacy `api.deepseeki.com` alias, including the
+Anthropic-compatible Messages route) also set
 `tool_choice: "required"` and reshape every active tool schema to DeepSeek's
 strict contract: optional parameters are removed from the schema (each
 removal is reported in the tool description — up to 20 names individually,
 the remainder counted), non-numeric `const` values land on
-`enum`, and conditional-requirement tables are dropped — some with a
-per-tool note, some silently; the split is below. A second keyword family
+`enum`, and conditional-requirement tables drop **silently**
+(`dependentRequired`, draft-7 name-array `dependencies`) or fail the tool
+closed when they cannot drop safely (`dependentSchemas`, boolean-`false`
+`dependencies`) — no conditional drop carries a per-tool note; the notes
+below belong to optional-parameter removals. A second keyword family
 widens **silently** — removed with no per-tool note because dropping them
 only widens what the endpoint accepts: `dependentRequired`, draft-7
 name-array `dependencies` (a boolean-`false` `dependencies` entry fails
@@ -775,7 +780,7 @@ resolution on a conformant wire while the pipeline's resolvers read
 pointers against the document root, and `$dynamicRef` is undocumented by
 the DeepSeek contract.
 Two carve-outs: on thinking-enabled requests to the DeepSeek dialect — chat
-and Anthropic-Messages alike (round 29) — the `tool_choice` key is omitted
+and Anthropic-Messages alike (round 28) — the `tool_choice` key is omitted
 entirely (the wire rejects the combination), and
 on routes whose model resolves to the Responses endpoint the wire hardcodes
 `strict: false` per tool and sends `tool_choice: "auto"` (the doctor's
@@ -795,12 +800,12 @@ schema-optional parameters (`update_goal`, `send_later`, `agent`,
 keep their original schema and ship without the strict flag, so they stay
 callable non-strict. `agent` (the model-facing sub-agent surface) carries
 its per-action requirements in a `dependentSchemas` table the strict
-contract cannot express — the strict gate fails the tool closed on the
+contract cannot express: the strict gate fails the tool closed on the
 keyword itself (the strict path never strips it; the runtime-truth
-sentence describes what would break without that arm) — under strict
-every targeted call would be rejected (only `roster`, a scope-less
-`status`, and the vacuous `wait` answer) — the tool ships non-strict
-instead. `agents/message` and
+sentence describes what would break without that arm — under strict
+every targeted call would be rejected, with only `roster`, a scope-less
+`status`, and the vacuous `wait` answering), so the tool ships
+non-strict instead. `agents/message` and
 `agents/followup` are model-hidden (never offered to the model), so their
 entries are defense-in-depth. `send_later`'s read-only `list` action would
 have stayed usable and is dropped with the tool — one honest omission

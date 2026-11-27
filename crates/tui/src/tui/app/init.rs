@@ -136,39 +136,18 @@ impl App {
                 None
             }
         });
-        let mut provider = config.api_provider();
-
         // A startup route saved explicitly from `/model` is a user choice and
         // must win over a provider merely seeded in config.toml. A one-launch
         // CLI/environment provider override still wins so scripts can pin
         // their route without changing the user's next interactive launch.
-        let explicit_launch_provider = crate::config::explicit_launch_provider_override().is_some();
-        let mut provider_identity_record = config
-            .active_provider_identity(provider)
-            .unwrap_or_else(|_| {
-                let key = config.provider_identity_for(provider);
-                let exact_id = (!(provider == ApiProvider::Custom
-                    && config.uses_legacy_literal_custom_route()))
-                .then(|| key.clone());
-                crate::config::ProviderIdentity {
-                    provider,
-                    key,
-                    exact_id,
-                    migrated_legacy_ollama_cloud_route: false,
-                }
-            });
-        if !explicit_launch_provider
-            && !config.fleet_operator_route_applied
-            && let Some(ref provider_str) = settings.default_provider
-            && let Ok(resolved) = config.resolve_provider_identity(provider_str)
-        {
-            provider = resolved.provider;
-            provider_identity_record = resolved;
-        }
+        // (`config.rs::launch_provider_identity` — the doctor's launch
+        // prediction reads the same derivation, so the two cannot drift.)
+        let provider_identity_record = crate::config::launch_provider_identity(config, &settings);
+        let provider = provider_identity_record.provider;
         let mut effective_auth_config = config.clone();
         effective_auth_config.scope_to_provider_identity(&provider_identity_record);
-        let provider_identity = provider_identity_record.key;
-        let provider_exact_id = provider_identity_record.exact_id;
+        let provider_identity = provider_identity_record.key.clone();
+        let provider_exact_id = provider_identity_record.exact_id.clone();
 
         // #5032: a stale `[providers.xai] oauth_credential_generation` pointer
         // whose owned credential file is gone makes `credentials_valid` return
@@ -342,33 +321,14 @@ impl App {
         // request wins. Before this fix the memory won unconditionally, so
         // `codewhale --provider moonshot --model kimi-k3` silently kept running
         // the remembered `kimi-k2.7-code` while `doctor` reported `kimi-k3`.
-        let model = if crate::config::explicit_launch_model_override().is_some()
-            || config.fleet_operator_route_applied
-        {
-            model
-        } else {
-            let configured = model;
-            provider_models
-                .get(&provider_identity)
-                .cloned()
-                .or_else(|| {
-                    // default_model is a DeepSeek-centric setting; other providers
-                    // get their model from config.toml / env (e.g. OPENAI_MODEL).
-                    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                        settings.default_model.clone()
-                    } else {
-                        None
-                    }
-                })
-                // The remembered pick may be a catalog spelling of the model
-                // the config file already names. Case-sensitive self-hosted
-                // endpoints reject the wrong spelling, so config.toml wins a
-                // case-only disagreement (the selection itself is unchanged).
-                .map(|remembered| {
-                    crate::config::prefer_configured_model_spelling(&configured, remembered)
-                })
-                .unwrap_or(configured)
-        };
+        // (`config.rs::launch_model_for_identity` — the doctor's launch
+        // prediction reads the same chain, so the two cannot drift.)
+        let model = crate::config::launch_model_for_identity(
+            config,
+            &settings,
+            &provider_identity_record,
+            &model,
+        );
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
         let mut enabled_provider_models = settings.enabled_models.clone().unwrap_or_default();
         for (saved_provider, saved_model) in &provider_models {

@@ -40,10 +40,10 @@ one-request miss):
 
 | Op | Reason |
 | --- | --- |
-| `/model` (SetModel) | `change:model` |
-| Mode change (agent/plan/operate/yolo) | `change:mode` |
+| `/model` (SetModel) | `change:model` (declared op-time, before the composer can diff the pre-installed context) |
+| Mode change (agent/plan/operate/yolo) | `change:mode` (hash-guarded — with bundled prompts the composition is mode-agnostic, so the miss only materializes when prompt bytes derive from mode) |
 | Goal set / pause / resume / clear / status | `change:goal` |
-| Mid-turn tool-surface change (deferred-tool admission/eviction, tool-search activation, runtime MCP tool arrival) | `change:tool_surface` |
+| Mid-turn tool-surface change (turn-tool-security transition, deferred-tool admission/eviction, tool-search activation, runtime MCP tool arrival, end-of-step backstop for any surviving catalog mutation) | `change:tool_surface` |
 | Session sync / restore (SyncSession) | `resume` |
 | Session construction | `initial` |
 
@@ -71,7 +71,11 @@ Two earlier behaviors are rejected, matching the DeepSeek Harness design:
   edges above.
 
 Tool-result redaction (`prepare_model_bound_request`) is content-preserving
-when no secret is configured (the common case), so it does not move the prefix.
+except for one unconditional pass: the credential-shaped scrubber
+(`RedactionPolicy::CredentialShaped`) masks token/JWT/PEM/auth-scheme-shaped
+values even with **no** configured secret, so a tool result that echoes
+credential-shaped text moves the prefix. Beyond that scrubber, redaction is
+content-preserving when no secret is configured, so it does not move the prefix.
 When a configured secret appears in a tool result, redacting it is a security
 requirement that correctly overrides cache stability for that one message.
 
@@ -132,7 +136,12 @@ when no context is pinned yet
 (`core/engine.rs::explicit_prompt_context_change_reason`) — so an
 in-session `/translate` toggle re-declares in place as
 `change:translation`, and a model switch that moves the route limits with
-it declares `model+route`, not bare `model`. Direct declarations add
+it declares `model+route` — but only on the composer-mediated path (a
+per-turn planned route, or context that first differs at the next
+submit). An explicit `/model` picker switch (`Op::SetModel`) pre-installs
+its context at op time, so the composer sees no diff and the switch
+declares the bare `change:model` the table above lists. Direct
+declarations add
 `resume` (a session resume, or the conversation carried across an engine
 respawn through `Op::SyncSession`), `tool_surface`, and the
 `mcp-session-boot` install edge; the feature-gated benchmark path adds

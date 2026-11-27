@@ -44,6 +44,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the static composition only when route resolution failed. Consumers
   keying on the literal `model_aware` value must switch to the concrete
   labels.
+- `codewhale doctor` JSON surfaces are launch-identity-scoped throughout
+  (capability, route, TLS, auth scheme, credential, probe, timeout,
+  `provider_config_table`, `provider_model`, `operate_fleet`,
+  `dsh_integration`), and several values changed as a result: the
+  `provider_config_table` label keys on the launch identity's exact id
+  (`providers.<key>` for a named custom table, `root (legacy literal
+  custom)` off a legacy root, `ollama` for a migrated legacy OllamaCloud
+  identity); `provider_model.model.resolved` follows the launch model
+  chain (per-provider `/model` memory, then DeepSeek-family
+  `settings.default_model`, over the config default), so it can differ
+  from every config table; `provider_source` gained `settings` and
+  `override` values naming which surface picked the route; the route
+  report's `base_url` gained a `source` marker
+  (`prepared_route`/`configured`); and `recommended_base_url` ships
+  verbatim including its `/beta` path (previously authority-redacted, a
+  form the chat wire still strips — consumers matching the redacted
+  prefix must allow the path). On a route-resolution failure the report
+  now answers `base_url` from the launch identity's table instead of the
+  raw config root.
 - API-backed `[search]` providers now visibly degrade directly to the
   keyless Bing tail instead of routing through DuckDuckGo when
   unavailable: DuckDuckGo is unreachable from mainland-China networks

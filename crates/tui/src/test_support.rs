@@ -189,6 +189,21 @@ pub(crate) fn guarded_environment_provides_state_paths() -> bool {
     .any(|var| guarded_path_is_present(var))
 }
 
+/// A sealed environment for tests whose code path reads persisted settings
+/// while asserting on a config-only fixture: an empty `CODEWHALE_HOME`
+/// behind the process env lock. Without it, a concurrent test persisting a
+/// `default_provider` or `provider_models` into the shared state root could
+/// flip the launch identity these assertions answer from (round 31 — the
+/// launch-scoped doctor reads settings on every surface derivation).
+pub(crate) fn sealed_empty_settings_env() -> (tempfile::TempDir, EnvVarGuard, TestEnvLock) {
+    let env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("sealed settings tempdir");
+    let codewhale_home = tmp.path().join(".codewhale");
+    std::fs::create_dir_all(&codewhale_home).expect("sealed settings home");
+    let home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    (tmp, home, env_lock)
+}
+
 impl EnvVarGuard {
     pub(crate) fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
         debug_assert!(

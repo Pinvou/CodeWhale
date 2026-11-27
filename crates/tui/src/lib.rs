@@ -6584,7 +6584,11 @@ fn doctor_provider_model_report_json(
     scoped_config.scope_to_provider_identity(identity);
     let scoped_config = &scoped_config;
     let provider = scoped_config.api_provider();
-    let credential = resolve_credential_diagnostic(scoped_config);
+    // The credential helper scopes internally (`doctor_launch_scoped`), like
+    // every sibling call site — feeding it the pre-scoped clone re-derived
+    // the identity the caller just scoped (harmless, but a redundant
+    // settings read and the only divergent convention in the report).
+    let credential = resolve_credential_diagnostic(config);
     // Round 30 (M2): the model answer follows the same launch chain the
     // capability block resolves, not the scoped table's default — the
     // table default ignores the launch chain's inputs (the per-provider
@@ -6596,10 +6600,13 @@ fn doctor_provider_model_report_json(
     let launch_settings = crate::settings::Settings::load_persisted_read_only()
         .unwrap_or_else(|_| crate::settings::Settings::default());
     let launch_model = doctor_launch_model_for_identity(config, identity, &launch_settings);
-    let resolved_model =
-        crate::route_runtime::resolve_runtime_route_for_identity(config, identity, Some(&launch_model))
-            .map(|route| route.model)
-            .unwrap_or(launch_model);
+    let resolved_model = crate::route_runtime::resolve_runtime_route_for_identity(
+        config,
+        identity,
+        Some(&launch_model),
+    )
+    .map(|route| route.model)
+    .unwrap_or(launch_model);
     let auth_present_or_local = credential.availability.certifies_ready();
     let credential_help = provider.credential_help();
     let credential_url = credential_help
@@ -6655,14 +6662,10 @@ fn doctor_dsh_integration_report(
     // settings re-point produced `route.provider: "ds4"` beside a DSH
     // identity resolved from the raw document. The scoped config is what
     // that resolver must read, and the selector is the launch model — the
-    // same chain `doctor_api_target` resolves (the M2 rule).
-    let (identity, launch_model) = {
-        let launch_settings = crate::settings::Settings::load_persisted_read_only()
-            .unwrap_or_else(|_| crate::settings::Settings::default());
-        let identity = doctor_launch_identity_with_settings(config, &launch_settings);
-        let model = doctor_launch_model_for_identity(config, &identity, &launch_settings);
-        (identity, model)
-    };
+    // same chain `doctor_api_target` resolves (the M2 rule). Round 31: one
+    // `doctor_launch_surface` call feeds both halves instead of an inline
+    // copy of its body.
+    let (_launch_provider, identity, launch_model) = doctor_launch_surface(config);
     let mut scoped = config.clone();
     scoped.scope_to_provider_identity(&identity);
     let identity = dsh::codewhale_route_identity_with_model(&scoped, &launch_model, workspace);
@@ -7511,10 +7514,16 @@ fn doctor_provider_source(config: &Config) -> &'static str {
     // precedence: explicit override > fleet > settings re-point > raw
     // config > default. The re-point test compares the raw spelling, not
     // resolved identities, on purpose: the label names which SURFACE chose
-    // the route, and a settings value that merely re-spells what the raw
-    // document already names resolves to the same identity either way —
-    // recording `settings` there would claim a change of provenance the
-    // identity never took (round 30 note).
+    // the route. The comparison is case-sensitive, and that is the honest
+    // split: a settings value that exactly matches the raw document's
+    // provider (after trimming) records `config` — the document names that
+    // route itself — while a case-different re-spelling records `settings`,
+    // because the identity genuinely resolved through the settings branch
+    // (`resolve_provider_identity` is case-insensitive, and `init.rs` takes
+    // its re-pointed record from that same branch). Round 31: an earlier
+    // draft of this note claimed re-spellings record no provenance change;
+    // the code has always recorded `settings` for them, matching init.
+    // (round 30 note)
     if crate::config::explicit_launch_provider_override().is_some() {
         return "override";
     }
@@ -7781,22 +7790,13 @@ struct DoctorStrictToolModeStatus {
 /// with a selected fleet the real launch serves the operator's route,
 /// which this prediction cannot see; the `fleet_operator_route_applied`
 /// guard below is kept for parity with `init.rs` and is inert in a doctor
-/// process (the flag is only ever set on the launch path). This is the
-/// same refusal `doctor_recovery_report` documents: the doctor models the
-/// settings re-point channel, not overlays.
+/// process (the flag is only ever set on the launch path). The project-
+/// overlay half of this boundary is the refusal `doctor_recovery_report`
+/// documents ("Project-overlay route is unavailable to this diagnostic");
+/// the fleet half has no matching refusal there — `doctor_recovery_report`
+/// is itself the one diagnostic that applies a fleet operator. What this
+/// chain models is the settings re-point channel, not overlays.
 fn doctor_launch_identity(config: &Config) -> crate::config::ProviderIdentity {
-    let launch_settings = crate::settings::Settings::load_persisted_read_only()
-        .unwrap_or_else(|_| crate::settings::Settings::default());
-    doctor_launch_identity_with_settings(config, &launch_settings)
-}
-
-/// [`doctor_launch_identity`] against an already-loaded settings document,
-/// so one disk read feeds both the identity and the model chain
-/// (`doctor_launch_surface`).
-fn doctor_launch_identity_with_settings(
-    config: &Config,
-    launch_settings: &crate::settings::Settings,
-) -> crate::config::ProviderIdentity {
     // The persisted document the launch path normalizes (`init.rs` reads
     // the same candidates with the same parser), loaded read-only: the
     // doctor is a diagnostic and must not create or migrate a settings
@@ -7806,31 +7806,9 @@ fn doctor_launch_identity_with_settings(
     // `default_provider`, `default_model`, `provider_models` — are
     // identical with or without it, and the read-only load skips it on
     // purpose: a diagnostic must not mutate anything, even in memory.
-    let provider = config.api_provider();
-    let mut identity = config
-        .active_provider_identity(provider)
-        .unwrap_or_else(|_| {
-            let key = config.provider_identity_for(provider);
-            let exact_id = (!(provider == crate::config::ApiProvider::Custom
-                && config.uses_legacy_literal_custom_route()))
-            .then(|| key.clone());
-            crate::config::ProviderIdentity {
-                provider,
-                key,
-                exact_id,
-                migrated_legacy_ollama_cloud_route: false,
-            }
-        });
-    // A startup provider saved from the route-save band replaces the config
-    // provider at launch; a one-launch CLI/env override wins over it.
-    if crate::config::explicit_launch_provider_override().is_none()
-        && !config.fleet_operator_route_applied
-        && let Some(ref provider_str) = launch_settings.default_provider
-        && let Ok(resolved) = config.resolve_provider_identity(provider_str)
-    {
-        identity = resolved;
-    }
-    identity
+    let launch_settings = crate::settings::Settings::load_persisted_read_only()
+        .unwrap_or_else(|_| crate::settings::Settings::default());
+    crate::config::launch_provider_identity(config, &launch_settings)
 }
 
 /// The launch surface a fresh session would serve: the provider re-point
@@ -7856,48 +7834,27 @@ fn doctor_launch_surface(
     // identity and the model chain used to load the document separately).
     let launch_settings = crate::settings::Settings::load_persisted_read_only()
         .unwrap_or_else(|_| crate::settings::Settings::default());
-    let identity = doctor_launch_identity_with_settings(config, &launch_settings);
+    let identity = crate::config::launch_provider_identity(config, &launch_settings);
     let model = doctor_launch_model_for_identity(config, &identity, &launch_settings);
     (identity.provider, identity, model)
 }
 
 /// The launch model chain for an identity whose settings document is
-/// already loaded: an explicit one-launch override wins outright, a fleet
-/// operator route keeps its own model, and otherwise the per-provider
-/// `/model` memory — then the DeepSeek-centric `settings.default_model` —
-/// wins over the config default, with the config file winning a case-only
-/// spelling disagreement (`init.rs`'s chain, fed by the raw config the
-/// launch resolves `TuiOptions::model` from).
+/// already loaded (`config.rs::launch_model_for_identity`, `init.rs`'s
+/// chain). The doctor's structural config load is env-blind by design, so
+/// the configured model absorbs the one-launch override here — the
+/// launch's own config load has already embedded that override into the
+/// provider slot its `default_model()` reads, and the shared chain keeps
+/// the configured answer whenever an override or an applied fleet operator
+/// route is present.
 fn doctor_launch_model_for_identity(
     config: &Config,
     identity: &crate::config::ProviderIdentity,
     launch_settings: &crate::settings::Settings,
 ) -> String {
-    let configured_model = config.default_model();
-    if let Some(override_model) = crate::config::explicit_launch_model_override() {
-        override_model
-    } else if config.fleet_operator_route_applied {
-        configured_model
-    } else {
-        launch_settings
-            .provider_models
-            .clone()
-            .unwrap_or_default()
-            .get(&identity.key)
-            .cloned()
-            .or_else(|| {
-                matches!(
-                    identity.provider,
-                    crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
-                )
-                .then(|| launch_settings.default_model.clone())
-                .flatten()
-            })
-            .map(|remembered| {
-                crate::config::prefer_configured_model_spelling(&configured_model, remembered)
-            })
-            .unwrap_or(configured_model)
-    }
+    let configured_model =
+        crate::config::explicit_launch_model_override().unwrap_or_else(|| config.default_model());
+    crate::config::launch_model_for_identity(config, launch_settings, identity, &configured_model)
 }
 
 /// The identity plus the identity-scoped clone the doctor sections read:
@@ -7968,19 +7925,26 @@ fn doctor_api_target_for_surface(
                 // that config shape.
                 route.config.deepseek_base_url(),
             ),
-            Err(_) => (
-                launch_model.to_string(),
-                DoctorModelResolution::ConfiguredOnly,
-                None,
-                None,
-                // Nothing is servable in this state, so the configured URL
-                // is all there is to show — the prepared route config does
-                // not exist. The route report labels it (`route_error` and
-                // the base_url source marker below) so the same config is
-                // never classified one way here and the opposite way once
-                // resolution succeeds.
-                config.deepseek_base_url(),
-            ),
+            Err(_) => {
+                // Nothing is servable in this state, so the configured URL is
+                // all there is to show — the prepared route config does not
+                // exist — and it must be the LAUNCH IDENTITY's configured
+                // URL: the report names the re-pointed provider key, so the
+                // raw root's URL beside it would contradict the very
+                // scoping this report exists for. The route report labels
+                // the state (`route_error` and the base_url source marker
+                // below) so the same config is never classified one way here
+                // and the opposite way once resolution succeeds.
+                let mut scoped_failure_config = config.clone();
+                scoped_failure_config.scope_to_provider_identity(launch_identity);
+                (
+                    launch_model.to_string(),
+                    DoctorModelResolution::ConfiguredOnly,
+                    None,
+                    None,
+                    scoped_failure_config.deepseek_base_url(),
+                )
+            }
         };
     DoctorApiTarget {
         provider: launch_identity.key.clone(),
@@ -7998,11 +7962,20 @@ fn doctor_api_target_for_surface(
 /// to the child sub-agents' `auto` alike, and per-tool schemas that cannot
 /// conform ship unchanged and non-strict. One const so a wording fix is
 /// single-point and the `contains()` pins stay single-sourced (round 30).
+/// The opening parenthetical mirrors [`CHAT_THINKING_OMISSION_PARENTHETICAL`]
+/// verbatim; const concat cannot compose them, so the pins guard the pair.
 const FAMILY_CHAT_VERDICT_TAIL: &str = "(omitted on thinking-enabled requests, \
      where the chat dialect suppresses it); per-tool schemas that cannot conform \
      ship unchanged and non-strict; child sub-agents request `tool_choice: auto` \
      (the chat dialect omits it on thinking-enabled requests, the same \
      suppression the parent's `required` faces)";
+
+/// The thinking-suppression parenthetical the family-chat verdicts embed at
+/// the head of [`FAMILY_CHAT_VERDICT_TAIL`] and the `custom_endpoint` arm's
+/// chat-shaped clause appends standalone — one spelling so the wording fix
+/// is single-point there too (round 31).
+const CHAT_THINKING_OMISSION_PARENTHETICAL: &str = "(omitted on thinking-enabled \
+     requests, where the chat dialect suppresses it)";
 
 fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus {
     if !config.strict_tool_mode.unwrap_or(false) {
@@ -8102,8 +8075,7 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
         let wire_overridden =
             effective_wire != codewhale_config::provider::WireFormat::ChatCompletions;
         let tool_choice_clause = if chat_shape_family && !wire_overridden {
-            "`tool_choice` falls back to `auto` (omitted on thinking-enabled \
-             requests, where the chat dialect suppresses it)"
+            format!("`tool_choice` falls back to `auto` {CHAT_THINKING_OMISSION_PARENTHETICAL}")
         } else if effective_wire == codewhale_config::provider::WireFormat::AnthropicMessages
             && launch_provider == crate::config::ApiProvider::DeepseekAnthropic
         {
@@ -8116,8 +8088,9 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             // `auto`.
             "`tool_choice` falls back to `auto` (the Messages dialect omits \
              it on thinking-enabled requests)"
+                .to_string()
         } else {
-            "`tool_choice` falls back to `auto`"
+            "`tool_choice` falls back to `auto`".to_string()
         };
         return DoctorStrictToolModeStatus {
             enabled: true,
@@ -8132,10 +8105,11 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                  percent-escaped host bytes, the Unicode dot separators, an \
                  explicit default port — also land here while the request still \
                  reaches the official API (an IDN homoglyph host is not \
-                 normalized: it dials the host it spells), as do spellings the \
-                 gate refuses outright (whitespace around or inside the URL, \
-                 query or fragment strings); point the setting at the canonical \
-                 spelling to get the reshaping"
+                 normalized: it dials the host it spells); spellings the gate \
+                 refuses outright (whitespace around or inside the URL, query \
+                 or fragment strings) land here too, and their requests do \
+                 not reach the official API; point the setting at the \
+                 canonical spelling to get the reshaping"
             ),
             recommended_base_url: None,
         };
@@ -8161,7 +8135,7 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             // provider_mismatch arm uses ("recognized").
             message: "enabled; the Anthropic wire forwards the per-tool \
                       top-level `strict` field untranslated on this \
-                      DeepSeek-family endpoint; tool_choice is omitted on \
+                      DeepSeek-family endpoint; `tool_choice` is omitted on \
                       requests whose thinking is on the wire"
                 .to_string(),
             recommended_base_url: None,
@@ -14710,6 +14684,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_api_target_reports_default_endpoint() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config::default();
 
         let target = doctor_api_target(&config);
@@ -14722,6 +14697,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_api_target_falls_back_to_configured_model_when_resolution_fails() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // `custom` with no custom provider table cannot resolve an identity;
         // doctor must fall back to the raw configured model and say so
         // instead of presenting an unresolved value as the engine's route.
@@ -14738,6 +14714,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_api_target_routes_deepseek_cn_alias_to_beta_endpoint() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             provider: Some("deepseek-cn".to_string()),
             ..Default::default()
@@ -14753,7 +14730,46 @@ mod doctor_endpoint_tests {
     }
 
     #[test]
+    fn doctor_api_target_err_state_answers_the_repointed_table_url_not_the_raw_root() {
+        // Round 31 (m7): on route-resolution failure the report still names
+        // the launch identity (`provider.key`), so the failure-state URL must
+        // come from the identity's table too — the raw root's URL beside a
+        // re-pointed provider key contradicts the scoping this report exists
+        // for. A settings-remembered Kimi Code membership model on the
+        // default direct-platform Moonshot route makes the resolution fail
+        // deterministically (the membership/direct model-vs-URL rejection).
+        let (tmp, _home, _lock) = crate::test_support::sealed_empty_settings_env();
+        let codewhale_home = tmp.path().join(".codewhale");
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_provider = \"moonshot\"\n\n[provider_models]\nmoonshot = \"kimi-for-coding\"\n",
+        )
+        .expect("plant settings re-point and membership remembered model");
+        let config = Config {
+            provider: Some("beta-route".to_string()),
+            base_url: Some("https://root.example.com/v1".to_string()),
+            ..Default::default()
+        };
+
+        let target = doctor_api_target(&config);
+
+        assert_eq!(target.provider, "moonshot");
+        assert_eq!(target.resolution, DoctorModelResolution::ConfiguredOnly);
+        assert_eq!(target.model, "kimi-for-coding");
+        assert_ne!(
+            target.base_url, "https://root.example.com/v1",
+            "the raw root's URL must not leak into a launch-identity report"
+        );
+        assert_eq!(
+            target.base_url,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            "the failure-state URL is the launch identity's own route"
+        );
+    }
+
+    #[test]
     fn strict_tool_mode_doctor_reports_disabled_by_default() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config::default();
 
         let status = doctor_strict_tool_mode_status(&config);
@@ -14766,6 +14782,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_answers_from_the_model_the_session_serves() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The doctor resolves with the session's own no-chip model, the
         // same `Some(&effective_model)` selector the engine's turn
         // resolver passes: a `responses`-dialect default model must
@@ -14800,6 +14817,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_accepts_default_beta_endpoint() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             strict_tool_mode: Some(true),
             ..Default::default()
@@ -14838,6 +14856,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_warns_for_non_beta_deepseek_endpoint() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             strict_tool_mode: Some(true),
             base_url: Some("https://api.deepseek.com".to_string()),
@@ -14877,6 +14896,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_accepts_deepseek_cn_alias_default_endpoint() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             provider: Some("deepseek-cn".to_string()),
             strict_tool_mode: Some(true),
@@ -14893,6 +14913,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_marks_custom_endpoint_as_out_of_scope() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The strict pipeline reshapes schemas per DeepSeek's strict-mode
         // documents; a custom (non-DeepSeek-family) endpoint keeps its tools
         // unreshaped, and nothing is advertised as sent strict.
@@ -14924,6 +14945,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_discloses_thinking_suppression_for_family_custom_urls() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // A family provider on a custom URL reaches this arm too, and the
         // suppression parenthetical is honest only there: the chat dialect
         // omits `tool_choice` on thinking-enabled requests. The wire
@@ -14954,6 +14976,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_discloses_thinking_suppression_for_the_ds4_chat_shape() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The wire's tool_choice suppression keys on the route's chat
         // SHAPE, not its provider typing alone: a DS4-local custom route
         // speaks the DeepSeek dialect (`chat_shape_provider_for`), so on
@@ -15036,6 +15059,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_drops_the_thinking_clause_when_the_wire_overrides() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // A custom provider table can override the wire: a DS4-shaped route
         // serving the Responses wire sends `tool_choice` unconditionally, so
         // the thinking-omission parenthetical would quote an omission that
@@ -15075,6 +15099,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_ready_arm_names_the_path_suffix_override() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // A configured `path_suffix` overrides beta routing (the client
         // splices the suffix onto the unversioned base), so the ready arm's
         // endpoint sentence must not claim "use the beta endpoint" — the
@@ -15106,6 +15131,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_answers_from_the_prepared_route_url() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The engine gate reads the route-prepared config, which clears a
         // legacy root `base_url` whose host belongs to another vendor; the
         // doctor must answer from the same URL a session would actually
@@ -15132,6 +15158,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_keeps_official_deepseek_urls_out_of_scope_for_other_providers() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The engine gate requires DeepSeek-family provider typing, so an
         // official DeepSeek URL under another provider stays out of scope and
         // must not be reported as "ready".
@@ -15158,6 +15185,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_names_the_provider_for_official_non_canonical_paths() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Any path on the official DeepSeek host is a DeepSeek endpoint;
         // under a non-family provider the mismatch arm must name the
         // provider, not mislabel the URL as a custom endpoint — the
@@ -15189,6 +15217,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_reports_official_custom_paths_as_in_scope() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Any path on the official host passes the engine gate, so a chat
         // dialect on a non-canonical official path is in scope: schemas are
         // reshaped and `tool_choice:"required"` is sent — the doctor must
@@ -15227,6 +15256,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_answers_the_anthropic_provider_from_the_wire_on_beta() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The gate passes for the Anthropic-family provider on the official
         // beta host, but the beta verdict describes a chat-completions
         // surface; the Anthropic Messages wire forwards the flag on its own
@@ -15260,6 +15290,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_answers_the_anthropic_provider_from_the_wire_on_the_default_path() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The Anthropic family's DEFAULT endpoint is the non-canonical
         // `/anthropic` path (`provider_defaults`), not the beta URL the
         // other pins use: the Anthropic arm answers from provider typing,
@@ -15294,6 +15325,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_discloses_thinking_suppression_for_deepseek_cn_custom_urls() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The DeepseekCN chat shape suppresses `tool_choice` on
         // thinking-enabled requests exactly like the Deepseek shape, so a
         // CN-typed provider on a custom URL needs the same suppression
@@ -15329,6 +15361,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn custom_endpoint_verdict_names_the_gate_refused_spellings() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Round 28: the verdict message names not only the WHATWG-normalized
         // official-host spellings but also the classes the GATE refuses
         // outright (whitespace, query/fragment) — a user with a padded URL
@@ -15367,6 +15400,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_names_the_messages_omission_on_a_family_foreign_url() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Round 30: the gate-failed region still speaks the Messages
         // dialect when a DeepseekAnthropic-typed route sits on a foreign
         // URL, and that wire omits `tool_choice` on thinking-enabled
@@ -15390,9 +15424,7 @@ mod doctor_endpoint_tests {
         let status = doctor_strict_tool_mode_status(&config);
         assert_eq!(status.status, "custom_endpoint", "{}", status.message);
         assert!(
-            status
-                .message
-                .contains("the Messages dialect omits it"),
+            status.message.contains("the Messages dialect omits it"),
             "{}",
             status.message
         );
@@ -15428,6 +15460,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_reports_anthropic_forwarding_on_non_beta_canonical_endpoints() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The chat wire strips `function.strict` on the canonical non-beta
         // endpoints, but the Anthropic Messages wire forwards it
         // untranslated — the doctor must not claim the flag is stripped for
@@ -15461,6 +15494,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_reports_the_responses_dialect_for_versioned_models() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // A route whose model resolves to the Responses endpoint ships
         // `"strict": false` per tool and `tool_choice: "auto"` on the wire,
         // so the doctor must not claim the flag was sent — the dialect is
@@ -15494,6 +15528,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_responses_remedy_names_the_beta_url_on_non_beta() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // The remedy is not URL-independent: switching the model alone on a
         // canonical non-beta endpoint lands the route in
         // `fallback_non_beta`, where the chat wire still strips the flag —
@@ -15527,6 +15562,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn strict_tool_mode_doctor_keeps_the_url_verdict_for_a_chat_surface_model() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Exact catalog rows stay authoritative: a model whose row resolves
         // to the chat surface keeps the URL-kind verdict (`ready` on the
         // beta endpoint) even though it is versioned.
@@ -15551,6 +15587,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_tls_status_reports_verification_enabled_by_default() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let status = doctor_tls_status(&Config::default());
 
         assert!(status.certificate_verification);
@@ -15561,6 +15598,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_tls_status_warns_when_active_provider_skips_verification() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let mut providers = crate::config::ProvidersConfig::default();
         providers.openai.insecure_skip_tls_verify = Some(true);
         let config = Config {
@@ -15580,6 +15618,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_exposes_alias_deprecation_for_deepseek_chat() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let mut config = Config {
             default_text_model: Some("deepseek-chat".to_string()),
             ..Default::default()
@@ -15604,6 +15643,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_preserves_custom_deepseek_alias_namespace() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let mut config = Config {
             base_url: Some("https://models.example/v1".to_string()),
             default_text_model: Some("deepseek-chat".to_string()),
@@ -15619,6 +15659,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_leaves_canonical_flash_alias_metadata_null() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             default_text_model: Some("deepseek-v4-flash".to_string()),
             ..Default::default()
@@ -15632,6 +15673,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_route_report_exposes_tokenhub_openai_compatible_route_without_secret() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let mut providers = crate::config::ProvidersConfig::default();
         providers.openai.api_key = Some("tokenhub-secret-value".to_string());
         providers.openai.base_url = Some("https://tokenhub.tencentmaas.com/v1".to_string());
@@ -15667,6 +15709,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_route_report_exposes_siliconflow_cn_provider_route() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let mut providers = crate::config::ProvidersConfig::default();
         providers.siliconflow_cn.api_key = Some("sf-cn-secret-value".to_string());
         providers.siliconflow_cn.base_url =
@@ -15696,6 +15739,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn doctor_route_report_names_kimi_code_context_provenance() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             provider: Some("moonshot".to_string()),
             providers: Some(crate::config::ProvidersConfig {
@@ -15723,6 +15767,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_uses_exact_kimi_code_route_facts() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             provider: Some("moonshot".to_string()),
             providers: Some(crate::config::ProvidersConfig {
@@ -15750,6 +15795,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_honors_kimi_code_context_override() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             provider: Some("moonshot".to_string()),
             providers: Some(crate::config::ProvidersConfig {
@@ -15779,6 +15825,7 @@ mod doctor_endpoint_tests {
 
     #[test]
     fn provider_capability_report_uses_direct_moonshot_k3_route_facts() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = Config {
             provider: Some("moonshot".to_string()),
             providers: Some(crate::config::ProvidersConfig {
@@ -16048,6 +16095,7 @@ mod terminal_mode_tests {
 
     #[test]
     fn doctor_json_surfaces_keep_exact_named_custom_provider() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let config = custom_exec_config("custom-a");
         let workspace = tempfile::tempdir().expect("doctor workspace");
 
@@ -16074,6 +16122,7 @@ mod terminal_mode_tests {
 
     #[test]
     fn doctor_route_report_names_the_root_for_the_legacy_literal_custom_route() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Round 27: the identity-keyed table label specialized on
         // `provider == Custom` alone, so the legacy literal shape — root
         // `base_url`/`api_key`, no `[providers.custom]` table — was told
@@ -20444,6 +20493,7 @@ mod doctor_live_probe_tests {
 
     #[test]
     fn oauth_routes_skip_live_probe_to_keep_doctor_non_mutating() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let codex = Config {
             provider: Some("openai-codex".to_string()),
             ..Config::default()
@@ -21139,6 +21189,7 @@ mod setup_helper_tests {
 
     #[test]
     fn ollama_doctor_credential_source_is_route_aware() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         let local = Config {
             provider: Some("ollama".to_string()),
             ..Config::default()
@@ -21777,13 +21828,28 @@ mod strict_doctor_fixwave_r22 {
             ..Default::default()
         };
         let status = doctor_strict_tool_mode_status(&config);
-        // The fixture's default table URL is the /anthropic path
-        // (non-canonical official host), so the URL arm is
-        // `official_route` — what changed is the DIALECT the notes speak:
-        // the chat-dialect disclosures, not the Messages verdict the
-        // round-22 pin asserted while every live dispatch path spoke chat.
-        assert_eq!(status.status, "official_route", "{:?}", status.status);
+        // Round 31 (re-cut drift): the wire key is inert END TO END for
+        // ModelAware kinds — the DeepSeek resolver no longer reads it for
+        // the endpoint either (`config.rs::resolve_deepseek_base_url_for_tui`
+        // dropped its `wire` parameter: a key-driven flip stranded the chat
+        // endpoint key on the vendor Messages host, and the vendor-Messages
+        // opt-in is the `deepseek-anthropic` identity, not the key). The
+        // fixture's URL is therefore the canonical beta default and the
+        // verdict is the same `ready` a plain deepseek config answers —
+        // pinned below — with the notes still keying on the dialect
+        // dispatch actually resolves (chat), not on the configured key.
+        assert_eq!(status.status, "ready", "{:?}", status.status);
         assert!(status.function_strict_sent);
+        let plain = Config {
+            provider: Some("deepseek".to_string()),
+            strict_tool_mode: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            doctor_strict_tool_mode_status(&plain).status,
+            status.status,
+            "the wire key is inert end to end for a ModelAware kind"
+        );
         assert!(
             status.message.contains("omitted on"),
             "the chat dialect suppresses tool_choice on thinking-enabled \
@@ -22000,6 +22066,7 @@ mod strict_doctor_fixwave_r22 {
 
     #[test]
     fn strict_tool_mode_doctor_child_sentence_discloses_the_thinking_suppression() {
+        let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
         // Round 23: the child sentence no longer claims the child's
         // `tool_choice: auto` always reaches the wire — the chat dialect
         // omits it on thinking-enabled requests exactly as it omits the
