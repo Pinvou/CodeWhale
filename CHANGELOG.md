@@ -13,20 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plaintext-HTTP admission now reads the authority the request actually
   dials. `http://evil.com\@localhost` (WHATWG ends the authority at a
   backslash) and `http://x#@localhost` (WHATWG ends it at `?`/`#`)
-  previously answered "localhost" while the wire dialed the attacker's
-  host, auto-allowing cleartext HTTP — and with it the bearer key — to a
-  remote endpoint; lookalike hosts like `http://localhost.evil.com` were
-  auto-allowed by prefix matching. The extraction now splits on the full
+  previously had that extraction answer "localhost" while the wire dialed
+  the attacker's host — a wrong answer every consumer of the predicate
+  inherits (the keyless self-hosted rule, secret-store scoping) — and
+  prefix-matching loopback admission auto-allowed cleartext HTTP, and
+  with it the bearer key, to lookalike hosts like
+  `http://localhost.evil.com`. The extraction now splits on the full
   WHATWG terminator set, refuses authorities containing `\`
   (fail-closed), and loopback admission is an exact host-boundary
-  judgment with case-normalized scheme checks.
+  judgment with case-normalized scheme checks. The official-family
+  matcher also stops trimming surrounding whitespace, so a padded
+  official URL now reads as a custom endpoint for model-namespace pairing
+  and credential scoping instead of silently matching.
 - The per-config `wire = "anthropic"` key and the endpoint it selects no
-  longer disagree: on the Fixed-wire family tables (Minimax, Modelstudio
-  Token/Coding Plan) the dialect key gates both the endpoint resolver and
-  the dispatch wire, so a configured route cannot speak chat into its own
-  Anthropic endpoint; on ModelAware kinds (Deepseek, OpencodeZen) the key
-  stays out of the wire answer because dispatch re-derives the dialect
-  from the route candidate per model.
+  longer disagree: every dual-protocol family table (Minimax, Modelstudio
+  Token/Coding Plan) reads the key from its own config table on both
+  sides — the endpoint resolver and the dispatch wire — so a Coding Plan
+  session can no longer answer the Token Plan table (or vice versa) and
+  dispatch chat into its own Anthropic endpoint. On ModelAware kinds
+  (Deepseek, OpencodeZen) the key is inert end to end: dispatch
+  re-derives the dialect from the route candidate per model, and the
+  DeepSeek resolver no longer flips to the vendor Anthropic URL on the
+  key either (that opt-in is the `deepseek-anthropic` identity — a
+  key-driven flip stranded DeepSeek's forced chat endpoint key on the
+  Messages-only host).
 - API-backed `[search]` providers now visibly degrade directly to the
   keyless Bing tail instead of routing through DuckDuckGo when
   unavailable: DuckDuckGo is unreachable from mainland-China networks

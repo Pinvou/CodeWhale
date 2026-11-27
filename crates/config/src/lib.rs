@@ -4858,6 +4858,34 @@ fn xiaomi_mimo_base_url_is_pay_as_you_go(base_url: &str) -> bool {
     )
 }
 
+/// The canonical official DeepSeek beta endpoints, lowercase with any
+/// trailing `/` trimmed: where the wire keeps the `function.strict` flag
+/// (the chat strip, `client/chat.rs`) and where the request is routed to
+/// `beta/chat/completions` (`client.rs`) — and, together with
+/// [`DEEPSEEK_CANONICAL_NON_BETA_URLS`], where the Responses dialect
+/// resolves its URL (`responses_api_url` keys on the union) and where the
+/// doctor reports the beta verdict once the stack's doctor layer wires it.
+/// One constant so the consumers cannot drift; the official-family matcher
+/// in this crate consumes both lists directly, and the TUI re-exports them.
+pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com/beta",
+    "https://api.deepseeki.com/beta",
+];
+
+/// The canonical official DeepSeek non-beta chat endpoints, lowercase
+/// with any trailing `/` trimmed: the chat wire strips `function.strict`
+/// here (only `/beta` supports it) and the doctor reports
+/// `fallback_non_beta`. The strict host gate
+/// (`url_is_official_deepseek_host` in the TUI) is deliberately broader
+/// than both canonical lists — any path on the official hosts — and every
+/// URL in these lists is pinned to pass that gate in `config` tests.
+pub const DEEPSEEK_CANONICAL_NON_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com",
+    "https://api.deepseek.com/v1",
+    "https://api.deepseeki.com",
+    "https://api.deepseeki.com/v1",
+];
+
 /// Whether `base_url` belongs to the provider's official endpoint family.
 ///
 /// Some providers publish multiple stable paths for the same credential and
@@ -4872,23 +4900,20 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
     // matched the literals anyway.)
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     match provider {
-        ProviderKind::Deepseek => matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com"
-                | "https://api.deepseek.com/v1"
-                | "https://api.deepseek.com/beta"
-                // The legacy compat host the rest of the codebase already
-                // recognizes (docs/REBRAND.md — it is NOT an official
-                // endpoint): the TUI's strict/beta routing has recognized
-                // it since the strict route gate landed, but this matcher
-                // lagged — an app-server route on `api.deepseeki.com/beta`
-                // was rewritten to `/v1` while `function.strict: true`
-                // stayed in the body, the one shape that landed the flag
-                // on a non-official path.
-                | "https://api.deepseeki.com"
-                | "https://api.deepseeki.com/v1"
-                | "https://api.deepseeki.com/beta"
-        ),
+        ProviderKind::Deepseek => {
+            // The legacy compat host the rest of the codebase already
+            // recognizes (docs/REBRAND.md — it is NOT an official
+            // endpoint): the TUI's strict/beta routing has recognized
+            // it since the strict route gate landed, but this matcher
+            // lagged — an app-server route on `api.deepseeki.com/beta`
+            // was rewritten to `/v1` while `function.strict: true`
+            // stayed in the body, the one shape that landed the flag
+            // on a non-official path. The lists themselves are shared
+            // with the client's strip/beta routing so the two crates
+            // cannot drift (round 2).
+            DEEPSEEK_CANONICAL_BETA_URLS.contains(&normalized.as_str())
+                || DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(&normalized.as_str())
+        }
         ProviderKind::DeepseekAnthropic => matches!(
             normalized.as_str(),
             "https://api.deepseek.com/anthropic" | "https://api.deepseek.com/anthropic/v1"

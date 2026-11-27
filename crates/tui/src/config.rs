@@ -1008,31 +1008,12 @@ pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) 
     url_is_official_deepseek_host(base_url)
 }
 
-/// The canonical official DeepSeek beta endpoints, lowercase with any
-/// trailing `/` trimmed: where the wire keeps the `function.strict` flag
-/// (the chat strip), where the request is routed to
-/// `beta/chat/completions` (`client.rs`), where the Responses dialect
-/// resolves its URL (`client.rs`), and where the doctor reports the beta
-/// verdict once the stack's doctor layer wires it — one constant so the
-/// consumers cannot drift.
-pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
-    "https://api.deepseek.com/beta",
-    "https://api.deepseeki.com/beta",
-];
-
-/// The canonical official DeepSeek non-beta chat endpoints, lowercase
-/// with any trailing `/` trimmed: the chat wire strips `function.strict`
-/// here (only `/beta` supports it) and the doctor reports
-/// `fallback_non_beta`. The strict host gate
-/// (`url_is_official_deepseek_host`) is deliberately broader than both
-/// canonical lists — any path on the official hosts — and every URL in
-/// these lists is pinned to pass that gate in `config` tests.
-pub const DEEPSEEK_CANONICAL_NON_BETA_URLS: &[&str] = &[
-    "https://api.deepseek.com",
-    "https://api.deepseek.com/v1",
-    "https://api.deepseeki.com",
-    "https://api.deepseeki.com/v1",
-];
+// The canonical official DeepSeek URL sets live in the config crate as the
+// single source (`codewhale_config::DEEPSEEK_CANONICAL_*`): the official
+// matcher there consumes the same lists, so the two crates' copies of the
+// six-URL set cannot drift again (round 2 — the set existed in both crates
+// with no cross-pin).
+pub(crate) use codewhale_config::{DEEPSEEK_CANONICAL_BETA_URLS, DEEPSEEK_CANONICAL_NON_BETA_URLS};
 
 /// Whether the URL sits on an official DeepSeek host: the scheme-and-host
 /// prefixes the strict gate, the client, and the doctor all recognize,
@@ -1127,9 +1108,10 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
 /// Whether the DeepSeek strict tool pipeline (schema reshaping plus
 /// `tool_choice: "required"`) acts on a route: the user flag AND the
 /// official-route gate. The engine turn-surface build, the child sub-agent
-/// surface, and the doctor all call this one predicate — at this layer the
-/// predicate and its pins land first, and the wiring lands with this
-/// stack's engine, subagent, and doctor layers — so there is no second
+/// surface, and the doctor are all meant to answer through this one
+/// predicate — at this layer the predicate and its pins land first, and
+/// their call sites land with this stack's engine, subagent, and doctor
+/// layers — so there is no second
 /// composition to drift. The surfaces still choose their own
 /// ARGUMENTS: the engine feeds the session provider with the resolved
 /// route's URL, the child feeds its own config's provider and URL (the
@@ -3326,30 +3308,33 @@ pub struct Config {
     pub notes_path: Option<String>,
     pub memory_path: Option<String>,
     /// When true, set `tool_choice: "required"` and opt compatible function
-    /// schemas into DeepSeek beta strict mode — effective only on official
-    /// DeepSeek-family routes (provider-typed DeepSeek on the
-    /// `api.deepseek.com` / legacy `api.deepseeki.com` hosts), because the
-    /// schema reshaping follows DeepSeek's strict documents and would
-    /// otherwise strip keywords other providers document (e.g. OpenAI's
-    /// `minItems`/`maxItems`). On those routes optional parameters are removed
-    /// from the schema (reported in the tool description), non-numeric
-    /// `const` values land on `enum`, and `dependentRequired` tables are
-    /// stripped, per the strict contract. Schemas the strict subset cannot
-    /// represent faithfully — root alternatives, required nullables
-    /// (`nullable` / null-type union branches), or tools whose runtime
-    /// demands schema-optional parameters (`update_goal`, `send_later`,
-    /// `agents/message`, `agents/followup`, `agent`, `Web`) —
-    /// stay non-strict: they keep their original schema. `tool_choice`
-    /// follows the route gate on the parent turn surface, not per-tool
-    /// outcomes: it stays `required` on an in-scope route even when some
-    /// tools fail closed, and falls back to `auto` only when the route
-    /// itself is out of scope. (The child sub-agent surface requests with
-    /// `auto`, thinking-mode chat requests may drop `tool_choice`
-    /// entirely, and the `/preview-request` surface mirrors this same
-    /// route-gated selection — pre-existing surfaces this field does not
-    /// change. The scope gate is `strict_tool_mode_for_route`; the
-    /// schema-reshaping contract described here lands with this stack's
-    /// sanitizer layer.)
+    /// schemas into DeepSeek beta strict mode — meant to be effective only
+    /// on official DeepSeek-family routes (provider-typed DeepSeek on the
+    /// `api.deepseek.com` / legacy `api.deepseeki.com` hosts; the scope
+    /// gate is `strict_tool_mode_for_route`), because the schema reshaping
+    /// follows DeepSeek's strict documents and would otherwise strip
+    /// keywords other providers document (e.g. OpenAI's
+    /// `minItems`/`maxItems`). At this stack layer every consuming surface
+    /// still keys on the bare flag — the route-gated wiring lands with this
+    /// stack's engine, subagent, and doctor layers. On gated routes
+    /// optional parameters are removed from the schema (reported in the
+    /// tool description), non-numeric `const` values land on `enum`, and
+    /// `dependentRequired` tables are stripped, per the strict contract.
+    /// Schemas the strict subset cannot represent faithfully — root
+    /// alternatives, required nullables (`nullable` / null-type union
+    /// branches), or tools whose runtime demands schema-optional parameters
+    /// (`update_goal`, `send_later`, `agents/message`, `agents/followup`,
+    /// `agent`, `Web`) — stay non-strict: they keep their original schema.
+    /// `tool_choice` is to follow the route gate on the parent turn
+    /// surface, not per-tool outcomes: it stays `required` on an in-scope
+    /// route even when some tools fail closed, and falls back to `auto`
+    /// only when the route itself is out of scope. (The child sub-agent
+    /// surface requests with `auto`, thinking-mode chat requests may drop
+    /// `tool_choice` entirely, and the `/preview-request` surface keys on
+    /// the bare flag at this layer — pre-existing surfaces this field does
+    /// not change. The schema-reshaping contract already exists and is
+    /// flag-gated today; only the route-gated wiring of it lands with the
+    /// stack's later layers.)
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
@@ -6697,7 +6682,7 @@ impl Config {
             provider,
             ApiProvider::Deepseek | ApiProvider::DeepseekAnthropic
         ) {
-            resolve_deepseek_base_url_for_tui(configured_base_url, provider, wire)
+            resolve_deepseek_base_url_for_tui(configured_base_url, provider)
         } else {
             configured_base_url
                 .or_else(|| self.route_owned_generic_env_base_url(provider, identity))
@@ -10154,15 +10139,20 @@ fn resolve_minimax_base_url_for_tui(
     }
 }
 
-fn resolve_deepseek_base_url_for_tui(
-    configured: Option<String>,
-    provider: ApiProvider,
-    wire: Option<&str>,
-) -> String {
+fn resolve_deepseek_base_url_for_tui(configured: Option<String>, provider: ApiProvider) -> String {
     if let Some(url) = configured.filter(|value| !value.trim().is_empty()) {
         return url;
     }
-    if matches!(provider, ApiProvider::DeepseekAnthropic) || wire_dialect_prefers_anthropic(wire) {
+    // The wire dialect key is deliberately not read here: Deepseek is a
+    // ModelAware kind whose dispatch re-derives the wire from the route
+    // candidate, and a key-driven endpoint flip strands that candidate on
+    // the vendor Anthropic URL — which is not in the official six-URL set,
+    // so the custom-endpoint rule forces the `chat` endpoint key and the
+    // session POSTs chat payloads to a Messages-only host (round 2). The
+    // vendor-Messages opt-in on DeepSeek is the `deepseek-anthropic`
+    // identity, not the wire key — the same policy as OpencodeZen's
+    // unkeyed resolver.
+    if matches!(provider, ApiProvider::DeepseekAnthropic) {
         DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL.to_string()
     } else {
         DEFAULT_DEEPSEEK_BASE_URL.to_string()
