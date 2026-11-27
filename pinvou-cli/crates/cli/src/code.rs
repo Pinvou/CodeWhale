@@ -5858,6 +5858,11 @@ fn checkpoints_rewind(
                     record.kept_turns,
                     cutoff,
                 ) {
+                    if error.is::<checkpoints::CheckpointWorkspaceBusy>() {
+                        return Err(CliError::failed(
+                            "code checkpoints rewind: checkpoint metadata is busy, retry later",
+                        ));
+                    }
                     note!(
                         "[pinvou-cli] stale checkpoint reconciliation failed (cleanup only): {error:#}"
                     );
