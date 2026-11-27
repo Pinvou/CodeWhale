@@ -5300,7 +5300,7 @@ async fn execute_foreground_via_background(
     extra_env: HashMap<String, String>,
     direct_argv: bool,
     timeout_bounds_ms: (u64, u64),
-) -> Result<ShellResult> {
+) -> Result<(ShellResult, bool)> {
     let timeout_ms =
         timeout_ms.map(|timeout| timeout.clamp(timeout_bounds_ms.0, timeout_bounds_ms.1));
     let spawn_timeout_ms = timeout_ms.unwrap_or(timeout_bounds_ms.1);
@@ -5402,11 +5402,16 @@ async fn execute_foreground_via_background(
                 .shell_manager
                 .lock()
                 .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-            let result = manager.kill(&task_id);
-            if result.is_ok() {
-                manager.acknowledge_foreground_completion(&task_id);
-            }
-            return result;
+            // Observe the child under the same lock as the stop. A late
+            // token must not relabel a process that has already finished.
+            let cancelled_by_waiter = manager.poll_status(&task_id)? == ShellStatus::Running;
+            let result = if cancelled_by_waiter {
+                manager.kill(&task_id)?
+            } else {
+                manager.get_output(&task_id, false, 0)?
+            };
+            manager.acknowledge_foreground_completion(&task_id);
+            return Ok((result, cancelled_by_waiter));
         }
 
         // Poll status only. The snapshot — and the buffer clones behind it — is
@@ -5419,7 +5424,9 @@ async fn execute_foreground_via_background(
                 .lock()
                 .map_err(|_| anyhow!("shell manager lock poisoned"))?;
             if manager.take_foreground_background_request() {
-                return manager.get_output(&task_id, false, 0);
+                return manager
+                    .get_output(&task_id, false, 0)
+                    .map(|result| (result, false));
             }
             if manager.poll_status(&task_id)? == ShellStatus::Running {
                 None
@@ -5433,7 +5440,7 @@ async fn execute_foreground_via_background(
         };
 
         if let Some(snapshot) = finished {
-            return Ok(snapshot);
+            return Ok((snapshot, false));
         }
 
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -5444,7 +5451,7 @@ async fn execute_foreground_via_background(
             let mut result = manager.kill(&task_id)?;
             manager.acknowledge_foreground_completion(&task_id);
             result.status = ShellStatus::TimedOut;
-            return Ok(result);
+            return Ok((result, false));
         }
 
         tokio::time::sleep(Duration::from_millis(poll_tick_ms)).await;
@@ -5580,6 +5587,7 @@ fn finish_contract_bash_result(
     result: ShellResult,
     timeout_ms: Option<u64>,
     context: &ToolContext,
+    cancelled_by_waiter: bool,
 ) -> Result<ToolResult, ToolError> {
     let sandbox_denied_hint = shell_sandbox_denied_hint(context, &result);
     let mut output = result.stdout.clone();
@@ -5607,11 +5615,16 @@ fn finish_contract_bash_result(
     }
     if result.status != ShellStatus::Completed {
         let status = contract_bash_error_status(&result, timeout_ms);
-        return Err(ToolError::execution_failed(if output.is_empty() {
+        let message = if output.is_empty() {
             status
         } else {
             format!("{output}\n\n{status}")
-        }));
+        };
+        return Err(if cancelled_by_waiter {
+            ToolError::cancelled(message)
+        } else {
+            ToolError::execution_failed(message)
+        });
     }
 
     Ok(ToolResult::success(if output.is_empty() {
@@ -6446,7 +6459,7 @@ impl ToolSpec for BashTool {
                             lifecycle_warning = Some(err.to_string());
                         }
                     }
-                    Ok(result)
+                    Ok((result, false))
                 }
                 Err(err) => Err(err),
             }
@@ -6480,7 +6493,7 @@ impl ToolSpec for BashTool {
                     .attach_heavy_permit(task_id, permit)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
             }
-            result
+            result.map(|result| (result, false))
         } else {
             execute_foreground_via_background(
                 context,
@@ -6503,7 +6516,7 @@ impl ToolSpec for BashTool {
         };
 
         match result {
-            Ok(result) => {
+            Ok((result, cancelled_by_waiter)) => {
                 let backgrounded_foreground =
                     !background && !interactive && result.status == ShellStatus::Running;
                 if (background || backgrounded_foreground)
@@ -6521,7 +6534,12 @@ impl ToolSpec for BashTool {
                     .as_ref()
                     .is_some_and(|token| token.is_cancelled());
                 if self.optional_timeout {
-                    return finish_contract_bash_result(result, timeout_ms, context);
+                    return finish_contract_bash_result(
+                        result,
+                        timeout_ms,
+                        context,
+                        cancelled_by_waiter,
+                    );
                 }
                 let task_id_str = result.task_id.clone().unwrap_or_default();
                 let stdout_summary = summarize_output(&result.stdout);

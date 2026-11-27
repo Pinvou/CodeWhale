@@ -7198,6 +7198,129 @@ fn make_plan_at(
     }
 }
 
+#[tokio::test]
+async fn tool_completion_event_marks_in_flight_cancellation_without_changing_transcript() {
+    use crate::core::events::TOOL_CALL_CANCELLED_METADATA_KEY;
+    use crate::tools::spec::{ToolCapability, ToolContext, ToolSpec, ToolTerminalStatus};
+
+    struct BlockingTool(Arc<tokio::sync::Semaphore>);
+
+    #[async_trait::async_trait]
+    impl ToolSpec for BlockingTool {
+        fn name(&self) -> &str {
+            "completion_cancel_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Wait for the engine to cancel the call"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+
+        async fn execute(&self, _: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
+            self.0.add_permits(1);
+            std::future::pending().await
+        }
+    }
+
+    for parallel in [false, true] {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let client = Arc::new(crate::llm_client::mock::MockLlmClient::new(vec![]));
+        let (mut engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                workspace: workspace.path().to_path_buf(),
+                ..Default::default()
+            },
+            &Config::default(),
+            client,
+        );
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let context = ToolContext::new(workspace.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(Arc::new(BlockingTool(Arc::clone(&started))));
+        let mut catalog = vec![catalog_tool("completion_cancel_probe")];
+        let policy = policy_for_catalog(
+            catalog.clone(),
+            None,
+            None,
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
+        let mut active = policy.active_names.clone();
+        let mut mode = AppMode::Agent;
+        let mut questions_allowed = false;
+        let count = if parallel { 2 } else { 1 };
+        let plans = (0..count)
+            .map(|index| {
+                let mut plan = make_plan_at(index, true, parallel, false, false);
+                plan.name = "completion_cancel_probe".into();
+                plan
+            })
+            .collect();
+        let stop = engine.cancel_token.clone();
+        let sandbox = crate::sandbox::SandboxPolicy::default();
+        let execute = engine.execute_planned_tools(
+            plans,
+            "tool-completion-test-turn",
+            "",
+            &mut catalog,
+            &policy,
+            &mut active,
+            Some(&registry),
+            Arc::new(tokio::sync::RwLock::new(())),
+            None,
+            &sandbox,
+            &mut mode,
+            &mut questions_allowed,
+        );
+        let cancel = async {
+            let _started = started
+                .acquire_many(count as u32)
+                .await
+                .expect("tool start lock");
+            stop.cancel();
+        };
+        let (outcomes, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(execute, cancel)
+        })
+        .await
+        .expect("tool batch must start and settle after cancellation");
+
+        let mut receiver = handle.rx_event.write().await;
+        let completions = std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::ToolCallComplete { id, result, .. } => Some((id, result)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completions.len(), count);
+        for outcome in outcomes {
+            let outcome = outcome.expect("cancelled tool outcome");
+            assert_eq!(outcome.terminal.status, ToolTerminalStatus::Cancelled);
+            let legacy = outcome.terminal.legacy_result().expect("model tool result");
+            assert!(legacy.metadata.is_none());
+            let (_, result) = completions
+                .iter()
+                .find(|(id, _)| id == &outcome.id)
+                .expect("matching host completion");
+            let host = result.as_ref().expect("existing host event result shape");
+            assert_eq!(host.content, legacy.content);
+            assert!(!host.success);
+            assert_eq!(
+                host.metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get(TOOL_CALL_CANCELLED_METADATA_KEY)),
+                Some(&Value::Bool(true))
+            );
+        }
+    }
+}
+
 fn parallel_batch_indices(batch: &ToolExecutionBatch) -> Vec<usize> {
     match batch {
         ToolExecutionBatch::Parallel(plans) => plans.iter().map(|plan| plan.index).collect(),
