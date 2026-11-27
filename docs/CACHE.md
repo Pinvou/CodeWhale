@@ -107,14 +107,15 @@ DeepSeek strict-mode tool shaping (`prepare_tools_for_strict_mode`) states its
 effect here per that rule: it is **frozen-prefix-compatible**. The removal
 note appended to a tool's description is a deterministic pure function of the
 pinned catalog and the route — the note names are sorted and deduplicated,
-the counts are order-independent, and the per-request pair-judge budget
-resets at every preparation over a stable catalog order — so on a stable
+the counts are order-independent, and the per-tool pair-judge budget
+refills at every preparation over a stable catalog order — so on a stable
 strict route the tools bytes are identical every step after the first
 preparation; the shaping runs on a per-request clone and never mutates the
 registry, and the pair-judge budget pools per tool (round 28) so no
 catalog order can change a later tool's verdict. One boundary is
 deliberate (round 25): the pattern-compile memo persists across requests
-while the per-request compile budget resets (the memo is entry-bounded at
+while the per-tool compile budget refills with each tool's preparation
+(the memo is entry-bounded at
 512 sources ≈ 8 MB of keys per thread, refuses rather than evicts at the
 bound, and the cached automata are the unaccounted part), so a
 pattern that abstained on a budget-refused first pass can be judged on a

@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `codewhale doctor` now serves the launch model everywhere, not just the
+  launch identity. The model answer the doctor fed the shared launch chain
+  was the raw `CODEWHALE_MODEL`/`DEEPSEEK_MODEL` spelling; the launch feeds
+  the env-applied config's `default_model()`, so with a provider-table
+  model (the env override lands in the root slot the table shadows) or an
+  alias spelling (normalized at read) the doctor named a model no session
+  would launch. The structural config load applies the ordinary model
+  overrides, so the doctor now reads the same resolved answer the launch
+  does.
+- The doctor's live probe (`--probe-api`) dispatches the launch model's
+  route instead of the scoped config default: `DeepSeekClient::new`
+  resolves ModelAware routes with a `None` selector, so a
+  settings-remembered model produced a report naming the remembered route
+  while the probe authenticated against the config default's endpoint.
+  Probe and api-target now resolve through the same call, and an
+  unresolved route fails the probe with the resolver's reason instead of
+  dispatching a route no session serves.
+- `codewhale doctor` auth scheme answers the served wire: every
+  Anthropic Messages route except OpenModel is authenticated with
+  `x-api-key` by the transport, while the scheme line answered `bearer`
+  for the DeepSeek Anthropic-dialect route (keyed on provider typing
+  instead of the wire).
+- One launch-surface derivation now feeds every `codewhale doctor`
+  section (settings loaded once per run instead of up to sixteen times,
+  each with an identity re-derivation and a scoped config clone), and the
+  route report stops re-resolving the route a second and third time: the
+  api-target line carries the resolved context window.
+- The doctor's route scope discloses its fidelity boundary in the report
+  itself (the human scope line and a new `route_scope_boundary` JSON key
+  name the two channels a real launch layers on top of what the doctor
+  reads: a selected Fleet's operator route and project config overlays).
+- The strict-doctor Anthropic Messages verdict discloses the fail-closed
+  outcome the chat verdicts already disclose: per-tool schemas that
+  cannot conform ship unchanged and non-strict.
+- Docs: the CONFIGURATION.md `wire` row no longer claims MiniMax and
+  Model Studio tables are key-inert for dispatch and diagnostics (the
+  client-side pin states the opposite — Fixed-family dispatch honors the
+  key); the CONFIGURATION.md `tool_choice` carve-out states the
+  Messages half precisely (the contract rejects the forced `any`/`tool`
+  values beside thinking while `auto`/`none` stay valid); CACHE.md
+  labels the strict-shaping budgets per tool (they stopped being
+  per-request in round 28/29).
+
 - Base-URL route security: the loopback/host extraction behind the
   plaintext-HTTP admission now reads the authority the request actually
   dials. `http://evil.com\@localhost` (WHATWG ends the authority at a
