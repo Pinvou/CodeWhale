@@ -37,7 +37,12 @@
 //   tests carries a non-empty `required` on every group-bearing branch, so
 //   the verb stays "must be" and every expected string holds verbatim; the
 //   generic-note cases render identically (`root_composition_generic_note`
-//   is code-identical). Zero assertion adaptations were required.
+//   is code-identical). Zero assertion adaptations were required AT ROUND
+//   23, when this note was written — round 29 later adapted five pins to
+//   the round-29 contracts (four flip a silence expectation to the "Exactly
+//   one" root-composition disclosure, one is comment-only); each carries
+//   its in-line "Round 29" note and the adaptations strengthen, never
+//   drop, the shape assertions.
 // - `responses_constraint_note_covers_a_single_dropped_group` pins the
 //   round-23-restored `root_composition_constraint_note` semantics (aggregate
 //   every composition keyword, disclose single dropped groups, keep the
