@@ -497,6 +497,59 @@ mod tests {
         );
     }
 
+    /// The downgrade guard runs on the user-configured spelling, so case
+    /// variants and padding must name the same documented-maximum row as
+    /// their lowercase form and take the same conservative gateway ceiling
+    /// (review 5929534479). The drift is observable under an explicit
+    /// operator override between the two ceilings: with
+    /// `CODEWHALE_MAX_OUTPUT_TOKENS=262144` the guard must clamp every
+    /// spelling to 131,072, while the pre-delegation predicate let a
+    /// `KIMI-K3.1-PRO` variant keep the full 262,144 override against its
+    /// 1M ceiling. (With no override the ordinary 64K automatic sizing
+    /// masks the difference at this layer.)
+    #[test]
+    fn kimi_k31_downgrade_guard_matches_spelling_variants() {
+        use super::{
+            OutputCeilingSource, effective_max_output_tokens_for_route, output_ceiling_source,
+        };
+        use crate::config::ApiProvider;
+        let _env_lock = crate::test_support::lock_test_env();
+        let _override =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "262144");
+        for model in ["kimi-k3.1-pro", "KIMI-K3.1-PRO", "K3.1-PRO-HIGHSPEED"] {
+            assert!(
+                crate::models::is_kimi_k31_documented_maximum_row(model),
+                "{model} must be recognized as a documented-maximum row"
+            );
+            assert_eq!(
+                output_ceiling_source(ApiProvider::Moonshot, model),
+                OutputCeilingSource::Documented(1_048_576),
+                "{model} must publish the family's documented maximum"
+            );
+            assert_eq!(
+                effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, None),
+                131_072,
+                "{model} must take the conservative K3.1 ceiling on a route with no output limit, not the operator override"
+            );
+        }
+        // Padding is a different story: the capability layer matches the
+        // catalogue by lowercased id without trimming, so a padded spelling
+        // is not catalogue-recognized at all and fails closed (stricter
+        // than the guard). Pin that direction too.
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Moonshot, " Kimi-K3.1-Pro ", None),
+            8_192,
+            "a padded spelling must fail closed, not inherit either ceiling"
+        );
+        // Neighboring families stay negative for the variant spellings too.
+        assert!(!crate::models::is_kimi_k31_documented_maximum_row(
+            "KIMI-K3"
+        ));
+        assert!(!crate::models::is_kimi_k31_documented_maximum_row(
+            "KIMI-K2"
+        ));
+    }
+
     #[test]
     fn kimi_k31_explicit_override_survives_the_direct_route_maximum() {
         let _env_lock = crate::test_support::lock_test_env();

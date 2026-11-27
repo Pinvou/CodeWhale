@@ -5104,11 +5104,12 @@ fn bounded_reap_reports_grace_expiry_while_the_child_lives() {
 }
 
 /// An inline stdin payload past one pipe buffer is refused before spawn:
-/// the payload is delivered with a blocking write while the shell-manager
-/// lock is held, and a non-reading child would wedge the executor past any
-/// watchdog. The boundary payload (exactly 64 KiB) still runs. The raw
-/// lane is the one that carries payloads — the read-only grammar rejects
-/// a `stdin` field outright.
+/// the payload is delivered through the bounded stdin writer with a write
+/// deadline, and a non-reading child stalls that write, which aborts the
+/// run before it starts (the executor never observes it). The boundary
+/// payload (exactly 64 KiB) still runs. The raw lane is the one that
+/// carries payloads — the read-only grammar rejects a `stdin` field
+/// outright.
 // Unix-only: the boundary leg executes `wc -c`, which the sanitized child
 // PATH does not resolve on Windows (and the deadline semantics the
 // boundary payload rides are unix — see `write_stdin_…` above).
