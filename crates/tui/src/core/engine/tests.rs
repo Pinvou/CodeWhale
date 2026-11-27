@@ -36800,10 +36800,7 @@ async fn engine_surface_gates_the_strict_flag_on_the_official_route() {
     let _home = EnvVarGuard::set("HOME", &home);
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
-    let _deepseek_env = EnvVarGuard::set(
-        "DEEPSEEK_BASE_URL",
-        "https://api.deepseek.com/beta",
-    );
+    let _deepseek_env = EnvVarGuard::set("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta");
 
     // The official leg spells the endpoint explicitly: the fixture
     // config carries no provider override, so the identity-aware
@@ -36822,7 +36819,11 @@ async fn engine_surface_gates_the_strict_flag_on_the_official_route() {
         };
         // The gate reads the flag off the ENGINE config — the runtime
         // constructors copy it across; a test names it directly.
-        let workspace = tmp.path().join(if expect_strict { "official" } else { "off-route" });
+        let workspace = tmp.path().join(if expect_strict {
+            "official"
+        } else {
+            "off-route"
+        });
         fs::create_dir_all(&workspace).expect("create workspace");
         let engine_config = EngineConfig {
             workspace,

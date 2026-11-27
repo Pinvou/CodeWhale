@@ -2938,9 +2938,17 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
             && obj.len() > 1
             && let Some(branches) = obj.get("anyOf").and_then(Value::as_array)
         {
-            let mut node_sans_any_of = obj.clone();
-            node_sans_any_of.remove("anyOf");
-            let node_sans_any_of = Value::Object(node_sans_any_of);
+            // Round 31: build the view instead of cloning the node and
+            // discarding the `anyOf` copy — `anyOf` is usually the node's
+            // largest child, and this site runs per composition node on
+            // the per-request path.
+            let mut sans_any_of = serde_json::Map::with_capacity(obj.len().saturating_sub(1));
+            for (key, value) in obj {
+                if key != "anyOf" {
+                    sans_any_of.insert(key.clone(), value.clone());
+                }
+            }
+            let node_sans_any_of = Value::Object(sans_any_of);
             let mut budget = pair_budget_take();
             let witness = branches.iter().any(|branch| {
                 schema_pair_satisfiable(branch, &node_sans_any_of, root, 0, &mut budget)
@@ -5374,15 +5382,18 @@ fn schema_pair_satisfiable(
         // the sibling still witnesses, and an incompatible one was never a
         // witness at all.
         let wrapper_obj = wrapper.as_object().expect("wrapper comes from a_obj/b_obj");
+        // Round 31: same build-don't-clone as the composition arm — skip
+        // the `anyOf` subtree instead of cloning and dropping it.
         let sibling = if wrapper_obj.len() == 1 {
             None
         } else {
-            let mut sibling = wrapper.clone();
-            sibling
-                .as_object_mut()
-                .expect("checked above")
-                .remove("anyOf");
-            Some(sibling)
+            let mut sans = serde_json::Map::with_capacity(wrapper_obj.len().saturating_sub(1));
+            for (key, value) in wrapper_obj {
+                if key != "anyOf" {
+                    sans.insert(key.clone(), value.clone());
+                }
+            }
+            Some(Value::Object(sans))
         };
         let witness = alternatives.iter().any(|alternative| {
             schema_pair_satisfiable(alternative, other, root, depth + 1, &mut *budget)
@@ -20367,6 +20378,37 @@ mod strict_fixwave_r31 {
             Some(&json!(false)),
             "the authored refusal survives: {}",
             schema
+        );
+    }
+
+    #[test]
+    fn screened_sources_do_not_spend_the_compile_budget() {
+        // Round 31: the tick sat ahead of the screens, so 128
+        // wire-SyntaxError sources burned the tool's pool and starved its
+        // later judgeable pattern — the same ordering gap the round-30
+        // cap fix closed for oversize sources. Over-expansion sources
+        // must abstain WITHOUT moving the counter; the judgeable pattern
+        // afterwards compiles as the first paid entry.
+        for i in 0..STRICT_PATTERN_COMPILE_BUDGET {
+            let hostile = format!("(a{{1,101}}){{1,101}}z{i}");
+            assert!(matches!(
+                compile_documented_pattern(&hostile),
+                PatternCompileOutcome::Final(None)
+            ));
+        }
+        assert_eq!(
+            pattern_compile_counters_for_test().0,
+            0,
+            "screened sources must not spend the pool"
+        );
+        assert!(matches!(
+            compile_documented_pattern("^a$"),
+            PatternCompileOutcome::Final(Some(_))
+        ));
+        assert_eq!(
+            pattern_compile_counters_for_test().0,
+            1,
+            "the judgeable pattern is the first paid compile"
         );
     }
 
