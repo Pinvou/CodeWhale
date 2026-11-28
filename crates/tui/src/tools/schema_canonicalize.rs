@@ -55,6 +55,22 @@ pub fn canonicalize_schema(value: &mut Value) {
                     }
                 }
             }
+            // Sort draft-7 `dependencies` NAME tables (round 31): the
+            // array spelling is semantically `dependentRequired` — a set
+            // of trigger names — and the keyword survives sanitize on the
+            // non-strict lanes (only the strict strip removes it), so two
+            // logically-equal schemas differing only in a table's authored
+            // order kept different bytes against the cache-stability
+            // contract. The SCHEMA-form values (draft-7's
+            // dependentSchemas spelling) are left for the recursion, which
+            // sorts their own `required` arrays.
+            if let Some(Value::Object(deps)) = map.get_mut("dependencies") {
+                for dep_value in deps.values_mut() {
+                    if let Value::Array(arr) = dep_value {
+                        sort_string_array(arr);
+                    }
+                }
+            }
             // Recurse into every child value, leaving instance data alone.
             for (k, v) in map.iter_mut() {
                 if INSTANCE_DATA_KEYS.contains(&k.as_str()) {
@@ -135,6 +151,29 @@ fn sort_string_array(arr: &mut [Value]) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dependencies_name_tables_sort_like_dependent_required() {
+        // Round 31 (fresh review): the draft-7 `dependencies` array
+        // spelling is `dependentRequired` semantics — a set of trigger
+        // names — and the keyword survives sanitize on the non-strict
+        // lanes, so authored order broke the identical-bytes contract for
+        // logically-equal schemas. Name tables sort; the SCHEMA-form
+        // values stay for the recursion (which sorts their `required`),
+        // and instance data stays untouched.
+        let mut schema = serde_json::json!({
+            "dependencies": {
+                "a": ["z", "x"],
+                "b": {"type": "object", "required": ["q", "p"]}
+            }
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(schema["dependencies"]["a"], serde_json::json!(["x", "z"]));
+        assert_eq!(
+            schema["dependencies"]["b"]["required"],
+            serde_json::json!(["p", "q"])
+        );
+    }
 
     #[test]
     fn examples_literals_are_instance_data_and_keep_their_bytes() {

@@ -211,6 +211,7 @@ fn contract_bash_nonzero_is_an_error_with_status_after_output() {
         },
         None,
         &ToolContext::new("."),
+        false,
     )
     .expect_err("nonzero must be a failed tool call");
     assert!(
@@ -2608,7 +2609,7 @@ fn contract_bash_denial_surfaces_the_escalation_shape() {
     let mut result = failed_network_shell_result("", "Operation not permitted");
     result.sandbox_denied = true;
 
-    let error = finish_contract_bash_result(result, None, &ctx)
+    let error = finish_contract_bash_result(result, None, &ctx, false)
         .expect_err("sandbox denial is a failed call");
 
     assert!(
@@ -3159,6 +3160,142 @@ async fn test_exec_shell_foreground_cancel_kills_process() {
     let meta = result.metadata.expect("metadata");
     assert_eq!(meta.get("status").and_then(Value::as_str), Some("Killed"));
     assert_eq!(meta.get("canceled").and_then(Value::as_bool), Some(true));
+}
+
+#[tokio::test]
+async fn lowercase_bash_preserves_observed_foreground_cancellation() {
+    // Call the real tool directly so the native waiter, including in the
+    // engine's same-poll race, gets the chance to observe Stop.
+    for stopped_elsewhere in [false, true] {
+        let workspace = tempdir().expect("tempdir");
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = ToolContext::new(workspace.path()).with_cancel_token(cancellation.clone());
+        let shell_manager = context.shell_manager.clone();
+        let command = sleep_command(30);
+        let run = LowercaseBashTool.execute(json!({ "command": command }), &context);
+        tokio::pin!(run);
+
+        let job_id = tokio::select! {
+            result = &mut run => panic!("shell completed before Stop: {result:?}"),
+            job = wait_for_running_foreground_shell(&shell_manager) => job,
+        };
+        if stopped_elsewhere {
+            let result = shell_manager.lock().expect("shell manager").kill(&job_id);
+            assert_eq!(result.expect("external stop").status, ShellStatus::Killed);
+        }
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut run)
+            .await
+            .expect("foreground waiter observed the cancellation");
+        let error = result.expect_err("stopped command has a terminal error");
+        match (stopped_elsewhere, error) {
+            (false, ToolError::Cancelled { message })
+            | (true, ToolError::ExecutionFailed { message }) => {
+                assert!(message.ends_with("Command aborted"), "{message}");
+            }
+            (stopped_elsewhere, error) => {
+                panic!("unexpected error for stopped_elsewhere={stopped_elsewhere}: {error:?}");
+            }
+        }
+        let job = shell_manager
+            .lock()
+            .expect("shell manager")
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("same shell job");
+        assert_eq!(job.status, ShellStatus::Killed);
+    }
+}
+
+async fn wait_for_running_foreground_shell(shell_manager: &Mutex<ShellManager>) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(job) = shell_manager
+                .lock()
+                .expect("shell manager")
+                .list_jobs()
+                .into_iter()
+                .find(|job| job.status == ShellStatus::Running)
+            {
+                return job.id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("real foreground shell entered Running")
+}
+
+#[tokio::test]
+async fn lowercase_bash_preserves_natural_exit_during_late_cancellation() {
+    let workspace = tempdir().expect("tempdir");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let context = ToolContext::new(workspace.path()).with_cancel_token(cancellation.clone());
+    let shell_manager = context.shell_manager.clone();
+    let powershell =
+        "while (!(Test-Path -LiteralPath release)) { Start-Sleep -Milliseconds 10 }; exit 7";
+    let command = if crate::shell_dispatcher::global_dispatcher()
+        .kind()
+        .is_powershell()
+    {
+        powershell.to_owned()
+    } else if cfg!(windows) {
+        format!(r#"powershell.exe -NoProfile -NonInteractive -Command "{powershell}""#)
+    } else {
+        "while [ ! -f release ]; do sleep 0.02; done; exit 7".to_owned()
+    };
+    let run = LowercaseBashTool.execute(json!({ "command": command }), &context);
+    tokio::pin!(run);
+
+    let job_id = tokio::select! {
+        result = &mut run => panic!("shell completed before release: {result:?}"),
+        job = wait_for_running_foreground_shell(&shell_manager) => job,
+    };
+    std::fs::write(workspace.path().join("release"), b"").expect("release process");
+    // Observe the OS child without updating the shell manager's cached status,
+    // and without polling the waiter until after it receives a late Stop.
+    let exit = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let exit = {
+                let mut manager = shell_manager.lock().expect("shell manager");
+                let job = manager.processes.get_mut(&job_id).expect("same shell job");
+                assert_eq!(job.status, ShellStatus::Running);
+                job.child
+                    .as_mut()
+                    .expect("live child handle")
+                    .try_wait()
+                    .expect("poll OS child")
+            };
+            if let Some(exit) = exit {
+                return exit;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("released foreground process exited");
+    assert_eq!(exit.code, Some(7));
+    cancellation.cancel();
+
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut run)
+        .await
+        .expect("waiter resolves after the late cancellation")
+        .expect_err("nonzero exits remain errors");
+    match error {
+        ToolError::ExecutionFailed { message } => {
+            assert!(message.ends_with("Command exited with code 7"), "{message}");
+        }
+        error => panic!("late cancellation replaced the natural failure: {error:?}"),
+    }
+    let snapshot = shell_manager
+        .lock()
+        .expect("shell manager")
+        .get_output(&job_id, false, 0)
+        .expect("same shell job");
+    assert_eq!(snapshot.status, ShellStatus::Failed);
+    assert_eq!(snapshot.exit_code, Some(7));
 }
 
 #[tokio::test]
@@ -5104,11 +5241,12 @@ fn bounded_reap_reports_grace_expiry_while_the_child_lives() {
 }
 
 /// An inline stdin payload past one pipe buffer is refused before spawn:
-/// the payload is delivered with a blocking write while the shell-manager
-/// lock is held, and a non-reading child would wedge the executor past any
-/// watchdog. The boundary payload (exactly 64 KiB) still runs. The raw
-/// lane is the one that carries payloads — the read-only grammar rejects
-/// a `stdin` field outright.
+/// the payload is delivered through the bounded stdin writer with a write
+/// deadline, and a non-reading child stalls that write, which aborts the
+/// run before it starts (the executor never observes it). The boundary
+/// payload (exactly 64 KiB) still runs. The raw lane is the one that
+/// carries payloads — the read-only grammar rejects a `stdin` field
+/// outright.
 // Unix-only: the boundary leg executes `wc -c`, which the sanitized child
 // PATH does not resolve on Windows (and the deadline semantics the
 // boundary payload rides are unix — see `write_stdin_…` above).

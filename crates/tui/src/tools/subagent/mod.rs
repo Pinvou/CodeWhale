@@ -13337,16 +13337,26 @@ async fn run_subagent(
         let request_route = runtime
             .client
             .effective_route_envelope(&runtime.model, chrono::Utc::now());
-        // Same gate as the parent path: the strict pipeline encodes DeepSeek's
-        // strict-mode contract, so it acts only on official DeepSeek-family
-        // routes (crate::config::strict_tool_mode_for_route).
-        let strict_tool_mode = runtime.api_config.as_deref().is_some_and(|config| {
-            crate::config::strict_tool_mode_for_route(
-                config.strict_tool_mode.unwrap_or(false),
-                config.api_provider(),
-                &config.deepseek_base_url(),
-            )
-        });
+        // The strict pipeline encodes DeepSeek's strict-mode contract, so it
+        // acts only on official DeepSeek-family routes — the same predicate
+        // the parent turn applies. Elsewhere it would strip keywords the
+        // other provider documents (`minItems`/`maxItems` on OpenAI) and
+        // remove optional properties no other contract asks to remove. The
+        // child feeds its own config's URL beside the client's effective
+        // provider; no config means no official route, and the gate fails
+        // closed like every divergence.
+        let strict_tool_mode = {
+            let flag = runtime
+                .api_config
+                .as_ref()
+                .and_then(|config| config.strict_tool_mode)
+                .unwrap_or(false);
+            let base_url = runtime
+                .api_config
+                .as_deref()
+                .map_or(String::new(), crate::config::Config::deepseek_base_url);
+            crate::config::strict_tool_mode_for_route(flag, request_route.provider, &base_url)
+        };
         let tools = tool_surface.request_tools(
             tool_registry.deferred_catalog_for_model(&agent_type),
             strict_tool_mode,

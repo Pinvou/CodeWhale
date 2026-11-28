@@ -1122,11 +1122,12 @@ mod tests {
                 None,
             )
         );
-        // The one place wire normalization is budget-load-bearing on today's
-        // catalogue: the short Kimi alias only reaches its catalogued 32,768
-        // ceiling after canonicalization to `moonshotai/kimi-k2.7-code`; raw,
-        // it is uncatalogued and fails closed at the 8,192 compatibility
-        // ceiling. Deleting the normalization call in
+        // A normalization-sensitive case in the budget (the OpenRouter
+        // trinity family is another): the short Kimi alias only reaches its
+        // catalogued 32,768 ceiling after canonicalization to
+        // `moonshotai/kimi-k2.7-code`; raw, it is uncatalogued and fails
+        // closed at the 8,192 compatibility ceiling. Deleting the
+        // normalization call in
         // `route_budget::route_effective_max_output_tokens` — the helper this
         // wrapper delegates to — turns this assertion red.
         let openrouter = crate::config::ApiProvider::Openrouter;

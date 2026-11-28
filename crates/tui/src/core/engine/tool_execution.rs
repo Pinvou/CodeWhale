@@ -457,7 +457,22 @@ impl Engine {
                     }
                 }
                 Err(err) => {
-                    let message = format!("{err}");
+                    // Keep the native bash prefix in the model's parallel
+                    // aggregate, including when its waiter observes Stop.
+                    let message = match err {
+                        ToolError::Cancelled { message }
+                            if tool_name == "bash"
+                                && !self
+                                    .config
+                                    .extra_tools
+                                    .0
+                                    .iter()
+                                    .any(|tool| tool.name() == "bash") =>
+                        {
+                            ToolError::execution_failed(message).to_string()
+                        }
+                        err => err.to_string(),
+                    };
                     ParallelToolResultEntry {
                         tool_name,
                         success: false,

@@ -9,7 +9,8 @@
 //! The default sanitizer runs in-place on every schema returned by
 //! `ToolRegistry::tools_for_api()` before the registry hands them off.
 //! Provider-specific helpers below add stricter DeepSeek and OpenAI Responses
-//! compatibility passes where their request shapes need it, and a narrower
+//! compatibility passes where their request shapes need it, an xAI pass that
+//! rehearses root unions for its flattening fallback, and a narrower
 //! Anthropic Messages pass that strips only the root composition keywords
 //! that validator is recorded rejecting.
 //!
@@ -60,7 +61,7 @@ use crate::models::Tool;
 /// - Collapse `{"anyOf":[X, {"type":"null"}]}` → `X ∪ {"nullable": true}`
 /// - Inject `"properties": {}` on bare-object schemas
 /// - Prune dangling `required` entries
-/// - Collapse single-element `oneOf` / `allOf`
+/// - Collapse single-element `oneOf` / `allOf` / `anyOf`
 /// - Walk recursively through all subschemas
 pub fn sanitize(schema: &mut Value) {
     sanitize_in_instance(schema, &[]);
@@ -416,9 +417,11 @@ const STRICT_REF_MAX_HOPS: usize = 16;
 /// a branch whose shared property `$ref`s the union node itself). Without a
 /// bound such a schema recurses forever on the per-request path and the
 /// process aborts on stack overflow (uncatchable). Any schema that needs
-/// this much joint depth is a cycle or junk — the judge abstains
-/// compatible-by-default past the bound, the same hostile-input line the
-/// hop, member, and alternative caps draw.
+/// this much joint depth is a cycle or junk. Past the bound the judge
+/// fails closed where either side carries a judged constraint (round 23
+/// — the abstention landed exactly on the unsatisfiable case), the same
+/// hostile-input line the call budget draws and the direction the hop,
+/// member, and alternative caps take beside judged constraints.
 const STRICT_PAIR_JUDGE_MAX_DEPTH: usize = 128;
 
 /// Total pair-judge call budget, refilled per tool at the preparation
@@ -843,7 +846,13 @@ impl DefectWalk {
                     match key.as_str() {
                         // Name → schema maps: field names are not schemas, so
                         // the map is never read as a union-bearing node.
-                        "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                        // Round 31: `definitions`/`$def` join the family —
+                        // the generic arm walked the map itself as a schema
+                        // node, so a definition literally named `oneOf`
+                        // fired R2 on its VALUE and a definition named
+                        // `title`/`examples` went invisible to the walk.
+                        "properties" | "$defs" | "definitions" | "$def" | "patternProperties"
+                        | "dependentSchemas" => {
                             if let Some(map) = child.as_object() {
                                 for subschema in map.values() {
                                     if let Some(reason) =
@@ -1502,15 +1511,48 @@ fn numbers_provably_disjoint(x: &serde_json::Number, y: &serde_json::Number) -> 
     false
 }
 
+/// Branch cap for the xAI rehearsal's union-defect walk (round 31): the
+/// R1/R2 arms are pairwise over branches, so an adversarial
+/// all-discriminated union cost O(B²)-O(B³) witness extractions per tool
+/// per request with no cap at all — the MFJS branch cap covers only the
+/// Moonshot lane. Past the cap the walk abstains, which is the
+/// NO-MUTATION answer: the rehearsal's verdict decides between
+/// pass-through and the flattening fallback, and no verdict keeps the
+/// authored schema exactly as it arrived.
+const XAI_DEFECT_BRANCH_CAP: usize = 500;
+
+/// Pair-proof budget for the R2 admission scan (round 31): past the
+/// branch cap a hostile under-cap union — every pair provably
+/// discriminated by its own pin — still paid B² proof walks per node.
+/// Each pair's proof walks both branches, so the budget bounds the total
+/// witness work; exhaustion abstains to pass-through, the same
+/// no-mutation line as the branch cap.
+const XAI_DEFECT_PAIR_PROOF_CAP: usize = 20_000;
+
 fn oneof_node_defect(
     branches: &[Value],
     enclosing: &serde_json::Map<String, Value>,
     path: &str,
     walk: &mut DefectWalk,
 ) -> Option<String> {
+    // Round 31: past the branch cap the walk abstains — pass-through is
+    // the no-mutation answer (see the cap's doc).
+    if branches.len() > XAI_DEFECT_BRANCH_CAP {
+        return None;
+    }
     // R1: identical branches.
+    // Round 32: the pairwise scan is proof-work like the R2 admission arm
+    // — a hostile under-cap union paid the full B²/2 deep `Value`
+    // compares per node per request outside every budget. The same
+    // pair-proof cap bounds it; exhaustion abstains to pass-through, the
+    // no-mutation answer the branch cap and the pair-proof cap draw.
+    let mut proofs = 0usize;
     for (left, left_branch) in branches.iter().enumerate() {
         for (right, right_branch) in branches.iter().enumerate().skip(left + 1) {
+            proofs += 1;
+            if proofs > XAI_DEFECT_PAIR_PROOF_CAP {
+                return None;
+            }
             if left_branch == right_branch {
                 return Some(format!(
                     "R1 identical branches {left} and {right} at {path}"
@@ -1571,14 +1613,34 @@ fn oneof_node_defect(
                 .all(|candidate| !right_set.contains(candidate))
         })
     };
-    let non_discriminating = required_free
-        .iter()
-        .filter(|branch| {
-            !required_free
-                .iter()
-                .all(|other| std::ptr::eq(**branch, *other) || pin_discriminated(branch, other))
-        })
-        .count();
+    // Round 32: the pin-exemption filter pays `pin_discriminated` per
+    // ordered pair — proof-work like the admission arm it feeds, so it
+    // ticks the same pair-proof cap and abstains to pass-through on
+    // exhaustion.
+    let mut exemption_proofs = 0usize;
+    let mut non_discriminating = 0usize;
+    for branch in required_free.iter() {
+        let mut discriminates_every_other = true;
+        for other in required_free.iter() {
+            if std::ptr::eq(*branch, *other) {
+                continue;
+            }
+            exemption_proofs += 1;
+            if exemption_proofs > XAI_DEFECT_PAIR_PROOF_CAP {
+                return None;
+            }
+            if !pin_discriminated(branch, other) {
+                discriminates_every_other = false;
+                break;
+            }
+        }
+        if !discriminates_every_other {
+            non_discriminating += 1;
+            if non_discriminating >= 2 {
+                break;
+            }
+        }
+    }
     if non_discriminating >= 2 {
         return Some(format!(
             "R2 {non_discriminating} non-discriminating branches at {path}"
@@ -1904,7 +1966,15 @@ fn strip_annotation_keywords(value: &mut Value) {
                 match key.as_str() {
                     // Name → schema maps: the keys are field names, never
                     // schema keywords; only the values are schemas.
-                    "properties" | "$defs" | "patternProperties" | "dependentSchemas" => {
+                    // Round 31: `definitions`/`$def` join the family (the
+                    // generic arm let the removal loop delete a definition
+                    // NAMED `title`/`examples` from the rehearsal clone),
+                    // and the literal skip gains `default`/`examples`/
+                    // `example` to match the DefectWalk's instance-data
+                    // line — annotations inside literal data must not be
+                    // stripped from the clone.
+                    "properties" | "$defs" | "definitions" | "$def" | "patternProperties"
+                    | "dependentSchemas" => {
                         if let Some(map) = child.as_object_mut() {
                             for subschema in map.values_mut() {
                                 strip_annotation_keywords(subschema);
@@ -1917,7 +1987,7 @@ fn strip_annotation_keywords(value: &mut Value) {
                     }
                     // Instance data: stripping inside it would corrupt the
                     // very constraint the value expresses.
-                    "const" | "enum" => {}
+                    "const" | "enum" | "default" | "examples" | "example" => {}
                     _ => strip_annotation_keywords(child),
                 }
             }
@@ -2030,10 +2100,17 @@ fn unions_lack_pairwise_discrimination(
         branches,
     };
     let groups: Vec<Vec<&str>> = branches.iter().map(branch_required_names).collect();
+    let mut proofs = 0usize;
     for (left, left_group) in groups.iter().enumerate() {
         for (right, right_group) in groups.iter().enumerate() {
             if left == right {
                 continue;
+            }
+            proofs += 1;
+            if proofs > XAI_DEFECT_PAIR_PROOF_CAP {
+                // Round 31: exhaustion abstains to pass-through — the
+                // no-mutation answer, like the branch cap.
+                return None;
             }
             if !admission.pair_discriminated(
                 left,
@@ -2891,9 +2968,17 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
             && obj.len() > 1
             && let Some(branches) = obj.get("anyOf").and_then(Value::as_array)
         {
-            let mut node_sans_any_of = obj.clone();
-            node_sans_any_of.remove("anyOf");
-            let node_sans_any_of = Value::Object(node_sans_any_of);
+            // Round 31: build the view instead of cloning the node and
+            // discarding the `anyOf` copy — `anyOf` is usually the node's
+            // largest child, and this site runs per composition node on
+            // the per-request path.
+            let mut sans_any_of = serde_json::Map::with_capacity(obj.len().saturating_sub(1));
+            for (key, value) in obj {
+                if key != "anyOf" {
+                    sans_any_of.insert(key.clone(), value.clone());
+                }
+            }
+            let node_sans_any_of = Value::Object(sans_any_of);
             let mut budget = pair_budget_take();
             let witness = branches.iter().any(|branch| {
                 schema_pair_satisfiable(branch, &node_sans_any_of, root, 0, &mut budget)
@@ -3241,7 +3326,13 @@ fn collapse_nullable_unions(schema: &mut Value) {
                     }
                 }
             }
-            obj.insert("nullable".into(), Value::Bool(true));
+            // Round 31: an authored `nullable: false` refuses the very
+            // null this branch carries — the union's admitted language
+            // was parent ∧ survivor ∧ ¬null, and the merged shape keeps
+            // that refusal instead of being clobbered open here.
+            if obj.get("nullable") != Some(&Value::Bool(false)) {
+                obj.insert("nullable".into(), Value::Bool(true));
+            }
         }
     }
 }
@@ -3275,8 +3366,57 @@ fn parent_keyword_collides(obj: &Map<String, Value>, key: &str, branch_value: &V
             return false;
         }
         if is_empty_container(parent) {
-            return parent.is_object()
-                && obj.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+            // Round 31: an empty container still asserts nothing — the
+            // branch's constraint is strictly more specific and the merge
+            // stays lossless — EXCEPT in two families. A schema-form
+            // `additionalProperties` constrains every key OUTSIDE
+            // `properties`; after a properties merge those keys live
+            // inside `properties` and the constraint stops applying, so
+            // `{"properties": {}, "additionalProperties": {"type":
+            // "number"}}` merged with a tags-array branch flipped
+            // `{"tags": []}` from rejected to accepted (the bool-false
+            // form already collided; `true` constrains nothing and stays
+            // mergeable). And `enum: []` / `anyOf: []` / `oneOf: []` are
+            // the FALSE schema — they admit nothing, which a branch value
+            // must not merge open (`allOf: []` is the identity and
+            // `required: []` asserts no names, so both stay mergeable).
+            if parent.is_object() {
+                if obj.get("additionalProperties").is_some_and(|ap| match ap {
+                    Value::Bool(false) => true,
+                    Value::Object(_) => key == "properties",
+                    _ => false,
+                }) {
+                    return true;
+                }
+                // Round 32 (fresh r4 review, live-proven): the
+                // `unevaluated` spellings are the same closure family.
+                // `unevaluatedProperties` constrains every key the
+                // evaluated containers do not admit — `{"properties": {},
+                // "unevaluatedProperties": false}` asserts objects with NO
+                // keys, and merging a branch's `properties` into the empty
+                // container made those keys evaluated, silently narrowing
+                // the closure away: the authored schema admitted nothing
+                // and the merged shape admitted `{"tags": []}` with no
+                // note. The bool-false form collides outright; the schema
+                // form constrains keys OUTSIDE `properties`, so only the
+                // properties merge escapes it (the additionalProperties
+                // reasoning one family over). `unevaluatedItems` mirrors
+                // this beside `items`/`prefixItems`.
+                match obj.get("unevaluatedProperties") {
+                    Some(Value::Bool(false)) => return true,
+                    Some(Value::Object(_)) if key == "properties" => return true,
+                    _ => {}
+                }
+                match obj.get("unevaluatedItems") {
+                    Some(Value::Bool(false)) => return true,
+                    Some(Value::Object(_)) if key == "items" || key == "prefixItems" => {
+                        return true;
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+            return matches!(key, "enum" | "anyOf" | "oneOf");
         }
         true
     })
@@ -3389,6 +3529,20 @@ const REF_SIBLING_JUDGED_KEYWORDS: &[&str] = &[
     "properties",
     "required",
     "additionalProperties",
+    // Round 31 (fresh review): the composition spellings. The wholesale
+    // resolution below REPLACES a `$ref` side with its definition and
+    // silently drops the side's own union sibling from the judgment — a
+    // branch `{"$ref": "#/str", "anyOf": [{"enum": ["a"]},
+    // {"type": "boolean"}]}` was judged as bare `str` against
+    // `{"enum": ["b"]}`, admitted `"b"`, and shipped a union whose
+    // property admits nothing. Judging the conjunction would mean
+    // intersecting every definition hop with every alternative — the
+    // node-level composition arm witnesses `$ref`-with-composition NODES
+    // separately, but the pair judge has no such witness, so the pair
+    // refuses like every other unjudgeable judged-conjunction.
+    "anyOf",
+    "oneOf",
+    "allOf",
 ];
 
 /// Round 27: whether this node pairs a `$ref` with a judged sibling pin —
@@ -3419,7 +3573,7 @@ fn ref_siblings_carry_judged_pins(obj: &Map<String, Value>) -> bool {
 /// per tool at [`prepare_tools_for_strict_mode`] (round 28 — the
 /// per-preparation pool let one schema drain the budget and silently
 /// strip strict mode from every later tool in the catalog); the compile
-/// budget beside which it used to reset stays request-shared.
+/// budget beside which it used to reset pools per tool since round 29.
 fn pair_budget_take() -> usize {
     PAIR_JUDGE_CALLS_LEFT.with(|cell| {
         let left = cell.get();
@@ -3473,22 +3627,26 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
         // over-cap sources burn the whole pool on free rejections and
         // starve its later judgeable patterns — availability, order
         // dependent, and the pool's own comment claims no such spend.
+        // Round 31: this caller-side cap is only the cheap pre-filter;
+        // the drift/expansion screens and the budget tick live INSIDE the
+        // compile body, the tick behind every screen — a run of
+        // wire-SyntaxError or over-expansion sources can never produce a
+        // verdict, so charging their rejection let 128 of them starve the
+        // tool's later fully-judgeable patterns.
         if pattern.len() > 16_384 {
             return None;
         }
-        let budget_left = PATTERN_COMPILES_THIS_TOOL.with(|counter| {
-            let compiles = counter.get();
-            if compiles < STRICT_PATTERN_COMPILE_BUDGET {
-                counter.set(compiles + 1);
-                true
-            } else {
-                false
-            }
-        });
-        if !budget_left {
-            return None;
-        }
-        let compiled = compile_documented_pattern(pattern);
+        // Round 31: the tick lives INSIDE the compile body, behind the
+        // cap and every screen — a source that can never reach a verdict
+        // (over-cap, drift-screened, over-expansion) no longer spends the
+        // pool, so a run of wire-SyntaxError sources cannot starve the
+        // tool's later fully-judgeable patterns. Exhaustion is signalled
+        // separately and deliberately NOT cached: the answer is not
+        // final, and a refilled tool must retry the source next request.
+        let compiled = match compile_documented_pattern(pattern) {
+            PatternCompileOutcome::Final(compiled) => compiled,
+            PatternCompileOutcome::BudgetExhausted => return None,
+        };
         // Only a cacheable miss leaks its key: a source over the compile
         // cap can never compile, so caching it would grow the table — and
         // the leak — with no judging benefit, and a table at its bound
@@ -3514,7 +3672,17 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
 }
 
 /// The uncached compile body of [`compiled_documented_pattern`].
-fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
+enum PatternCompileOutcome {
+    /// A compiled oracle, or a screened-out source: either way the answer
+    /// is final for the thread's lifetime and worth negative-caching.
+    Final(Option<regex::Regex>),
+    /// The pool was empty at the tick (which sits behind the cap and
+    /// every screen): the answer is NOT final — a refilled tool must
+    /// retry this source, so the caller must not negative-cache it.
+    BudgetExhausted,
+}
+
+fn compile_documented_pattern(pattern: &str) -> PatternCompileOutcome {
     // Compile work scales with the pattern source, and a judge site pays
     // it per node (or per pair call) on the per-request path. Past this
     // bound the judge abstains compatible-by-default; the pattern still
@@ -3530,7 +3698,7 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
     // lets real validated patterns be judged; the expansion screen and
     // the per-request compile budget remain the actual cost bounds.
     if pattern.len() > 16_384 {
-        return None;
+        return PatternCompileOutcome::Final(None);
     }
     // Regex-dialect drift the judge cannot paper over: a case-insensitive
     // flag folds Unicode case Rust-side where ECMA-262's Canonicalize does
@@ -3595,8 +3763,30 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
         // bytes. Both render judge verdicts the wire can never reach.
         || has_stacked_quantifier(pattern)
         || has_class_set_operation(pattern)
+        // Round 32 (fresh r4 review, live-proven): `\<` and `\>` are real
+        // word-boundary assertions here (regex-syntax lowers them to
+        // WordBoundaryStart/EndAngle) where Annex B's IdentityEscape reads
+        // literal `<`/`>` — the oracle accepted "id" for `^\<id$` whose
+        // wire pattern rejects it. The `\b`/`\A`/`\a` line one family
+        // over.
+        || pattern.contains("\\<")
+        || pattern.contains("\\>")
+        || has_tainted_repetition_brace(pattern)
     {
-        return None;
+        return PatternCompileOutcome::Final(None);
+    }
+    // Round 31 (fresh review): a raw line terminator in the source is a
+    // wire SyntaxError — the ECMA-262 class grammar's
+    // RegularExpressionClassChar excludes LineTerminator, so
+    // `new RegExp("[a\nb]")` never compiles there — while this side
+    // compiles the class and judges members against it. The same drift
+    // family as the flags above: the judge abstains and lets the wire
+    // reject the schema on its own terms.
+    if pattern
+        .chars()
+        .any(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+    {
+        return PatternCompileOutcome::Final(None);
     }
     // Round 23: a static EXPANSION screen before compiling. The judge's
     // real cost is member length × NFA-program size, and the NFA's state
@@ -3642,7 +3832,7 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
             }
         }
         if expansion > STRICT_PATTERN_EXPANSION_LIMIT {
-            return None;
+            return PatternCompileOutcome::Final(None);
         }
         index += 1;
     }
@@ -3650,9 +3840,22 @@ fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
     // bounds the NFA compile and REJECTED a 4,000-literal flat
     // alternation (~4 KB source) while the hostile nested bounded repeat
     // slipped through it — the wrong bound in the wrong place. The
-    // expansion screen above is the cost bound; the per-request compile
-    // budget bounds how many screened patterns a preparation pays.
-    regex::Regex::new(&ecma_dot_exact_pattern(pattern)).ok()
+    // expansion screen above is the cost bound. Round 31: the budget
+    // tick sits HERE, behind the cap and every screen — a source that
+    // can never reach a verdict no longer spends the pool.
+    let budget_left = PATTERN_COMPILES_THIS_TOOL.with(|counter| {
+        let compiles = counter.get();
+        if compiles < STRICT_PATTERN_COMPILE_BUDGET {
+            counter.set(compiles + 1);
+            true
+        } else {
+            false
+        }
+    });
+    if !budget_left {
+        return PatternCompileOutcome::BudgetExhausted;
+    }
+    PatternCompileOutcome::Final(regex::Regex::new(&ecma_dot_exact_pattern(pattern)).ok())
 }
 
 /// Round 28: the compile copy is ECMA-exact in the `.` dimension. Rust's
@@ -3774,6 +3977,68 @@ fn has_rust_only_flag_group(pattern: &str) -> bool {
                 Some(b'i' | b'm' | b's' | b'U' | b'u' | b'R' | b'x' | b'-' | b'P')
             )
     })
+}
+
+/// Round 32 (fresh r4 review, live-proven): Rust's repetition parser skips
+/// ASCII whitespace inside the braces, so `a{1, 2}` compiles a real counted
+/// repetition on this side where ECMA-262 Annex B reads the whole brace run
+/// as literal text — the oracle accepted "aa" for a pattern the wire only
+/// ever matches against the literal `a{1, 2}` (and a hostile
+/// `a{1, 999 }`-shaped brace counted ZERO expansion while this side built a
+/// ~10⁵-state machine, bypassing the expansion screen). Any brace run
+/// carrying whitespace before its `}` is screened; digits and commas keep
+/// judging (the ECMA quantifier spelling), class contents are literal on
+/// both dialects, and an unterminated or junk brace errors on this side
+/// anyway and abstains through the compile failure.
+fn has_tainted_repetition_brace(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut index = 0usize;
+    let mut in_class = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' {
+            index += 2;
+            continue;
+        }
+        if in_class {
+            if byte == b']' {
+                in_class = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'[' => {
+                // ECMA `[]` / `[^]` are closed at the marker — bytes after
+                // one are class body again.
+                let mut cursor = index + 1;
+                if bytes.get(cursor) == Some(&b'^') {
+                    cursor += 1;
+                }
+                if bytes.get(cursor) == Some(&b']') {
+                    index = cursor;
+                } else {
+                    in_class = true;
+                }
+            }
+            b'{' => {
+                let mut cursor = index + 1;
+                let mut tainted = false;
+                while cursor < bytes.len() && bytes[cursor] != b'}' {
+                    if bytes[cursor].is_ascii_whitespace() {
+                        tainted = true;
+                    }
+                    cursor += 1;
+                }
+                if tainted && cursor < bytes.len() {
+                    return true;
+                }
+                index = cursor;
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }
 
 /// Round 28: stacked quantifiers — `a**`, `a*+`, `a{2,3}*`, `a{2}{3}` —
@@ -3956,6 +4221,18 @@ fn value_satisfies_string_constraints(
     // the enum path never allowed. An over-cap string fails the judge
     // (conservative direction: a judged constraint is present).
     if value.len() > ENUM_PAIR_MEMBER_BYTES_CAP {
+        return false;
+    }
+    // Round 31 (fresh review): the wire matches per UTF-16 code unit and
+    // this oracle per Unicode scalar value. A value containing a
+    // surrogate pair (an astral character) cannot be judged exactly
+    // against any count-sensitive construct — `^.$` matches one unit on
+    // the wire and rejects the member, where the oracle accepted it and
+    // shipped the tool strict callable by nothing. A judged pattern is
+    // present, so the member refuses (the fail-closed direction, like
+    // every judge residual); values beside NO pattern, and values without
+    // astral characters, keep the exact oracle path.
+    if pattern.is_some() && value.chars().any(|c| c.len_utf16() == 2) {
         return false;
     }
     if let Some(pattern) = pattern
@@ -4438,10 +4715,28 @@ fn value_clears_bounds_with(
                 cell.set(left - 1);
                 true
             }) && alternative.as_object().is_some_and(|alternative_obj| {
+                // Round 32 (fresh r4 review, live-proven): the bounds
+                // judgment alone TYPE-clears an object alternative — its
+                // `properties`/`required`/`additionalProperties` live in
+                // the object judge's domain, so a wrapper whose
+                // alternative demands `a ∈ enum ["y"]` type-cleared a pin
+                // carrying `{"a": "x"}` and the union shipped strict
+                // callable by nothing. Every sibling site (the pair-judge
+                // enum arm, the items arm, the node enum arm) pairs the
+                // two judgments; the chase does too now. Property
+                // patterns compile once per alternative through the
+                // shared memo, and the object judge's depth cap bounds
+                // the recursion.
+                let alternative_patterns = compiled_property_patterns(alternative_obj);
                 value_clears_bounds_with(
                     value,
                     alternative_obj,
                     compiled_documented_pattern(alternative_obj).as_ref(),
+                ) && pinned_object_value_compatible_with(
+                    value,
+                    alternative_obj,
+                    &alternative_patterns,
+                    PINNED_OBJECT_JUDGE_DEPTH,
                 )
             })
         });
@@ -4771,6 +5066,53 @@ fn node_pins_cover_branch(obj: &Map<String, Value>, branch: &Value, root: &Value
     })
 }
 
+/// Serialized byte length of `value`, an UPPER bound that stops counting
+/// once `total` passes `cap` (round 31): the cap predicate's cumulative
+/// early-exit bounds how many members serialize, but a single oversized
+/// member was still fully `to_vec`d on every call — a ~1 MB member × the
+/// per-tool pair budget ≈ a GB of allocation churn per hostile tool per
+/// request, recurring. Exact for every spelling the compact serializer
+/// emits absent control characters; strings charge each escape-needing
+/// byte its full `\uXXXX` width, so the count can only over-charge —
+/// and an over-charge lands on the predicate's conservative side.
+fn serialized_len_capped(value: &Value, cap: usize, total: &mut usize) {
+    if *total > cap {
+        return;
+    }
+    match value {
+        Value::Null => *total += 4,
+        Value::Bool(b) => *total += if *b { 4 } else { 5 },
+        Value::Number(n) => *total += n.to_string().len(),
+        Value::String(s) => {
+            *total += s.len() + 2;
+            *total += s
+                .bytes()
+                .filter(|&b| b < 0x20 || b == b'"' || b == b'\\')
+                .count()
+                * 6;
+        }
+        Value::Array(items) => {
+            *total += 2 + items.len().saturating_sub(1);
+            for item in items {
+                serialized_len_capped(item, cap, total);
+                if *total > cap {
+                    return;
+                }
+            }
+        }
+        Value::Object(map) => {
+            *total += 2 + map.len().saturating_sub(1);
+            for (key, item) in map {
+                *total += key.len() + 3;
+                serialized_len_capped(item, cap, total);
+                if *total > cap {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Whether one side's `enum` value stays within the pair judge's
 /// membership-scan cap: at most [`ENUM_PAIR_MEMBER_BYTES_CAP`] serialized
 /// most [`ENUM_PAIR_MEMBER_BYTES_CAP`] serialized bytes. The count cap
@@ -4790,16 +5132,15 @@ fn enum_members_within_judge_cap(members: &[Value]) -> bool {
     // `to_vec` measured (members + separators + brackets) — a hostile
     // 256 × 16 KB enum still decides at its first oversized member
     // instead of paying the full 4 MB serialization per call per request
-    // (measured 19.8 s per node before the byte cap).
+    // (measured 19.8 s per node before the byte cap). Round 31: the
+    // per-member measure is the bounded walk above, so even the FIRST
+    // oversized member costs O(cap) instead of its own full size.
     let separators = members.len().saturating_sub(1) + 2;
     let mut member_bytes = 0usize;
     for member in members {
-        match serde_json::to_vec(member) {
-            Ok(bytes) => member_bytes += bytes.len(),
-            // A value that cannot serialize cannot be judged; abstain on
-            // the safe side like a cap overshoot.
-            Err(_) => return false,
-        }
+        let mut member_len = 0usize;
+        serialized_len_capped(member, ENUM_PAIR_MEMBER_BYTES_CAP, &mut member_len);
+        member_bytes += member_len;
         if member_bytes + separators > ENUM_PAIR_MEMBER_BYTES_CAP {
             return false;
         }
@@ -5070,8 +5411,144 @@ fn pinned_object_value_compatible_with(
 /// unwound level then fires its sibling/properties recursion, giving the
 /// unwinding an exponential call tree (probed: unbounded depth aborts the
 /// process on stack overflow; depth cap alone hangs the request). Past
-/// either bound the judge abstains compatible-by-default, the same
-/// hostile-input line the hop, member, and alternative caps draw.
+/// either bound the judge fails closed where a judged constraint is
+/// The wrapper arm's joint witness: whether SOME alternative satisfies
+/// `alternative ∧ sibling ∧ other` far enough to call the pair
+/// satisfiable. Round 32 (fresh r4 review, live-proven): pairwise
+/// verdicts do not compose into a joint one — a trio whose every PAIR
+/// shares a value can still admit no common instance (the
+/// alternative's `enum: ["a", "b"]` beside sibling `pattern: "^a$"`
+/// and other `pattern: "^b$"`: every pair overlaps, the three share
+/// nothing). The witness now takes one of two provable shapes: when
+/// any of the three sides pins a finite value domain (`enum`/`const`),
+/// the witness is a VALUE — one pinned member clearing all three sides
+/// through the funnel (every instance of a pinned side is one of its
+/// members, so enumerating the first pinned side is complete; a work
+/// cap bounds the scan and exhaustion fails closed). When no side pins
+/// a domain but two or more sides carry pattern/format constraints,
+/// the string-domain intersection is exactly what this judge cannot
+/// prove, and an unprovable witness is not a satisfiability witness —
+/// fail closed (the same unprovable-intersection line the multi-branch
+/// allOf arm draws). Open domains over provable dimensions (types,
+/// numeric windows) keep the pairwise verdicts: those dimensions
+/// already refuse through them.
+fn wrapper_witness(
+    alternatives: &[Value],
+    sibling: Option<&Value>,
+    other: &Value,
+    root: &Value,
+    depth: usize,
+    budget: &mut usize,
+) -> bool {
+    /// Funnel judgments one alternative's enumeration may pay before
+    /// the honest verdict becomes fail-closed — the same hostile-input
+    /// line the chase and pair budgets draw.
+    const WITNESS_WORK_CAP: usize = 4_096;
+    // The finite value domain a side pins for the enumeration: outer
+    // `None` when the side pins no domain at all, inner `None` when it
+    // pins one past the judge caps (unenumerable — the skipped scan
+    // could have judged the trio, so the honest verdict is
+    // fail-closed), else the members.
+    let side_witness_values = |side: &Value| -> Option<Option<Vec<Value>>> {
+        let obj = side.as_object()?;
+        if let Some(const_value) = obj.get("const") {
+            return Some(Some(vec![const_value.clone()]));
+        }
+        let members = obj.get("enum").and_then(Value::as_array)?;
+        if enum_members_within_judge_cap(members) {
+            Some(Some(members.clone()))
+        } else {
+            Some(None)
+        }
+    };
+    let side_carries_string_domain = |side: Option<&Value>| -> bool {
+        side.and_then(Value::as_object)
+            .is_some_and(|obj| obj.contains_key("pattern") || obj.contains_key("format"))
+    };
+    let value_clears_side = |value: &Value, side: &Value, work: &mut usize| -> bool {
+        *work += 1;
+        if *work > WITNESS_WORK_CAP {
+            return false;
+        }
+        let Some(side_obj) = side.as_object() else {
+            return false;
+        };
+        let side_patterns = compiled_property_patterns(side_obj);
+        value_clears_bounds_with(
+            value,
+            side_obj,
+            compiled_documented_pattern(side_obj).as_ref(),
+        ) && pinned_object_value_compatible_with(
+            value,
+            side_obj,
+            &side_patterns,
+            PINNED_OBJECT_JUDGE_DEPTH,
+        )
+    };
+    alternatives.iter().any(|alternative| {
+        // The FIRST pinned side among {alternative, sibling, other} owns
+        // the enumeration: every instance of a pinned side is one of its
+        // members, so if the trio is satisfiable at all, some member of
+        // that side is a common instance — enumerating one pinned side
+        // is complete.
+        let mut pinned: Option<Vec<Value>> = None;
+        let mut over_cap = false;
+        for side in [Some(alternative), sibling, Some(other)]
+            .into_iter()
+            .flatten()
+        {
+            match side_witness_values(side) {
+                Some(Some(members)) => {
+                    pinned = Some(members);
+                    break;
+                }
+                Some(None) => {
+                    over_cap = true;
+                    break;
+                }
+                None => {}
+            }
+        }
+        if let Some(members) = pinned {
+            let mut work = 0usize;
+            return members.iter().any(|value| {
+                let mut clears_all = true;
+                for side in [Some(alternative), sibling, Some(other)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !value_clears_side(value, side, &mut work) {
+                        clears_all = false;
+                        break;
+                    }
+                }
+                clears_all
+            });
+        }
+        if over_cap {
+            return false;
+        }
+        // No side pins a domain: with two or more pattern/format
+        // constraints riding different sides the string-domain
+        // intersection is unprovable here — fail closed. Otherwise the
+        // pairwise verdicts stand (types and numeric windows already
+        // refuse through them).
+        let string_domains = [Some(alternative), sibling, Some(other)]
+            .into_iter()
+            .flatten()
+            .filter(|side| side_carries_string_domain(Some(side)))
+            .count();
+        if string_domains >= 2 {
+            return false;
+        }
+        schema_pair_satisfiable(alternative, other, root, depth + 1, budget)
+            && sibling.is_none_or(|sibling| {
+                schema_pair_satisfiable(alternative, sibling, root, depth + 1, budget)
+            })
+    })
+}
+/// present (round 23) — the same hostile-input line the hop, member, and
+/// alternative caps draw beside judged constraints.
 fn schema_pair_satisfiable(
     a: &Value,
     b: &Value,
@@ -5144,8 +5621,9 @@ fn schema_pair_satisfiable(
     // the union strict unsatisfiable. An alternative this judge cannot
     // read (a boolean or scalar form, already failed closed upstream)
     // is simply not a satisfiability witness, and past the alternative
-    // cap the chase abstains compatible-by-default — the same
-    // hostile-input line the enum membership cap draws.
+    // cap the chase fails closed — the wrapper carries `anyOf`, itself
+    // a judged constraint the skipped scan would have consulted
+    // (round 23).
     //
     // The chase CONJUNCTS with the wrapper's own keywords beside `anyOf`:
     // an instance must satisfy some alternative AND the sibling `enum`/
@@ -5190,22 +5668,23 @@ fn schema_pair_satisfiable(
         // the sibling still witnesses, and an incompatible one was never a
         // witness at all.
         let wrapper_obj = wrapper.as_object().expect("wrapper comes from a_obj/b_obj");
+        // Round 31: same build-don't-clone as the composition arm — skip
+        // the `anyOf` subtree instead of cloning and dropping it.
         let sibling = if wrapper_obj.len() == 1 {
             None
         } else {
-            let mut sibling = wrapper.clone();
-            sibling
-                .as_object_mut()
-                .expect("checked above")
-                .remove("anyOf");
-            Some(sibling)
+            let mut sans = serde_json::Map::with_capacity(wrapper_obj.len().saturating_sub(1));
+            for (key, value) in wrapper_obj {
+                if key != "anyOf" {
+                    sans.insert(key.clone(), value.clone());
+                }
+            }
+            Some(Value::Object(sans))
         };
-        let witness = alternatives.iter().any(|alternative| {
-            schema_pair_satisfiable(alternative, other, root, depth + 1, &mut *budget)
-                && sibling.as_ref().is_none_or(|sibling| {
-                    schema_pair_satisfiable(alternative, sibling, root, depth + 1, &mut *budget)
-                })
-        });
+        // Round 32 (fresh r4 review, live-proven): the witness takes a
+        // provable shape — see `wrapper_witness`. Pairwise halves are not
+        // the whole joint.
+        let witness = wrapper_witness(alternatives, sibling.as_ref(), other, root, depth, budget);
         if !witness {
             return false;
         }
@@ -5362,8 +5841,27 @@ fn schema_pair_satisfiable(
                 // once per member × per key — the same hoist the node-level
                 // arm draws.
                 let property_patterns = compiled_property_patterns(other);
+                // Round 32 (fresh r4 review, live-proven): the members are
+                // the pinned side's candidate values, but its own
+                // `pattern`/bounds constrain which members are actually in
+                // its language — `{enum: ["a","b"], "pattern": "^a$"}`
+                // admits only "a". The scan used to test the raw members
+                // against the other side alone, so a member OUTSIDE the
+                // pinned side's language cleared a contradicting pattern
+                // and the composition arm certified a union whose every
+                // instance is unsatisfiable. The member must clear its own
+                // side before it may clear the other.
+                let pinned_pattern = compiled_documented_pattern(pinned);
+                let pinned_property_patterns = compiled_property_patterns(pinned);
                 if !members.iter().any(|member| {
-                    value_clears_bounds_with(member, other, other_pattern)
+                    value_clears_bounds_with(member, pinned, pinned_pattern.as_ref())
+                        && pinned_object_value_compatible_with(
+                            member,
+                            pinned,
+                            &pinned_property_patterns,
+                            PINNED_OBJECT_JUDGE_DEPTH,
+                        )
+                        && value_clears_bounds_with(member, other, other_pattern)
                         && pinned_object_value_compatible_with(
                             member,
                             other,
@@ -7892,12 +8390,19 @@ mod strict_fixwave_r23 {
         // deterministically (the judge abstains, the pattern still binds
         // on the wire) while a normal pattern compiles untouched.
         let hostile = format!("{}z", "(a{1,100})".repeat(8));
+        use super::PatternCompileOutcome;
         assert!(
-            super::compile_documented_pattern(&hostile).is_none(),
+            matches!(
+                super::compile_documented_pattern(&hostile),
+                PatternCompileOutcome::Final(None)
+            ),
             "the nested-bounded repeat is rejected by the expansion screen"
         );
         assert!(
-            super::compile_documented_pattern("^a[0-9]+z$").is_some(),
+            matches!(
+                super::compile_documented_pattern("^a[0-9]+z$"),
+                PatternCompileOutcome::Final(Some(_))
+            ),
             "a normal pattern compiles untouched"
         );
     }
@@ -14631,7 +15136,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_judgment_terminates_on_a_disjoint_anyof_leaf_tree() {
+    fn coverage_judgment_terminates_and_fails_closed_on_a_disjoint_anyof_leaf_tree() {
         // The round-18 chase made the pair judge explore an OR-tree: a
         // binary anyOf tree whose every leaf disjoins the covering
         // branch's leaf pays 2^depth pair calls. The tree is expressed
@@ -14666,10 +15171,18 @@ mod tests {
             "$defs": Value::Object(defs)
         });
         let mut tool = test_tool("probe", schema);
-        // Termination is the point; the abstained judgment counts the
-        // branch as covering, so the tool ships strict.
+        // Termination is the point — and the verdict is part of the
+        // contract (round 31; the old comment asserted nothing while
+        // claiming the opposite direction). Every leaf disjoins the
+        // covering branch's leaf (`string` via the alias tree vs
+        // `boolean`), so the union genuinely admits nothing; the
+        // exhausted pair judgment fails closed beside those judged
+        // constraints (round 23) and the tool refuses. A regression to
+        // either wedge or abstain-compatible is a behavior change the
+        // pin now catches.
         let verdict = prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
-        let _ = verdict;
+        assert!(!verdict, "termination holds");
+        assert_eq!(tool.strict, None);
     }
 
     #[test]
@@ -16535,6 +17048,13 @@ mod kimi_tests {
                 "$schema",
                 json!({"type": "string", "$schema": "https://json-schema.org/draft/2020-12/schema"}),
             ),
+            // Round 32: the `$def` spelling is document-absent too (the
+            // whitelist carries `$defs` only) — pinned so a whitelist
+            // change cannot admit it silently.
+            (
+                "$def",
+                json!({"type": "object", "$def": {"a": {"type": "string"}}}),
+            ),
             (
                 "prefixItems",
                 json!({"type": "array", "prefixItems": [{"type": "string"}]}),
@@ -18063,9 +18583,9 @@ mod kimi_tests {
         fn memo_budget_bounds_a_rotation_of_distinct_heavy_patterns() {
             // 1000 distinct bounded-repeat patterns: the cached half keeps
             // hitting (no eviction, no clear), the tail compiles at most
-            // STRICT_PATTERN_COMPILE_BUDGET per request, and the rest abstains
+            // STRICT_PATTERN_COMPILE_BUDGET per tool, and the rest abstains
             // compatible — the verdict stays keep-direction and the compiles
-            // per request stay bounded.
+            // per tool stay bounded.
             let properties: serde_json::Map<String, Value> = (0..1000)
             .map(|i| {
                 (
@@ -19883,6 +20403,16 @@ mod strict_fixwave_r30 {
         // collapsed by the lossless pass, which lands the reference
         // keyword beside judged siblings and fails closed through the
         // ref-sibling rule before this conjunct runs).
+        //
+        // Round 32: the resolution contract lives where the document root
+        // is available — `node_pins_cover_branch`, judged directly below.
+        // The VALUE funnel cannot resolve the reference (its round-29
+        // refusal has no root to resolve through), and the wrapper chase
+        // now conjuncts each alternative with the object judge, so the
+        // boolean sibling correctly refuses a string pin. A union whose
+        // ONLY admitting branch is a `$ref` therefore fails closed at the
+        // funnel — the safe direction; the tool ships usable and
+        // non-strict.
         let admitting = json!({
             "type": "object",
             "properties": {"u": {
@@ -19901,9 +20431,17 @@ mod strict_fixwave_r30 {
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"], "additionalProperties": false}}
         });
+        let union_node = admitting["properties"]["u"].as_object().unwrap().clone();
+        assert!(
+            node_pins_cover_branch(&union_node, &json!({"$ref": "#/$defs/str_a"}), &admitting,),
+            "the definition admits the pinned member: it covers"
+        );
         let (all, strict) = verdict(admitting);
-        assert!(all, "the definition admits the pinned member: {all}");
-        assert_eq!(strict, Some(true));
+        assert!(
+            !all,
+            "the funnel cannot resolve the ref alternative and the boolean              sibling refuses the string pin: the tool ships non-strict ({all})"
+        );
+        assert_eq!(strict, None);
         let refusing = json!({
             "type": "object",
             "properties": {"u": {
@@ -19922,11 +20460,892 @@ mod strict_fixwave_r30 {
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"], "additionalProperties": false}}
         });
+        let refusing_node = refusing["properties"]["u"].as_object().unwrap().clone();
+        assert!(
+            !node_pins_cover_branch(&refusing_node, &json!({"$ref": "#/$defs/str_a"}), &refusing,),
+            "the definition refuses the pinned member: it covers nothing"
+        );
         let (all, strict) = verdict(refusing);
         assert!(
             !all,
             "the definition refuses the pinned member: callable by nothing"
         );
         assert_eq!(strict, None);
+    }
+}
+
+#[cfg(test)]
+mod strict_fixwave_r31 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    #[test]
+    fn ref_side_union_sibling_fails_closed_at_the_pair() {
+        // Round 31 (fresh review, judges lane): wholesale resolution
+        // REPLACES a `$ref` side with its definition and silently drops
+        // the side's own union sibling — `str ∧ (enum ["a"] ∨ boolean)`
+        // was judged as bare `str`, admitted `"b"`, and the coverage arm
+        // shipped a union whose property admits nothing. The composition
+        // spellings are judged siblings now: the pair refuses, exactly
+        // like the round-27 `maximum`-beside-`$ref` case.
+        let root = json!({"$defs": {"str": {"type": "string"}}});
+        let mut budget = 1024usize;
+        for sibling in ["anyOf", "oneOf", "allOf"] {
+            let side = json!({
+                "$ref": "#/$defs/str",
+                sibling: [{"enum": ["a"]}, {"type": "boolean"}]
+            });
+            assert!(
+                !schema_pair_satisfiable(&side, &json!({"enum": ["b"]}), &root, 0, &mut budget),
+                "the {sibling} sibling must refuse the pair, not vanish into resolution"
+            );
+            let mut budget = 1024usize;
+            assert!(
+                !schema_pair_satisfiable(&side, &json!({"enum": ["a"]}), &root, 0, &mut budget),
+                "the sibling conjunct is unjudgeable in BOTH directions, satisfiable or not"
+            );
+        }
+        // Keep-side: a bare `$ref` with no composition sibling keeps the
+        // resolution path — `"b"` is a string, so the pair stays
+        // compatible and the coverage arm keeps judging.
+        let mut budget = 1024usize;
+        assert!(schema_pair_satisfiable(
+            &json!({"$ref": "#/$defs/str"}),
+            &json!({"enum": ["b"]}),
+            &root,
+            0,
+            &mut budget
+        ));
+    }
+
+    #[test]
+    fn ref_side_union_sibling_poisons_the_funnel_one_branch() {
+        // The funnel-level reproduction (round-30 probe shape): the node
+        // pin `a` carries `$ref` + `anyOf`, the branch demands
+        // `a: enum ["b"]` — the intersection is empty, so the union ships
+        // strict callable by nothing unless the pair refuses.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/str", "anyOf": [
+                        {"enum": ["a"]}, {"type": "boolean"}
+                    ]}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false}
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": {"str": {"type": "string"}}
+        }));
+        assert!(
+            !all,
+            "the callable-by-nothing union must fail the tool closed"
+        );
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn ref_side_union_sibling_poisons_the_funnel_two_branches() {
+        // The two-branch variant: a single branch would collapse beside
+        // the node and take a different path, so the round-30 probe used
+        // two to defeat the collapse. Both must refuse.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/str", "anyOf": [
+                        {"enum": ["a"]}, {"type": "boolean"}
+                    ]}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false}
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": {"str": {"type": "string"}}
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn schema_form_additional_properties_collides_with_empty_properties() {
+        // Round 31 (fresh review, generic-walk lane): the empty-`properties`
+        // leniency collided only beside the BOOL-false spelling, so a
+        // schema-form `additionalProperties` let the branch's properties
+        // merge INSIDE `properties` — and keys inside `properties` no
+        // longer answer to the parent's `additionalProperties` schema.
+        // The original rejects `{"tags": []}` (array ∧ number); the
+        // merged shape accepted it, silently, on every lane.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {"type": "number"},
+            "anyOf": [
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_some(),
+            "the schema-form closure must keep the authored union: {}",
+            schema
+        );
+        assert!(
+            schema
+                .get("properties")
+                .and_then(|p| p.get("tags"))
+                .is_none(),
+            "the branch keys must not escape the authored closure: {}",
+            schema
+        );
+        // The strict lane refuses the composition instead of shipping the
+        // widened shape.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {"type": "number"},
+            "anyOf": [
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]},
+                {"type": "null"}
+            ]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+        // Keep-side: `additionalProperties: true` constrains nothing, so
+        // the documented lossless collapse still serves the merge.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true,
+            "anyOf": [
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_none() && schema["nullable"] == json!(true),
+            "the true-form closure must keep merging losslessly: {}",
+            schema
+        );
+    }
+
+    #[test]
+    fn empty_false_schema_arrays_are_not_merged_open() {
+        // Round 31: `enum: []` / `anyOf: []` / `oneOf: []` admit NOTHING.
+        // The empty-container leniency treated them as asserting nothing
+        // and let a branch value merge over them, resurrecting a schema
+        // the author killed.
+        // Round 32: the `oneOf: []` spelling joins the sweep (it was the
+        // merge carrier above and never exercised as the false schema).
+        for (key, carrier) in [("enum", "oneOf"), ("anyOf", "oneOf"), ("oneOf", "anyOf")] {
+            let mut schema = Value::Object(
+                [
+                    (key.to_string(), json!([])),
+                    (
+                        carrier.to_string(),
+                        json!([{"type": "string", "enum": ["a"]}]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            sanitize(&mut schema);
+            assert_eq!(
+                schema.get(key).and_then(|v| v.as_array()).map(Vec::len),
+                Some(0),
+                "the empty {key} false schema must keep the union closed: {}",
+                schema
+            );
+        }
+    }
+
+    #[test]
+    fn authored_nullable_false_survives_the_null_collapse() {
+        // Round 31: the null-branch collapse inserted `nullable: true`
+        // unconditionally, flipping an authored refusal of null into an
+        // admission — the marker must keep the author's answer.
+        let mut schema = json!({
+            "type": "string",
+            "nullable": false,
+            "anyOf": [{"type": "string"}, {"type": "null"}]
+        });
+        sanitize(&mut schema);
+        assert_eq!(schema.get("anyOf"), None, "the union still collapses");
+        assert_eq!(
+            schema.get("nullable"),
+            Some(&json!(false)),
+            "the authored refusal survives: {}",
+            schema
+        );
+    }
+
+    #[test]
+    fn screened_sources_do_not_spend_the_compile_budget() {
+        // Round 31: the tick sat ahead of the screens, so 128
+        // wire-SyntaxError sources burned the tool's pool and starved its
+        // later judgeable pattern — the same ordering gap the round-30
+        // cap fix closed for oversize sources. Over-expansion sources
+        // must abstain WITHOUT moving the counter; the judgeable pattern
+        // afterwards compiles as the first paid entry.
+        for i in 0..STRICT_PATTERN_COMPILE_BUDGET {
+            let hostile = format!("(a{{1,101}}){{1,101}}z{i}");
+            assert!(matches!(
+                compile_documented_pattern(&hostile),
+                PatternCompileOutcome::Final(None)
+            ));
+        }
+        assert_eq!(
+            pattern_compile_counters_for_test().0,
+            0,
+            "screened sources must not spend the pool"
+        );
+        assert!(matches!(
+            compile_documented_pattern("^a$"),
+            PatternCompileOutcome::Final(Some(_))
+        ));
+        assert_eq!(
+            pattern_compile_counters_for_test().0,
+            1,
+            "the judgeable pattern is the first paid compile"
+        );
+    }
+
+    #[test]
+    fn rehearsal_walkers_treat_definitions_maps_as_name_maps() {
+        // Round 31 (fresh review, generic-walk lane): both rehearsal
+        // walkers hand-copied their name-map family without the
+        // `definitions`/`$def` spellings. The defect walk read the MAP
+        // itself as a union-bearing node — a definition literally named
+        // `oneOf` fired R2 on its value and forced the flattening
+        // fallback for an otherwise pass-through schema — and the
+        // annotation strip's removal loop deleted a definition NAMED
+        // `title`/`examples` from the clone.
+        assert_eq!(
+            oneof_semantic_defect(&json!({
+                "definitions": {"oneOf": [{"type": "object"}, {"type": "object"}]}
+            })),
+            None,
+            "a definition named oneOf is data-keyed, not a union node"
+        );
+        let mut clone = json!({
+            "definitions": {
+                "title": {"description": "kept-as-schema", "type": "object"}
+            }
+        });
+        strip_annotation_keywords(&mut clone);
+        assert_eq!(
+            clone["definitions"]["title"]["type"],
+            json!("object"),
+            "the definition named title survives the strip"
+        );
+        assert_eq!(
+            clone["definitions"]["title"]["description"],
+            json!(null),
+            "annotations INSIDE a definition are still stripped"
+        );
+        // The literal-skip alignment: annotations inside instance data
+        // stay verbatim on the clone.
+        let mut clone = json!({"example": {"title": "literal", "type": 1}});
+        strip_annotation_keywords(&mut clone);
+        assert_eq!(clone["example"]["title"], json!("literal"));
+    }
+
+    #[test]
+    fn oversized_union_defect_walk_abstains_to_pass_through() {
+        // Round 31 (fresh review, performance lane): the rehearsal's R1/R2
+        // arms are pairwise over branches with no cap — a 600-branch
+        // all-discriminated union (distinct `kind` consts, the cheapest
+        // proof per pair) paid O(B²) proof walks per node per request,
+        // recurring. Past the branch cap the walk abstains, which is the
+        // NO-MUTATION answer: pass-through keeps the authored union
+        // exactly as it arrived, and no defect is claimed.
+        let branches: Vec<Value> = (0..600)
+            .map(|kind| {
+                json!({
+                    "type": "object",
+                    "properties": {"kind": {"const": kind}},
+                    "required": ["kind"],
+                    "additionalProperties": false
+                })
+            })
+            .collect();
+        let schema = json!({"type": "object", "oneOf": branches});
+        let started = std::time::Instant::now();
+        assert_eq!(
+            oneof_semantic_defect(&schema),
+            None,
+            "an over-cap union claims no defect and takes no fallback"
+        );
+        assert!(
+            started.elapsed().as_millis() < 1_000,
+            "the cap must bound the walk, not just redirect it"
+        );
+        // Keep-side: an under-cap union still walks — two branches sharing
+        // a required group with distinct pins are the classic R1-family
+        // the walk exists to catch, and the under-cap shape above the
+        // proof budget is far away.
+        let defect = oneof_semantic_defect(&json!({
+            "type": "object",
+            "oneOf": [
+                {"type": "object", "properties": {"a": true}, "required": ["a"]},
+                {"type": "object", "properties": {"a": true}, "required": ["a"]}
+            ]
+        }));
+        assert!(defect.is_some(), "the under-cap walk still finds R1 twins");
+    }
+
+    #[test]
+    fn astral_member_under_a_count_sensitive_pattern_refuses() {
+        // Round 31 (fresh review, pattern lane): the wire matches per
+        // UTF-16 code unit, the oracle per scalar value. ECMA `.` matches
+        // ONE unit, so `^.$` rejects the two-unit member on the wire —
+        // the oracle accepted it and shipped the tool strict callable by
+        // nothing. A judged pattern is present, so the member now refuses.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string",
+                "enum": ["\u{1F600}"], "pattern": "^.$"}},
+            "required": ["q"]
+        }));
+        assert!(
+            !all,
+            "the wire rejects the only member; the judge may not admit it"
+        );
+        assert_eq!(strict, None);
+        // Keep-sides: a scalar member under the same pattern still judges
+        // exactly, and an astral member with NO pattern keeps shipping.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string", "enum": ["a"], "pattern": "^.$"}},
+            "required": ["q"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string", "enum": ["\u{1F600}"]}},
+            "required": ["q"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn raw_line_terminator_pattern_abstains_like_the_drift_families() {
+        // Round 31: `[a\nb]` is a wire SyntaxError (the ECMA class grammar
+        // excludes LineTerminator) where this side compiled the class and
+        // judged members by it. The judge abstains — the member ships
+        // unjudged, exactly like the flag-drift family — and the wire
+        // rejects the schema on its own terms.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"q": {"type": "string",
+                "enum": ["zzz"], "pattern": "[ab]\n-z"}},
+            "required": ["q"]
+        }));
+        assert!(all, "the member is not judged by a wire-SyntaxError source");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn bare_ref_property_still_resolves_through_the_coverage_arm() {
+        // Keep-side at the funnel level: the M1 trace WITHOUT the union
+        // sibling — a bare `$ref` property judged against the branch's
+        // enum through resolution — stays compatible and ships strict.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {"a": {"$ref": "#/$defs/str"}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["b"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "object", "properties": {"a": {"enum": ["c"]}},
+                         "required": ["a"], "additionalProperties": false}
+                    ]
+                }
+            },
+            "required": ["u"],
+            "$defs": {"str": {"type": "string"}}
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+}
+
+// Round 32 (fresh r4 review — every pin here was live-proven through the
+// production funnel on the pre-fix tree before the fix landed, and each
+// goes RED under its own mutant).
+#[cfg(test)]
+mod strict_fixwave_r32 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    #[test]
+    fn chase_conjuncts_object_alternatives_with_their_properties() {
+        // The items variant: the wrapper sits under `items` (meeting
+        // neither the coverage arm nor the composition arm), the node
+        // pins an element the object alternative rejects. The chase used
+        // to type-clear the alternative without consulting its
+        // properties — the pinned element `{"a": "x"}` satisfies NEITHER
+        // alternative (`a ∈ enum ["y"]` demanded; objects are not
+        // strings) and the union shipped strict callable by nothing.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "arr": {
+                    "type": "array",
+                    "items": {"anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["y"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "string"}
+                    ]},
+                    "enum": [[{"a": "x"}]]
+                }
+            },
+            "required": ["arr"]
+        }));
+        assert!(
+            !all,
+            "the callable-by-nothing items union must fail the tool closed"
+        );
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn chase_conjuncts_property_leaves_the_same_way() {
+        // The property-leaf variant: the wrapper sits under the branch's
+        // property `u`, so the coverage arm's funnel leg reads the same
+        // chase. The node pins `u: {"a": "x"}`; the object alternative
+        // demands `a ∈ enum ["y"]`.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "w": {
+                    "type": "object",
+                    "properties": {
+                        "p": {"type": "string"},
+                        "u": {"type": "object", "properties": {"a": {"type": "string"}},
+                              "required": ["a"]}
+                    },
+                    "required": ["p", "u"],
+                    "enum": [{"p": "x", "u": {"a": "x"}}],
+                    "anyOf": [{
+                        "type": "object",
+                        "properties": {
+                            "p": {"type": "string"},
+                            "u": {"anyOf": [
+                                {"type": "object", "properties": {"a": {"enum": ["y"]}},
+                                 "required": ["a"], "additionalProperties": false},
+                                {"type": "string"}
+                            ]}
+                        },
+                        "required": ["p", "u"],
+                        "additionalProperties": false
+                    }]
+                }
+            },
+            "required": ["w"]
+        }));
+        assert!(
+            !all,
+            "the callable-by-nothing union must fail the tool closed"
+        );
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn chase_keep_side_still_ships_compatible_unions() {
+        // Keep-side (the items form — a satisfiable wrapper union whose
+        // branch-property form is already fail-closed through
+        // `branch_shape_unrepresentable`): the pinned element satisfies
+        // the object alternative, so the union is genuinely satisfiable
+        // and must keep shipping strict — the conjunct must not
+        // over-fail. This is the dead variant's own schema with the pin
+        // flipped to an admitted element.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "arr": {
+                    "type": "array",
+                    "items": {"anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["y"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "string"}
+                    ]},
+                    "enum": [[{"a": "y"}]]
+                }
+            },
+            "required": ["arr"]
+        }));
+        assert!(all, "the compatible union must keep shipping strict");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn wrapper_trio_witness_enumerates_the_pinned_domain() {
+        // Live-proven pre-fix (property position, so the shaped-branch
+        // rule does not shadow it): the branch property `u` is a wrapper
+        // whose alternative pins {"zz","ab"} beside sibling `pattern:
+        // "^z"`, and the node property pins enum ["ab","za"]. Every PAIR
+        // overlaps - alternative and other share "ab", alternative and
+        // sibling share "zz", sibling and other share "za" - but the
+        // three share nothing: every wire instance carries u in
+        // {"ab","za"} AND through the wrapper some alternative and "^z",
+        // which is empty. The pairwise witness certified satisfiability
+        // and the coverage arm shipped the union strict callable by
+        // nothing. The value witness enumerates the first pinned domain:
+        // "zz" clears the sibling but not the node enum, "ab" clears the
+        // node enum but not the sibling - no witness, fail closed.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {
+                        "p": {"type": "string"},
+                        "u": {"type": "string", "enum": ["ab", "za"]}
+                    },
+                    "required": ["p", "u"],
+                    "enum": [{"p": "x", "u": "ab"}],
+                    "anyOf": [{
+                        "type": "object",
+                        "properties": {
+                            "p": {"type": "string"},
+                            "u": {"anyOf": [
+                                {"enum": ["zz", "ab"]},
+                                {"type": "boolean"}
+                            ], "pattern": "^z"}
+                        },
+                        "required": ["p", "u"],
+                        "additionalProperties": false
+                    }]
+                }
+            },
+            "required": ["u"]
+        }));
+        assert!(
+            !all,
+            "the jointly-empty wrapper trio must fail the tool closed"
+        );
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn drift_screens_screen_the_new_families() {
+        // Round 32 (fresh r4 review, live-proven): all three spellings
+        // compiled and JUDGED here pre-fix with wire-divergent semantics —
+        // `^\<id$` accepted "id" (Rust word-boundary at position 0 vs the
+        // wire's literal `<`), `^a{1, 2}$` accepted "aa" (Rust's parser
+        // skips whitespace inside the braces vs the wire's literal text),
+        // and `(?<n.m>x)` compiled where Annex B's GroupName rejects the
+        // name. Each must now screen to abstain like the drift families
+        // one family over (rounds 26-28).
+        for pattern in [r"\<id", "^a{1, 2}$"] {
+            let obj = json!({"pattern": pattern});
+            assert!(
+                compiled_documented_pattern(obj.as_object().unwrap()).is_none(),
+                "the drifted spelling must screen: {pattern}"
+            );
+        }
+        // Keep-sides: the clean spellings keep compiling and judging.
+        for pattern in [r"^a{2}$", "^b$"] {
+            let obj = json!({"pattern": pattern});
+            assert!(
+                compiled_documented_pattern(obj.as_object().unwrap()).is_some(),
+                "the clean spelling must keep judging: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn screened_drift_patterns_abstain_and_ship_like_the_family() {
+        // The drift-family contract (rounds 26-28 pins): a screened
+        // pattern abstains the judge and the tool ships strict with the
+        // pattern binding on the wire alone. Pre-fix the judge actively
+        // FALSELY VERIFIED the pinned members against the divergent
+        // reading; the screen removes that wrong verdict. (The
+        // wire-legal-but-drifting pattern binding unjudged is the
+        // family's disclosed abstain line.)
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string", "pattern": r"\<id", "enum": ["id"]}
+            },
+            "required": ["tag"]
+        }));
+        assert!(all, "the screened pattern abstains and ships");
+        assert_eq!(strict, Some(true));
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "v": {"type": "string", "pattern": "^a{1, 2}$", "enum": ["aa"]}
+            },
+            "required": ["v"]
+        }));
+        assert!(all, "the screened pattern abstains and ships");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn wrapper_witness_refuses_the_pairwise_only_trio() {
+        // Unit pin for the wrapper arm's witness (end-to-end wrapper trios
+        // are intercepted by the shaped-branch and coverage fail-closed
+        // arms, so the contract is pinned at the judge). ENUM trios: the
+        // alternative pins {"a","b"}, the sibling {"a","c"}, the other
+        // {"b","c"} — every PAIR shares a member and the three share
+        // nothing. The pairwise witness returned true pre-fix; the value
+        // witness enumerates the pinned domain, finds no member clearing
+        // all three sides, and refuses.
+        let w = json!({
+            "anyOf": [{"enum": ["a", "b"]}, {"type": "boolean"}],
+            "enum": ["a", "c"]
+        });
+        let other = json!({"enum": ["b", "c"]});
+        let root = Value::Null;
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(
+            !schema_pair_satisfiable(&w, &other, &root, 0, &mut budget),
+            "the pairwise-only trio must not witness satisfiable"
+        );
+    }
+
+    #[test]
+    fn wrapper_witness_keep_side_shares_a_pinned_member() {
+        // Keep-side: the trio shares "zz" — a member of the alternative
+        // that clears the sibling and the other side alike — and the pair
+        // stays satisfiable (the enumerated witness must find it).
+        let w = json!({
+            "anyOf": [{"enum": ["a", "zz"]}, {"type": "boolean"}],
+            "enum": ["zz", "c"]
+        });
+        let other = json!({"enum": ["b", "zz"]});
+        let root = Value::Null;
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(
+            schema_pair_satisfiable(&w, &other, &root, 0, &mut budget),
+            "the trio admits zz: the pair stays satisfiable"
+        );
+    }
+
+    #[test]
+    fn pair_member_scan_constrains_members_to_the_pinned_language() {
+        // The flat form the single-branch collapse produces: the pinned
+        // side `{enum: ["a","b"], "pattern": "^a$"}` admits only "a", but
+        // the member scan used to test the RAW members against the other
+        // side - member "b" cleared `^b$` outside the pinned language and
+        // the composition arm certified a union whose every instance is
+        // unsatisfiable. The member must clear its own side first.
+        // Discriminating (ships pre-fix, fails closed here): the pinned
+        // side {enum: ["ab","ba"], "pattern": "^b"} admits only "ba",
+        // but the raw member "ab" cleared the contradicting `^a` outside
+        // the pinned language and the composition arm shipped the union
+        // strict callable by nothing ("ba" fails `^a`).
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "s": {
+                    "anyOf": [{"enum": ["ab", "ba"], "pattern": "^b"}],
+                    "pattern": "^a"
+                }
+            },
+            "required": ["s"]
+        }));
+        assert!(
+            !all,
+            "the member outside the pinned language must not witness"
+        );
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn pair_member_scan_keep_side_still_witnesses() {
+        // Keep-side for the member-vs-own-side conjunct: member "ab" is in
+        // the pinned side's language (`^a` prefix) AND clears `^b$` - the
+        // union is satisfiable through it and ships.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "s": {
+                    "anyOf": [{"enum": ["ab", "ba"], "pattern": "^b"}],
+                    "pattern": "^ba$"
+                }
+            },
+            "required": ["s"]
+        }));
+        assert!(
+            all,
+            "ba is in the pinned language and clears ^ba$: the union ships"
+        );
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn wrapper_witness_keeps_the_enum_sibling_keep_side() {
+        // Keep-side (the round-31 shape): a pinned sibling the alternative
+        // admits — the witness must keep certifying the pair.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "s": {"anyOf": [{"enum": ["a", "b"]}], "enum": ["a"]}
+            },
+            "required": ["s"]
+        }));
+        assert!(all, "the admitted sibling pin keeps the union satisfiable");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn unevaluated_closures_collide_in_the_nullable_collapse() {
+        // Live-proven pre-fix (generic sanitize, every non-strict lane):
+        // the authored closure admits objects with NO keys — every key is
+        // unevaluated and rejected — so the authored non-null language is
+        // empty and the whole union admits nothing. The nullable collapse
+        // merged the branch's properties inside the closure anyway and
+        // the shipped shape admitted {"tags": []} with no note. The
+        // collision keeps the union (no merge, no nullable landing).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "unevaluatedProperties": false,
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_some(),
+            "the closure must collide: the union stays a union ({schema})"
+        );
+        assert!(
+            schema.get("nullable").is_none(),
+            "no nullable landing past the collision ({schema})"
+        );
+        assert!(
+            schema["properties"].as_object().is_some_and(Map::is_empty),
+            "the branch properties must not merge into the closure ({schema})"
+        );
+    }
+
+    #[test]
+    fn unevaluated_closures_keep_the_open_form_mergeable() {
+        // Keep-sides: `unevaluatedProperties: true` constrains nothing and
+        // stays mergeable (the additionalProperties true-form line), and
+        // a parent with NO closure still collapses losslessly — the
+        // collision must not over-fail the documented nullable merge.
+        let mut open = json!({
+            "type": "object",
+            "properties": {},
+            "unevaluatedProperties": true,
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]}
+            ]
+        });
+        sanitize(&mut open);
+        assert!(
+            open.get("nullable") == Some(&Value::Bool(true)),
+            "the true-form closure merges ({open})"
+        );
+        let mut plain = json!({
+            "type": "object",
+            "properties": {},
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]}
+            ]
+        });
+        sanitize(&mut plain);
+        assert!(
+            plain.get("nullable") == Some(&Value::Bool(true)),
+            "the closure-free parent still collapses ({plain})"
+        );
+    }
+
+    #[test]
+    fn xai_identical_branch_scan_ticks_the_pair_proof_budget() {
+        // Round 32: the R1 identical-branch scan was pairwise proof-work
+        // outside every budget — a hostile under-cap union paid the full
+        // B²/2 deep Value compares per node per request. The scan ticks
+        // the pair-proof cap and abstains to pass-through on exhaustion:
+        // 300 distinct branches put the late identical pair (260, 261)
+        // past the 20k cap (~44k pairs precede it), so the walk abstains
+        // instead of detecting.
+        let mut branches = Vec::new();
+        for i in 0..300usize {
+            branches.push(json!({
+                "type": "object",
+                "properties": {"f": {"type": "string", "enum": [format!("v{i}")]
+                }}
+            }));
+        }
+        branches[260] = branches[261].clone();
+        let mut walk = DefectWalk::default();
+        assert!(
+            oneof_node_defect(&branches, &Map::new(), "#", &mut walk).is_none(),
+            "the scan must abstain past the pair-proof cap"
+        );
     }
 }
