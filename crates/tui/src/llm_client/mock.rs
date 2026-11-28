@@ -295,8 +295,6 @@ impl LlmClient for MockLlmClient {
     }
 }
 
-/// Wrap a canned event vector as a stream that yields each event in order and
-/// auto-appends `MessageStop` if the trailing event is not already one.
 /// A canned stream that dies with a transport error after emitting its
 /// events verbatim — the mid-stream-drop shape the engine's transparent
 /// retry (round-6 review) and drop-resume policies consume. Unlike
@@ -312,6 +310,8 @@ fn stream_from_canned_failing(turn: CannedTurn) -> StreamEventBox {
     Box::pin(s) as Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'static>>
 }
 
+/// Wrap a canned event vector as a stream that yields each event in order and
+/// auto-appends `MessageStop` if the trailing event is not already one.
 fn stream_from_canned(turn: CannedTurn) -> StreamEventBox {
     let s = try_stream! {
         let has_stop = matches!(turn.last(), Some(StreamEvent::MessageStop));

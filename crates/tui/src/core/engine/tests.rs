@@ -9828,7 +9828,14 @@ async fn moonshot_unclosed_tool_blocks_fail_closed_and_replay_raw_arguments() {
                 _ => None,
             })
             .expect("raw_arguments object on the next replay");
-        assert!(replayed.is_object(), "{replayed}");
+        // The sentinel must carry the ORIGINAL raw buffer verbatim so a
+        // follow-up turn can re-parse it; pin the exact payload, not just
+        // the key's presence.
+        assert_eq!(
+            replayed.get("raw_arguments"),
+            Some(&json!(arguments)),
+            "sentinel must replay the original raw buffer verbatim: {replayed}"
+        );
         handle.send(Op::Shutdown).await.expect("shutdown engine");
         task.await.expect("engine task");
     }

@@ -529,15 +529,19 @@ mod tests {
             "k3.1-pro-highspeed",
             "K3.1-PRO-HIGHSPEED",
         ] {
-            assert_ne!(
+            // Exact conservative values, not just negatives: a mutation that
+            // clamped the variants to some other uncatalogued number (8K,
+            // 200K, …) must fail here exactly as it would for the lowercase
+            // spellings pinned by the sibling conservative-ceiling test.
+            assert_eq!(
                 output_ceiling_source(ApiProvider::Moonshot, model),
-                OutputCeilingSource::Documented(1_048_576),
-                "{model} must never publish the family's documented maximum from a spelling alone"
+                OutputCeilingSource::Documented(131_072),
+                "{model} must keep the family's conservative documented ceiling, never the 1M maximum"
             );
-            assert_ne!(
+            assert_eq!(
                 effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, None),
-                1_048_576,
-                "{model} must not inherit the documented ceiling on a route with no output limit"
+                131_072,
+                "{model} must clamp to the conservative ceiling on a route with no output limit"
             );
         }
         // Padding is a different story: the capability layer matches the

@@ -162,7 +162,7 @@ codewhale auth set --provider moonshot --api-key "你的中国区Kimi API key"
 
 **注意事项**
 
-- **不要用 `/model auto`**：Kimi 没有便宜的"flash 档"，auto 只会落在默认模型上，直接固定模型更实在
+- **`/model auto` 的子任务会用旧模型**：Kimi 没有便宜的"flash 档"，auto 会把启发式子任务落到上一代轻量模型 `kimi-k2.6`；想全程使用 `kimi-k3`，直接固定模型更实在
 - **deepseek 不受影响**：切回用 `/provider deepseek` + `/model deepseek-v4-pro`，随时可换
 - **Kimi Code 会员模型别混用**：`k3`、`k3.1-pro[-highspeed]`、`kimi-for-coding[-highspeed]` 是 Kimi Code 会员平台专属模型（入口 `api.kimi.com/coding/v1`，海外别名 `api.kimi.ai/coding/v1`），与普通 API 入口的 `kimi-` ID 不同，普通中国区 API key 不要用这些会员 ID
 - **改动 base_url 后要重启 Codewhale** 才生效
