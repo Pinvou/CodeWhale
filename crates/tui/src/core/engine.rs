@@ -493,6 +493,8 @@ pub struct EngineConfig {
     /// When true, force `tool_choice: "required"` and opt compatible function
     /// schemas into DeepSeek beta strict mode.
     pub strict_tool_mode: bool,
+    /// Provider-neutral tool schema projection, independent of `tool_choice`.
+    pub tool_schema_policy: crate::config::ToolSchemaPolicy,
     /// Workshop / large-tool-output routing (#548). `None` disables routing.
     pub workshop: Option<crate::tools::large_output_router::WorkshopConfig>,
     /// Which search backend `web_search` should use. Default: Firecrawl.
@@ -630,6 +632,7 @@ impl Default for EngineConfig {
             speech_output_dir: None,
             vision_config: None,
             strict_tool_mode: false,
+            tool_schema_policy: crate::config::ToolSchemaPolicy::Auto,
             goal_objective: None,
             goal_token_budget: None,
             goal_status: GoalStatus::Active,
@@ -4237,6 +4240,9 @@ impl Engine {
                             .await;
                         tracing::info!(target: "advisor", "advisor watcher {state}");
                     }
+                    Op::SetToolSchemaPolicy { policy } => {
+                        self.apply_tool_schema_policy(policy);
+                    }
                     Op::SetSearchProvider { provider } => {
                         self.config.search_provider = provider;
                     }
@@ -5522,6 +5528,7 @@ impl Engine {
                     &HashSet::new(),
                     &[],
                     false,
+                    self.config.tool_schema_policy,
                     Some(Vec::new()),
                     None,
                     Some(0),
@@ -5681,6 +5688,7 @@ impl Engine {
                 .with_locale_tag(route.locale_tag.clone())
                 .with_role_models(route.role_models.clone())
                 .with_api_config((*route.api_config).clone())
+                .with_tool_schema_policy(self.config.tool_schema_policy)
                 .with_auto_model(route.auto_model)
                 .with_reasoning_effort(route.reasoning_effort.clone(), route.reasoning_effort_auto)
                 .with_host_agent_profiles(Arc::clone(&self.config.fleet_roster))
@@ -5791,6 +5799,7 @@ impl Engine {
             &always_load,
             &input_policy.dynamic_active_tools,
             self.config.strict_tool_mode,
+            self.config.tool_schema_policy,
             allowed_tools,
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,
@@ -7407,6 +7416,7 @@ impl Engine {
         .with_locale_tag(self.config.locale_tag.clone())
         .with_role_models(self.subagent_role_models())
         .with_api_config(self.api_config.clone())
+        .with_tool_schema_policy(self.config.tool_schema_policy)
         .with_auto_model(self.session.auto_model)
         .with_reasoning_effort(
             self.session.reasoning_effort.clone(),
@@ -8457,6 +8467,13 @@ impl Engine {
             }
         }
         catalog.extend(missing);
+    }
+
+    fn apply_tool_schema_policy(&mut self, policy: crate::config::ToolSchemaPolicy) {
+        if self.config.tool_schema_policy != policy {
+            self.config.tool_schema_policy = policy;
+            self.declare_prefix_change_if_unset("tool_surface");
+        }
     }
 
     /// First-set wins for the declared re-pin reason: an already-pending
@@ -9812,7 +9829,7 @@ use self::tool_catalog::{
     REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
     apply_registry_first_shell_guidance, build_model_tool_catalog_with_surface,
     default_synthetic_catalog_tool_names, execute_code_execution_tool, is_tool_search_tool,
-    maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
+    maybe_hydrate_requested_deferred_tool, missing_tool_error_message, tool_choice_for_request,
 };
 #[cfg(test)]
 use self::tool_catalog::{

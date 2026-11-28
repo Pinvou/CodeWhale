@@ -7711,7 +7711,11 @@ fn small_surface_legacy_rules_cover_lowercase_primitives_with_deny_wins() {
 }
 
 fn model_request_tools(surface: &mut SubAgentToolSurface) -> Vec<Tool> {
-    surface.request_tools(surface.catalog.clone(), false)
+    surface.request_tools(
+        surface.catalog.clone(),
+        false,
+        crate::config::ToolSchemaPolicy::Auto,
+    )
 }
 
 fn forked_child_request_fixture(
@@ -7764,7 +7768,11 @@ fn small_surface_starts_with_only_pi_head_and_search() {
         .map(str::to_string)
         .collect()
     );
-    let strict = surface.request_tools(surface.catalog.clone(), true);
+    let strict = surface.request_tools(
+        surface.catalog.clone(),
+        true,
+        crate::config::ToolSchemaPolicy::Auto,
+    );
     assert_eq!(
         strict
             .iter()
@@ -7772,6 +7780,21 @@ fn small_surface_starts_with_only_pi_head_and_search() {
             .and_then(|tool| tool.strict),
         Some(true)
     );
+
+    let relaxed = surface.request_tools(
+        surface.catalog.clone(),
+        true,
+        crate::config::ToolSchemaPolicy::Relaxed,
+    );
+    for tool in relaxed {
+        let original = surface
+            .catalog
+            .iter()
+            .find(|candidate| candidate.name == tool.name)
+            .expect("original child catalog tool");
+        assert_eq!(tool.strict, Some(false));
+        assert_eq!(tool.input_schema, original.input_schema);
+    }
 }
 
 #[tokio::test]
@@ -16500,6 +16523,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
     SubAgentRuntime {
         client: stub_client(),
         api_config: Some(std::sync::Arc::new(stub_config)),
+        tool_schema_policy: crate::config::ToolSchemaPolicy::Auto,
         model: "deepseek-v4-flash".to_string(),
         locale_tag: "en".to_string(),
         auto_model: false,

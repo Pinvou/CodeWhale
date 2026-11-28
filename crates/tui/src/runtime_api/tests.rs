@@ -9322,6 +9322,148 @@ async fn reload_config_reads_from_config_path_and_updates_in_memory_state() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn tool_schema_policy_config_validates_persists_and_reloads() -> Result<()> {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let provider = MockServer::start().await;
+    let root = std::env::temp_dir().join(format!(
+        "codewhale-config-tool-schema-policy-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root)?;
+    let config_file = root.join("custom-config.toml");
+    fs::write(
+        &config_file,
+        format!(
+            "provider = \"schema-policy-fixture\"\nstrict_tool_mode = true\n\n[providers.schema-policy-fixture]\nkind = \"openai-compatible\"\nbase_url = \"{}/v1\"\nmodel = \"fixture-model\"\napi_key = \"fixture-key\"\n",
+            provider.uri()
+        ),
+    )?;
+
+    let Some((addr, runtime_threads, handle)) =
+        spawn_test_server_with_config_path(config_file.clone()).await?
+    else {
+        return Ok(());
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                )),
+        )
+        .mount(&provider)
+        .await;
+    let client = crate::tls::reqwest_client();
+
+    assert_eq!(
+        get_config(&client, &addr).await["tool_schema_policy"],
+        "auto"
+    );
+    let (status, body) =
+        post_set_config(&client, &addr, "tool_schema_policy", "strict", true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("expected 'auto' or 'relaxed'"),
+        "body: {body}"
+    );
+
+    let (status, body) =
+        post_set_config(&client, &addr, "tool_schema_policy", "relaxed", true).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        get_config(&client, &addr).await["tool_schema_policy"],
+        "auto"
+    );
+    assert!(fs::read_to_string(&config_file)?.contains("tool_schema_policy = \"relaxed\""));
+
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let thread_id = created["id"]
+        .as_str()
+        .context("missing thread id")?
+        .to_string();
+    let cached_engine = runtime_threads.get_engine(&thread_id).await?;
+    let run_turn = |prompt: &str| {
+        let client = client.clone();
+        let thread_id = thread_id.clone();
+        let prompt = prompt.to_string();
+        async move {
+            let started: serde_json::Value = client
+                .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
+                .json(&json!({ "prompt": prompt }))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let turn_id = started["turn"]["id"].as_str().context("missing turn id")?;
+            let terminal = wait_for_terminal_turn_status(
+                &client,
+                addr,
+                &thread_id,
+                turn_id,
+                Duration::from_secs(5),
+            )
+            .await?;
+            assert_eq!(terminal, "completed");
+            Ok::<(), anyhow::Error>(())
+        }
+    };
+
+    run_turn("before reload").await?;
+    let reload = client
+        .post(format!("http://{addr}/v1/config/reload"))
+        .send()
+        .await?;
+    assert_eq!(reload.status(), StatusCode::OK);
+    assert_eq!(
+        get_config(&client, &addr).await["tool_schema_policy"],
+        "relaxed"
+    );
+    run_turn("after reload").await?;
+    assert!(
+        cached_engine
+            .tx_op
+            .same_channel(&runtime_threads.get_engine(&thread_id).await?.tx_op)
+    );
+
+    let requests = provider.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 2);
+    let strict_values = requests
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body)?;
+            assert_eq!(body["tool_choice"], json!("required"));
+            let tools = body["tools"].as_array().context("missing tools")?;
+            let probe = tools
+                .iter()
+                .find(|tool| tool["function"]["name"] == "read")
+                .context("missing read tool")?;
+            Ok::<Option<bool>, anyhow::Error>(probe["function"]["strict"].as_bool())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(strict_values, vec![Some(true), None]);
+
+    handle.abort();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/providers/{id}/switch endpoint tests
 //

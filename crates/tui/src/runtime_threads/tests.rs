@@ -2266,6 +2266,7 @@ async fn config_reload_updates_next_turn_route_without_mutating_engine_route() -
         .expect("named custom provider");
     provider.base_url = Some("http://127.0.0.1:18182/v1".to_string());
     provider.api_key = Some("new-local-test-key".to_string());
+    reloaded.tool_schema_policy = Some(crate::config::ToolSchemaPolicy::Relaxed);
     manager.reload_config(reloaded).await?;
 
     let refreshed = manager.resolved_route_for_thread(&manager.read_config(), &thread)?;
@@ -2274,7 +2275,7 @@ async fn config_reload_updates_next_turn_route_without_mutating_engine_route() -
         refreshed.config.deepseek_base_url(),
         "http://127.0.0.1:18182/v1"
     );
-    for _ in 0..3 {
+    for _ in 0..4 {
         let op = harness.rx_op.recv().await.expect("runtime control op");
         assert!(
             matches!(
@@ -2282,6 +2283,9 @@ async fn config_reload_updates_next_turn_route_without_mutating_engine_route() -
                 Op::SetCompaction { .. }
                     | Op::SetStreamChunkTimeout { .. }
                     | Op::SetSubagentRuntimeConfig { .. }
+                    | Op::SetToolSchemaPolicy {
+                        policy: crate::config::ToolSchemaPolicy::Relaxed
+                    }
             ),
             "reload must not mutate an engine provider route: {op:?}"
         );
@@ -2414,7 +2418,8 @@ async fn queued_reload_is_a_hard_boundary_for_a_concurrent_turn_start() -> Resul
             Some(
                 Op::SetCompaction { .. }
                 | Op::SetStreamChunkTimeout { .. }
-                | Op::SetSubagentRuntimeConfig { .. },
+                | Op::SetSubagentRuntimeConfig { .. }
+                | Op::SetToolSchemaPolicy { .. },
             ) => {}
             other => panic!("expected post-reload SendMessage, got {other:?}"),
         }
@@ -2506,7 +2511,8 @@ async fn queued_reload_is_a_hard_boundary_for_concurrent_compaction() -> Result<
             Some(
                 Op::SetCompaction { .. }
                 | Op::SetStreamChunkTimeout { .. }
-                | Op::SetSubagentRuntimeConfig { .. },
+                | Op::SetSubagentRuntimeConfig { .. }
+                | Op::SetToolSchemaPolicy { .. },
             ) => {}
             other => panic!("expected post-reload CompactContext, got {other:?}"),
         }

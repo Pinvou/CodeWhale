@@ -1633,6 +1633,7 @@ impl Engine {
         let mut mode = tool_policy.mode;
         let mut questions_allowed = tool_policy.allows_questions();
         let strict_tool_mode = tool_policy.strict_tool_mode;
+        let tool_schema_policy = tool_policy.tool_schema_policy;
         let mut tool_catalog = std::mem::take(&mut tool_policy.catalog);
         let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
         // A note parked by an earlier turn that never reached a tool result
@@ -2176,8 +2177,12 @@ impl Engine {
             // helper that seeded this turn and that `/preview-request`
             // reports, so a deferred tool activated mid-turn is reflected
             // identically in both places.
-            let active_tools =
-                active_tools_for_request(&tool_catalog, &active_tool_names, strict_tool_mode);
+            let active_tools = active_tools_for_request(
+                &tool_catalog,
+                &active_tool_names,
+                strict_tool_mode,
+                tool_schema_policy,
+            );
 
             // Resolve `auto` reasoning_effort to a concrete tier (#663).
             let effective_reasoning_effort = resolve_auto_effort(
@@ -2352,15 +2357,7 @@ impl Engine {
                 ),
                 system: self.session.system_prompt.clone(),
                 tools: active_tools.clone(),
-                tool_choice: if active_tools.is_some() {
-                    if strict_tool_mode {
-                        Some(json!("required"))
-                    } else {
-                        Some(json!({ "type": "auto" }))
-                    }
-                } else {
-                    None
-                },
+                tool_choice: tool_choice_for_request(&active_tools, strict_tool_mode),
                 reasoning_effort: effective_reasoning_effort,
             });
             // Normalize images against the route this request is actually

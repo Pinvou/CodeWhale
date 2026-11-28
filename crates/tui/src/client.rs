@@ -7735,6 +7735,7 @@ mod tests {
             &catalog,
             &std::collections::HashSet::from(["apply_patch".to_string()]),
             true,
+            crate::config::ToolSchemaPolicy::Auto,
         )
         .expect("active apply_patch");
         let request = MessageRequest {
@@ -7817,6 +7818,113 @@ mod tests {
         )
         .expect("DeepSeek strict:true projection");
         assert_eq!(deepseek.body["tools"][0]["function"]["strict"], json!(true));
+    }
+
+    #[test]
+    fn relaxed_schema_policy_preserves_registry_catalog_on_moonshot_chat_wire() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let registry = ToolRegistryBuilder::new()
+            .with_dynamic_tools(&[
+                DynamicToolSpec {
+                    namespace: Some("capture".to_string()),
+                    name: "complex_lookup".to_string(),
+                    description: "Look up either kind of record".to_string(),
+                    input_schema: json!({
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"type": "string"},
+                                    "outline": {"type": "string"}
+                                },
+                                "required": ["kind", "outline"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"type": "string"},
+                                    "content": {"type": "string"}
+                                },
+                                "required": ["kind", "content"],
+                                "additionalProperties": false
+                            }
+                        ],
+                        "dependentSchemas": {"kind": {"required": ["outline"]}},
+                        "default": {"kind": "outline"}
+                    }),
+                    defer_loading: false,
+                },
+                DynamicToolSpec {
+                    namespace: Some("capture".to_string()),
+                    name: "simple_lookup".to_string(),
+                    description: "Look up a record by query".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }),
+                    defer_loading: false,
+                },
+            ])
+            .build(ToolContext::new(workspace.path().to_path_buf()));
+        let mut catalog = registry.to_api_tools();
+        crate::core::engine::tool_catalog::ensure_advanced_tooling(
+            &mut catalog,
+            crate::tui::app::AppMode::Agent,
+            &std::collections::HashSet::new(),
+        );
+        catalog.retain(|tool| {
+            matches!(
+                tool.name.as_str(),
+                "complex_lookup" | "simple_lookup" | "tool_search"
+            )
+        });
+        assert_eq!(catalog.len(), 3, "unexpected registry names: {catalog:?}");
+        catalog
+            .iter_mut()
+            .find(|tool| tool.name == "simple_lookup")
+            .expect("simple registry tool")
+            .strict = Some(true);
+        let active_names = catalog
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        let selected = crate::core::engine::tool_catalog::active_tools_for_request(
+            &catalog,
+            &active_names,
+            true,
+            crate::config::ToolSchemaPolicy::Relaxed,
+        )
+        .expect("active registry catalog");
+        assert_eq!(selected.len(), catalog.len());
+        for tool in &selected {
+            let original = catalog
+                .iter()
+                .find(|candidate| candidate.name == tool.name)
+                .expect("original catalog tool");
+            assert_eq!(tool.strict, Some(false));
+            assert_eq!(tool.input_schema, original.input_schema);
+        }
+
+        let mut request = k3_request_fixture(crate::config::MOONSHOT_KIMI_K3_MODEL, None, false);
+        request.tools = Some(selected);
+        let wire = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("relaxed Moonshot Chat projection");
+        assert!(wire.omitted_tool_names.is_empty());
+        assert_eq!(wire.body["tools"].as_array().map(Vec::len), Some(3));
+        for original in &catalog {
+            let function = captured_function(&wire.body, &original.name);
+            assert_eq!(function["strict"], json!(false));
+            assert_eq!(function["parameters"], original.input_schema);
+        }
     }
 
     #[test]

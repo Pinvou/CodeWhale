@@ -1323,6 +1323,25 @@ fn window_title_config_parses_and_overlays() {
 }
 
 #[test]
+fn tool_schema_policy_config_parses_and_overlays() {
+    let omitted: Config = toml::from_str("").expect("empty config");
+    assert_eq!(omitted.tool_schema_policy, None);
+
+    let relaxed: Config =
+        toml::from_str(r#"tool_schema_policy = "relaxed""#).expect("parse relaxed schema policy");
+    assert_eq!(relaxed.tool_schema_policy, Some(ToolSchemaPolicy::Relaxed));
+    let automatic: Config =
+        toml::from_str(r#"tool_schema_policy = "auto""#).expect("parse automatic schema policy");
+    assert_eq!(automatic.tool_schema_policy, Some(ToolSchemaPolicy::Auto));
+    assert!(toml::from_str::<Config>(r#"tool_schema_policy = "strict""#).is_err());
+
+    let merged = merge_config(relaxed.clone(), automatic);
+    assert_eq!(merged.tool_schema_policy, Some(ToolSchemaPolicy::Auto));
+    let merged = merge_config(relaxed, Config::default());
+    assert_eq!(merged.tool_schema_policy, Some(ToolSchemaPolicy::Relaxed));
+}
+
+#[test]
 fn search_provider_scenario() {
     // Scenario consolidation of: search_provider_defaults_to_firecrawl, search_provider_resolution_reports_default_source, search_provider_resolution_reports_config_source, search_provider_resolution_reports_env_override_source, search_provider_env_override_accepts_baidu, search_provider_resolution_ignores_invalid_env_override
     // from search_provider_defaults_to_firecrawl

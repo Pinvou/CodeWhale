@@ -2422,6 +2422,8 @@ pub struct SubAgentRuntime {
     ///
     /// `None` for legacy/test runtimes that never threaded a config.
     pub api_config: Option<std::sync::Arc<crate::config::Config>>,
+    /// Engine-resolved schema projection inherited by every descendant request.
+    pub tool_schema_policy: crate::config::ToolSchemaPolicy,
     pub model: String,
     /// Active UI/model locale used for generated human-facing worker names.
     /// Internal ids and session handles remain language-neutral.
@@ -2595,6 +2597,7 @@ impl SubAgentRuntime {
         Self {
             client,
             api_config: None,
+            tool_schema_policy: crate::config::ToolSchemaPolicy::Auto,
             model,
             locale_tag: "en".to_string(),
             auto_model: false,
@@ -2866,6 +2869,12 @@ impl SubAgentRuntime {
         self
     }
 
+    #[must_use]
+    pub fn with_tool_schema_policy(mut self, policy: crate::config::ToolSchemaPolicy) -> Self {
+        self.tool_schema_policy = policy;
+        self
+    }
+
     /// Preserve whether the parent session is using per-turn model routing.
     #[must_use]
     pub fn with_auto_model(mut self, auto_model: bool) -> Self {
@@ -2950,6 +2959,7 @@ impl SubAgentRuntime {
         Self {
             client: self.client.clone(),
             api_config: self.api_config.clone(),
+            tool_schema_policy: self.tool_schema_policy,
             model: self.model.clone(),
             locale_tag: self.locale_tag.clone(),
             auto_model: self.auto_model,
@@ -13345,6 +13355,7 @@ async fn run_subagent(
                 .as_ref()
                 .and_then(|config| config.strict_tool_mode)
                 .unwrap_or(false),
+            runtime.tool_schema_policy,
         );
         let request_active_tool_names = tool_surface.active_names.clone();
         let has_tools = !tools.is_empty();
@@ -15926,7 +15937,12 @@ impl SubAgentToolSurface {
         }
     }
 
-    fn request_tools(&mut self, catalog: Vec<Tool>, strict: bool) -> Vec<Tool> {
+    fn request_tools(
+        &mut self,
+        catalog: Vec<Tool>,
+        strict: bool,
+        schema_policy: crate::config::ToolSchemaPolicy,
+    ) -> Vec<Tool> {
         self.catalog = catalog;
         // A refresh that grew a cached schema past the collective bounds
         // evicts here, outside any result payload — park the note.
@@ -15935,7 +15951,8 @@ impl SubAgentToolSurface {
         let mut active_names = initial_active_tools(&self.catalog);
         active_names.extend(self.cache.names().map(str::to_string));
         self.active_names = active_names;
-        active_tools_for_request(&self.catalog, &self.active_names, strict).unwrap_or_default()
+        active_tools_for_request(&self.catalog, &self.active_names, strict, schema_policy)
+            .unwrap_or_default()
     }
 
     fn search(&mut self, name: &str, input: &Value) -> Result<String> {

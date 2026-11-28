@@ -6649,6 +6649,7 @@ struct GuiConfigResponse {
     calm_mode: bool,
     sandbox_mode: String,
     strict_tool_mode: bool,
+    tool_schema_policy: String,
     memory_enabled: bool,
     search_provider: String,
     prompt_suggestion: bool,
@@ -6749,6 +6750,11 @@ async fn get_config(
             .clone()
             .unwrap_or_else(|| "workspace-write".to_string()),
         strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
+        tool_schema_policy: config
+            .tool_schema_policy
+            .unwrap_or_default()
+            .as_str()
+            .to_string(),
         memory_enabled: config.memory_enabled(),
         search_provider: config.search_provider().as_str().to_string(),
         prompt_suggestion: config.prompt_suggestion_enabled(),
@@ -6779,6 +6785,16 @@ async fn set_config(
         }
         "default_model" => {
             value = normalize_runtime_config_model(ApiProvider::Deepseek, &value)?;
+        }
+        "tool_schema_policy" => {
+            value = crate::config::ToolSchemaPolicy::parse(&value)
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for tool_schema_policy: expected 'auto' or 'relaxed'"
+                    ))
+                })?
+                .as_str()
+                .to_string();
         }
         _ => {}
     }
@@ -6922,6 +6938,11 @@ async fn set_config(
                 })?;
                 config_persistence::persist_root_bool_key(config_path, "strict_tool_mode", enabled)
             }
+            "tool_schema_policy" => config_persistence::persist_root_string_key(
+                config_path,
+                "tool_schema_policy",
+                &value,
+            ),
             "memory_enabled" => {
                 let enabled = value.parse::<bool>().map_err(|_| {
                     ApiError::bad_request(format!(
@@ -6954,7 +6975,7 @@ async fn set_config(
             }
             _ => {
                 return Err(ApiError::bad_request(format!(
-                    "Unknown config key '{key}'. Supported keys: model, default_model, reasoning_effort, approval_mode, base_url, provider, provider_url, cost_currency, default_mode, auto_compact, allow_shell, mcp_config_path, show_thinking, thinking_default_expanded, thinking_highlight, show_tool_details, inline_diffs, locale, max_history, calm_mode, workspace_follow_symlinks, subagents_enabled, subagents_max_depth, sandbox_mode, strict_tool_mode, memory_enabled, search_provider, prompt_suggestion"
+                    "Unknown config key '{key}'. Supported keys: model, default_model, reasoning_effort, approval_mode, base_url, provider, provider_url, cost_currency, default_mode, auto_compact, allow_shell, mcp_config_path, show_thinking, thinking_default_expanded, thinking_highlight, show_tool_details, inline_diffs, locale, max_history, calm_mode, workspace_follow_symlinks, subagents_enabled, subagents_max_depth, sandbox_mode, strict_tool_mode, tool_schema_policy, memory_enabled, search_provider, prompt_suggestion"
                 )));
             }
         };

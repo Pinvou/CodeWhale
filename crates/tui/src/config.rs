@@ -3048,6 +3048,36 @@ pub trait ModelHttpPolicy: std::fmt::Debug + Send + Sync {
     ) -> Result<reqwest::ClientBuilder>;
 }
 
+/// Provider-neutral projection of tool schemas and their `strict` flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolSchemaPolicy {
+    /// Preserve each tool's explicit strictness and the legacy preparation path.
+    #[default]
+    Auto,
+    /// Mark every selected tool non-strict without rewriting its input schema.
+    Relaxed,
+}
+
+impl ToolSchemaPolicy {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "relaxed" => Some(Self::Relaxed),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Relaxed => "relaxed",
+        }
+    }
+}
+
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -3162,6 +3192,8 @@ pub struct Config {
     /// schemas into DeepSeek beta strict mode. Schemas with root alternatives
     /// stay non-strict to avoid changing optional/one-of tool semantics.
     pub strict_tool_mode: Option<bool>,
+    /// Provider-neutral tool schema projection. Defaults to `auto`.
+    pub tool_schema_policy: Option<ToolSchemaPolicy>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars
     /// work. Project-scope config is not allowed to set this field; the TUI
@@ -11069,6 +11101,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         workflow: override_cfg.workflow.or(base.workflow),
         subagents: override_cfg.subagents.or(base.subagents),
         strict_tool_mode: override_cfg.strict_tool_mode.or(base.strict_tool_mode),
+        tool_schema_policy: override_cfg.tool_schema_policy.or(base.tool_schema_policy),
         runtime_api: override_cfg.runtime_api.or(base.runtime_api),
         workshop: override_cfg.workshop.or(base.workshop),
         exec_policy_engine: override_cfg.exec_policy_engine,
