@@ -3980,18 +3980,6 @@ fn has_rust_only_flag_group(pattern: &str) -> bool {
     })
 }
 
-/// Round 28: stacked quantifiers — `a**`, `a*+`, `a{2,3}*`, `a{2}{3}` —
-/// compile in the regex crate (its parser re-quantifies an existing
-/// `Ast::Repetition`; only `Empty`/`Flags` are rejected), where ECMA-262
-/// makes every one of them a SyntaxError (Annex B's ExtendedAtom excludes
-/// `* + ?` with nothing to repeat). The judge rendering verdicts on a
-/// pattern the wire cannot compile is the inline-flag class one family
-/// over, so the screen abstains. Escaped pairs (`\*`) and class contents
-/// (`[a*+]`) are literal on both sides and keep judging; a valid counted
-/// group (`{n[,m]}`) counts as a quantifier for adjacency, literal
-/// braces do not. Over-abstention is the conservative direction — the
-/// pattern still ships and binds on the wire.
-
 /// Round 32 (fresh r4 review, live-proven): Rust's repetition parser skips
 /// ASCII whitespace inside the braces, so `a{1, 2}` compiles a real counted
 /// repetition on this side where ECMA-262 Annex B reads the whole brace run
@@ -4084,6 +4072,17 @@ fn has_wire_illegal_capture_name(pattern: &str) -> bool {
     false
 }
 
+/// Round 28: stacked quantifiers — `a**`, `a*+`, `a{2,3}*`, `a{2}{3}` —
+/// compile in the regex crate (its parser re-quantifies an existing
+/// `Ast::Repetition`; only `Empty`/`Flags` are rejected), where ECMA-262
+/// makes every one of them a SyntaxError (Annex B's ExtendedAtom excludes
+/// `* + ?` with nothing to repeat). The judge rendering verdicts on a
+/// pattern the wire cannot compile is the inline-flag class one family
+/// over, so the screen abstains. Escaped pairs (`\*`) and class contents
+/// (`[a*+]`) are literal on both sides and keep judging; a valid counted
+/// group (`{n[,m]}`) counts as a quantifier for adjacency, literal
+/// braces do not. Over-abstention is the conservative direction — the
+/// pattern still ships and binds on the wire.
 fn has_stacked_quantifier(pattern: &str) -> bool {
     let bytes = pattern.as_bytes();
     let mut index = 0usize;
@@ -5435,9 +5434,6 @@ fn pinned_object_value_compatible_with(
 /// unwinding an exponential call tree (probed: unbounded depth aborts the
 /// process on stack overflow; depth cap alone hangs the request). Past
 /// either bound the judge fails closed where a judged constraint is
-/// present (round 23) — the same hostile-input line the hop, member, and
-/// alternative caps draw beside judged constraints.
-
 /// The wrapper arm's joint witness: whether SOME alternative satisfies
 /// `alternative ∧ sibling ∧ other` far enough to call the pair
 /// satisfiable. Round 32 (fresh r4 review, live-proven): pairwise
@@ -5573,6 +5569,8 @@ fn wrapper_witness(
             })
     })
 }
+/// present (round 23) — the same hostile-input line the hop, member, and
+/// alternative caps draw beside judged constraints.
 fn schema_pair_satisfiable(
     a: &Value,
     b: &Value,
@@ -21111,57 +21109,6 @@ mod strict_fixwave_r32 {
             "the jointly-empty wrapper trio must fail the tool closed"
         );
         assert_eq!(strict, None);
-    }
-
-    #[test]
-    fn temp_direct_hsic_probe() {
-        let node_u = json!({"type": "string", "enum": ["ab", "zz"]});
-        let w = json!({"anyOf": [{"enum": ["zz", "ab"]}, {"type": "boolean"}], "pattern": "^z"});
-        let b = json!({
-            "type": "object",
-            "properties": {
-                "p": {"type": "string"},
-                "u": {"anyOf": [
-                    {"enum": ["zz", "ab"]},
-                    {"type": "boolean"}
-                ], "pattern": "^z"}
-            },
-            "required": ["p", "u"],
-            "additionalProperties": false
-        });
-        let u = json!({
-            "type": "object",
-            "properties": {
-                "p": {"type": "string"},
-                "u": {"type": "string", "enum": ["ab", "zz"]}
-            },
-            "required": ["p", "u"],
-            "enum": [{"p": "x", "u": "zz"}],
-            "anyOf": [b.clone()]
-        });
-        let root = json!({"type": "object", "properties": {"u": u.clone()}, "required": ["u"]});
-        println!(
-            "HSIC node_u={}",
-            has_strict_incompatible_composition(&node_u, &root, false)
-        );
-        println!(
-            "HSIC w={}",
-            has_strict_incompatible_composition(&w, &root, false)
-        );
-        println!(
-            "HSIC b={}",
-            has_strict_incompatible_composition(&b, &root, false)
-        );
-        println!(
-            "HSIC u={}",
-            has_strict_incompatible_composition(&u, &root, true)
-        );
-        let (all, strict) = verdict(json!({
-            "type": "object",
-            "properties": {"u": u},
-            "required": ["u"]
-        }));
-        println!("HSIC verdict all={all} strict={strict:?}");
     }
 
     #[test]
