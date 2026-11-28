@@ -5282,6 +5282,139 @@ fn pinned_object_value_compatible_with(
 /// either bound the judge fails closed where a judged constraint is
 /// present (round 23) — the same hostile-input line the hop, member, and
 /// alternative caps draw beside judged constraints.
+
+/// The wrapper arm's joint witness: whether SOME alternative satisfies
+/// `alternative ∧ sibling ∧ other` far enough to call the pair
+/// satisfiable. Round 32 (fresh r4 review, live-proven): pairwise
+/// verdicts do not compose into a joint one — a trio whose every PAIR
+/// shares a value can still admit no common instance (the
+/// alternative's `enum: ["a", "b"]` beside sibling `pattern: "^a$"`
+/// and other `pattern: "^b$"`: every pair overlaps, the three share
+/// nothing). The witness now takes one of two provable shapes: when
+/// any of the three sides pins a finite value domain (`enum`/`const`),
+/// the witness is a VALUE — one pinned member clearing all three sides
+/// through the funnel (every instance of a pinned side is one of its
+/// members, so enumerating the first pinned side is complete; a work
+/// cap bounds the scan and exhaustion fails closed). When no side pins
+/// a domain but two or more sides carry pattern/format constraints,
+/// the string-domain intersection is exactly what this judge cannot
+/// prove, and an unprovable witness is not a satisfiability witness —
+/// fail closed (the same unprovable-intersection line the multi-branch
+/// allOf arm draws). Open domains over provable dimensions (types,
+/// numeric windows) keep the pairwise verdicts: those dimensions
+/// already refuse through them.
+fn wrapper_witness(
+    alternatives: &[Value],
+    sibling: Option<&Value>,
+    other: &Value,
+    root: &Value,
+    depth: usize,
+    budget: &mut usize,
+) -> bool {
+    /// Funnel judgments one alternative's enumeration may pay before
+    /// the honest verdict becomes fail-closed — the same hostile-input
+    /// line the chase and pair budgets draw.
+    const WITNESS_WORK_CAP: usize = 4_096;
+    // The finite value domain a side pins for the enumeration: outer
+    // `None` when the side pins no domain at all, inner `None` when it
+    // pins one past the judge caps (unenumerable — the skipped scan
+    // could have judged the trio, so the honest verdict is
+    // fail-closed), else the members.
+    let side_witness_values = |side: &Value| -> Option<Option<Vec<Value>>> {
+        let obj = side.as_object()?;
+        if let Some(const_value) = obj.get("const") {
+            return Some(Some(vec![const_value.clone()]));
+        }
+        let members = obj.get("enum").and_then(Value::as_array)?;
+        if enum_members_within_judge_cap(members) {
+            Some(Some(members.clone()))
+        } else {
+            Some(None)
+        }
+    };
+    let side_carries_string_domain = |side: Option<&Value>| -> bool {
+        side.and_then(Value::as_object)
+            .is_some_and(|obj| obj.contains_key("pattern") || obj.contains_key("format"))
+    };
+    let value_clears_side = |value: &Value, side: &Value, work: &mut usize| -> bool {
+        *work += 1;
+        if *work > WITNESS_WORK_CAP {
+            return false;
+        }
+        let Some(side_obj) = side.as_object() else {
+            return false;
+        };
+        let side_patterns = compiled_property_patterns(side_obj);
+        value_clears_bounds_with(value, side_obj, compiled_documented_pattern(side_obj).as_ref())
+            && pinned_object_value_compatible_with(
+                value,
+                side_obj,
+                &side_patterns,
+                PINNED_OBJECT_JUDGE_DEPTH,
+            )
+    };
+    alternatives.iter().any(|alternative| {
+        // The FIRST pinned side among {alternative, sibling, other} owns
+        // the enumeration: every instance of a pinned side is one of its
+        // members, so if the trio is satisfiable at all, some member of
+        // that side is a common instance — enumerating one pinned side
+        // is complete.
+        let mut pinned: Option<Vec<Value>> = None;
+        let mut over_cap = false;
+        for side in [Some(alternative), sibling, Some(other)]
+            .into_iter()
+            .flatten()
+        {
+            match side_witness_values(side) {
+                Some(Some(members)) => {
+                    pinned = Some(members);
+                    break;
+                }
+                Some(None) => {
+                    over_cap = true;
+                    break;
+                }
+                None => {}
+            }
+        }
+        if let Some(members) = pinned {
+            let mut work = 0usize;
+            return members.iter().any(|value| {
+                let mut clears_all = true;
+                for side in [Some(alternative), sibling, Some(other)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !value_clears_side(value, side, &mut work) {
+                        clears_all = false;
+                        break;
+                    }
+                }
+                clears_all
+            });
+        }
+        if over_cap {
+            return false;
+        }
+        // No side pins a domain: with two or more pattern/format
+        // constraints riding different sides the string-domain
+        // intersection is unprovable here — fail closed. Otherwise the
+        // pairwise verdicts stand (types and numeric windows already
+        // refuse through them).
+        let string_domains = [Some(alternative), sibling, Some(other)]
+            .into_iter()
+            .flatten()
+            .filter(|side| side_carries_string_domain(Some(side)))
+            .count();
+        if string_domains >= 2 {
+            return false;
+        }
+        schema_pair_satisfiable(alternative, other, root, depth + 1, budget)
+            && sibling.is_none_or(|sibling| {
+                schema_pair_satisfiable(alternative, sibling, root, depth + 1, budget)
+            })
+    })
+}
 fn schema_pair_satisfiable(
     a: &Value,
     b: &Value,
@@ -5413,12 +5546,11 @@ fn schema_pair_satisfiable(
             }
             Some(Value::Object(sans))
         };
-        let witness = alternatives.iter().any(|alternative| {
-            schema_pair_satisfiable(alternative, other, root, depth + 1, &mut *budget)
-                && sibling.as_ref().is_none_or(|sibling| {
-                    schema_pair_satisfiable(alternative, sibling, root, depth + 1, &mut *budget)
-                })
-        });
+        // Round 32 (fresh r4 review, live-proven): the witness takes a
+        // provable shape — see `wrapper_witness`. Pairwise halves are not
+        // the whole joint.
+        let witness =
+            wrapper_witness(alternatives, sibling.as_ref(), other, root, depth, budget);
         if !witness {
             return false;
         }
@@ -5575,8 +5707,27 @@ fn schema_pair_satisfiable(
                 // once per member × per key — the same hoist the node-level
                 // arm draws.
                 let property_patterns = compiled_property_patterns(other);
+                // Round 32 (fresh r4 review, live-proven): the members are
+                // the pinned side's candidate values, but its own
+                // `pattern`/bounds constrain which members are actually in
+                // its language — `{enum: ["a","b"], "pattern": "^a$"}`
+                // admits only "a". The scan used to test the raw members
+                // against the other side alone, so a member OUTSIDE the
+                // pinned side's language cleared a contradicting pattern
+                // and the composition arm certified a union whose every
+                // instance is unsatisfiable. The member must clear its own
+                // side before it may clear the other.
+                let pinned_pattern = compiled_documented_pattern(pinned);
+                let pinned_property_patterns = compiled_property_patterns(pinned);
                 if !members.iter().any(|member| {
-                    value_clears_bounds_with(member, other, other_pattern)
+                    value_clears_bounds_with(member, pinned, pinned_pattern.as_ref())
+                        && pinned_object_value_compatible_with(
+                            member,
+                            pinned,
+                            &pinned_property_patterns,
+                            PINNED_OBJECT_JUDGE_DEPTH,
+                        )
+                        && value_clears_bounds_with(member, other, other_pattern)
                         && pinned_object_value_compatible_with(
                             member,
                             other,
@@ -20745,6 +20896,198 @@ mod strict_fixwave_r32 {
             "required": ["arr"]
         }));
         assert!(all, "the compatible union must keep shipping strict");
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn wrapper_trio_witness_enumerates_the_pinned_domain() {
+        // Live-proven pre-fix (property position, so the shaped-branch
+        // rule does not shadow it): the branch property `u` is a wrapper
+        // whose alternative pins {"zz","ab"} beside sibling `pattern:
+        // "^z"`, and the node property pins enum ["ab","za"]. Every PAIR
+        // overlaps - alternative and other share "ab", alternative and
+        // sibling share "zz", sibling and other share "za" - but the
+        // three share nothing: every wire instance carries u in
+        // {"ab","za"} AND through the wrapper some alternative and "^z",
+        // which is empty. The pairwise witness certified satisfiability
+        // and the coverage arm shipped the union strict callable by
+        // nothing. The value witness enumerates the first pinned domain:
+        // "zz" clears the sibling but not the node enum, "ab" clears the
+        // node enum but not the sibling - no witness, fail closed.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {
+                    "type": "object",
+                    "properties": {
+                        "p": {"type": "string"},
+                        "u": {"type": "string", "enum": ["ab", "za"]}
+                    },
+                    "required": ["p", "u"],
+                    "enum": [{"p": "x", "u": "ab"}],
+                    "anyOf": [{
+                        "type": "object",
+                        "properties": {
+                            "p": {"type": "string"},
+                            "u": {"anyOf": [
+                                {"enum": ["zz", "ab"]},
+                                {"type": "boolean"}
+                            ], "pattern": "^z"}
+                        },
+                        "required": ["p", "u"],
+                        "additionalProperties": false
+                    }]
+                }
+            },
+            "required": ["u"]
+        }));
+        assert!(!all, "the jointly-empty wrapper trio must fail the tool closed");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn temp_direct_hsic_probe() {
+        let node_u = json!({"type": "string", "enum": ["ab", "zz"]});
+        let w = json!({"anyOf": [{"enum": ["zz", "ab"]}, {"type": "boolean"}], "pattern": "^z"});
+        let b = json!({
+            "type": "object",
+            "properties": {
+                "p": {"type": "string"},
+                "u": {"anyOf": [
+                    {"enum": ["zz", "ab"]},
+                    {"type": "boolean"}
+                ], "pattern": "^z"}
+            },
+            "required": ["p", "u"],
+            "additionalProperties": false
+        });
+        let u = json!({
+            "type": "object",
+            "properties": {
+                "p": {"type": "string"},
+                "u": {"type": "string", "enum": ["ab", "zz"]}
+            },
+            "required": ["p", "u"],
+            "enum": [{"p": "x", "u": "zz"}],
+            "anyOf": [b.clone()]
+        });
+        let root = json!({"type": "object", "properties": {"u": u.clone()}, "required": ["u"]});
+        println!("HSIC node_u={}", has_strict_incompatible_composition(&node_u, &root, false));
+        println!("HSIC w={}", has_strict_incompatible_composition(&w, &root, false));
+        println!("HSIC b={}", has_strict_incompatible_composition(&b, &root, false));
+        println!("HSIC u={}", has_strict_incompatible_composition(&u, &root, true));
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"u": u},
+            "required": ["u"]
+        }));
+        println!("HSIC verdict all={all} strict={strict:?}");
+    }
+
+    #[test]
+    fn wrapper_witness_refuses_the_pairwise_only_trio() {
+        // Unit pin for the wrapper arm's witness (end-to-end wrapper trios
+        // are intercepted by the shaped-branch and coverage fail-closed
+        // arms, so the contract is pinned at the judge): the wrapper's
+        // alternative pins {"ax","bz"} beside sibling `^a` and other
+        // `z$`. Every PAIR overlaps - "ax" clears alternative+`^a`, "bz"
+        // clears alternative+`z$`, and `^a` with `z$` share "az" through
+        // the unprovable-pattern abstention - but the three share
+        // nothing. The pairwise witness returned true pre-fix; the value
+        // witness enumerates the pinned domain, finds no member clearing
+        // both string domains, and refuses.
+        let w = json!({
+            "anyOf": [{"enum": ["ax", "bz"]}, {"type": "boolean"}],
+            "pattern": "^a"
+        });
+        let other = json!({"pattern": "z$"});
+        let root = Value::Null;
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(
+            !schema_pair_satisfiable(&w, &other, &root, 0, &mut budget),
+            "the pairwise-only trio must not witness satisfiable"
+        );
+    }
+
+    #[test]
+    fn wrapper_witness_keep_side_shares_a_pinned_member() {
+        // Keep-side: the other side's domain admits "ax", which clears
+        // the alternative and the sibling pattern - the trio genuinely
+        // admits "ax" and the pair stays satisfiable.
+        let w = json!({
+            "anyOf": [{"enum": ["ax", "bz"]}, {"type": "boolean"}],
+            "pattern": "^a"
+        });
+        let other = json!({"pattern": "x$"});
+        let root = Value::Null;
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(
+            schema_pair_satisfiable(&w, &other, &root, 0, &mut budget),
+            "the trio admits ax: the pair stays satisfiable"
+        );
+    }
+
+    #[test]
+    fn pair_member_scan_constrains_members_to_the_pinned_language() {
+        // The flat form the single-branch collapse produces: the pinned
+        // side `{enum: ["a","b"], "pattern": "^a$"}` admits only "a", but
+        // the member scan used to test the RAW members against the other
+        // side - member "b" cleared `^b$` outside the pinned language and
+        // the composition arm certified a union whose every instance is
+        // unsatisfiable. The member must clear its own side first.
+        // Discriminating (ships pre-fix, fails closed here): the pinned
+        // side {enum: ["ab","ba"], "pattern": "^b"} admits only "ba",
+        // but the raw member "ab" cleared the contradicting `^a` outside
+        // the pinned language and the composition arm shipped the union
+        // strict callable by nothing ("ba" fails `^a`).
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "s": {
+                    "anyOf": [{"enum": ["ab", "ba"], "pattern": "^b"}],
+                    "pattern": "^a"
+                }
+            },
+            "required": ["s"]
+        }));
+        assert!(!all, "the member outside the pinned language must not witness");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn pair_member_scan_keep_side_still_witnesses() {
+        // Keep-side for the member-vs-own-side conjunct: member "ab" is in
+        // the pinned side's language (`^a` prefix) AND clears `^b$` - the
+        // union is satisfiable through it and ships.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "s": {
+                    "anyOf": [{"enum": ["ab", "ba"], "pattern": "^b"}],
+                    "pattern": "^ba$"
+                }
+            },
+            "required": ["s"]
+        }));
+        assert!(
+            all,
+            "ba is in the pinned language and clears ^ba$: the union ships"
+        );
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn wrapper_witness_keeps_the_enum_sibling_keep_side() {
+        // Keep-side (the round-31 shape): a pinned sibling the alternative
+        // admits — the witness must keep certifying the pair.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "s": {"anyOf": [{"enum": ["a", "b"]}], "enum": ["a"]}
+            },
+            "required": ["s"]
+        }));
+        assert!(all, "the admitted sibling pin keeps the union satisfiable");
         assert_eq!(strict, Some(true));
     }
 }
