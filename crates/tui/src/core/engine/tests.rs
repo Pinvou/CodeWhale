@@ -10457,6 +10457,146 @@ async fn clean_output_limit_superset_stop_keeps_a_closed_call_executable() {
 }
 
 #[tokio::test]
+async fn clean_max_completion_tokens_stop_keeps_unclosed_blocks_invalidated() {
+    // Round-7 review: the round-6 rescue-superset arm was pinned only
+    // through `output_limit`; the `max_completion_tokens` spelling shared
+    // the arm but nothing exercised it, so deleting the spelling flipped
+    // nothing. This pin uses an UNCLOSED tool block — the shape where the
+    // spelling is load-bearing: it makes `stream_completed` false, so the
+    // open block is invalidated instead of being finalized and executed as
+    // an unknown-stop-reason completion.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let turn = vec![
+        canned::message_start("mct-unclosed"),
+        canned::tool_use_block_start(0, "call-mct", "tool_search"),
+        canned::tool_input_delta(0, r#"{"query":"read"}"#),
+        // No block_stop: the tool block never closes.
+        canned::message_delta("max_completion_tokens", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A clean max_completion_tokens stop must not execute an unclosed block.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send unclosed mct stream");
+
+    let mut executed = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the unclosed mct turn")
+    {
+        match event {
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_err(),
+                    "an unclosed block under a clean max_completion_tokens stop must not execute: {result:?}"
+                );
+                executed = true;
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(
+        executed,
+        "the unclosed block must be settled with an incomplete receipt, never executed"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn fallback_text_tool_call_survives_a_clean_output_limit_stop() {
+    // Round-7 review: the fallback text-marker parser keyed on bare
+    // `stream_completed`, which is false for every output-limit stop, so a
+    // provably complete `[TOOL_CALL]` pair was invalidated with a false
+    // "malformed ... stream ended without normal completion" receipt on
+    // exactly the clean stops the acceptance ladder deliberately accepts —
+    // while a native closed block in the same stream was rescued. The
+    // fallback site now keys on the same clean-shape predicate the rescue
+    // uses, and this pin fails without it.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let marker =
+        "[TOOL_CALL]\n{\"tool\":\"tool_search\",\"args\":{\"query\":\"read\"}}\n[/TOOL_CALL]";
+    let turn = vec![
+        canned::message_start("fallback-output-limit"),
+        canned::text_block_start(0),
+        canned::text_delta(0, marker),
+        canned::block_stop(0),
+        canned::message_delta("length", None),
+        canned::message_stop(),
+    ];
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![turn]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let config = Config::default();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "A clean length stop keeps a complete text-marker call alive.",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("send fallback marker stream");
+
+    let mut started = false;
+    let mut completed_ok = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for the fallback-marker turn")
+    {
+        match event {
+            Event::ToolCallStarted { name, input, .. } if name == "tool_search" => {
+                assert_eq!(
+                    input,
+                    serde_json::json!({"query": "read"}),
+                    "the fallback call must carry its parsed arguments, not the malformed sentinel"
+                );
+                started = true;
+            }
+            Event::ToolCallComplete { name, result, .. } if name == "tool_search" => {
+                assert!(
+                    result.is_ok(),
+                    "the clean-length fallback call must execute: {result:?}"
+                );
+                completed_ok = true;
+            }
+            Event::TurnComplete { .. } => break,
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(started, "the fallback call must be announced as started");
+    assert!(completed_ok, "the clean-length fallback call must execute");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn transparent_retry_does_not_inherit_the_dead_stream_stop_reason() {
     // Round-6 review: `stop_reason` was declared outside the stream event
     // loop and survived the transparent stream retry. A stop-reason-only

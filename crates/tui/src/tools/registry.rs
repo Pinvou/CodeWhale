@@ -1685,11 +1685,26 @@ mod raw_budget_tests {
 
     #[test]
     fn over_budget_schema_skips_recursive_registry_preprocessing() {
-        let mut literal = json!("leaf");
+        // Round-7 review: the deep content must sit where preprocessing is
+        // OBSERVABLE — canonicalize_schema sorts `required` arrays but skips
+        // instance data, and sanitize no-ops past its own depth guard, so a
+        // fixture nested under `default` passed with or without the
+        // registry-level guard. Unsorted `required` arrays at every level
+        // make a run canonicalizer observable: removing the guard flips
+        // this assertion (base, which had no guard, sorts them).
+        let mut literal = json!({"type": "string"});
         for _ in 0..=64 {
-            literal = json!({"nested": literal});
+            literal = json!({
+                "type": "object",
+                "properties": {"zz": literal.clone(), "aa": {"type": "string"}},
+                "required": ["zz", "aa"]
+            });
         }
-        let schema = json!({"type": "object", "default": literal});
+        let schema = literal;
+        assert_ne!(
+            schema["required"][0], schema["required"][1],
+            "fixture precondition: the required array must be non-canonical"
+        );
         let mut registry =
             ToolRegistry::new(ToolContext::new(tempdir().unwrap().path().to_path_buf()));
         registry.register(mcp_tool_adapter_with_schema_for_test(
@@ -1699,6 +1714,9 @@ mod raw_budget_tests {
 
         let tools = registry.to_api_tools();
 
-        assert_eq!(tools[0].input_schema, schema);
+        assert_eq!(
+            tools[0].input_schema, schema,
+            "an over-budget schema must ship verbatim: the registry-level guard skips both sanitize and canonicalize, so every nested required array stays unsorted"
+        );
     }
 }

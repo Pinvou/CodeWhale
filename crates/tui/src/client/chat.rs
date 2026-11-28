@@ -2376,7 +2376,7 @@ impl DeepSeekClient {
                 };
                 if unowned > 0 {
                     crate::logging::warn(format!(
-                        "Moonshot response contains {unowned} tool call(s) for tools not offered by this request; passed to dispatch as unknown-tool errors"
+                        "Moonshot response contains {unowned} tool call(s) for tools not offered by this request; carried verbatim so a tool-executing consumer reports each as an unknown-tool error"
                     ));
                 }
                 return Ok(cached);
@@ -5536,7 +5536,7 @@ fn parse_chat_message_for_route_with_owners(
     }
     if unowned_response_tools > 0 {
         crate::logging::warn(format!(
-            "Moonshot response contains {unowned_response_tools} tool call(s) for tools not offered by this request; passed to dispatch as unknown-tool errors"
+            "Moonshot response contains {unowned_response_tools} tool call(s) for tools not offered by this request; carried verbatim so a tool-executing consumer reports each as an unknown-tool error"
         ));
     }
 
@@ -6346,6 +6346,34 @@ fn tool_name_or_fallback(name: Option<&str>, id: &str, source: &str) -> String {
 mod stream_diagnostics_tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn bounded_frame_message_truncates_over_bound_multibyte_text_on_char_boundary() {
+        // Round-7 review: the 512-byte raw-arguments excerpt has direct
+        // truncation pins, but this helper's over-bound and split-character
+        // paths did not — a naive byte-slice refactor would have passed the
+        // suite. One emoji is 4 bytes, so the ASCII prefix length is chosen
+        // to straddle the boundary mid-character.
+        let message = format!("{}\u{1F600}\u{1F600}", "a".repeat(ERROR_BODY_MAX_BYTES - 2));
+        let bounded = bounded_frame_message(&message);
+        assert!(bounded.len() <= ERROR_BODY_MAX_BYTES + 3);
+        assert!(
+            bounded.ends_with('\u{2026}'),
+            "over-bound text must gain an ellipsis"
+        );
+        assert!(bounded.is_char_boundary(bounded.len() - 3));
+        let reparsed: serde_json::Value =
+            serde_json::from_str(&format!("\"{bounded}\"")).expect("bounded text stays valid JSON");
+        assert!(reparsed.is_string());
+    }
+
+    #[test]
+    fn bounded_frame_message_keeps_in_bound_text_verbatim_without_ellipsis() {
+        let message = "provider error: upstream 500".to_string();
+        assert_eq!(bounded_frame_message(&message), message);
+        let exact = "x".repeat(ERROR_BODY_MAX_BYTES);
+        assert_eq!(bounded_frame_message(&exact), exact);
+    }
 
     #[test]
     fn stream_idle_timeout_reports_progress_and_timing() {

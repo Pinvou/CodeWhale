@@ -3736,7 +3736,8 @@ mod tests {
                     // Overdepth input trips the entry-point depth guard, so
                     // the result is `Ok` here; the pointer table only needs
                     // the fail-closed "no mutation" behavior under test.
-                    let _ = sanitize_for_kimi(schema);
+                    sanitize_for_kimi(schema)
+                        .expect("overdepth input must take the guard's silent Ok path");
                 }) as fn(&mut Value),
             ),
         ] {
@@ -8770,6 +8771,16 @@ fn normalize_kimi_compatibility(
         {
             obj.remove("properties");
         }
+        // The registry collapse retains union compositions that carry
+        // instance data verbatim (the round-6 carve-out), so without this
+        // distribution the strict lane dropped every tool with the common
+        // `Optional[T] = default` property shape on the union-sibling
+        // whitelist, although the exact wire form exists: move
+        // `default`/`enum` onto the branches that provably admit them (base
+        // shipped exactly this distributed form by flattening first).
+        // Instance data nothing admits stays on the node for the sibling
+        // whitelist to reject, exactly as before (fail-closed).
+        distribute_kimi_union_instance_data(obj);
         if obj.keys().any(|key| {
             !matches!(key.as_str(), "anyOf" | "type" | "description")
                 && !(is_root && key == "$defs")
@@ -8782,6 +8793,118 @@ fn normalize_kimi_compatibility(
 
     normalize_kimi_child_schemas(schema)?;
     Ok(())
+}
+
+/// Move node-level instance data beside a retained `anyOf` onto the
+/// branches that provably admit it. `default` annotates instance data, so
+/// admitting branches gain it verbatim and the accepted instance set is
+/// untouched; `enum` is a constraint, so each admitting branch carries the
+/// subset of values its type admits and a branch admitting none is dropped
+/// exactly (it admits no instance under the original node-level enum).
+/// Branches that already constrain the same instance data, `$ref`/bool
+/// branches, and unprovable type forms cannot take the distribution and
+/// stay as-is; if that leaves any value or key undistributed, the key stays
+/// on the node for the union-sibling whitelist to reject — the same
+/// fail-closed outcome as before this helper existed (round-7 review).
+fn distribute_kimi_union_instance_data(obj: &mut serde_json::Map<String, Value>) {
+    if let Some(value) = obj.get("default").cloned() {
+        let branches = obj.get_mut("anyOf").and_then(Value::as_array_mut);
+        if let Some(branches) = branches
+            && distribute_single_instance_value(branches, "default", &value)
+        {
+            obj.remove("default");
+        }
+    }
+    if let Some(Value::Array(values)) = obj.get("enum").cloned() {
+        let branches = obj.get_mut("anyOf").and_then(Value::as_array_mut);
+        if let Some(branches) = branches
+            && distribute_enum_across_branches(branches, &values)
+        {
+            obj.remove("enum");
+        }
+    }
+}
+
+/// Whether one branch provably admits an instance value for distribution.
+fn branch_admits_instance(branch: &Value, value: &Value) -> bool {
+    let Some(branch_obj) = branch.as_object() else {
+        return false;
+    };
+    if branch_obj.contains_key("const")
+        || branch_obj.contains_key("enum")
+        || branch_obj.contains_key("$ref")
+        || branch_obj.contains_key("anyOf")
+        || branch_obj.contains_key("oneOf")
+        || branch_obj.contains_key("allOf")
+    {
+        return false;
+    }
+    match branch_obj.get("type") {
+        None => true,
+        Some(Value::String(branch_type)) => instance_data_is_type(value, branch_type),
+        Some(Value::Array(members)) => members.iter().any(|member| {
+            member
+                .as_str()
+                .is_some_and(|t| instance_data_is_type(value, t))
+        }),
+        Some(_) => false,
+    }
+}
+
+/// Annotate every admitting branch with one instance-data value. Returns
+/// whether at least one branch admitted it.
+fn distribute_single_instance_value(branches: &mut [Value], key: &str, value: &Value) -> bool {
+    let mut distributed = false;
+    for branch in branches.iter_mut() {
+        if branch_admits_instance(branch, value)
+            && let Some(branch_obj) = branch.as_object_mut()
+        {
+            branch_obj.insert(key.to_string(), value.clone());
+            distributed = true;
+        }
+    }
+    distributed
+}
+
+/// Distribute a node-level `enum` across the branches: each admitting
+/// branch carries the values its type admits, and a branch admitting no
+/// value is dropped exactly. Returns whether every value was admitted by at
+/// least one surviving branch and at least one branch survives.
+fn distribute_enum_across_branches(branches: &mut Vec<Value>, values: &[Value]) -> bool {
+    let mut per_branch: Vec<Option<Vec<Value>>> = Vec::with_capacity(branches.len());
+    for _ in branches.iter() {
+        per_branch.push(None);
+    }
+    for value in values {
+        let mut admitted = false;
+        for (index, branch) in branches.iter().enumerate() {
+            if branch_admits_instance(branch, value) {
+                admitted = true;
+                per_branch[index]
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
+            }
+        }
+        if !admitted {
+            return false;
+        }
+    }
+    let mut kept = Vec::new();
+    for (branch, subset) in branches.drain(..).zip(per_branch) {
+        if let Some(values) = subset {
+            let mut branch_obj = match branch.as_object() {
+                Some(branch_obj) => branch_obj.clone(),
+                None => return false,
+            };
+            branch_obj.insert("enum".to_string(), Value::Array(values));
+            kept.push(Value::Object(branch_obj));
+        }
+    }
+    if kept.is_empty() {
+        return false;
+    }
+    *branches = kept;
+    true
 }
 
 fn normalize_kimi_child_schemas(schema: &mut Value) -> Result<(), KimiParameterSchemaError> {
@@ -10063,6 +10186,11 @@ mod kimi_tests {
         let a = &unrepresentable["properties"]["a"];
         assert_eq!(a["type"], "object");
         assert_eq!(a["anyOf"], json!([{"type": ["string", 3]}]));
+        // The deferral claim itself: the retained form must actually be what
+        // the validator rejects, not a shape that slips through.
+        let error = validate_mfjs_parameters(&unrepresentable)
+            .expect_err("the validator must reject the retained non-string type member");
+        assert_eq!(error, KimiParameterSchemaError::InvalidKeywordValue);
     }
 
     #[test]
@@ -11476,15 +11604,11 @@ mod kimi_tests {
                 }),
                 KimiParameterSchemaError::MissingType,
             ),
-            (
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "x": {"default": "a", "anyOf": [{"type": "string"}, {"type": "null"}]}
-                    }
-                }),
-                KimiParameterSchemaError::InvalidKeywordValue,
-            ),
+            // The `Optional[T] = default` union shape is no longer in this
+            // table: the round-7 instance-data distribution ships it onto the
+            // admitting branch (the exact form base shipped by flattening),
+            // pinned by
+            // `kimi_lane_ships_optional_property_default_into_the_admitting_branch`.
             (
                 json!({
                     "type": "object",
@@ -12714,6 +12838,136 @@ mod kimi_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod r7_instance_data_pins {
+    use super::*;
+    use serde_json::json;
+
+    // Round-7 P2-2: the registry collapse retains the common
+    // `Optional[T] = default` union verbatim; the strict lane used to drop
+    // the whole tool on the union-sibling whitelist although the exact wire
+    // form (default inside the admitting branch) exists — base shipped it
+    // by flattening first.
+    #[test]
+    fn kimi_lane_ships_optional_property_default_into_the_admitting_branch() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": "fast"
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema).expect("Optional-with-default must ship exactly");
+        assert_eq!(
+            schema["properties"]["mode"],
+            json!({"anyOf": [
+                {"type": "string", "default": "fast"},
+                {"type": "null"}
+            ]}),
+            "the default rides the admitting branch, not the union node"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_distributes_node_enum_across_branches_by_type() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "v": {
+                    "anyOf": [{"type": "string"}, {"type": "integer"}],
+                    "enum": ["a", 1]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("a fully admitted node enum distributes onto the branches");
+        assert_eq!(
+            schema["properties"]["v"],
+            json!({"anyOf": [
+                {"type": "string", "enum": ["a"]},
+                {"type": "integer", "enum": [1]}
+            ]}),
+            "each branch carries exactly its admitted subset"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_drops_a_branch_admitting_no_enum_value_exactly() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "v": {
+                    "anyOf": [{"type": "string"}, {"type": "integer"}],
+                    "enum": ["a", "b"]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("the string-only enum admits every original instance");
+        assert_eq!(
+            schema["properties"]["v"],
+            json!({"anyOf": [{"type": "string", "enum": ["a", "b"]}]}),
+            "the integer branch admits no enum value and drops exactly"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_keeps_undistributable_instance_data_fail_closed() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": {"nested": true}
+                }
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an object default admits no branch and must keep failing closed");
+        assert_eq!(error, KimiParameterSchemaError::InvalidKeywordValue);
+    }
+
+    #[test]
+    fn kimi_lane_enum_with_an_unadmitted_value_stays_fail_closed() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "v": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "enum": ["a", true]
+                }
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an enum value no branch admits must keep the node-level rejection");
+        assert_eq!(error, KimiParameterSchemaError::InvalidKeywordValue);
+    }
+
+    #[test]
+    fn kimi_lane_distributes_a_null_default_onto_the_null_branch() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "maybe": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": null
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema).expect("a null default rides the null branch");
+        assert_eq!(
+            schema["properties"]["maybe"],
+            json!({"anyOf": [
+                {"type": "string"},
+                {"type": "null", "default": null}
+            ]}),
+            "the null default rides the admitting null branch"
+        );
+    }
+}
 // NOTE: appended inside the file's existing test module boundary is not
 // possible from a script; these two tests live in their own module that
 // reaches the private walkers through the public `sanitize` seam.
@@ -12832,46 +13086,58 @@ mod review_wave_tests {
         // both operands, so pricing the cap at one unit per pair let ~100k
         // pairs of compound members cost ~10^10 element visits on the
         // byte-uncapped registry lane. The cap is now charged by the
-        // operands' serialized size: the SAME pair count completes for tiny
-        // members and declines for compound ones, and a mutated cap that
-        // reverts to pair-count pricing completes the compound case and
-        // flips the first assertion.
-        let compound_member = |tag: &str| -> Value {
-            // ~40 KB objects sharing a long prefix and differing only at
-            // the last key, so no pair comparison short-circuits early.
+        // operands' serialized size. The discriminating fixture shares one
+        // large compound member between the two enum sides, so the pair
+        // comparison SHORT-CIRCUITS on equality and a merge under pair-count
+        // pricing would complete onto the intersection — while size charging
+        // trips the cap mid-loop and declines, preserving the original
+        // union. The final assertion is observable only in the declined
+        // world, which is what makes this pin bite for the pricing mutation
+        // (a pair-count revert fails it).
+        let shared = {
             let mut fields = serde_json::Map::new();
-            for index in 0..400 {
+            for index in 0..800 {
                 fields.insert(
                     format!("field-{index:04}"),
-                    Value::String(format!("{tag}-payload-{index:04}-value")),
+                    Value::String(format!("shared-payload-{index:04}-value-long-suffix")),
                 );
             }
-            fields.insert("tail".into(), Value::String(format!("{tag}-tail")));
+            fields.insert("tail".into(), Value::String("shared-tail".to_string()));
             Value::Object(fields)
         };
+        let differing_outer = {
+            let mut fields = shared.as_object().expect("shared is an object").clone();
+            fields.insert("tail".into(), Value::String("outer-a-tail".to_string()));
+            Value::Object(fields)
+        };
+        let differing_inner = {
+            let mut fields = shared.as_object().expect("shared is an object").clone();
+            fields.insert("tail".into(), Value::String("inner-b-tail".to_string()));
+            Value::Object(fields)
+        };
+        // ~43 KB per operand: the merge attempt charges (shared,shared),
+        // then (outer-a,shared), then (outer-a,inner-b) — the third charge
+        // crosses the 100_000 cap before its comparison runs, so the merge
+        // declines even though its intersection would have been the shared
+        // member.
         let compound = json!({
             "type": "object",
-            "enum": [compound_member("outer-a"), compound_member("outer-b"), compound_member("outer-c")],
-            "anyOf": [{
-                "type": "object",
-                "enum": [compound_member("inner-a"), compound_member("inner-b"), compound_member("inner-c")]
-            }]
+            "enum": [shared.clone(), differing_outer],
+            "anyOf": [{"type": "object", "enum": [shared, differing_inner]}]
         });
         let mut worked = compound.clone();
         crate::tools::schema_sanitize::sanitize(&mut worked);
         assert_eq!(
             worked["enum"], compound["enum"],
-            "the outer enum must survive the declined merge verbatim"
+            "size charging must decline this merge: three ~36KB-sized pair charges exhaust the 100_000 cap before the third comparison runs, so the original union survives verbatim — pair-count pricing (1 per pair) would complete the merge and collapse the enum onto the shared member, flipping this assertion"
         );
         assert_eq!(
             worked["anyOf"][0]["enum"], compound["anyOf"][0]["enum"],
-            "9 compound pairs at ~17 KB per operand exceed the 100_000 \
-             byte-charged merge-work cap: the merge must decline and \
-             preserve the original union instead of collapsing it"
+            "the inner enum must equally survive the declined merge verbatim"
         );
 
-        // Control: the same 3 × 3 pair count with tiny members — the pair
-        // loop completes (declining only on the empty intersection), so the
+        // Control: the same pair count with tiny members — the pair loop
+        // completes (declining only on the empty intersection), so the
         // collapse behaves exactly as it did before the size-charging.
         let small = json!({
             "type": "string",

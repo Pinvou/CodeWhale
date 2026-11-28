@@ -825,7 +825,14 @@ struct StreamOutcome {
     usage: Usage,
     usage_reported: bool,
     stop_reason: Option<String>,
-    stream_completed: bool,
+    /// The same clean-shape predicate that keeps already-closed native tool
+    /// blocks valid (see `is_clean_output_limit_shape`): true for a fully
+    /// completed stream AND for a clean output-limit stop on an otherwise
+    /// clean stream. The fallback text-marker parser must key on this rather
+    /// than on `stream_completed`, or a provably complete marker call is
+    /// invalidated on exactly the clean output-limit stops the ladder
+    /// accepts (round-7 review).
+    closed_tools_stay_valid: bool,
     pending_message_complete: bool,
     last_text_index: Option<usize>,
     stream_errors: u32,
@@ -2552,7 +2559,7 @@ impl Engine {
                 usage,
                 usage_reported,
                 stop_reason,
-                stream_completed,
+                closed_tools_stay_valid,
                 pending_message_complete,
                 last_text_index,
                 stream_errors,
@@ -2926,12 +2933,12 @@ impl Engine {
                     // is rewritten into a fresh incarnation here; everything
                     // downstream treats the id as opaque.
                     let id = fresh_fallback_tool_id(&call.id);
-                    let input = if stream_completed {
+                    let input = if closed_tools_stay_valid {
                         call.args
                     } else {
                         malformed_tool_arguments_input(&call.args.to_string())
                     };
-                    if stream_completed {
+                    if closed_tools_stay_valid {
                         let _ = self
                             .tx_event
                             .send(Event::ToolCallStarted {
@@ -2948,7 +2955,7 @@ impl Engine {
                         caller: None,
                         thought_signature: None,
                         input_buffer: String::new(),
-                        input_parse_error: (!stream_completed)
+                        input_parse_error: (!closed_tools_stay_valid)
                             .then(|| INCOMPLETE_STREAM_TOOL_INPUT_ERROR.to_string()),
                         input_parse_proof: Default::default(),
                     });
@@ -6772,7 +6779,7 @@ impl Engine {
             usage,
             usage_reported,
             stop_reason,
-            stream_completed,
+            closed_tools_stay_valid,
             pending_message_complete,
             last_text_index,
             stream_errors,

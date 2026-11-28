@@ -135,7 +135,6 @@ impl MockLlmClient {
         self
     }
 
-    /// Push a canned turn onto the back of the queue.
     /// Push a canned stream that emits the events and then dies with a
     /// transport error (no clean close, no auto-appended `MessageStop`).
     pub fn push_failing_stream(&self, turn: CannedTurn) {
@@ -145,6 +144,7 @@ impl MockLlmClient {
             .push_back(FauxStep::FailingStream(turn));
     }
 
+    /// Push a canned turn onto the back of the queue.
     pub fn push_turn(&self, turn: CannedTurn) {
         self.canned
             .lock()
