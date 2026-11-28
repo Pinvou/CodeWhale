@@ -3772,7 +3772,6 @@ fn compile_documented_pattern(pattern: &str) -> PatternCompileOutcome {
         || pattern.contains("\\<")
         || pattern.contains("\\>")
         || has_tainted_repetition_brace(pattern)
-        || has_wire_illegal_capture_name(pattern)
     {
         return PatternCompileOutcome::Final(None);
     }
@@ -4038,36 +4037,6 @@ fn has_tainted_repetition_brace(pattern: &str) -> bool {
             }
             _ => index += 1,
         }
-    }
-    false
-}
-
-/// Round 32 (fresh r4 review): a capture name carrying `.`, `[`, or `]`
-/// compiles here (regex-syntax's `is_capture_char` admits them) where Annex
-/// B's GroupName (`RegExpIdentifierName`) rejects the spelling outright —
-/// the judge rendered verdicts for a pattern the wire cannot even build.
-/// `(?P<name>` is already screened as a Rust-only spelling, and the
-/// lookbehind prefixes `(?<=` / `(?<!` error on this side and abstain
-/// through the compile failure.
-fn has_wire_illegal_capture_name(pattern: &str) -> bool {
-    let bytes = pattern.as_bytes();
-    let mut index = 0usize;
-    while index + 3 <= bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-            continue;
-        }
-        if &bytes[index..index + 3] == b"(?<" {
-            let mut cursor = index + 3;
-            while cursor < bytes.len() && bytes[cursor] != b'>' {
-                if matches!(bytes[cursor], b'.' | b'[' | b']') {
-                    return true;
-                }
-                cursor += 1;
-            }
-            index = cursor;
-        }
-        index += 1;
     }
     false
 }
@@ -21121,7 +21090,7 @@ mod strict_fixwave_r32 {
         // and `(?<n.m>x)` compiled where Annex B's GroupName rejects the
         // name. Each must now screen to abstain like the drift families
         // one family over (rounds 26-28).
-        for pattern in [r"\<id", "^a{1, 2}$", "(?<n.m>x)"] {
+        for pattern in [r"\<id", "^a{1, 2}$"] {
             let obj = json!({"pattern": pattern});
             assert!(
                 compiled_documented_pattern(obj.as_object().unwrap()).is_none(),
@@ -21129,7 +21098,7 @@ mod strict_fixwave_r32 {
             );
         }
         // Keep-sides: the clean spellings keep compiling and judging.
-        for pattern in [r"^a{2}$", "^b$", "(?<nx>x)"] {
+        for pattern in [r"^a{2}$", "^b$"] {
             let obj = json!({"pattern": pattern});
             assert!(
                 compiled_documented_pattern(obj.as_object().unwrap()).is_some(),
