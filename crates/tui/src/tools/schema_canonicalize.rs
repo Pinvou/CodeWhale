@@ -27,23 +27,44 @@ use serde_json::Value;
 pub fn canonicalize_schema(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            // `enum`, `const`, and `default` carry INSTANCE data, not
-            // schema: an object under them is a literal argument, and a
-            // `required` key inside that literal is plugin data. Sorting
-            // its array or rebuilding its keys rewrites the only permitted
-            // value — `enum: [{"required": ["b","a"]}]` advertised as
-            // `["a","b"]` excludes the argument the plugin declared — so
-            // these subtrees are skipped entirely. Their bytes come from
-            // the manifest verbatim on every reconnect, so prefix-cache
-            // stability is preserved (review 5915330170, the registry
-            // companion to the sanitizer's enum/const instance-data rule).
-            const INSTANCE_DATA_KEYS: &[&str] = &["enum", "const", "default"];
+            // `enum`, `const`, `default`, `examples`, and `example` carry
+            // INSTANCE data, not schema: an object under them is a literal
+            // argument, and a `required` key inside that literal is plugin
+            // data. Sorting its array or rebuilding its keys rewrites the
+            // only permitted value — `enum: [{"required": ["b","a"]}]`
+            // advertised as `["a","b"]` excludes the argument the plugin
+            // declared — so these subtrees are skipped entirely. Their
+            // bytes come from the manifest verbatim on every reconnect, so
+            // prefix-cache stability is preserved (review 5915330170, the
+            // registry companion to the sanitizer's enum/const
+            // instance-data rule; round 25 adds the two example spellings
+            // the sanitizer's literal-key line already carries — without
+            // them the canonicalizer reordered bytes inside `examples`
+            // objects the sanitizer had just promised byte-for-byte).
+            const INSTANCE_DATA_KEYS: &[&str] =
+                &["enum", "const", "default", "examples", "example"];
             // Sort `required` arrays (they are sets per JSON Schema spec).
             if let Some(Value::Array(req)) = map.get_mut("required") {
                 sort_string_array(req);
             }
             // Sort `dependentRequired` sub-arrays.
             if let Some(Value::Object(deps)) = map.get_mut("dependentRequired") {
+                for dep_value in deps.values_mut() {
+                    if let Value::Array(arr) = dep_value {
+                        sort_string_array(arr);
+                    }
+                }
+            }
+            // Sort draft-7 `dependencies` NAME tables (round 31): the
+            // array spelling is semantically `dependentRequired` — a set
+            // of trigger names — and the keyword survives sanitize on the
+            // non-strict lanes (only the strict strip removes it), so two
+            // logically-equal schemas differing only in a table's authored
+            // order kept different bytes against the cache-stability
+            // contract. The SCHEMA-form values (draft-7's
+            // dependentSchemas spelling) are left for the recursion, which
+            // sorts their own `required` arrays.
+            if let Some(Value::Object(deps)) = map.get_mut("dependencies") {
                 for dep_value in deps.values_mut() {
                     if let Value::Array(arr) = dep_value {
                         sort_string_array(arr);
@@ -130,6 +151,65 @@ fn sort_string_array(arr: &mut [Value]) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dependencies_name_tables_sort_like_dependent_required() {
+        // Round 31 (fresh review): the draft-7 `dependencies` array
+        // spelling is `dependentRequired` semantics — a set of trigger
+        // names — and the keyword survives sanitize on the non-strict
+        // lanes, so authored order broke the identical-bytes contract for
+        // logically-equal schemas. Name tables sort; the SCHEMA-form
+        // values stay for the recursion (which sorts their `required`),
+        // and instance data stays untouched.
+        let mut schema = serde_json::json!({
+            "dependencies": {
+                "a": ["z", "x"],
+                "b": {"type": "object", "required": ["q", "p"]}
+            }
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(schema["dependencies"]["a"], serde_json::json!(["x", "z"]));
+        assert_eq!(
+            schema["dependencies"]["b"]["required"],
+            serde_json::json!(["p", "q"])
+        );
+    }
+
+    #[test]
+    fn examples_literals_are_instance_data_and_keep_their_bytes() {
+        // `examples`/`example` are instance data like `enum`/`const`/
+        // `default` (round 25): an object literal under them is plugin
+        // data whose key order and array order are the only permitted
+        // bytes, so canonicalize must not reorder them. The sanitizer's
+        // byte-for-byte example pins cover sanitize alone; this pin covers
+        // the registry chain (sanitize → canonicalize) those pins skipped.
+        let mut schema = json!({
+            "type": "object",
+            "required": ["z", "a"],
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "examples": [{"b": 1, "a": [2, 1]}]
+                }
+            }
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(schema["required"], json!(["a", "z"]));
+        // Byte-level, not `Value` equality: serde_json Map comparison
+        // ignores object key order, and the regression this pin owns (the
+        // canonicalizer treating `examples` as schema and reordering the
+        // literal's keys) is exactly a reorder — a round-30 mutation
+        // removing the `examples`/`example` skip spellings left this pin
+        // green under `Value` equality while the bytes moved. (A byte
+        // compare on the pristine tree gives
+        // `[{"b":1,"a":[2,1]}]`; under the removal it is
+        // `[{"a":[2,1],"b":1}]`.)
+        assert_eq!(
+            schema["properties"]["q"]["examples"].to_string(),
+            r#"[{"b":1,"a":[2,1]}]"#,
+            "the examples literal keeps manifest order verbatim, byte for byte"
+        );
+    }
 
     #[test]
     fn sorts_required_array() {

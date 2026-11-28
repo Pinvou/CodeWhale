@@ -36783,3 +36783,92 @@ fn run_completion_real_factories_observe_shutdown_and_direct_handles_do_not() {
         );
     });
 }
+
+#[tokio::test]
+async fn engine_surface_gates_the_strict_flag_on_the_official_route() {
+    // Round 31 (fresh review): the child sub-agent gate got a real-path
+    // pin in round 30; the PARENT turn surface had none — reverting the
+    // engine call site back to the raw config flag left every pin green
+    // (the exact gap the round-30 wave had to close on the child path).
+    // This pin drives the same builder the turn uses with the flag ON
+    // and a non-official DeepSeek base URL, and asserts the surface
+    // ships non-strict; the official host keeps it on.
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+    let _deepseek_env = EnvVarGuard::set("DEEPSEEK_BASE_URL", "https://api.deepseek.com/beta");
+
+    // The official leg spells the endpoint explicitly: the fixture
+    // config carries no provider override, so the identity-aware
+    // `deepseek_base_url()` would not resolve the official host on its
+    // own — the production route always names it one way or another.
+    for (base_url, expect_strict) in [
+        (Some("http://127.0.0.1:9/v1".to_string()), false),
+        (Some("https://api.deepseek.com/beta".to_string()), true),
+    ] {
+        let api_config = crate::config::Config {
+            api_key: Some("local-runtime-contract-fixture".to_string()),
+            default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
+            base_url,
+            strict_tool_mode: Some(true),
+            ..crate::config::Config::default()
+        };
+        // The gate reads the flag off the ENGINE config — the runtime
+        // constructors copy it across; a test names it directly.
+        let workspace = tmp.path().join(if expect_strict {
+            "official"
+        } else {
+            "off-route"
+        });
+        fs::create_dir_all(&workspace).expect("create workspace");
+        let engine_config = EngineConfig {
+            workspace,
+            allow_shell: true,
+            strict_tool_mode: true,
+            ..EngineConfig::default()
+        };
+        let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+        // MCP catalogs depend on configured external servers; the gate
+        // under pin does not, and disabling keeps the builder offline.
+        engine.config.features.disable(Feature::Mcp);
+        let route = TurnRouteContext {
+            provider: ApiProvider::Deepseek,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            capabilities: codewhale_config::route::RouteCapabilities::default(),
+            limits: None,
+            client: engine.deepseek_client.clone(),
+            api_config: Box::new(api_config.clone()),
+            locale_tag: engine.config.locale_tag.clone(),
+            role_models: engine.subagent_role_models(),
+            auto_model: false,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+        };
+        let policy = crate::core::authority::TurnAuthority::from_effective_fields(
+            AppMode::Agent,
+            true,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
+        let build = engine
+            .build_turn_tool_registry_and_catalog(
+                &policy,
+                &[],
+                None,
+                SubAgentWiring::Inert,
+                McpAccess::PassiveSnapshot,
+                route,
+                "",
+            )
+            .await;
+        assert_eq!(
+            build.surface.strict_tool_mode, expect_strict,
+            "the surface must carry the route-gated verdict, not the raw flag"
+        );
+    }
+}
