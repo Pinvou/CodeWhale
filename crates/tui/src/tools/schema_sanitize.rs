@@ -4584,10 +4584,28 @@ fn value_clears_bounds_with(
                 cell.set(left - 1);
                 true
             }) && alternative.as_object().is_some_and(|alternative_obj| {
+                // Round 32 (fresh r4 review, live-proven): the bounds
+                // judgment alone TYPE-clears an object alternative — its
+                // `properties`/`required`/`additionalProperties` live in
+                // the object judge's domain, so a wrapper whose
+                // alternative demands `a ∈ enum ["y"]` type-cleared a pin
+                // carrying `{"a": "x"}` and the union shipped strict
+                // callable by nothing. Every sibling site (the pair-judge
+                // enum arm, the items arm, the node enum arm) pairs the
+                // two judgments; the chase does too now. Property
+                // patterns compile once per alternative through the
+                // shared memo, and the object judge's depth cap bounds
+                // the recursion.
+                let alternative_patterns = compiled_property_patterns(alternative_obj);
                 value_clears_bounds_with(
                     value,
                     alternative_obj,
                     compiled_documented_pattern(alternative_obj).as_ref(),
+                ) && pinned_object_value_compatible_with(
+                    value,
+                    alternative_obj,
+                    &alternative_patterns,
+                    PINNED_OBJECT_JUDGE_DEPTH,
                 )
             })
         });
@@ -20093,6 +20111,16 @@ mod strict_fixwave_r30 {
         // collapsed by the lossless pass, which lands the reference
         // keyword beside judged siblings and fails closed through the
         // ref-sibling rule before this conjunct runs).
+        //
+        // Round 32: the resolution contract lives where the document root
+        // is available — `node_pins_cover_branch`, judged directly below.
+        // The VALUE funnel cannot resolve the reference (its round-29
+        // refusal has no root to resolve through), and the wrapper chase
+        // now conjuncts each alternative with the object judge, so the
+        // boolean sibling correctly refuses a string pin. A union whose
+        // ONLY admitting branch is a `$ref` therefore fails closed at the
+        // funnel — the safe direction; the tool ships usable and
+        // non-strict.
         let admitting = json!({
             "type": "object",
             "properties": {"u": {
@@ -20111,9 +20139,21 @@ mod strict_fixwave_r30 {
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"], "additionalProperties": false}}
         });
+        let union_node = admitting["properties"]["u"].as_object().unwrap().clone();
+        assert!(
+            node_pins_cover_branch(
+                &union_node,
+                &json!({"$ref": "#/$defs/str_a"}),
+                &admitting,
+            ),
+            "the definition admits the pinned member: it covers"
+        );
         let (all, strict) = verdict(admitting);
-        assert!(all, "the definition admits the pinned member: {all}");
-        assert_eq!(strict, Some(true));
+        assert!(
+            !all,
+            "the funnel cannot resolve the ref alternative and the boolean              sibling refuses the string pin: the tool ships non-strict ({all})"
+        );
+        assert_eq!(strict, None);
         let refusing = json!({
             "type": "object",
             "properties": {"u": {
@@ -20132,6 +20172,15 @@ mod strict_fixwave_r30 {
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"], "additionalProperties": false}}
         });
+        let refusing_node = refusing["properties"]["u"].as_object().unwrap().clone();
+        assert!(
+            !node_pins_cover_branch(
+                &refusing_node,
+                &json!({"$ref": "#/$defs/str_a"}),
+                &refusing,
+            ),
+            "the definition refuses the pinned member: it covers nothing"
+        );
         let (all, strict) = verdict(refusing);
         assert!(
             !all,
@@ -20572,6 +20621,130 @@ mod strict_fixwave_r31 {
             "$defs": {"str": {"type": "string"}}
         }));
         assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+}
+
+// Round 32 (fresh r4 review — every pin here was live-proven through the
+// production funnel on the pre-fix tree before the fix landed, and each
+// goes RED under its own mutant).
+#[cfg(test)]
+mod strict_fixwave_r32 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    #[test]
+    fn chase_conjuncts_object_alternatives_with_their_properties() {
+        // The items variant: the wrapper sits under `items` (meeting
+        // neither the coverage arm nor the composition arm), the node
+        // pins an element the object alternative rejects. The chase used
+        // to type-clear the alternative without consulting its
+        // properties — the pinned element `{"a": "x"}` satisfies NEITHER
+        // alternative (`a ∈ enum ["y"]` demanded; objects are not
+        // strings) and the union shipped strict callable by nothing.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "arr": {
+                    "type": "array",
+                    "items": {"anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["y"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "string"}
+                    ]},
+                    "enum": [[{"a": "x"}]]
+                }
+            },
+            "required": ["arr"]
+        }));
+        assert!(!all, "the callable-by-nothing items union must fail the tool closed");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn chase_conjuncts_property_leaves_the_same_way() {
+        // The property-leaf variant: the wrapper sits under the branch's
+        // property `u`, so the coverage arm's funnel leg reads the same
+        // chase. The node pins `u: {"a": "x"}`; the object alternative
+        // demands `a ∈ enum ["y"]`.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "w": {
+                    "type": "object",
+                    "properties": {
+                        "p": {"type": "string"},
+                        "u": {"type": "object", "properties": {"a": {"type": "string"}},
+                              "required": ["a"]}
+                    },
+                    "required": ["p", "u"],
+                    "enum": [{"p": "x", "u": {"a": "x"}}],
+                    "anyOf": [{
+                        "type": "object",
+                        "properties": {
+                            "p": {"type": "string"},
+                            "u": {"anyOf": [
+                                {"type": "object", "properties": {"a": {"enum": ["y"]}},
+                                 "required": ["a"], "additionalProperties": false},
+                                {"type": "string"}
+                            ]}
+                        },
+                        "required": ["p", "u"],
+                        "additionalProperties": false
+                    }]
+                }
+            },
+            "required": ["w"]
+        }));
+        assert!(!all, "the callable-by-nothing union must fail the tool closed");
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn chase_keep_side_still_ships_compatible_unions() {
+        // Keep-side (the items form — a satisfiable wrapper union whose
+        // branch-property form is already fail-closed through
+        // `branch_shape_unrepresentable`): the pinned element satisfies
+        // the object alternative, so the union is genuinely satisfiable
+        // and must keep shipping strict — the conjunct must not
+        // over-fail. This is the dead variant's own schema with the pin
+        // flipped to an admitted element.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "arr": {
+                    "type": "array",
+                    "items": {"anyOf": [
+                        {"type": "object", "properties": {"a": {"enum": ["y"]}},
+                         "required": ["a"], "additionalProperties": false},
+                        {"type": "string"}
+                    ]},
+                    "enum": [[{"a": "y"}]]
+                }
+            },
+            "required": ["arr"]
+        }));
+        assert!(all, "the compatible union must keep shipping strict");
         assert_eq!(strict, Some(true));
     }
 }
