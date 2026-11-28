@@ -4858,6 +4858,34 @@ fn xiaomi_mimo_base_url_is_pay_as_you_go(base_url: &str) -> bool {
     )
 }
 
+/// The canonical official DeepSeek beta endpoints, lowercase with any
+/// trailing `/` trimmed: where the wire keeps the `function.strict` flag
+/// (the chat strip, `client/chat.rs`) and where the request is routed to
+/// `beta/chat/completions` (`client.rs`) — and, together with
+/// [`DEEPSEEK_CANONICAL_NON_BETA_URLS`], where the Responses dialect
+/// resolves its URL (`responses_api_url` keys on the union) and where the
+/// doctor reports the beta verdict once the stack's doctor layer wires it.
+/// One constant so the consumers cannot drift; the official-family matcher
+/// in this crate consumes both lists directly, and the TUI re-exports them.
+pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com/beta",
+    "https://api.deepseeki.com/beta",
+];
+
+/// The canonical official DeepSeek non-beta chat endpoints, lowercase
+/// with any trailing `/` trimmed: the chat wire strips `function.strict`
+/// here (only `/beta` supports it) and the doctor reports
+/// `fallback_non_beta`. The strict host gate
+/// (`url_is_official_deepseek_host` in the TUI) is deliberately broader
+/// than both canonical lists — any path on the official hosts — and every
+/// URL in these lists is pinned to pass that gate in `config` tests.
+pub const DEEPSEEK_CANONICAL_NON_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com",
+    "https://api.deepseek.com/v1",
+    "https://api.deepseeki.com",
+    "https://api.deepseeki.com/v1",
+];
+
 /// Whether `base_url` belongs to the provider's official endpoint family.
 ///
 /// Some providers publish multiple stable paths for the same credential and
@@ -4865,14 +4893,27 @@ fn xiaomi_mimo_base_url_is_pay_as_you_go(base_url: &str) -> bool {
 /// canonicalization and credential scoping cannot disagree.
 #[must_use]
 pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> bool {
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    // No `trim()` of leading/trailing whitespace: the TUI's strict route
+    // gate rejects whitespace-padded URLs outright, and this matcher's
+    // whole point is to answer the same question the gate answers — a
+    // padded URL is "official" to neither. (Interior whitespace never
+    // matched the literals anyway.)
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     match provider {
-        ProviderKind::Deepseek => matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com"
-                | "https://api.deepseek.com/v1"
-                | "https://api.deepseek.com/beta"
-        ),
+        ProviderKind::Deepseek => {
+            // The legacy compat host the rest of the codebase already
+            // recognizes (docs/REBRAND.md — it is NOT an official
+            // endpoint): the TUI's strict/beta routing has recognized
+            // it since the strict route gate landed, but this matcher
+            // lagged — an app-server route on `api.deepseeki.com/beta`
+            // was rewritten to `/v1` while `function.strict: true`
+            // stayed in the body, the one shape that landed the flag
+            // on a non-official path. The lists themselves are shared
+            // with the client's strip/beta routing so the two crates
+            // cannot drift (round 2).
+            DEEPSEEK_CANONICAL_BETA_URLS.contains(&normalized.as_str())
+                || DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(&normalized.as_str())
+        }
         ProviderKind::DeepseekAnthropic => matches!(
             normalized.as_str(),
             "https://api.deepseek.com/anthropic" | "https://api.deepseek.com/anthropic/v1"
@@ -5041,7 +5082,14 @@ pub fn auth_mode_uses_kimi_imported_token(auth_mode: &str) -> bool {
     )
 }
 
-fn base_url_uses_local_host(base_url: &str) -> bool {
+/// Whether a base URL points at a loopback/unspecified host, i.e. a local
+/// runtime rather than a hosted endpoint. Security-load-bearing: the
+/// client's plaintext-HTTP admission, the DS4 chat-shape key, the keyless
+/// self-hosted rule, and secret-store scoping all consume this predicate,
+/// so it must answer for the host the request ACTUALLY dials. One copy —
+/// the TUI re-exports this fn; there is deliberately no second body to
+/// drift.
+pub fn base_url_uses_local_host(base_url: &str) -> bool {
     let Some(host) = base_url_host(base_url) else {
         return false;
     };
@@ -5053,11 +5101,40 @@ fn base_url_uses_local_host(base_url: &str) -> bool {
         .is_ok_and(|addr| addr.is_loopback() || addr.is_unspecified())
 }
 
+/// The host this URL dials, as far as a string parse can tell. A WHATWG
+/// parser (what reqwest actually runs) terminates the authority at a
+/// backslash in special schemes just like `/`, `?`, or `#`, so
+/// `http://evil.com\@localhost` dials `evil.com` with path
+/// `/@localhost/` — an authority containing `\` is REFUSED, not parsed:
+/// the parse declines to name the dialed host and answers None
+/// (fail-closed). That is a policy, not an impossibility claim — WHATWG
+/// consumes a leading `/`-`\` run after the scheme (parser.rs:439-458),
+/// so `http://\@localhost` really does dial the host the text names, and
+/// refusing it only withholds loopback privileges (usability, never
+/// safety). A userinfo `@` splits the same way WHATWG
+/// does (everything before the LAST `@` is userinfo), so
+/// `http://localhost:8080` and `http://me@localhost` answer `localhost`.
 fn base_url_host(base_url: &str) -> Option<&str> {
     let without_scheme = base_url
         .split_once("://")
         .map_or(base_url, |(_, rest)| rest);
-    let authority = without_scheme.split('/').next()?.rsplit('@').next()?;
+    // WHATWG ends the authority at `?` and `#` exactly like `/`
+    // (url-2.5.9 parser.rs: `parse_userinfo` and `parse_host` both break
+    // on `'/' | '?' | '#'`), so text past either is path or fragment and
+    // the LAST `@` the wire honors lives BEFORE it. Splitting on `/`
+    // alone let `rsplit('@')` walk through a `?`/`#` into fragment text:
+    // `http://x#@localhost` dials `x` while this read `localhost`, and
+    // the plaintext-HTTP admission sent the bearer key to `x` (round 29
+    // blocker). Split on the full terminator set.
+    let authority = without_scheme.split(['/', '?', '#']).next()?;
+    if authority.contains('\\') {
+        // WHATWG dials whatever precedes the backslash; `rsplit('@')`
+        // would read the PATH's userinfo segment and answer the host
+        // after it — the exact disguise `http://evil.com\@localhost`
+        // exists to exploit.
+        return None;
+    }
+    let authority = authority.rsplit('@').next()?;
     if let Some(rest) = authority.strip_prefix('[') {
         return rest.split_once(']').map(|(host, _)| host);
     }

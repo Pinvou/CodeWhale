@@ -7075,6 +7075,12 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
         "https://api.deepseek.com",
         "https://api.deepseek.com/v1/",
         "https://api.deepseek.com/beta",
+        // The legacy compat host the TUI strict/beta routing already
+        // recognizes (round 25; docs/REBRAND.md — not an official
+        // endpoint) — the same three paths per host.
+        "https://api.deepseeki.com",
+        "https://api.deepseeki.com/v1/",
+        "https://api.deepseeki.com/beta",
     ] {
         assert!(provider_base_url_is_official(
             ProviderKind::Deepseek,
@@ -7088,6 +7094,21 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
     assert!(!provider_base_url_is_official(
         ProviderKind::Deepseek,
         "https://api.deepseek.com.evil.example/v1"
+    ));
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "https://api.deepseeki.com.evil.example/v1"
+    ));
+    // Round 27: no whitespace trimming — the TUI strict route gate rejects
+    // padded URLs outright, and this matcher answers the same question the
+    // gate answers, so a padded URL is official to neither.
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "  https://api.deepseek.com/v1"
+    ));
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Deepseek,
+        "https://api.deepseek.com/v1  "
     ));
 }
 
@@ -9559,4 +9580,106 @@ fn telemetry_metadata_update_refuses_corrupt_or_busy_state_and_reloads_the_saved
     })
     .unwrap();
     assert!(SetupState::load_from(&path).unwrap().telemetry_opted_out());
+}
+
+#[test]
+fn base_url_host_extraction_refuses_backslash_authorities() {
+    // WHATWG (url-2.5.9 parser.rs — the parser reqwest runs) terminates
+    // the authority at a backslash in special schemes exactly like `/`,
+    // `?`, or `#`, so `http://evil.com\@localhost` dials `evil.com` with
+    // path `/@localhost/` while a naive `rsplit('@')` reads the path's
+    // userinfo segment and answers `localhost` (round 28 blocker — the
+    // predicate feeds the plaintext-HTTP admission). An authority
+    // containing `\` is REFUSED, not parsed: the parse declines to name
+    // the dialed host and answers not-loopback, fail-closed. That is a
+    // policy, not an impossibility claim — WHATWG consumes a leading
+    // `/`-`\` run after the scheme (parser.rs:439-458), so
+    // `http://\@localhost` really does dial the host the text names, and
+    // refusing it only withholds loopback privileges (usability, never
+    // safety). Userinfo without a backslash still splits the same way
+    // WHATWG does.
+    assert!(base_url_uses_local_host("http://localhost:8080"));
+    assert!(base_url_uses_local_host("http://me@localhost"));
+    assert!(base_url_uses_local_host("http://[::1]:9000"));
+    // userinfo without a backslash: the wire dials localhost, so the
+    // predicate answers loopback — the same answer WHATWG gives.
+    assert!(base_url_uses_local_host("http://evil.com@localhost"));
+    assert!(!base_url_uses_local_host("http://localhost.evil.com"));
+    assert!(!base_url_uses_local_host("http://evil.com\\@localhost"));
+    assert!(!base_url_uses_local_host("http://evil.com\\\\@localhost"));
+    assert!(!base_url_uses_local_host("http://localhost\\@evil.com"));
+    assert!(!base_url_uses_local_host("HTTP://LOCALHOST.attacker.com"));
+    // The refusal is authority-scoped: WHATWG dials localhost for both of
+    // these (the backslash lives in the path, percent-encoded or literal),
+    // so the predicate must keep answering loopback — a future edit moving
+    // the `\` check to the whole string would break legitimate loopback
+    // URLs while passing every assertion above.
+    assert!(base_url_uses_local_host("http://localhost/%5C@evil.com"));
+    assert!(base_url_uses_local_host("http://localhost/\\@evil.com"));
+}
+
+#[test]
+fn base_url_host_extraction_ends_authority_at_query_and_fragment() {
+    // Round 29: WHATWG ends the authority at `?` and `#` exactly like `/`
+    // (url-2.5.9 parser.rs — `parse_userinfo` and `parse_host` both break
+    // on `'/' | '?' | '#'`), so `http://x#@localhost` dials host `x` with
+    // fragment `#@localhost` while a `rsplit('@')` walked through the
+    // `#` into fragment text and answered `localhost` — the plaintext-HTTP
+    // admission then sent the bearer key to the remote host. The
+    // extraction must split on the full terminator set; the fragment's
+    // `@` is never a userinfo separator.
+    assert!(!base_url_uses_local_host("http://x#@localhost"));
+    assert!(!base_url_uses_local_host("http://x?@localhost"));
+    assert!(!base_url_uses_local_host("http://x:80#y@localhost"));
+    assert!(!base_url_uses_local_host("HTTP://X#@LOCALHOST"));
+    // Fragment text containing a loopback-looking host must not flip the
+    // dialed remote host either way.
+    assert!(!base_url_uses_local_host("http://x#@127.0.0.1"));
+    // A genuine loopback authority with a fragment stays loopback: the
+    // wire dials 127.0.0.1 and drops the fragment.
+    assert!(base_url_uses_local_host("http://127.0.0.1#@localhost"));
+    assert!(base_url_uses_local_host("http://localhost#/whatever"));
+    assert!(base_url_uses_local_host("http://localhost?x=1"));
+}
+
+#[test]
+fn base_url_uses_local_host_folds_case_for_admission() {
+    // The host comparison case-folds before the exact match; dropping the
+    // fold would refuse uppercase spellings the wire dials as loopback —
+    // a usability regression that passes every uppercase NEGATIVE pin in
+    // this file (those fail the exact match with or without the fold).
+    // These are the positive cases that catch it.
+    assert!(base_url_uses_local_host("HTTP://LOCALHOST:8080"));
+    assert!(base_url_uses_local_host("http://LocalHost"));
+    // Negative control that must stay negative under any case spelling.
+    assert!(!base_url_uses_local_host("HTTP://LOCALHOST.EVIL.COM"));
+}
+
+#[test]
+fn deepseek_canonical_sets_stay_populated_beta_disjoint_non_beta() {
+    // The Deepseek arm consumes the shared canonical lists directly (round
+    // 2: the six-URL set existed in two crates with no cross-pin; the
+    // matcher now reads these very lists). Each member's "official" answer
+    // is pinned with literals by
+    // `deepseek_official_endpoint_family_shares_canonical_model_namespace`,
+    // so content drift trips that test; this pin guards the LIST-LEVEL
+    // invariants: the sets stay populated (an emptied set would vacuously
+    // pass every consuming loop in both crates) and the beta list keeps
+    // its property so the beta/non-beta split the chat wire relies on
+    // cannot silently re-shape.
+    assert!(
+        !DEEPSEEK_CANONICAL_BETA_URLS.is_empty() && !DEEPSEEK_CANONICAL_NON_BETA_URLS.is_empty(),
+        "an emptied set would vacuously pass the consuming loops and \
+         silently drop their coverage"
+    );
+    for url in DEEPSEEK_CANONICAL_BETA_URLS {
+        assert!(url.ends_with("/beta"), "{url} must be a beta endpoint");
+        assert!(
+            !DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(url),
+            "{url} must not appear in the non-beta set"
+        );
+    }
+    for url in DEEPSEEK_CANONICAL_NON_BETA_URLS {
+        assert!(!url.ends_with("/beta"), "{url} must not be a beta endpoint");
+    }
 }

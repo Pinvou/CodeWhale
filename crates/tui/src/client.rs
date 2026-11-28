@@ -1103,15 +1103,32 @@ async fn bounded_error_text_until(
 
 fn validate_base_url_security(base_url: &str) -> Result<()> {
     let display_base_url = redact_url_for_display(base_url);
-    if base_url.starts_with("https://")
-        || base_url.starts_with("http://localhost")
-        || base_url.starts_with("http://127.0.0.1")
-        || base_url.starts_with("http://[::1]")
+    // Scheme spellings compare case-insensitively (RFC 3986 §3.1: schemes
+    // are case-normalized): the route gate lowercases before it judges, so
+    // an uppercase-scheme URL was admitted by the gate and then refused
+    // here — a session that can never start while the doctor reported the
+    // route ready (round 23).
+    let scheme_normalized = base_url.to_ascii_lowercase();
+    if scheme_normalized.starts_with("https://") {
+        return Ok(());
+    }
+    // Loopback admission is a HOST-BOUNDARY judgment, not a prefix match:
+    // the lowercase lookalike `http://localhost.evil.com` matched the old
+    // `starts_with("http://localhost")` arm and auto-allowed without the
+    // env hatch; uppercase spellings never matched the case-sensitive arms
+    // and were refused outright — the scheme normalization exists so the
+    // route gate and this validator answer case variants identically, not
+    // to widen admission. `base_url_uses_local_host` extracts the authority
+    // the request actually dials — userinfo and port stripped, IPv6
+    // brackets unwrapped, case folded — and matches loopback/unspecified
+    // addresses exactly, so a lookalike host falls through to the env
+    // hatch like any other remote host.
+    if scheme_normalized.starts_with("http://") && crate::config::base_url_uses_local_host(base_url)
     {
         return Ok(());
     }
 
-    if base_url.starts_with("http://")
+    if scheme_normalized.starts_with("http://")
         && std::env::var(ALLOW_INSECURE_HTTP_ENV)
             .or_else(|_| std::env::var(LEGACY_ALLOW_INSECURE_HTTP_ENV))
             .ok()
@@ -1124,7 +1141,7 @@ fn validate_base_url_security(base_url: &str) -> Result<()> {
         return Ok(());
     }
 
-    if base_url.starts_with("http://") {
+    if scheme_normalized.starts_with("http://") {
         anyhow::bail!(
             "Refusing insecure base URL '{display_base_url}'.\n\
              \n\
@@ -1233,16 +1250,13 @@ pub(crate) fn api_url(base_url: &str, path: &str) -> String {
 
 fn responses_api_url(base_url: &str, provider: ApiProvider) -> String {
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    // The same canonical URL sets the strict strip, the beta routing, and —
+    // once the stack's doctor layer wires it — the doctor's classifier
+    // (`config::DEEPSEEK_CANONICAL_*`), so the official-deepseek checks
+    // cannot drift from one another as the sets change.
     let official_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        && matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com"
-                | "https://api.deepseek.com/v1"
-                | "https://api.deepseek.com/beta"
-                | "https://api.deepseeki.com"
-                | "https://api.deepseeki.com/v1"
-                | "https://api.deepseeki.com/beta"
-        );
+        && (crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&normalized.as_str())
+            || crate::config::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(&normalized.as_str()));
     if official_deepseek {
         format!("{}/responses", unversioned_base_url(base_url))
     } else {
@@ -1303,10 +1317,8 @@ fn chat_completions_url(
 }
 
 fn is_official_deepseek_beta_base_url(base_url: &str) -> bool {
-    matches!(
-        base_url.trim_end_matches('/').to_ascii_lowercase().as_str(),
-        "https://api.deepseek.com/beta" | "https://api.deepseeki.com/beta"
-    )
+    let trimmed = base_url.trim_end_matches('/').to_ascii_lowercase();
+    crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&trimmed.as_str())
 }
 
 fn body_uses_strict_tools(body: &Value) -> bool {
@@ -1484,26 +1496,64 @@ pub(crate) fn with_model_transport_environment(
     builder
 }
 
+/// The provider whose chat dialect a route's payload actually speaks for
+/// `model`: DS4 is configured as a named custom route so its endpoint and
+/// billing identity remain exact, but its chat payload deliberately speaks
+/// the first-party DeepSeek reasoning/tool dialect that DS4 implements —
+/// so the shape, not the route's provider typing alone, decides the chat
+/// body and the `tool_choice` suppression
+/// (`should_send_tool_choice_for_chat`). Free-standing so the stack's
+/// doctor layer can quote the same predicate the wire applies to the
+/// resolved route (the client method feeds from the identical config
+/// accessors; the doctor call site lands with the doctor layer).
+pub(crate) fn chat_shape_provider_for(
+    api_provider: ApiProvider,
+    provider_identity: &str,
+    base_url: &str,
+    model: &str,
+) -> ApiProvider {
+    if api_provider == ApiProvider::Custom
+        && provider_identity.eq_ignore_ascii_case("ds4")
+        && crate::config::base_url_uses_local_host(base_url)
+        && matches!(
+            model.trim().to_ascii_lowercase().as_str(),
+            "deepseek-v4-flash" | "deepseek-v4-pro"
+        )
+    {
+        ApiProvider::Deepseek
+    } else {
+        api_provider
+    }
+}
+
 impl DeepSeekClient {
     fn is_local_ds4_model(&self, model: &str) -> bool {
+        // Delegate to the same predicate the wire uses
+        // (`chat_shape_provider_for`; the doctor quotes it once the doctor
+        // layer lands), so the DS4 model list lives in one place. The
+        // `Custom` guard here is load-bearing, not redundant: the predicate
+        // passes a non-Custom provider through UNCHANGED, so a native
+        // Deepseek client would satisfy the `== ApiProvider::Deepseek`
+        // comparison below with none of the DS4 conditions met.
         self.api_provider == ApiProvider::Custom
-            && self.provider_identity.eq_ignore_ascii_case("ds4")
-            && crate::config::base_url_uses_local_host(&self.base_url)
-            && matches!(
-                model.trim().to_ascii_lowercase().as_str(),
-                "deepseek-v4-flash" | "deepseek-v4-pro"
-            )
+            && chat_shape_provider_for(
+                self.api_provider,
+                &self.provider_identity,
+                &self.base_url,
+                model,
+            ) == ApiProvider::Deepseek
     }
 
     /// DS4 is configured as a named custom route so its endpoint and billing
     /// identity remain exact, but its chat payload deliberately speaks the
     /// first-party DeepSeek reasoning/tool dialect that DS4 implements.
     fn chat_shape_provider(&self, model: &str) -> ApiProvider {
-        if self.is_local_ds4_model(model) {
-            ApiProvider::Deepseek
-        } else {
-            self.api_provider
-        }
+        chat_shape_provider_for(
+            self.api_provider,
+            &self.provider_identity,
+            &self.base_url,
+            model,
+        )
     }
 
     /// Create a DeepSeek client from CLI configuration.
@@ -2381,21 +2431,63 @@ fn provider_default_wire_format(api_provider: ApiProvider) -> WireFormat {
 /// Power-user toggle: `providers.<id>.wire = "openai" | "anthropic" | "responses"`.
 /// Legacy dialect kinds (`*Anthropic`) still force Messages. Custom providers
 /// honor `wire = "responses" | "anthropic" | "chat"` per-config (see
-/// `crates/config/src/provider.rs:Custom`). Everyone else keeps the descriptor's
-/// fixed policy (or Chat Completions).
-fn provider_wire_format_for_config(
+/// `crates/config/src/provider.rs:Custom`). Everyone else keeps the
+/// descriptor's fixed policy (or Chat Completions) — except the
+/// Fixed-wire family tables (Minimax, Modelstudio Token/Coding Plan),
+/// which honor `wire = "anthropic"`: for those kinds this function IS the
+/// dispatch wire (the non-ModelAware construction arm binds its answer
+/// directly), and the base-URL resolvers (`resolve_*_base_url_for_tui`)
+/// select the vendor Anthropic endpoint from the very same key — so the
+/// key must gate the dialect here too, or one spelling gets a chat
+/// dispatch into an Anthropic endpoint. The key is read from each
+/// provider's OWN config table — the same table its resolver reads —
+/// never through the catalog collapse: `catalog_identity` folds
+/// `ModelstudioCodingPlan` onto TokenPlan, and a catalog-keyed read made
+/// the Coding Plan session answer the Token Plan table (or vice versa)
+/// while its resolver answered the coding table (round 2). ModelAware
+/// kinds (Deepseek, OpencodeZen) are the other direction (round 23):
+/// dispatch re-derives the wire from the route candidate per model and
+/// never constructs through that arm, so a `wire = "anthropic"` on
+/// `[providers.deepseek]` used to flip THIS answer while every live
+/// dispatch path kept speaking chat — the doctor's round-22 wire-keyed
+/// verdict quoted a dialect no live client spoke (probed: the flag
+/// stripped on the chat wire while the doctor claimed the Messages wire
+/// forwarded it). Since the round-2 wave the DeepSeek resolver no longer
+/// reads the key either, so the key is inert end to end for ModelAware
+/// kinds: the vendor-Messages opt-in on DeepSeek is the
+/// `deepseek-anthropic` identity, not the wire key (a key-driven endpoint
+/// flip strands DeepSeek's forced chat endpoint key on the vendor
+/// Anthropic route — chat payloads on a Messages-only host). Keying the
+/// function on the table the resolver reads keeps construction on the
+/// dialect the endpoint was selected for; the doctor call site lands with
+/// the doctor layer, and `provider_capability_with_wire` (which applies
+/// the key to Custom only) does not yet mirror the built-in override. The
+/// Custom half of the override is unchanged and honored.
+pub(crate) fn provider_wire_format_for_config(
     api_provider: ApiProvider,
     config: Option<&crate::config::Config>,
 ) -> WireFormat {
     let catalog = api_provider.catalog_identity();
-    let wire = config.and_then(|cfg| cfg.provider_wire_dialect(catalog));
+    // The provider's OWN table — what its resolver reads — not the catalog
+    // collapse: `catalog_identity` folds ModelstudioCodingPlan onto
+    // TokenPlan, so a catalog-keyed read split the Coding Plan dialect from
+    // the endpoint its resolver selected (round 2).
+    let wire = config.and_then(|cfg| cfg.provider_wire_dialect(api_provider));
+    // The wire key selects the Anthropic dialect exactly where it also
+    // selects the endpoint: the Fixed(ChatCompletions) families, whose
+    // resolvers read the same key from the same table. ModelAware kinds are
+    // excluded, and since round 2 their resolver does not read the key
+    // either — see the round-23 note above.
+    let model_aware = api_provider.metadata().is_some_and(|provider| {
+        provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
+    });
     let prefers_anthropic = matches!(
         api_provider,
         ApiProvider::DeepseekAnthropic
             | ApiProvider::MinimaxAnthropic
             | ApiProvider::ModelstudioTokenPlanAnthropic
             | ApiProvider::ModelstudioCodingPlanAnthropic
-    ) || wire_dialect_prefers_anthropic(wire);
+    ) || (!model_aware && wire_dialect_prefers_anthropic(wire));
 
     if prefers_anthropic
         && matches!(
@@ -13419,6 +13511,71 @@ mod tests {
 
             assert!(validate_base_url_security("http://localhost:8080").is_ok());
             assert!(validate_base_url_security("http://127.0.0.1:8080").is_ok());
+            assert!(validate_base_url_security("http://[::1]:9000").is_ok());
+            // Round 27: loopback admission is a HOST-BOUNDARY judgment, not
+            // a prefix match. The lookalike hosts auto-allowed through the
+            // old `starts_with("http://localhost")` arms fall through to
+            // the env hatch like any other remote host, and the case-variant
+            // spellings the round-27 scheme normalization would have
+            // widened match the same exact-host rule.
+            let lookalike = validate_base_url_security("http://localhost.evil.com")
+                .expect_err("lookalike loopback host must not auto-allow");
+            assert!(lookalike.to_string().contains("Refusing insecure base URL"));
+            let case_variant = validate_base_url_security("HTTP://LOCALHOST.attacker.com")
+                .expect_err("case-variant lookalike must not auto-allow");
+            assert!(
+                case_variant
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
+            // Round 28: a backslash in the authority ends it for WHATWG —
+            // `http://evil.com\@localhost` dials evil.com with path
+            // `/@localhost/` — so the extractor refuses any authority
+            // containing `\` instead of reading the path's userinfo
+            // segment as the host. The reversed spelling fails closed
+            // too (the parse cannot name the dialed host either way).
+            let backslash = validate_base_url_security("http://evil.com\\@localhost")
+                .expect_err("backslash-disguised host must not auto-allow");
+            assert!(backslash.to_string().contains("Refusing insecure base URL"));
+            let double_backslash = validate_base_url_security("http://evil.com\\\\@localhost")
+                .expect_err("double-backslash disguise must not auto-allow");
+            assert!(
+                double_backslash
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
+            let backslash_remote = validate_base_url_security("http://localhost\\@evil.com")
+                .expect_err("backslash authority must not parse as loopback");
+            assert!(
+                backslash_remote
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
+            // Round 29: WHATWG ends the authority at `?` and `#` exactly
+            // like `/`, so `http://x#@localhost` dials host `x` while a
+            // `rsplit('@')` that walked through the `#` answered
+            // `localhost` and the loopback admission sent the bearer key
+            // to `x` in cleartext. The extractor splits on the full
+            // terminator set; the fragment's `@` is never a userinfo
+            // separator.
+            let fragment = validate_base_url_security("http://x#@localhost")
+                .expect_err("fragment-disguised host must not auto-allow");
+            assert!(fragment.to_string().contains("Refusing insecure base URL"));
+            let query = validate_base_url_security("http://x?@localhost")
+                .expect_err("query-disguised host must not auto-allow");
+            assert!(query.to_string().contains("Refusing insecure base URL"));
+            let fragment_port = validate_base_url_security("http://x:80#y@localhost")
+                .expect_err("port+fragment disguise must not auto-allow");
+            assert!(
+                fragment_port
+                    .to_string()
+                    .contains("Refusing insecure base URL")
+            );
+            // Other schemes keep refusing even on a loopback host: the
+            // local-host arm keys on the http scheme.
+            let ftp = validate_base_url_security("ftp://localhost/file")
+                .expect_err("non-http scheme must refuse");
+            assert!(ftp.to_string().contains("only HTTPS"));
         }
         // from base_url_security_allows_non_local_http_with_explicit_opt_in
         {
@@ -14266,6 +14423,47 @@ mod tests {
             .bind_request_to_protocol(minimal_zen_request("gpt-6-mini"))
             .expect("per-request routing keeps the bound wire");
         assert_eq!(request.model, "gpt-6-mini");
+    }
+
+    /// The `wire = "anthropic"` key must answer the same dialect dispatch
+    /// actually speaks. On the `Fixed(ChatCompletions)` family tables
+    /// (Minimax, Modelstudio Token/Coding Plan) the family answer of
+    /// `provider_wire_format_for_config` IS the dispatch wire — the
+    /// non-ModelAware construction arm (`from_parts`) binds it directly —
+    /// and the base-URL resolvers (`resolve_*_base_url_for_tui`) select the
+    /// vendor Anthropic endpoint for the very same key, so the dialect must
+    /// honor it or the session speaks chat into an Anthropic endpoint.
+    /// ModelAware kinds (Deepseek, OpencodeZen) re-derive the wire from the
+    /// route candidate per model and never construct through that arm
+    /// (round 23), so the key stays out of their family answer: honoring it
+    /// there only made diagnostics quote a dialect no live client spoke.
+    #[test]
+    fn wire_dialect_key_gates_fixed_family_dispatch_and_stays_out_of_model_aware() {
+        let minimax = toml::from_str::<crate::config::Config>(
+            r#"
+[providers.minimax]
+wire = "anthropic"
+"#,
+        )
+        .expect("minimax wire table parses");
+        assert_eq!(
+            provider_wire_format_for_config(ApiProvider::Minimax, Some(&minimax)),
+            WireFormat::AnthropicMessages,
+            "Fixed-family dispatch must honor the key its endpoint resolver honors"
+        );
+
+        let deepseek = toml::from_str::<crate::config::Config>(
+            r#"
+[providers.deepseek]
+wire = "anthropic"
+"#,
+        )
+        .expect("deepseek wire table parses");
+        assert_eq!(
+            provider_wire_format_for_config(ApiProvider::Deepseek, Some(&deepseek)),
+            WireFormat::ChatCompletions,
+            "ModelAware dispatch re-derives the wire from the route candidate (round 23); the key must not flip the family answer"
+        );
     }
 
     /// A `wire = "anthropic"` Custom table must reach a real

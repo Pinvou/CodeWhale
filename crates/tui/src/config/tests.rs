@@ -13731,3 +13731,453 @@ fn kimi_k31_model_spelling_normalizes_case_and_padding() {
     assert!(!is_kimi_k31_model_spelling("kimi-k3.1"));
     assert!(!is_kimi_k31_model_spelling(" k3 "));
 }
+
+#[test]
+fn strict_pipeline_scope_is_official_deepseek_family_routes() {
+    // The DeepSeek strict pipeline reshapes schemas per DeepSeek's strict
+    // documents, so only provider-typed DeepSeek family routes on the
+    // official hosts may act on it — a misconfigured provider or a lookalike
+    // host must not receive the reshaping.
+    for provider in [
+        ApiProvider::Deepseek,
+        ApiProvider::DeepseekCN,
+        ApiProvider::DeepseekAnthropic,
+    ] {
+        for base_url in [
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/",
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com/beta",
+            "https://api.deepseek.com/anthropic",
+            "https://api.deepseeki.com",
+            "https://api.deepseeki.com/beta",
+            // Case-insensitive host matching is the documented gate behavior;
+            // pin the unpadded uppercase form so the lowercase branch keeps a
+            // positive case of its own (the padded negatives below exercise
+            // it only via the whitespace rejection that precedes them).
+            "HTTPS://API.DEEPSEEK.COM/V1",
+        ] {
+            assert!(
+                super::route_is_official_deepseek_family(provider, base_url),
+                "{provider:?} on {base_url} is an official family route"
+            );
+        }
+    }
+
+    for (provider, base_url, why) in [
+        (
+            ApiProvider::Openai,
+            "https://api.deepseek.com/beta",
+            "a DeepSeek URL under a non-DeepSeek provider stays out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://llm.example.com/v1",
+            "a custom endpoint is not an official family route",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com.evil.example/beta",
+            "a lookalike host must not pass the host-boundary check",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "http://api.deepseek.com/beta",
+            "plaintext http is not the official endpoint",
+        ),
+        (
+            ApiProvider::Moonshot,
+            "https://api.moonshot.ai/v1",
+            "unrelated providers stay out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "  HTTPS://API.DEEPSEEK.COM/BETA  ",
+            "a whitespace-padded URL matches no surface that string-compares the base URL \
+             (this gate, the doctor classifier, the wire strip set), so admitting it here \
+             alone would leak the strict flag past the non-beta strip; it stays out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta\t",
+            "whitespace padding after a path fails the same no-trim boundary check — \
+             the strip set string-compares this exact text and would not strip, \
+             so admitting it here alone would leak the strict flag",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/v1 ",
+            "trailing whitespace after a path degrades the route out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https:// api.deepseek.com/beta",
+            "interior whitespace is rejected without any trimming",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com:8443/beta",
+            "an explicit port is outside the scheme-and-host prefix the wire strip and \
+             the doctor classifier string-match, so the gate must not admit it",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com:443/v1",
+            "even the WHATWG-default port folds away on the wire while the gate \
+             string-matches the configured text, so it conservatively withholds \
+             instead of guessing at the fold",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://user@api.deepseek.com/beta",
+            "userinfo before the host defeats the prefix match and must stay out of scope",
+        ),
+    ] {
+        assert!(
+            !super::route_is_official_deepseek_family(provider, base_url),
+            "{why}: {provider:?} on {base_url}"
+        );
+    }
+}
+
+#[test]
+fn official_host_gate_rejects_query_and_fragment_urls() {
+    // The client splices its path suffix directly after the configured
+    // URL, so a query or fragment would build a request path the endpoint
+    // 404s on while the gate and doctor still reported the pipeline as
+    // acting — such a URL degrades to out of scope.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta?x=1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com#frag"
+    ));
+    // A fragment AFTER an admissible path exercises the `contains('#')` arm
+    // itself: the bare-`#frag` spelling above is rejected by the path
+    // boundary check even without that arm (a dropped arm passes it), and
+    // this is the flag-past-strip spelling the gate's docstring names.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1#x"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseeki.com/v1?debug"
+    ));
+    assert!(!strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta?x=1"
+    ));
+    // The canonical URLs stay admitted.
+    assert!(url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta"
+    ));
+}
+
+#[test]
+fn official_host_gate_rejects_invisible_characters_and_dot_segments() {
+    // A path the HTTP layer would canonicalize or percent-encode describes
+    // no endpoint the wire surfaces string-match: zero-width characters
+    // are not whitespace (U+200B/U+FEFF slip past that check), control
+    // bytes are not whitespace either, and a dot segment lands the request
+    // on a canonical path after URL normalization — `/beta/../v1` reaches
+    // the canonical non-beta endpoint, the one class where the flag must
+    // be stripped. All degrade to out of scope.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta\u{200b}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1\u{feff}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1\u{7}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta/../v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/./v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1/.."
+    ));
+    // The ENCODED spellings of the same dot segments: WHATWG URL
+    // normalization percent-decodes `%2e` for dot-segment detection
+    // (`/beta/%2e%2e/v1` lands on the canonical non-beta path with the
+    // flag kept) and folds backslashes into path separators for special
+    // schemes (`/beta\..\v1` normalizes identically). Any `%` escape or
+    // `\` in the path degrades to out of scope — every official endpoint
+    // path is plain letters and slashes.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta/%2e%2e/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/%2E%2E/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/.%2e/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/%2e./v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta\\..\\v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta/x\\..\\v1"
+    ));
+    // Plain paths the wire serves verbatim stay admitted.
+    assert!(url_is_official_deepseek_host("https://api.deepseek.com/v2"));
+    assert!(url_is_official_deepseek_host(
+        "https://api.deepseek.com/BETA/v1"
+    ));
+    // Same-arm spellings the earlier pins did not cover (round 25): a
+    // host-then-userinfo URL (only the user@host direction was pinned),
+    // an empty-port spelling (only an explicit port was pinned), a DEL
+    // byte (the 0x21..=0x7E printable band excludes 0x7F, but only
+    // lower control bytes were pinned), and the lookalike host on the
+    // second official host.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com@evil.example/beta"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com:/beta"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1\u{7f}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseeki.com.evil.example/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        " https://api.deepseeki.com/beta"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseeki.com/beta?x=1"
+    ));
+}
+
+#[test]
+fn deepseek_canonical_url_sets_stay_inside_the_official_host_gate() {
+    // The chat strip and the beta routing read `DEEPSEEK_CANONICAL_*` (the
+    // doctor's classifier joins them once its PR wires it); every canonical
+    // URL must keep passing the broader official-host gate
+    // (`url_is_official_deepseek_host`)
+    // so no surface can recognize an endpoint the gate would reject, and
+    // the beta set must stay disjoint from the non-beta set so the strip
+    // decision cannot flip.
+    assert!(
+        !super::DEEPSEEK_CANONICAL_BETA_URLS.is_empty()
+            && !super::DEEPSEEK_CANONICAL_NON_BETA_URLS.is_empty(),
+        "an emptied set would vacuously pass the loops below and silently \
+         drop its surface's coverage"
+    );
+    for url in super::DEEPSEEK_CANONICAL_BETA_URLS
+        .iter()
+        .chain(super::DEEPSEEK_CANONICAL_NON_BETA_URLS.iter())
+    {
+        assert!(
+            super::url_is_official_deepseek_host(url),
+            "canonical {url} must pass the official-host gate"
+        );
+    }
+    for url in super::DEEPSEEK_CANONICAL_BETA_URLS {
+        assert!(url.ends_with("/beta"), "{url} must be a beta endpoint");
+        assert!(
+            !super::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(url),
+            "{url} must not appear in the non-beta set"
+        );
+    }
+    for url in super::DEEPSEEK_CANONICAL_NON_BETA_URLS {
+        assert!(!url.ends_with("/beta"), "{url} must not be a beta endpoint");
+    }
+}
+
+#[test]
+fn strict_tool_mode_for_route_combines_the_flag_with_the_official_route_gate() {
+    // One composition answers for the engine turn surface, the child
+    // sub-agent surface, and the doctor — the user flag alone must never
+    // enable the pipeline, and an official URL alone must not either.
+    assert!(super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        false,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Openai,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://llm.example.com/v1"
+    ));
+}
+
+#[test]
+fn official_host_gate_rejects_an_interior_empty_path_segment() {
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com//v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1//chat"
+    ));
+    // A single trailing slash stays admitted (route identity folds it).
+    assert!(url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1/"
+    ));
+}
+
+#[test]
+fn official_host_gate_rejects_the_path_percent_encode_printables() {
+    // Round 23: the six printable bytes WHATWG path canonicalization
+    // percent-encodes join the `%`/backslash rejections — the admitted
+    // string and the wire's request path disagreed (`/beta<x>` serializes
+    // as `/beta%3Cx%3E`), landing a 404 on the official host with the
+    // flag kept.
+    for byte in ["\"", "<", ">", "`", "{", "}"] {
+        let url = format!("https://api.deepseek.com/beta{byte}/v1");
+        assert!(
+            !url_is_official_deepseek_host(&url),
+            "the percent-encodeable byte {byte:?} must degrade to out of scope"
+        );
+    }
+    // Plain official paths stay admitted.
+    assert!(url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta"
+    ));
+}
+
+#[test]
+fn minimax_wire_dialect_key_selects_the_endpoint_and_the_dispatch_together() {
+    // The base-URL resolver and the dispatch fn (`provider_wire_format_for_config`
+    // — for this Fixed(ChatCompletions) family, the non-ModelAware construction
+    // arm binds its answer directly) read the same `wire` key. Pinning the PAIR
+    // keeps one spelling from answering with two protocols: the regression this
+    // closes was exactly that split — the resolver picked the vendor Anthropic
+    // endpoint while dispatch spoke chat into it.
+    assert_eq!(
+        super::resolve_minimax_base_url_for_tui(None, ApiProvider::Minimax, Some("anthropic")),
+        super::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL
+    );
+    assert_eq!(
+        super::resolve_minimax_base_url_for_tui(None, ApiProvider::Minimax, None),
+        super::DEFAULT_MINIMAX_BASE_URL
+    );
+    let config = toml::from_str::<Config>("\n[providers.minimax]\nwire = \"anthropic\"\n")
+        .expect("minimax wire table parses");
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(ApiProvider::Minimax, Some(&config)),
+        codewhale_config::provider::WireFormat::AnthropicMessages,
+        "dispatch must answer the dialect the endpoint resolver selected for the same key"
+    );
+}
+
+#[test]
+fn deepseek_wire_key_is_inert_for_the_endpoint_and_the_dispatch() {
+    // Round 2: Deepseek is ModelAware — dispatch re-derives the wire from
+    // the route candidate, and the resolver must not read the key either.
+    // A key-driven endpoint flip used to strand the route candidate on the
+    // vendor Anthropic URL, which is not in the official six-URL set, so
+    // the custom-endpoint rule forced the `chat` endpoint key and the
+    // session POSTed chat payloads to a Messages-only host. The vendor-
+    // Messages opt-in on DeepSeek is the `deepseek-anthropic` identity,
+    // not the wire key — this pin holds both sides of that inertness.
+    let config = toml::from_str::<Config>("\n[providers.deepseek]\nwire = \"anthropic\"\n")
+        .expect("deepseek wire table parses");
+    assert_eq!(
+        config.base_url_for_route_identity(ApiProvider::Deepseek, "deepseek"),
+        super::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+        "the wire key must not move the Deepseek endpoint away from the chat route"
+    );
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(ApiProvider::Deepseek, Some(&config)),
+        codewhale_config::provider::WireFormat::ChatCompletions,
+        "ModelAware dispatch re-derives the wire from the route candidate; the key must not flip the family answer"
+    );
+}
+
+#[test]
+fn modelstudio_coding_plan_wire_key_reads_the_coding_table_on_both_sides() {
+    // Round 2: the dispatch fn read the key through the catalog collapse
+    // (`catalog_identity` folds CodingPlan onto TokenPlan) while the
+    // endpoint resolver read the coding table — a key on the coding table
+    // got chat dispatch into the coding plan's Anthropic endpoint, and the
+    // reverse spelling got Messages into its chat endpoint. Both sides now
+    // read the provider's OWN table, so the pair answers as one.
+    let coding_key =
+        toml::from_str::<Config>("\n[providers.modelstudio_coding_plan]\nwire = \"anthropic\"\n")
+            .expect("coding plan wire table parses");
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(
+            ApiProvider::ModelstudioCodingPlan,
+            Some(&coding_key),
+        ),
+        codewhale_config::provider::WireFormat::AnthropicMessages,
+        "a key on the coding table must gate dispatch for the Coding Plan session"
+    );
+    assert_eq!(
+        super::resolve_modelstudio_base_url_for_tui(
+            None,
+            ApiProvider::ModelstudioCodingPlan,
+            None,
+            Some("anthropic"),
+        ),
+        super::MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL.to_string(),
+        "the resolver must keep selecting the coding plan's Anthropic endpoint for the same key"
+    );
+    // The reverse split: a key on the TOKEN table must not flip a Coding
+    // Plan session — its resolver reads the coding table and answers the
+    // chat endpoint, so dispatch must stay ChatCompletions.
+    let token_key =
+        toml::from_str::<Config>("\n[providers.modelstudio_token_plan]\nwire = \"anthropic\"\n")
+            .expect("token plan wire table parses");
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(
+            ApiProvider::ModelstudioCodingPlan,
+            Some(&token_key),
+        ),
+        codewhale_config::provider::WireFormat::ChatCompletions,
+        "a Token-Plan-table key must not flip a Coding Plan session into Messages"
+    );
+}
+
+#[test]
+fn fixed_family_dispatch_stays_chat_without_a_wire_key() {
+    // The fourth cell of the resolver/dispatch matrix: a Fixed
+    // (ChatCompletions) family with no wire key — or no config at all —
+    // must answer chat. An unconditional-AnthropicMessages regression on
+    // the dispatch side survives every key-on pin; this cell closes it.
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(ApiProvider::Minimax, None),
+        codewhale_config::provider::WireFormat::ChatCompletions,
+        "no config at all must keep the Fixed family on its descriptor policy"
+    );
+    let no_key =
+        toml::from_str::<Config>("\n[providers.minimax]\n").expect("empty minimax table parses");
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(ApiProvider::Minimax, Some(&no_key)),
+        codewhale_config::provider::WireFormat::ChatCompletions,
+        "a table without the key must keep the Fixed family on its descriptor policy"
+    );
+}
+
+#[test]
+fn opencode_zen_wire_key_stays_out_of_the_model_aware_answer() {
+    // OpencodeZen is the second ModelAware kind (round 23): the key stays
+    // out of the family answer, which falls to the descriptor Responses
+    // policy. Pinned beside the Deepseek cell so both ModelAware kinds
+    // carry their own assertion.
+    let config = toml::from_str::<Config>("\n[providers.opencode_zen]\nwire = \"anthropic\"\n")
+        .expect("opencode zen wire table parses");
+    assert_eq!(
+        crate::client::provider_wire_format_for_config(ApiProvider::OpencodeZen, Some(&config)),
+        codewhale_config::provider::WireFormat::Responses,
+        "the key must not flip a ModelAware kind's family answer"
+    );
+}
