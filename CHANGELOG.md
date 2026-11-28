@@ -31,11 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x-api-key` by the transport, while the scheme line answered `bearer`
   for the DeepSeek Anthropic-dialect route (keyed on provider typing
   instead of the wire).
-- One launch-surface derivation now feeds every `codewhale doctor`
-  section (settings loaded once per run instead of up to sixteen times,
-  each with an identity re-derivation and a scoped config clone), and the
-  route report stops re-resolving the route a second and third time: the
-  api-target line carries the resolved context window.
+- One launch-surface derivation feeds the `codewhale doctor` JSON report's
+  sections, and the human report threads the same derivation through its
+  api-target, probe gates, timeout lines, and connectivity probe (settings
+  were loaded up to sixteen times per report at the worst intermediate
+  state, each with an identity re-derivation and a scoped config clone;
+  the setup section still derives its own credential facts before the
+  surface exists), and the route report stops re-resolving the route a
+  second and third time: the api-target line carries the resolved context
+  window.
 - The doctor's route scope discloses its fidelity boundary in the report
   itself (the human scope line and a new `route_scope_boundary` JSON key
   name the two channels a real launch layers on top of what the doctor

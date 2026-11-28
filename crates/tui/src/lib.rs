@@ -4465,19 +4465,20 @@ fn doctor_api_key_providers() -> impl Iterator<Item = crate::config::ApiProvider
 /// Doctor must never turn credential inspection into a refresh/write path.
 /// OAuth connectivity is exercised by an ordinary user request instead;
 /// doctor limits itself to non-mutating readiness inspection.
-fn doctor_should_probe_auth(config: &Config) -> bool {
-    // The auth facts the served route speaks: scoped to the launch
-    // identity like the credential source line (round 24 — the raw root's
-    // table gated a probe decision the session may not serve).
-    let (_identity, scoped) = doctor_launch_scoped(config);
-    let config = &scoped;
-    let provider = config.api_provider();
+///
+/// Takes the identity-scoped config the run already derived (`scoped`):
+/// the auth facts the served route speaks come from the launch identity's
+/// table, and deriving a second surface here re-loaded settings and
+/// re-cloned the config for an answer the caller's surface already
+/// carries (round 33).
+fn doctor_should_probe_auth(scoped: &Config) -> bool {
+    let provider = scoped.api_provider();
     if provider == crate::config::ApiProvider::OpenaiCodex
-        && !config.provider_uses_custom_endpoint(provider)
+        && !scoped.provider_uses_custom_endpoint(provider)
     {
         return false;
     }
-    let auth_mode = config.auth_mode_for_provider(provider);
+    let auth_mode = scoped.auth_mode_for_provider(provider);
     if provider == crate::config::ApiProvider::Xai
         && auth_mode
             .as_deref()
@@ -4689,7 +4690,11 @@ async fn run_doctor(
         "{}",
         "DeepSeek Harness integration (read-only detection):".bold()
     );
-    // One surface derivation feeds the rest of the report (round 32).
+    // One surface derivation feeds the report's route sections below — the
+    // dsh lines, the credential line, the api target, the probe gates, the
+    // timeout lines, and the connectivity probe (round 33; the setup
+    // section above still derives its own credential facts before the
+    // surface exists).
     let surface = doctor_launch_surface_full(config);
     for line in doctor_dsh_integration_lines(&surface, workspace) {
         println!("  {line}");
@@ -4724,7 +4729,7 @@ async fn run_doctor(
     // API connectivity test
     println!();
     println!("{}", "API Connectivity:".bold());
-    let api_target = doctor_api_target(config);
+    let api_target = doctor_api_target_for_surface(config, &surface.identity, &surface.model);
     // Configured-vs-active honesty (DGF-01): doctor describes the route a
     // session launched NOW would resolve. It cannot see inside an already
     // running session, which keeps the route it resolved at its own launch.
@@ -4792,7 +4797,7 @@ async fn run_doctor(
     let endpoint_is_local =
         crate::config::provider_route_is_keyless_self_hosted(human_provider, &api_target.base_url)
             || crate::config::base_url_uses_local_host(&api_target.base_url);
-    if doctor_should_probe_auth(config) && live_api_requested {
+    if doctor_should_probe_auth(human_scoped) && live_api_requested {
         print!("  {} Testing connection...", "·".dimmed());
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -4801,8 +4806,14 @@ async fn run_doctor(
         // probe with an in-memory clone. Constructing the normal client from
         // the original config could otherwise trigger its legacy secret-store
         // migration while a user merely asks doctor to test connectivity.
+        // The launch identity and model come from the run's one surface
+        // derivation — the diagnostic clone differs only in credential
+        // fields, so its own re-derivation answered the same values with a
+        // second settings load (round 33).
         let connectivity_result = match config.with_read_only_api_key_for_diagnostic() {
-            Ok(diagnostic_config) => test_api_connectivity(&diagnostic_config).await,
+            Ok(diagnostic_config) => {
+                test_api_connectivity(&diagnostic_config, &surface.identity, &surface.model).await
+            }
             Err(error) => Err(error),
         };
         match connectivity_result {
@@ -4818,12 +4829,25 @@ async fn run_doctor(
                     "\r  {} API connection failed",
                     "✗".truecolor(red_r, red_g, red_b)
                 );
-                if error_msg.contains("401") || error_msg.contains("Unauthorized") {
+                if error_msg.starts_with(ROUTE_RESOLUTION_FAILURE_PREFIX) {
+                    // The resolver's own message can embed a configured URL,
+                    // which may carry credential material — name the state
+                    // and where the redacted reason lives instead (round
+                    // 33; the raw reason previously fell through to the
+                    // canned arm because it matched no transport substring).
+                    println!(
+                        "    The configured route could not be resolved; run \
+                         `codewhale doctor --json` and read `route_error` \
+                         for the resolver's reason."
+                    );
+                } else if error_msg.contains("401") || error_msg.contains("Unauthorized") {
                     println!("    {}", invalid_api_key_hint(human_provider));
                 } else if error_msg.contains("403") || error_msg.contains("Forbidden") {
                     println!("    {}", forbidden_api_key_hint(human_provider));
                 } else if error_msg.contains("timeout") || error_msg.contains("Timeout") {
-                    for line in doctor_timeout_recovery_lines(config) {
+                    for line in
+                        doctor_timeout_recovery_lines_for(config, &surface.identity, &surface.model)
+                    {
                         println!("    {line}");
                     }
                 } else if error_msg.contains("dns") || error_msg.contains("resolve") {
@@ -4839,7 +4863,7 @@ async fn run_doctor(
                 }
             }
         }
-    } else if !doctor_should_probe_auth(config) {
+    } else if !doctor_should_probe_auth(human_scoped) {
         println!(
             "  {} Live OAuth connectivity not checked by non-mutating doctor",
             "·".dimmed()
@@ -7144,6 +7168,9 @@ fn run_doctor_json(
     );
 
     let stash = crate::composer_stash::diagnostic_stash_report();
+    // Derived once for the three storage fields below instead of walked
+    // per field inside the json! block (round 33).
+    let spillover = crate::tools::truncate::spillover_root();
     let report = json!({
         "version": env!("CARGO_PKG_VERSION"),
         "config_path": config_path.display().to_string(),
@@ -7229,14 +7256,15 @@ fn run_doctor_json(
         },
         "storage": {
             "spillover": {
-                "path": crate::tools::truncate::spillover_root()
+                "path": spillover
+                    .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
-                "present": crate::tools::truncate::spillover_root()
-                    .is_some_and(|p| p.is_dir()),
-                "count": crate::tools::truncate::spillover_root()
+                "present": spillover.as_ref().is_some_and(|p| p.is_dir()),
+                "count": spillover
+                    .as_ref()
                     .filter(|p| p.is_dir())
-                    .map(|p| count_dir_entries(&p))
+                    .map(|p| count_dir_entries(p))
                     .unwrap_or(0),
             },
             "stash": {
@@ -7278,13 +7306,10 @@ fn run_doctor_context_json(config: &Config, workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the `capability` section for the machine-readable doctor report.
-///
-/// Returns a JSON value with the resolved provider, resolved model, context
-/// window, max output, thinking support, cache telemetry support, and request
-/// payload mode.
-/// The capability report, from an already-derived launch surface
-/// (round 32).
+/// Build the `capability` section for the machine-readable doctor report,
+/// from an already-derived launch surface (round 32): a JSON value with the
+/// resolved provider, resolved model, context window, max output, thinking
+/// support, cache telemetry support, and request payload mode.
 fn provider_capability_report_for(
     config: &Config,
     surface: &DoctorLaunchSurface,
@@ -7453,7 +7478,7 @@ fn doctor_route_report_for(config: &Config, surface: &DoctorLaunchSurface) -> se
 
     json!({
         "provider": target.provider,
-        "provider_source": doctor_provider_source_for(config, Some(&surface.settings)),
+        "provider_source": doctor_provider_source_for(config, &surface.settings),
         // The table key follows the LAUNCH identity. Round 29 (K1): the
         // legacy-root question keys on the identity's own `exact_id`
         // (None exactly when the identity IS the literal root), not on
@@ -7468,10 +7493,16 @@ fn doctor_route_report_for(config: &Config, surface: &DoctorLaunchSurface) -> se
         "route_identity": route_identity,
         // Resolved routes answer from the candidate's own protocol — the
         // dispatch fact; the static composition is the fallback for a
-        // route that failed to resolve (round 26).
-        "wire_protocol": target
-            .wire_protocol
-            .unwrap_or_else(|| doctor_effective_wire_protocol(config, provider)),
+        // route that failed to resolve (round 26). The fallback reads the
+        // run's scoped clone directly: the helper it used to call
+        // re-derived a whole launch surface for a clone the surface
+        // already carries (round 33).
+        "wire_protocol": target.wire_protocol.unwrap_or_else(|| {
+            wire_format_label(crate::client::provider_wire_format_for_config(
+                provider,
+                Some(&surface.scoped),
+            ))
+        }),
         "base_url": {
             // Names which URL this block answers from — the prepared
             // route's endpoint when the launch route resolved, the
@@ -7523,10 +7554,11 @@ fn doctor_provider_config_table(identity: &crate::config::ProviderIdentity) -> S
 
 /// Which surface supplied the served provider. `settings` is the document
 /// the identity's own derivation read (round 32 — a separately loaded copy
-/// could answer a different document).
+/// could answer a different document); always `Some` in production, so the
+/// option wrapper is gone (round 33).
 fn doctor_provider_source_for(
     config: &Config,
-    settings: Option<&crate::settings::Settings>,
+    settings: &crate::settings::Settings,
 ) -> &'static str {
     // Which surface supplied the served provider: a settings
     // `default_provider` re-point wins at launch (the `/model` →
@@ -7547,12 +7579,12 @@ fn doctor_provider_source_for(
     // route). Round 31: an earlier
     // draft of this note claimed re-spellings record no provenance change;
     // the code has always recorded `settings` for them, matching init.
-    // (round 30 note)
     if crate::config::explicit_launch_provider_override().is_some() {
         return "override";
     }
     let settings_provider = settings
-        .and_then(|launch_settings| launch_settings.default_provider.clone())
+        .default_provider
+        .clone()
         .filter(|provider_str| config.resolve_provider_identity(provider_str).is_ok());
     if !config.fleet_operator_route_applied
         && let Some(settings_provider) = settings_provider
@@ -7572,24 +7604,6 @@ fn doctor_provider_source_for(
     } else {
         "default"
     }
-}
-
-/// The route report's wire line FALLBACK: the static wire composition,
-/// used only when no route resolved (an unresolved route has no candidate
-/// to bind, so there is no dispatch fact to report). A resolved route
-/// answers from [`DoctorApiTarget::wire_protocol`] — the same
-/// `candidate.protocol()` binding the client makes — because this
-/// composition reports `chat_completions` for a model-aware provider
-/// whose flash model dispatches Responses (round 26).
-fn doctor_effective_wire_protocol(
-    config: &Config,
-    provider: crate::config::ApiProvider,
-) -> &'static str {
-    let (_identity, scoped) = doctor_launch_scoped(config);
-    wire_format_label(crate::client::provider_wire_format_for_config(
-        provider,
-        Some(&scoped),
-    ))
 }
 
 /// The report spelling for one wire format, shared by the resolved-route
@@ -7811,13 +7825,18 @@ struct DoctorStrictToolModeStatus {
 }
 
 /// One derivation of the launch surface a fresh session would serve, fed
-/// to every doctor section of a run: settings loaded once, the identity
-/// derived once, the identity-scoped clone built once. Each section used
-/// to repeat the load-derive-clone sequence — sixteen settings reads per
-/// JSON report at its worst (round 32) — and the redundancy copied itself
-/// into every new section per review round. `settings` is carried so
-/// provenance labels (`doctor_provider_source`) answer the same document
-/// the identity came from.
+/// to the doctor's route sections: the JSON report derives it once for
+/// every section it builds, and the human report threads the same
+/// derivation through the api target, the probe gates, the timeout lines,
+/// and the connectivity probe (round 33 — those sites used to re-derive,
+/// each with a fresh settings load). The setup section still derives its
+/// own credential facts before the surface exists, so a run performs a
+/// small constant number of settings loads, not literally one. Each
+/// section used to repeat the load-derive-clone sequence — sixteen
+/// settings reads per JSON report at its worst (round 32) — and the
+/// redundancy copied itself into every new section per review round.
+/// `settings` is carried so provenance labels (`doctor_provider_source`)
+/// answer the same document the identity came from.
 struct DoctorLaunchSurface {
     provider: crate::config::ApiProvider,
     identity: crate::config::ProviderIdentity,
@@ -7872,18 +7891,12 @@ fn doctor_launch_surface_full(config: &Config) -> DoctorLaunchSurface {
     }
 }
 
-/// The launch surface a fresh session would serve: the provider re-point
-/// and the model chain the app's launch path applies (`tui/app/init.rs`),
-/// read from the same persisted settings a launch reads. The doctor
-/// predicts "what a session launched now would use", so a route remembered
-/// through `/model` → "remember as my default" — which writes
-/// settings.toml only, a document `Config` never loads — must key the
-/// verdict: answering from the config document alone reported a chat-model
-/// verdict for a launch that actually serves a `responses`-dialect model,
-/// the drift the round-18 selector fix closed for config.toml and this
-/// chain closes for the settings channel. Returns the launch provider, the
-/// full launch identity record (the route resolvers key on it — see
-/// `doctor_api_target`), and the launch model.
+/// Test-facing convenience entry returning the surface's `(provider,
+/// identity, model)` triple: production callers consume the
+/// [`DoctorLaunchSurface`] struct the run derives once (round 33 — the
+/// `_for` forms take the identity and model directly, so this wrapper has
+/// no production caller left).
+#[cfg(test)]
 fn doctor_launch_surface(
     config: &Config,
 ) -> (
@@ -7917,18 +7930,14 @@ fn doctor_launch_model_for_identity(
     crate::config::launch_model_for_identity(config, launch_settings, identity, &configured_model)
 }
 
-/// The identity plus the identity-scoped clone the doctor sections read:
-/// one place for the derive-clone-scope sequence every section repeats
-/// (round 30). `scope_to_provider_identity` can log, so centralizing also
-/// keeps that behavior uniform.
-fn doctor_launch_scoped(config: &Config) -> (crate::config::ProviderIdentity, Config) {
-    let surface = doctor_launch_surface_full(config);
-    (surface.identity, surface.scoped)
-}
-
+/// Test-facing convenience entry: production callers answer the run's one
+/// surface derivation through the `_for` form (round 33 — the human report
+/// threads the surface through every route section, so this wrapper's
+/// internal derivation has no production caller left).
+#[cfg(test)]
 fn doctor_api_target(config: &Config) -> DoctorApiTarget {
-    let (_launch_provider, launch_identity, launch_model) = doctor_launch_surface(config);
-    doctor_api_target_for_surface(config, &launch_identity, &launch_model)
+    let surface = doctor_launch_surface_full(config);
+    doctor_api_target_for_surface(config, &surface.identity, &surface.model)
 }
 
 /// [`doctor_api_target`] for a caller that already derived the launch
@@ -8187,12 +8196,17 @@ fn doctor_strict_tool_mode_status_for(
                  standard normalizes to the official host — a trailing-dot FQDN, \
                  percent-escaped host bytes, the Unicode dot separators, an \
                  explicit default port — also land here while the request still \
-                 reaches the official API (an IDN homoglyph host is not \
-                 normalized: it dials the host it spells); spellings the gate \
-                 refuses outright (whitespace around or inside the URL, query \
-                 or fragment strings) land here too, and their requests do \
-                 not reach the official API; point the setting at the \
-                 canonical spelling to get the reshaping"
+                 reaches the official API (a confusable-script IDN homoglyph \
+                 host is not normalized: it dials the host it spells). \
+                 Spellings the gate refuses outright (whitespace around or \
+                 inside the URL, query or fragment strings) land here too, \
+                 and the refusal does not keep the request off the official \
+                 endpoint: whitespace around the URL is stripped by URL \
+                 normalization and a query or fragment leaves the path \
+                 intact, so the request still reaches the official API with \
+                 its tools unreshaped; only whitespace inside the host fails \
+                 URL parsing outright. Point the setting at the canonical \
+                 spelling to get the reshaping"
             ),
             recommended_base_url: None,
         };
@@ -8312,7 +8326,7 @@ fn doctor_strict_tool_mode_status_for(
                 // the user reads this verdict as "strict semantics are
                 // fully off".
                 message: format!(
-                    "enabled, but function.strict is stripped for this non-beta DeepSeek \
+                    "enabled, but `function.strict` is stripped for this non-beta DeepSeek \
                      endpoint; the strict schema reshaping still applies and \
                      `tool_choice` stays `required` {FAMILY_CHAT_VERDICT_TAIL}"
                 ),
@@ -8436,18 +8450,33 @@ fn recommended_strict_base_url(_config: &Config, _base_url: &str) -> &'static st
     crate::config::DEFAULT_DEEPSEEK_BASE_URL
 }
 
+/// Test-facing convenience entry: production callers thread the run's one
+/// surface derivation through the `_for` form (round 33).
+#[cfg(test)]
 fn doctor_timeout_recovery_lines(config: &Config) -> Vec<String> {
+    let surface = doctor_launch_surface_full(config);
+    doctor_timeout_recovery_lines_for(config, &surface.identity, &surface.model)
+}
+
+fn doctor_timeout_recovery_lines_for(
+    config: &Config,
+    launch_identity: &crate::config::ProviderIdentity,
+    launch_model: &str,
+) -> Vec<String> {
     // Round 24: provider facts in the recovery lines answer from the
     // launch identity (the raw root's typing attributed its endpoint
-    // advice to a served route that may differ).
+    // advice to a served route that may differ). The identity and model
+    // come from the run's one surface derivation (round 33) — deriving
+    // them here loaded settings a second time for values the caller
+    // already carries.
     let raw = config;
-    let (_identity, scoped) = doctor_launch_scoped(config);
+    let mut scoped = config.clone();
+    scoped.scope_to_provider_identity(launch_identity);
     let config = &scoped;
     // The api target keeps the raw-config convention every other call site
-    // uses — it derives its own launch surface, and feeding it the already
-    // scoped clone would silently read the scoped table inside the model
-    // chain (round 30).
-    let target = doctor_api_target(raw);
+    // uses — feeding it the already scoped clone would silently read the
+    // scoped table inside the model chain (round 30).
+    let target = doctor_api_target_for_surface(raw, launch_identity, launch_model);
     let mut lines = vec![format!(
         "Connection timed out while reaching {}.",
         crate::doctor::structural_url_authority(&target.base_url)
@@ -8702,6 +8731,13 @@ mod speech_cli_tests {
 /// resolver's reason instead of dispatching a route no session serves.
 /// Keyless DS4 routes are handled by the caller — the catalog probe needs
 /// no client.
+///
+/// A failed route resolution is reported with
+/// [`ROUTE_RESOLUTION_FAILURE_PREFIX`] so the human report can classify it
+/// ahead of the transport-substring arms (a resolver message names the
+/// route, so it would otherwise match the DNS/`resolve` arm and mislead).
+pub(crate) const ROUTE_RESOLUTION_FAILURE_PREFIX: &str = "route resolution failed: ";
+
 fn doctor_probe_route_client(
     config: &Config,
     launch_identity: &crate::config::ProviderIdentity,
@@ -8713,20 +8749,27 @@ fn doctor_probe_route_client(
         launch_identity,
         Some(launch_model),
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(|error| anyhow::anyhow!("{ROUTE_RESOLUTION_FAILURE_PREFIX}{error}"))?;
     DeepSeekClient::from_candidate(&route.config, &route.candidate)
 }
 
-async fn test_api_connectivity(config: &Config) -> Result<()> {
+async fn test_api_connectivity(
+    config: &Config,
+    launch_identity: &crate::config::ProviderIdentity,
+    launch_model: &str,
+) -> Result<()> {
     use crate::models::{ContentBlock, Message, MessageRequest};
 
     // Probe the route the session will actually serve: the launch identity
     // scopes the config before any provider read (round-22 residual), and
     // the launch model keys the dispatch (round 32 — see
-    // [`doctor_probe_route_client`]).
-    let (_launch_provider, launch_identity, launch_model) = doctor_launch_surface(config);
+    // [`doctor_probe_route_client`]). The identity and model come from the
+    // run's one surface derivation (round 33): the config here is the
+    // diagnostic credential clone, which differs only in credential
+    // fields, so deriving its own surface answered the same values with a
+    // second settings load.
     let mut scoped_config = config.clone();
-    scoped_config.scope_to_provider_identity(&launch_identity);
+    scoped_config.scope_to_provider_identity(launch_identity);
     let scoped = &scoped_config;
 
     if crate::doctor::is_keyless_ds4_route(scoped) {
@@ -8734,7 +8777,7 @@ async fn test_api_connectivity(config: &Config) -> Result<()> {
         // chat request; the launch-route resolution below is not needed.
         return crate::doctor::probe_ds4_models(scoped).await;
     }
-    let client = doctor_probe_route_client(scoped, &launch_identity, &launch_model)?;
+    let client = doctor_probe_route_client(scoped, launch_identity, launch_model)?;
     let model = client.model().to_string();
 
     // Minimal request: single word prompt, 1 max token
@@ -15064,6 +15107,50 @@ mod doctor_endpoint_tests {
             "the unresolved state is marked: {}",
             report
         );
+        // Round 33: the context window falls back to the static capability
+        // answer on the unresolved route, marked with its own source rung —
+        // the report must not imply a resolved-route fact it does not have.
+        assert_eq!(
+            report["context_window"]["source"], "fallback",
+            "the unresolved route's context window names its fallback rung: {}",
+            report
+        );
+    }
+
+    #[test]
+    fn doctor_probe_route_client_prefixes_route_resolution_failures() {
+        // Round 33: the probe's unresolved-route failure carries the
+        // resolver's reason, but the human report classifies probe errors
+        // by substring — and a resolver message names routes, so it matched
+        // the DNS/`resolve` arm and printed misleading DNS advice. The
+        // failure now carries a prefix the report keys on; the raw reason
+        // stays out of the human output (it can embed a configured URL),
+        // while `doctor --json` keeps `route_error`.
+        let _sealed = crate::test_support::sealed_empty_settings_env();
+        let codewhale_home = _sealed.0.path().join(".codewhale");
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_provider = \"moonshot\"\n\n[provider_models]\nmoonshot = \"kimi-for-coding\"\n",
+        )
+        .expect("plant settings re-point and membership remembered model");
+        let config = Config {
+            provider: Some("beta-route".to_string()),
+            base_url: Some("https://root.example.com/v1".to_string()),
+            ..Default::default()
+        };
+        let surface = doctor_launch_surface_full(&config);
+        let mut scoped = config.clone();
+        scoped.scope_to_provider_identity(&surface.identity);
+        let error = match doctor_probe_route_client(&scoped, &surface.identity, &surface.model) {
+            Err(error) => error,
+            Ok(_) => panic!("the membership model on the direct Moonshot route fails resolution"),
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with(ROUTE_RESOLUTION_FAILURE_PREFIX),
+            "the failure is classifiable as a route resolution: {error}"
+        );
     }
 
     #[test]
@@ -15110,6 +15197,21 @@ mod doctor_endpoint_tests {
         assert!(
             DOCTOR_ROUTE_SCOPE_BOUNDARY.contains("project config overlay"),
             "the overlay half is named: {DOCTOR_ROUTE_SCOPE_BOUNDARY}"
+        );
+    }
+
+    #[test]
+    fn family_chat_verdict_tail_opens_with_the_thinking_omission_parenthetical() {
+        // Round 33: the tail const's doc says the opening parenthetical
+        // mirrors [`CHAT_THINKING_OMISSION_PARENTHETICAL`] verbatim and
+        // that "the pins guard the pair" — no pin asserted the prefix
+        // relationship, so rewording one const while keeping its verdict
+        // substrings would silently diverge the pair. This is that pin.
+        assert!(
+            FAMILY_CHAT_VERDICT_TAIL.starts_with(CHAT_THINKING_OMISSION_PARENTHETICAL),
+            "the family-chat tail must mirror the thinking-omission \
+             parenthetical verbatim:\n  tail:     {FAMILY_CHAT_VERDICT_TAIL}\n  \
+             head: {CHAT_THINKING_OMISSION_PARENTHETICAL}"
         );
     }
 
@@ -15631,6 +15733,19 @@ mod doctor_endpoint_tests {
             !status.message.contains("function.strict"),
             "the Messages dialect has no function wrapper (round 29)"
         );
+        // Round 33: the arm's fail-closed disclosure — per-tool schemas that
+        // cannot conform ship unchanged and non-strict — was hand-duplicated
+        // from the chat tail with no `contains` pin, so a wording edit there
+        // failed nothing. This is that pin (the clause is a deliberate
+        // inline copy: the chat tail's const is family-chat shaped, this arm
+        // speaks the Messages wire).
+        assert!(
+            status
+                .message
+                .contains("cannot conform ship unchanged and non-strict"),
+            "{}",
+            status.message
+        );
         assert!(status.recommended_base_url.is_none());
     }
 
@@ -15665,6 +15780,19 @@ mod doctor_endpoint_tests {
         assert!(
             !status.message.contains("function.strict"),
             "the Messages dialect has no function wrapper (round 29)"
+        );
+        // Round 33: the arm's fail-closed disclosure — per-tool schemas that
+        // cannot conform ship unchanged and non-strict — was hand-duplicated
+        // from the chat tail with no `contains` pin, so a wording edit there
+        // failed nothing. This is that pin (the clause is a deliberate
+        // inline copy: the chat tail's const is family-chat shaped, this arm
+        // speaks the Messages wire).
+        assert!(
+            status
+                .message
+                .contains("cannot conform ship unchanged and non-strict"),
+            "{}",
+            status.message
         );
         assert!(status.recommended_base_url.is_none());
     }
@@ -15740,6 +15868,25 @@ mod doctor_endpoint_tests {
         assert!(
             status.message.contains("IDN homoglyph"),
             "{}",
+            status.message
+        );
+        // Round 33: the refused-spelling claim must match the wire. The
+        // client passes the URL through verbatim and reqwest's WHATWG
+        // parser strips surrounding whitespace and files `?`/`#` text out
+        // of the path, so those spellings still dial the official
+        // endpoint — the earlier sentence claimed they "do not reach the
+        // official API", which the wire contradicts for three of the four
+        // named classes. Only interior whitespace fails to parse.
+        assert!(
+            status
+                .message
+                .contains("only whitespace inside the host fails URL parsing"),
+            "{}",
+            status.message
+        );
+        assert!(
+            !status.message.contains("do not reach the official API"),
+            "the inverted wire claim must not return: {}",
             status.message
         );
     }
@@ -15834,6 +15981,19 @@ mod doctor_endpoint_tests {
         assert!(
             !status.message.contains("function.strict"),
             "the Messages dialect has no function wrapper (round 29)"
+        );
+        // Round 33: the arm's fail-closed disclosure — per-tool schemas that
+        // cannot conform ship unchanged and non-strict — was hand-duplicated
+        // from the chat tail with no `contains` pin, so a wording edit there
+        // failed nothing. This is that pin (the clause is a deliberate
+        // inline copy: the chat tail's const is family-chat shaped, this arm
+        // speaks the Messages wire).
+        assert!(
+            status
+                .message
+                .contains("cannot conform ship unchanged and non-strict"),
+            "{}",
+            status.message
         );
         assert!(status.recommended_base_url.is_none());
     }
@@ -20901,11 +21061,15 @@ mod doctor_live_probe_tests {
     #[test]
     fn oauth_routes_skip_live_probe_to_keep_doctor_non_mutating() {
         let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
+        // Round 33: the gate reads the identity-scoped table, so the pins
+        // scope each config the way the run does (one derivation per
+        // config, then the scoped clone in).
+        let scoped_of = |config: &Config| doctor_launch_surface_full(config).scoped;
         let codex = Config {
             provider: Some("openai-codex".to_string()),
             ..Config::default()
         };
-        assert!(!doctor_should_probe_auth(&codex));
+        assert!(!doctor_should_probe_auth(&scoped_of(&codex)));
 
         let xai = Config {
             provider: Some("xai".to_string()),
@@ -20918,8 +21082,8 @@ mod doctor_live_probe_tests {
             }),
             ..Config::default()
         };
-        assert!(!doctor_should_probe_auth(&xai));
-        assert!(doctor_should_probe_auth(&Config::default()));
+        assert!(!doctor_should_probe_auth(&scoped_of(&xai)));
+        assert!(doctor_should_probe_auth(&scoped_of(&Config::default())));
     }
 }
 
@@ -21942,18 +22106,37 @@ mod fork_session_tests {
 mod strict_doctor_fixwave_r22 {
     use super::*;
 
-    fn repoint_fixture() -> (
-        tempfile::TempDir,
-        Config,
-        crate::test_support::EnvVarGuard,
-        crate::test_support::TestEnvLock,
-    ) {
+    /// A sealed launch fixture held as one binding: the fields drop in
+    /// declaration order, so the guards restore their variables while the
+    /// env mutex is still held and the lock releases last. Destructuring
+    /// the old tuple dropped the lock FIRST (right-to-left), opening a
+    /// window where a concurrent test could lock, set, and read the env
+    /// while this fixture's home guard was still pending (round 33).
+    struct RepointFixture {
+        /// Kept for its Drop: the sealed home outlives the assertions.
+        _tmp: tempfile::TempDir,
+        config: Config,
+        /// Kept for its Drop: `CODEWHALE_HOME` is restored while the env
+        /// mutex is still held.
+        _home: crate::test_support::EnvVarGuard,
+        /// The ambient launch-override reads
+        /// (`CODEWHALE_PROVIDER`/`CODEWHALE_MODEL`, the `DEEPSEEK_*`
+        /// aliases, and the config-path overrides) removed for the
+        /// fixture's lifetime — the launch chain reads them
+        /// unconditionally, and an ambient export re-points the identity
+        /// no matter how sealed the planted home is (round 33).
+        _ambient: Vec<crate::test_support::EnvVarGuard>,
+        _env_lock: crate::test_support::TestEnvLock,
+    }
+
+    fn repoint_fixture() -> RepointFixture {
         let env_lock = crate::test_support::lock_test_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let codewhale_home = tmp.path().join(".codewhale");
         std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
         let home =
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        let ambient = crate::test_support::remove_ambient_launch_env();
         std::fs::write(
             codewhale_home.join("settings.toml"),
             "default_provider = \"ds4\"\n",
@@ -21987,7 +22170,13 @@ mod strict_doctor_fixwave_r22 {
             strict_tool_mode: Some(true),
             ..Default::default()
         };
-        (tmp, config, home, env_lock)
+        RepointFixture {
+            _tmp: tmp,
+            config,
+            _home: home,
+            _ambient: ambient,
+            _env_lock: env_lock,
+        }
     }
 
     #[test]
@@ -22002,9 +22191,10 @@ mod strict_doctor_fixwave_r22 {
         // verdict — a route no session can serve, and an internally
         // contradictory report (provider line: ds4). The doctor must
         // resolve through the launch identity.
-        let (_tmp, config, _home, _env_lock) = repoint_fixture();
+        let fixture = repoint_fixture();
+        let config = &fixture.config;
 
-        let target = doctor_api_target(&config);
+        let target = doctor_api_target(config);
         assert_eq!(
             target.provider, "ds4",
             "the report's provider line is the launch identity: {:?}",
@@ -22016,7 +22206,7 @@ mod strict_doctor_fixwave_r22 {
             target
         );
 
-        let status = doctor_strict_tool_mode_status(&config);
+        let status = doctor_strict_tool_mode_status(config);
         assert_eq!(
             status.status, "custom_endpoint",
             "the DS4-local launch route is out of scope on its host, not a provider mismatch: {}",
@@ -22187,18 +22377,19 @@ mod strict_doctor_fixwave_r22 {
 
     #[test]
     fn doctor_capability_and_route_reports_follow_the_launch_identity() {
-        let (_tmp, config, _home, _env_lock) = repoint_fixture();
+        let fixture = repoint_fixture();
+        let config = &fixture.config;
         // The launch identity is `ds4` (the settings re-point); the raw
         // root names `beta-route`. The capability report used to answer
         // `resolved_provider: beta-route` on the same run whose api-target
         // line named ds4 — an internally contradictory report.
         let capability =
-            provider_capability_report_for(&config, &doctor_launch_surface_full(&config));
+            provider_capability_report_for(config, &doctor_launch_surface_full(config));
         assert_eq!(
             capability["resolved_provider"], "ds4",
             "the capability report resolves the launch identity: {capability}"
         );
-        let route = doctor_route_report(&config);
+        let route = doctor_route_report(config);
         assert_eq!(
             route["provider"], "ds4",
             "the route report names the launch identity: {route}"
@@ -22212,14 +22403,15 @@ mod strict_doctor_fixwave_r22 {
 
     #[test]
     fn doctor_tls_and_credential_follow_the_launch_identity() {
-        let (_tmp, config, _home, _env_lock) = repoint_fixture();
-        let tls = doctor_tls_status(&config);
+        let fixture = repoint_fixture();
+        let config = &fixture.config;
+        let tls = doctor_tls_status(config);
         assert!(
             tls.provider.contains("ds4"),
             "the TLS line names the launch identity: {:?}",
             tls.provider
         );
-        let credential = resolve_credential_diagnostic(&config);
+        let credential = resolve_credential_diagnostic(config);
         // The ds4 table is a local endpoint: its credential state is the
         // served one (not required), not the raw root's beta-route state.
         assert_eq!(
@@ -22295,18 +22487,14 @@ mod strict_doctor_fixwave_r22 {
         );
     }
 
-    fn responses_repoint_fixture() -> (
-        tempfile::TempDir,
-        Config,
-        crate::test_support::EnvVarGuard,
-        crate::test_support::TestEnvLock,
-    ) {
+    fn responses_repoint_fixture() -> RepointFixture {
         // The round-22 re-point fixture with the ds4 table speaking the
         // Responses wire and carrying no auth: the shape the raw-root
         // reads mislabeled (the raw root's chat table answered for a
         // session whose wire is Responses and which sends no credentials).
-        let (tmp, mut config, home, env_lock) = repoint_fixture();
-        let ds4 = config
+        let mut base = repoint_fixture();
+        let ds4 = base
+            .config
             .providers
             .as_mut()
             .expect("fixture providers")
@@ -22315,7 +22503,7 @@ mod strict_doctor_fixwave_r22 {
             .expect("fixture ds4 table");
         ds4.wire = Some("responses".to_string());
         ds4.auth_mode = Some("none".to_string());
-        (tmp, config, home, env_lock)
+        base
     }
 
     #[test]
@@ -22328,8 +22516,9 @@ mod strict_doctor_fixwave_r22 {
         // Both halves now answer the scoped clone: the fixture's raw root
         // is `beta-route` (whose table carries the flag) while the
         // remembered launch provider is `ds4` (whose table is clean).
-        let (_tmp, mut config, _home, _env_lock) = repoint_fixture();
-        config
+        let mut fixture = repoint_fixture();
+        fixture
+            .config
             .providers
             .as_mut()
             .expect("fixture providers")
@@ -22337,8 +22526,9 @@ mod strict_doctor_fixwave_r22 {
             .get_mut("beta-route")
             .expect("fixture beta-route table")
             .insecure_skip_tls_verify = Some(true);
+        let config = &fixture.config;
 
-        let status = doctor_tls_status(&config);
+        let status = doctor_tls_status(config);
 
         assert_eq!(status.provider, "ds4");
         assert!(
@@ -22356,8 +22546,9 @@ mod strict_doctor_fixwave_r22 {
         // chat table keyed the Custom re-point and quoted the chat-dialect
         // thinking-suppression parenthetical for a session whose wire is
         // Responses (which sends `tool_choice` unconditionally).
-        let (_tmp, config, _home, _env_lock) = responses_repoint_fixture();
-        let status = doctor_strict_tool_mode_status(&config);
+        let fixture = responses_repoint_fixture();
+        let config = &fixture.config;
+        let status = doctor_strict_tool_mode_status(config);
         assert_eq!(status.status, "custom_endpoint", "{:?}", status.status);
         assert!(
             !status
@@ -22376,8 +22567,9 @@ mod strict_doctor_fixwave_r22 {
         // client actually speaks — the Custom table's wire override (the
         // resolver honors it) — not the raw root's dialect or the catalog
         // profile that used to override the wire-aware value.
-        let (_tmp, config, _home, _env_lock) = responses_repoint_fixture();
-        let report = provider_capability_report_for(&config, &doctor_launch_surface_full(&config));
+        let fixture = responses_repoint_fixture();
+        let config = &fixture.config;
+        let report = provider_capability_report_for(config, &doctor_launch_surface_full(config));
         assert_eq!(report["resolved_provider"], "ds4");
         assert_eq!(
             report["request_payload_mode"], "Responses",
@@ -22391,18 +22583,14 @@ mod strict_doctor_fixwave_r22 {
     /// round-26 doctor findings (wire line + payload mode) answer from.
     /// No Custom table and no wire override — the divergence is between
     /// the static wire composition and the resolved candidate.
-    fn flash_launch_fixture() -> (
-        tempfile::TempDir,
-        Config,
-        crate::test_support::EnvVarGuard,
-        crate::test_support::TestEnvLock,
-    ) {
+    fn flash_launch_fixture() -> RepointFixture {
         let env_lock = crate::test_support::lock_test_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let codewhale_home = tmp.path().join(".codewhale");
         std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
         let home =
             crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        let ambient = crate::test_support::remove_ambient_launch_env();
         std::fs::write(
             codewhale_home.join("settings.toml"),
             "default_provider = \"deepseek\"\ndefault_model = \"deepseek-v4-flash\"\n",
@@ -22412,7 +22600,13 @@ mod strict_doctor_fixwave_r22 {
             provider: Some("deepseek".to_string()),
             ..Default::default()
         };
-        (tmp, config, home, env_lock)
+        RepointFixture {
+            _tmp: tmp,
+            config,
+            _home: home,
+            _ambient: ambient,
+            _env_lock: env_lock,
+        }
     }
 
     #[test]
@@ -22423,8 +22617,9 @@ mod strict_doctor_fixwave_r22 {
         // `candidate.protocol()` and dispatches Responses for the flash
         // offering, and the strict section of the same run answers
         // `responses_dialect`. The line now reads the resolved candidate.
-        let (_tmp, config, _home, _env_lock) = flash_launch_fixture();
-        let report = doctor_route_report(&config);
+        let fixture = flash_launch_fixture();
+        let config = &fixture.config;
+        let report = doctor_route_report(config);
         assert_eq!(
             report["wire_protocol"], "responses",
             "the dispatch dialect the candidate binds is what the wire \
@@ -22440,8 +22635,9 @@ mod strict_doctor_fixwave_r22 {
         // profile is `Some` exactly when the route is, so the arm was dead
         // and a flash route reported the chat matrix while the client
         // speaks Responses. The protocol now wins over the profile.
-        let (_tmp, config, _home, _env_lock) = flash_launch_fixture();
-        let report = provider_capability_report_for(&config, &doctor_launch_surface_full(&config));
+        let fixture = flash_launch_fixture();
+        let config = &fixture.config;
+        let report = provider_capability_report_for(config, &doctor_launch_surface_full(config));
         assert_eq!(
             report["request_payload_mode"], "Responses",
             "the resolved endpoint's protocol is what dispatch speaks: {}",
@@ -22455,8 +22651,9 @@ mod strict_doctor_fixwave_r22 {
         // identity like the credential source beside it — the raw root
         // named `bearer` for a custom table while the served ds4 route
         // sends no auth (`auth_mode = "none"`).
-        let (_tmp, config, _home, _env_lock) = responses_repoint_fixture();
-        let report = doctor_route_report(&config);
+        let fixture = responses_repoint_fixture();
+        let config = &fixture.config;
+        let report = doctor_route_report(config);
         assert_eq!(report["provider"], "ds4");
         assert_eq!(
             report["auth"]["scheme"], "none",
@@ -22470,8 +22667,9 @@ mod strict_doctor_fixwave_r22 {
         // Round 23: `provider_source` distinguishes a settings-served
         // provider from one the raw config document supplied — the raw
         // inspect-only label said `config` for a route settings chose.
-        let (_tmp, config, _home, _env_lock) = repoint_fixture();
-        let report = doctor_route_report(&config);
+        let fixture = repoint_fixture();
+        let config = &fixture.config;
+        let report = doctor_route_report(config);
         assert_eq!(report["provider"], "ds4");
         assert_eq!(
             report["provider_source"], "settings",

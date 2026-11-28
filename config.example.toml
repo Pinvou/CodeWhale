@@ -42,8 +42,8 @@ base_url = "https://api.deepseek.com/beta"
 # api.deepseeki.com alias); there it sets `tool_choice: "required"`, omitted
 # on thinking-enabled DeepSeek-dialect requests (chat and Anthropic-Messages
 # alike, where the wire rejects the forced combination), and forced to
-# "auto" on routes whose model resolves to the Responses endpoint (that wire
-# hardcodes strict: false per tool); and it reshapes tool schemas to the
+# `auto` on routes whose model resolves to the Responses endpoint (that wire
+# hardcodes `strict: false` per tool); and it reshapes tool schemas to the
 # strict contract (optional parameters are removed and reported in the
 # tool description; tools that lose per-action parameters keep working with a
 # note naming what stopped — `todo_write` statuses and the Registry launcher's

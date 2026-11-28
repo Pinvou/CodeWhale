@@ -1032,10 +1032,15 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
     }
     // A query or fragment is not part of any canonical endpoint the wire
     // surfaces know: the client splices the path suffix directly after the
-    // configured URL, so `https://api.deepseek.com/beta?x=1` would request
-    // `.../beta?x=1/v1/chat/completions` and 404 while the gate and the
-    // doctor still reported the pipeline as acting. Such a URL degrades to
-    // out of scope, the same line the whitespace rejection draws.
+    // configured URL as a string, and `Url::parse` then files everything
+    // from the `?`/`#` onward into the query or fragment — so
+    // `https://api.deepseek.com/beta?x=1` still POSTs to the official
+    // `/beta` path (the spliced suffix is absorbed into the query), while
+    // the gate and the doctor report no official-host treatment. Such a
+    // URL degrades to out of scope, the same line the whitespace rejection
+    // draws (whose surrounding-whitespace half is likewise stripped by
+    // URL normalization before the request dials; only interior
+    // whitespace fails to parse at all).
     if base_url.contains('?') || base_url.contains('#') {
         return false;
     }

@@ -43,7 +43,7 @@ one-request miss):
 | `/model` (SetModel) | `change:model` (declared op-time, before the composer can diff the pre-installed context) |
 | Mode change (agent/plan/operate/yolo) | `change:mode` (hash-guarded — with bundled prompts the composition is mode-agnostic, so the miss only materializes when prompt bytes derive from mode) |
 | Goal set / pause / resume / clear / status | `change:goal` |
-| Mid-turn tool-surface change (turn-tool-security transition, deferred-tool admission/eviction, tool-search activation, runtime MCP tool arrival, end-of-step backstop for any surviving catalog mutation) | `change:tool_surface` |
+| Mid-turn tool-surface change (turn-tool-security transition, deferred-tool admission/eviction, tool-search activation, runtime MCP tool arrival, end-of-step backstop comparing the active name-set and catalog length) | `change:tool_surface` |
 | Session sync / restore (SyncSession) | `resume` |
 | Session construction | `initial` |
 

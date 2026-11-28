@@ -509,6 +509,11 @@ fn doctor_mcp_reports_redact_url_argv_and_env_values() {
 }
 #[test]
 fn doctor_provider_json_redacts_every_credential_url_to_its_authority() {
+    // Round 33: the launch-surface derivation reads persisted settings, so
+    // the loop must run on a sealed empty home — an ambient
+    // `default_provider` would re-point every iteration through one
+    // provider and silently collapse the coverage the loop exists for.
+    let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
     let mut providers = crate::config::ApiProvider::all().to_vec();
     providers.push(crate::config::ApiProvider::DeepseekCN);
 

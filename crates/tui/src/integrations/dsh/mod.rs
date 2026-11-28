@@ -935,10 +935,11 @@ pub(crate) fn codewhale_route_identity(
 }
 
 /// [`codewhale_route_identity`] with an explicit model selector: the
-/// doctor passes the launch model (the settings chain, round 30) while the
-/// session-side callers keep the config default. The config handed in must
-/// already be scoped to the identity the caller serves — the provider-keyed
-/// resolver re-derives the route identity from the config root.
+/// doctor passes the launch model from its one launch-surface derivation
+/// (the settings chain) while the session-side callers keep the config
+/// default. The config handed in must already be scoped to the identity
+/// the caller serves — the provider-keyed resolver re-derives the route
+/// identity from the config root.
 pub(crate) fn codewhale_route_identity_with_model(
     config: &crate::config::Config,
     model_selector: &str,
