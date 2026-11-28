@@ -4601,7 +4601,13 @@ fn write_stdin_to_a_child_that_stops_consuming_errors_instead_of_wedging() {
         verdict
     });
     let _ = receiver
-        .recv_timeout(std::time::Duration::from_secs(30))
+        // The outer hang guard keeps the shared 60 s budget the moved
+        // scenario runner used: the deadline pin itself asserts the write
+        // errors in well under a second, so the guard exists only to reap a
+        // wedged worker, and its budget must stay insensitive to loaded-host
+        // scheduling (the source comment above spells out that
+        // load-sensitivity concern).
+        .recv_timeout(std::time::Duration::from_secs(60))
         .expect("the bounded-write pin hung: the STDIN_WRITE_DEADLINE regression is live");
     handle
         .join()
@@ -7320,7 +7326,11 @@ fn test_write_stdin_streams_output() {
 /// timeout (`cat` behaves identically). The foreground lane must deliver EOF
 /// at spawn instead. Background keeps the pipe open for deferred
 /// `interact` streaming — that contract is pinned by
-/// `test_write_stdin_streams_output` and must not regress.
+/// `test_write_stdin_streams_output` and must not regress. Unix-only: the
+/// elapsed-time assertion assumes the helper's cold start is negligible,
+/// and a cold Windows PowerShell launch can approach the 3 s budget on its
+/// own (the previously reviewed head guarded this test the same way).
+#[cfg(unix)]
 #[tokio::test]
 async fn foreground_without_stdin_data_gives_stdin_readers_eof() {
     let workspace = tempdir().expect("workspace");
