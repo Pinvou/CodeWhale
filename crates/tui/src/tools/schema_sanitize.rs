@@ -3627,8 +3627,9 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
         // over-cap sources burn the whole pool on free rejections and
         // starve its later judgeable patterns — availability, order
         // dependent, and the pool's own comment claims no such spend.
-        // Round 31: the drift/expansion screens live in the compile body
-        // BEHIND the tick there too, for the same reason — a run of
+        // Round 31: this caller-side cap is only the cheap pre-filter;
+        // the drift/expansion screens and the budget tick live INSIDE the
+        // compile body, the tick behind every screen — a run of
         // wire-SyntaxError or over-expansion sources can never produce a
         // verdict, so charging their rejection let 128 of them starve the
         // tool's later fully-judgeable patterns.
@@ -5097,14 +5098,6 @@ fn node_pins_cover_branch(obj: &Map<String, Value>, branch: &Value, root: &Value
     })
 }
 
-/// Serialized-size cap for one side's `enum` value in the pair judge's
-/// membership scan; the sole bound since round 24 — the member-COUNT cap
-/// that guarded the quadratic scan the hash oracle replaced is gone, and
-/// the byte cap alone made the worst case a function of member BYTES
-/// (256 members of 60 KB strings each are 4 GB of `Value` equality per
-/// pair call within the catalog budget). Past the cap the side refuses —
-/// fail-closed wherever a judged constraint is present (round 23), the
-/// same direction the enum arms draw past their caps.
 /// Serialized byte length of `value`, an UPPER bound that stops counting
 /// once `total` passes `cap` (round 31): the cap predicate's cumulative
 /// early-exit bounds how many members serialize, but a single oversized
@@ -5652,8 +5645,9 @@ fn schema_pair_satisfiable(
     // the union strict unsatisfiable. An alternative this judge cannot
     // read (a boolean or scalar form, already failed closed upstream)
     // is simply not a satisfiability witness, and past the alternative
-    // cap the chase abstains compatible-by-default — the same
-    // hostile-input line the enum membership cap draws.
+    // cap the chase fails closed — the wrapper carries `anyOf`, itself
+    // a judged constraint the skipped scan would have consulted
+    // (round 23).
     //
     // The chase CONJUNCTS with the wrapper's own keywords beside `anyOf`:
     // an instance must satisfy some alternative AND the sibling `enum`/
@@ -17078,6 +17072,13 @@ mod kimi_tests {
                 "$schema",
                 json!({"type": "string", "$schema": "https://json-schema.org/draft/2020-12/schema"}),
             ),
+            // Round 32: the `$def` spelling is document-absent too (the
+            // whitelist carries `$defs` only) — pinned so a whitelist
+            // change cannot admit it silently.
+            (
+                "$def",
+                json!({"type": "object", "$def": {"a": {"type": "string"}}}),
+            ),
             (
                 "prefixItems",
                 json!({"type": "array", "prefixItems": [{"type": "string"}]}),
@@ -18606,9 +18607,9 @@ mod kimi_tests {
         fn memo_budget_bounds_a_rotation_of_distinct_heavy_patterns() {
             // 1000 distinct bounded-repeat patterns: the cached half keeps
             // hitting (no eviction, no clear), the tail compiles at most
-            // STRICT_PATTERN_COMPILE_BUDGET per request, and the rest abstains
+            // STRICT_PATTERN_COMPILE_BUDGET per tool, and the rest abstains
             // compatible — the verdict stays keep-direction and the compiles
-            // per request stay bounded.
+            // per tool stay bounded.
             let properties: serde_json::Map<String, Value> = (0..1000)
             .map(|i| {
                 (
@@ -20694,12 +20695,14 @@ mod strict_fixwave_r31 {
         // The empty-container leniency treated them as asserting nothing
         // and let a branch value merge over them, resurrecting a schema
         // the author killed.
-        for key in ["enum", "anyOf"] {
+        // Round 32: the `oneOf: []` spelling joins the sweep (it was the
+        // merge carrier above and never exercised as the false schema).
+        for (key, carrier) in [("enum", "oneOf"), ("anyOf", "oneOf"), ("oneOf", "anyOf")] {
             let mut schema = Value::Object(
                 [
                     (key.to_string(), json!([])),
                     (
-                        "oneOf".to_string(),
+                        carrier.to_string(),
                         json!([{"type": "string", "enum": ["a"]}]),
                     ),
                 ]
