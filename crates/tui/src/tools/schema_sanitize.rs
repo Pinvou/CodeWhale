@@ -3703,6 +3703,16 @@ fn compile_documented_pattern(pattern: &str) -> PatternCompileOutcome {
         // bytes. Both render judge verdicts the wire can never reach.
         || has_stacked_quantifier(pattern)
         || has_class_set_operation(pattern)
+        // Round 32 (fresh r4 review, live-proven): `\<` and `\>` are real
+        // word-boundary assertions here (regex-syntax lowers them to
+        // WordBoundaryStart/EndAngle) where Annex B's IdentityEscape reads
+        // literal `<`/`>` — the oracle accepted "id" for `^\<id$` whose
+        // wire pattern rejects it. The `\b`/`\A`/`\a` line one family
+        // over.
+        || pattern.contains("\\<")
+        || pattern.contains("\\>")
+        || has_tainted_repetition_brace(pattern)
+        || has_wire_illegal_capture_name(pattern)
     {
         return PatternCompileOutcome::Final(None);
     }
@@ -3921,6 +3931,99 @@ fn has_rust_only_flag_group(pattern: &str) -> bool {
 /// group (`{n[,m]}`) counts as a quantifier for adjacency, literal
 /// braces do not. Over-abstention is the conservative direction — the
 /// pattern still ships and binds on the wire.
+
+/// Round 32 (fresh r4 review, live-proven): Rust's repetition parser skips
+/// ASCII whitespace inside the braces, so `a{1, 2}` compiles a real counted
+/// repetition on this side where ECMA-262 Annex B reads the whole brace run
+/// as literal text — the oracle accepted "aa" for a pattern the wire only
+/// ever matches against the literal `a{1, 2}` (and a hostile
+/// `a{1, 999 }`-shaped brace counted ZERO expansion while this side built a
+/// ~10⁵-state machine, bypassing the expansion screen). Any brace run
+/// carrying whitespace before its `}` is screened; digits and commas keep
+/// judging (the ECMA quantifier spelling), class contents are literal on
+/// both dialects, and an unterminated or junk brace errors on this side
+/// anyway and abstains through the compile failure.
+fn has_tainted_repetition_brace(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut index = 0usize;
+    let mut in_class = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' {
+            index += 2;
+            continue;
+        }
+        if in_class {
+            if byte == b']' {
+                in_class = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'[' => {
+                // ECMA `[]` / `[^]` are closed at the marker — bytes after
+                // one are class body again.
+                let mut cursor = index + 1;
+                if bytes.get(cursor) == Some(&b'^') {
+                    cursor += 1;
+                }
+                if bytes.get(cursor) == Some(&b']') {
+                    index = cursor;
+                } else {
+                    in_class = true;
+                }
+            }
+            b'{' => {
+                let mut cursor = index + 1;
+                let mut tainted = false;
+                while cursor < bytes.len() && bytes[cursor] != b'}' {
+                    if bytes[cursor].is_ascii_whitespace() {
+                        tainted = true;
+                    }
+                    cursor += 1;
+                }
+                if tainted && cursor < bytes.len() {
+                    return true;
+                }
+                index = cursor;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+/// Round 32 (fresh r4 review): a capture name carrying `.`, `[`, or `]`
+/// compiles here (regex-syntax's `is_capture_char` admits them) where Annex
+/// B's GroupName (`RegExpIdentifierName`) rejects the spelling outright —
+/// the judge rendered verdicts for a pattern the wire cannot even build.
+/// `(?P<name>` is already screened as a Rust-only spelling, and the
+/// lookbehind prefixes `(?<=` / `(?<!` error on this side and abstain
+/// through the compile failure.
+fn has_wire_illegal_capture_name(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut index = 0usize;
+    while index + 3 <= bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if &bytes[index..index + 3] == b"(?<" {
+            let mut cursor = index + 3;
+            while cursor < bytes.len() && bytes[cursor] != b'>' {
+                if matches!(bytes[cursor], b'.' | b'[' | b']') {
+                    return true;
+                }
+                cursor += 1;
+            }
+            index = cursor;
+        }
+        index += 1;
+    }
+    false
+}
+
 fn has_stacked_quantifier(pattern: &str) -> bool {
     let bytes = pattern.as_bytes();
     let mut index = 0usize;
@@ -5345,13 +5448,16 @@ fn wrapper_witness(
             return false;
         };
         let side_patterns = compiled_property_patterns(side_obj);
-        value_clears_bounds_with(value, side_obj, compiled_documented_pattern(side_obj).as_ref())
-            && pinned_object_value_compatible_with(
-                value,
-                side_obj,
-                &side_patterns,
-                PINNED_OBJECT_JUDGE_DEPTH,
-            )
+        value_clears_bounds_with(
+            value,
+            side_obj,
+            compiled_documented_pattern(side_obj).as_ref(),
+        ) && pinned_object_value_compatible_with(
+            value,
+            side_obj,
+            &side_patterns,
+            PINNED_OBJECT_JUDGE_DEPTH,
+        )
     };
     alternatives.iter().any(|alternative| {
         // The FIRST pinned side among {alternative, sibling, other} owns
@@ -5549,8 +5655,7 @@ fn schema_pair_satisfiable(
         // Round 32 (fresh r4 review, live-proven): the witness takes a
         // provable shape — see `wrapper_witness`. Pairwise halves are not
         // the whole joint.
-        let witness =
-            wrapper_witness(alternatives, sibling.as_ref(), other, root, depth, budget);
+        let witness = wrapper_witness(alternatives, sibling.as_ref(), other, root, depth, budget);
         if !witness {
             return false;
         }
@@ -20292,11 +20397,7 @@ mod strict_fixwave_r30 {
         });
         let union_node = admitting["properties"]["u"].as_object().unwrap().clone();
         assert!(
-            node_pins_cover_branch(
-                &union_node,
-                &json!({"$ref": "#/$defs/str_a"}),
-                &admitting,
-            ),
+            node_pins_cover_branch(&union_node, &json!({"$ref": "#/$defs/str_a"}), &admitting,),
             "the definition admits the pinned member: it covers"
         );
         let (all, strict) = verdict(admitting);
@@ -20325,11 +20426,7 @@ mod strict_fixwave_r30 {
         });
         let refusing_node = refusing["properties"]["u"].as_object().unwrap().clone();
         assert!(
-            !node_pins_cover_branch(
-                &refusing_node,
-                &json!({"$ref": "#/$defs/str_a"}),
-                &refusing,
-            ),
+            !node_pins_cover_branch(&refusing_node, &json!({"$ref": "#/$defs/str_a"}), &refusing,),
             "the definition refuses the pinned member: it covers nothing"
         );
         let (all, strict) = verdict(refusing);
@@ -20828,7 +20925,10 @@ mod strict_fixwave_r32 {
             },
             "required": ["arr"]
         }));
-        assert!(!all, "the callable-by-nothing items union must fail the tool closed");
+        assert!(
+            !all,
+            "the callable-by-nothing items union must fail the tool closed"
+        );
         assert_eq!(strict, None);
     }
 
@@ -20867,7 +20967,10 @@ mod strict_fixwave_r32 {
             },
             "required": ["w"]
         }));
-        assert!(!all, "the callable-by-nothing union must fail the tool closed");
+        assert!(
+            !all,
+            "the callable-by-nothing union must fail the tool closed"
+        );
         assert_eq!(strict, None);
     }
 
@@ -20941,7 +21044,10 @@ mod strict_fixwave_r32 {
             },
             "required": ["u"]
         }));
-        assert!(!all, "the jointly-empty wrapper trio must fail the tool closed");
+        assert!(
+            !all,
+            "the jointly-empty wrapper trio must fail the tool closed"
+        );
         assert_eq!(strict, None);
     }
 
@@ -20972,16 +21078,84 @@ mod strict_fixwave_r32 {
             "anyOf": [b.clone()]
         });
         let root = json!({"type": "object", "properties": {"u": u.clone()}, "required": ["u"]});
-        println!("HSIC node_u={}", has_strict_incompatible_composition(&node_u, &root, false));
-        println!("HSIC w={}", has_strict_incompatible_composition(&w, &root, false));
-        println!("HSIC b={}", has_strict_incompatible_composition(&b, &root, false));
-        println!("HSIC u={}", has_strict_incompatible_composition(&u, &root, true));
+        println!(
+            "HSIC node_u={}",
+            has_strict_incompatible_composition(&node_u, &root, false)
+        );
+        println!(
+            "HSIC w={}",
+            has_strict_incompatible_composition(&w, &root, false)
+        );
+        println!(
+            "HSIC b={}",
+            has_strict_incompatible_composition(&b, &root, false)
+        );
+        println!(
+            "HSIC u={}",
+            has_strict_incompatible_composition(&u, &root, true)
+        );
         let (all, strict) = verdict(json!({
             "type": "object",
             "properties": {"u": u},
             "required": ["u"]
         }));
         println!("HSIC verdict all={all} strict={strict:?}");
+    }
+
+    #[test]
+    fn drift_screens_screen_the_new_families() {
+        // Round 32 (fresh r4 review, live-proven): all three spellings
+        // compiled and JUDGED here pre-fix with wire-divergent semantics —
+        // `^\<id$` accepted "id" (Rust word-boundary at position 0 vs the
+        // wire's literal `<`), `^a{1, 2}$` accepted "aa" (Rust's parser
+        // skips whitespace inside the braces vs the wire's literal text),
+        // and `(?<n.m>x)` compiled where Annex B's GroupName rejects the
+        // name. Each must now screen to abstain like the drift families
+        // one family over (rounds 26-28).
+        for pattern in [r"\<id", "^a{1, 2}$", "(?<n.m>x)"] {
+            let obj = json!({"pattern": pattern});
+            assert!(
+                compiled_documented_pattern(obj.as_object().unwrap()).is_none(),
+                "the drifted spelling must screen: {pattern}"
+            );
+        }
+        // Keep-sides: the clean spellings keep compiling and judging.
+        for pattern in [r"^a{2}$", "^b$", "(?<nx>x)"] {
+            let obj = json!({"pattern": pattern});
+            assert!(
+                compiled_documented_pattern(obj.as_object().unwrap()).is_some(),
+                "the clean spelling must keep judging: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn screened_drift_patterns_abstain_and_ship_like_the_family() {
+        // The drift-family contract (rounds 26-28 pins): a screened
+        // pattern abstains the judge and the tool ships strict with the
+        // pattern binding on the wire alone. Pre-fix the judge actively
+        // FALSELY VERIFIED the pinned members against the divergent
+        // reading; the screen removes that wrong verdict. (The
+        // wire-legal-but-drifting pattern binding unjudged is the
+        // family's disclosed abstain line.)
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string", "pattern": r"\<id", "enum": ["id"]}
+            },
+            "required": ["tag"]
+        }));
+        assert!(all, "the screened pattern abstains and ships");
+        assert_eq!(strict, Some(true));
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "v": {"type": "string", "pattern": "^a{1, 2}$", "enum": ["aa"]}
+            },
+            "required": ["v"]
+        }));
+        assert!(all, "the screened pattern abstains and ships");
+        assert_eq!(strict, Some(true));
     }
 
     #[test]
@@ -21050,7 +21224,10 @@ mod strict_fixwave_r32 {
             },
             "required": ["s"]
         }));
-        assert!(!all, "the member outside the pinned language must not witness");
+        assert!(
+            !all,
+            "the member outside the pinned language must not witness"
+        );
         assert_eq!(strict, None);
     }
 
