@@ -21171,19 +21171,17 @@ mod strict_fixwave_r32 {
     fn wrapper_witness_refuses_the_pairwise_only_trio() {
         // Unit pin for the wrapper arm's witness (end-to-end wrapper trios
         // are intercepted by the shaped-branch and coverage fail-closed
-        // arms, so the contract is pinned at the judge): the wrapper's
-        // alternative pins {"ax","bz"} beside sibling `^a` and other
-        // `z$`. Every PAIR overlaps - "ax" clears alternative+`^a`, "bz"
-        // clears alternative+`z$`, and `^a` with `z$` share "az" through
-        // the unprovable-pattern abstention - but the three share
+        // arms, so the contract is pinned at the judge). ENUM trios: the
+        // alternative pins {"a","b"}, the sibling {"a","c"}, the other
+        // {"b","c"} — every PAIR shares a member and the three share
         // nothing. The pairwise witness returned true pre-fix; the value
         // witness enumerates the pinned domain, finds no member clearing
-        // both string domains, and refuses.
+        // all three sides, and refuses.
         let w = json!({
-            "anyOf": [{"enum": ["ax", "bz"]}, {"type": "boolean"}],
-            "pattern": "^a"
+            "anyOf": [{"enum": ["a", "b"]}, {"type": "boolean"}],
+            "enum": ["a", "c"]
         });
-        let other = json!({"pattern": "z$"});
+        let other = json!({"enum": ["b", "c"]});
         let root = Value::Null;
         let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
         assert!(
@@ -21194,19 +21192,19 @@ mod strict_fixwave_r32 {
 
     #[test]
     fn wrapper_witness_keep_side_shares_a_pinned_member() {
-        // Keep-side: the other side's domain admits "ax", which clears
-        // the alternative and the sibling pattern - the trio genuinely
-        // admits "ax" and the pair stays satisfiable.
+        // Keep-side: the trio shares "zz" — a member of the alternative
+        // that clears the sibling and the other side alike — and the pair
+        // stays satisfiable (the enumerated witness must find it).
         let w = json!({
-            "anyOf": [{"enum": ["ax", "bz"]}, {"type": "boolean"}],
-            "pattern": "^a"
+            "anyOf": [{"enum": ["a", "zz"]}, {"type": "boolean"}],
+            "enum": ["zz", "c"]
         });
-        let other = json!({"pattern": "x$"});
+        let other = json!({"enum": ["b", "zz"]});
         let root = Value::Null;
         let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
         assert!(
             schema_pair_satisfiable(&w, &other, &root, 0, &mut budget),
-            "the trio admits ax: the pair stays satisfiable"
+            "the trio admits zz: the pair stays satisfiable"
         );
     }
 
