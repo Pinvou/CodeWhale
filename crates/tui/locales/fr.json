@@ -1140,6 +1140,7 @@
   "VoiceErrNetwork": "Voix : échec de la requête de transcription",
   "VoiceErrEmptySend": "Voix : rien à envoyer",
   "VoiceErrTooShort": "Voix : aucune parole détectée, enregistrement trop court",
+  "VoiceErrRecorderStalled": "Voix : l'enregistreur ne répond plus, l'audio capté a été perdu. Vérifiez le micro et réessayez.",
   "VoiceRecording": "🎙 Enregistrement... parlez maintenant",
   "VoiceProcessing": "🎙 Transcription...",
   "VoiceTranscribed": "🎙 Transcrit",

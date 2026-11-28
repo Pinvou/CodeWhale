@@ -1430,8 +1430,8 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -1546,8 +1546,8 @@ async fn operation_key_replays_torn_response_survives_restart_and_rejects_mismat
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -1761,8 +1761,8 @@ async fn thread_updates_while_start_waits_for_capacity_survive_latest_turn_write
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -1927,8 +1927,8 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -3450,6 +3450,71 @@ async fn aggregate_usage_marks_bounded_journal_truncation_incomplete() -> Result
 }
 
 #[test]
+fn runtime_usage_after_the_final_save_persists_at_sink_retirement() -> Result<()> {
+    // Review 5926566445: a detached child can hold its lease past the
+    // parent's final settlement save. Reports the sink accepted after that
+    // save only stage until the last lease drops, so retirement itself must
+    // flush the staged form — no later settlement save exists on this path.
+    // The pre-fix behavior needed the explicit settlement save below, which
+    // the reviewer called out as not covering this boundary.
+    let _cost_scope = crate::cost_status::test_scope();
+    let data_dir = test_runtime_dir();
+    let manager = test_manager(data_dir.clone())?;
+    let thread = sample_thread("thr_sink_retire_flush");
+    manager.store.save_thread(&thread)?;
+    let turn = sample_turn(
+        &thread.id,
+        "turn_sink_retire_flush",
+        RuntimeTurnStatus::InProgress,
+    );
+    manager.store.save_turn(&turn)?;
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("active runtime owner lease");
+    crate::cost_status::finish_runtime_usage_owner(&turn.id);
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-detached",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "detached:response:test",
+        &route,
+        &Usage {
+            input_tokens: 9,
+            output_tokens: 4,
+            ..Usage::default()
+        },
+    );
+    // No settlement save here: retirement must be the durable boundary.
+    drop(lease);
+    drop(manager);
+
+    let reopened = test_manager(data_dir)?;
+    let persisted = reopened.store.load_turn(&turn.id)?;
+    assert_eq!(
+        persisted.routed_usage.len(),
+        1,
+        "post-settlement usage must survive restart via the retirement flush"
+    );
+    assert_eq!(persisted.routed_usage[0].usage.input_tokens, 9);
+    assert_eq!(persisted.routed_usage[0].usage.output_tokens, 4);
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the retirement flush must not duplicate the record into the fallback journal"
+    );
+    Ok(())
+}
+
+#[test]
 fn runtime_usage_sink_survives_parent_terminal_and_restart_exactly_once() -> Result<()> {
     let _cost_scope = crate::cost_status::test_scope();
     let data_dir = test_runtime_dir();
@@ -3498,6 +3563,12 @@ fn runtime_usage_sink_survives_parent_terminal_and_restart_exactly_once() -> Res
         },
     );
     drop(lease);
+    // Settlement-shaped flush: the production turn settlement persists the
+    // staged routed-usage form with its terminal save (the disclosed batching
+    // trade means an unflushed crash window exists, but this test pins the
+    // restart contract, so it settles explicitly before dropping the store).
+    let settled = manager.store.load_turn(&turn.id)?;
+    manager.store.save_turn(&settled)?;
     drop(manager);
 
     let reopened = test_manager(data_dir.clone())?;
@@ -3547,7 +3618,8 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
         Some(ApiProvider::Deepseek.default_base_url()),
         Utc::now(),
     );
-    for index in 0..90 {
+    let extra = 30usize;
+    for index in 0..MAX_ROUTED_USAGE_RECORDS_PER_TURN + extra {
         let path = match index % 3 {
             0 => "sink",
             1 => "mailbox",
@@ -3559,7 +3631,7 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
             crate::cost_status::EffectiveRouteUsage {
                 route: route.clone(),
                 usage: Usage {
-                    input_tokens: index,
+                    input_tokens: index as u32,
                     ..Usage::default()
                 },
             },
@@ -3567,8 +3639,15 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
     }
 
     assert_eq!(turn.routed_usage.len(), MAX_ROUTED_USAGE_RECORDS_PER_TURN);
-    assert_eq!(turn.routed_usage_dropped_records, 26);
-    assert_eq!(turn.routed_usage_source_ids.len(), 90);
+    assert_eq!(
+        MAX_ROUTED_USAGE_RECORDS_PER_TURN, 2_048,
+        "the audited per-turn routed-usage cap"
+    );
+    assert_eq!(turn.routed_usage_dropped_records, extra as u64);
+    assert_eq!(
+        turn.routed_usage_source_ids.len(),
+        MAX_ROUTED_USAGE_RECORDS_PER_TURN + extra
+    );
     let before = turn.clone();
     assert!(!append_routed_usage_record(
         &mut turn,
@@ -3586,6 +3665,1054 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
         turn.routed_usage_dropped_records,
         before.routed_usage_dropped_records
     );
+}
+
+/// The terminal settlement must not lose records a still-registered
+/// terminal-turn sink stages while the settle awaits are running. Building
+/// the terminal snapshot before those awaits and saving it afterwards wipes
+/// exactly those records (`save_turn` clears the stage), while the
+/// settlement shape — re-`load_turn` under the same mutation hold that saves,
+/// after the settles — folds the staged form into the terminal save. Pins
+/// both: the destructive snapshot shape, and the settlement shape that
+/// survives it.
+#[test]
+fn settlement_snapshot_built_after_the_settles_keeps_records_staged_in_the_gap() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn("thr_gap", "turn_gap", RuntimeTurnStatus::InProgress);
+    store.save_turn(&turn).expect("persist base turn");
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = crate::cost_status::EffectiveRouteUsage {
+        route,
+        usage: Usage {
+            input_tokens: 11,
+            ..Usage::default()
+        },
+    };
+
+    // The snapshot-across-await shape: a snapshot loaded BEFORE the in-gap
+    // append, saved after it, wipes the staged record from disk (the stage
+    // clears with the save). This is the hazard the settlement ordering must
+    // avoid.
+    let stale_snapshot = store.load_turn(&turn.id).expect("snapshot before the gap");
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "sink:in-gap", record.clone())
+            .expect("in-gap staged append"),
+        "the terminal-turn sink is still registered in the gap"
+    );
+    let wiped = {
+        let _turn_mutation = store.turn_mutation.lock();
+        let mut wiped = stale_snapshot.clone();
+        wiped.status = RuntimeTurnStatus::Completed;
+        store.save_turn(&wiped).expect("save stale snapshot");
+        wiped
+    };
+    assert_eq!(
+        wiped.routed_usage.len(),
+        0,
+        "the stale snapshot was loaded before the in-gap append (base has none)"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("reload")
+            .routed_usage
+            .len(),
+        0,
+        "saving the stale snapshot destroys the staged record — this is why \
+         the settlement must rebuild its snapshot after the settles"
+    );
+
+    // Now the settlement shape on that destroyed base: re-stage the in-gap
+    // record and rebuild the snapshot under the same mutation hold that
+    // saves, so the staged form rides the terminal save and the stage ends
+    // empty.
+    store
+        .append_routed_usage_staged(&turn.id, "sink:in-gap-2", record)
+        .expect("re-stage for the settlement shape");
+    let settled = {
+        let _turn_mutation = store.turn_mutation.lock();
+        let mut settled = store.load_turn(&turn.id).expect("settlement load");
+        assert_eq!(
+            settled.routed_usage.len(),
+            1,
+            "load_turn returns the staged form for the rebuild"
+        );
+        settled.status = RuntimeTurnStatus::Completed;
+        store.save_turn(&settled).expect("settlement save");
+        settled
+    };
+    assert_eq!(
+        settled.routed_usage.len(),
+        1,
+        "the settlement save must carry the record staged during the settles"
+    );
+    assert_eq!(settled.routed_usage[0].usage.input_tokens, 11);
+    assert!(
+        store.routed_usage_staged.lock().is_empty(),
+        "the stage clears only after the record is durably carried"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// (#847 review: a late report after the settlement save used to be lost on
+/// a normal exit) Once the settlement save completes and the turn is marked
+/// settled, a detached child's routed-usage record must be written THROUGH
+/// to disk instead of joining the in-memory stage batch: the lease can
+/// still be held across process exit, and neither the stage map nor any
+/// static runs Drops then. Pins the write-through, its exactly-once
+/// dedupe, and its durability across a fresh store open (the "normal exit
+/// and restart" step).
+#[test]
+fn late_report_after_settlement_is_written_through_and_survives_reopen() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn("thr_late", "turn_late", RuntimeTurnStatus::InProgress);
+    store.save_turn(&turn).expect("persist base turn");
+
+    // Settlement boundary, exactly as the monitor does it: the terminal
+    // save under the mutation hold, then the settled marker.
+    {
+        let _turn_mutation = store.turn_mutation.lock();
+        let mut settled = store.load_turn(&turn.id).expect("settlement load");
+        settled.status = RuntimeTurnStatus::Completed;
+        store.save_turn(&settled).expect("settlement save");
+    }
+    store.mark_turn_settled(&turn.id);
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = crate::cost_status::EffectiveRouteUsage {
+        route,
+        usage: Usage {
+            input_tokens: 13,
+            ..Usage::default()
+        },
+    };
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "sink:late-child", record)
+            .expect("late append after settlement"),
+        "the late record must be newly delivered"
+    );
+    // Write-through: the stage map holds nothing for this turn.
+    assert!(
+        store.routed_usage_staged.lock().is_empty(),
+        "a settled turn's late record must not stage"
+    );
+    // Exactly-once: a re-delivery of the same source id is a no-op.
+    let duplicate = crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek-primary",
+            "deepseek-v4-flash",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            Utc::now(),
+        ),
+        usage: Usage {
+            input_tokens: 13,
+            ..Usage::default()
+        },
+    };
+    assert!(
+        !store
+            .append_routed_usage_staged(&turn.id, "sink:late-child", duplicate)
+            .expect("duplicate delivery answers false"),
+        "the source fingerprint dedupe must survive the write-through path"
+    );
+    // "Normal exit and restart": a fresh store over the same root must see
+    // the record — it is on disk, not in process memory.
+    drop(store);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 13);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn monitor_failure_settlement_carries_records_staged_while_the_settles_await() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn("thr_mf_gap", "turn_mf_gap", RuntimeTurnStatus::InProgress);
+    let item = sample_item(
+        "turn_mf_gap",
+        "item_mf_gap",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    // A detached child's lease keeps the sink registered past the settle's
+    // `finish_runtime_usage_owner` (which only retires lease-less sinks) —
+    // that still-registered sink is exactly the mid-gap delivery path under
+    // test. Without a lease the sink would be gone before the settles and
+    // the record would fall back to the journal instead.
+    let _lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+
+    // Park the settlement inside its first terminal `emit_event` by holding
+    // the event-emit lock: the queued item is terminalized on disk by then,
+    // and the terminal snapshot does not exist yet — the settlement builds it
+    // after the settles, under the same hold that saves. (The ordering this
+    // replaces snapshotted before the item-failure emissions, so a record
+    // staged at this point was wiped by the stale snapshot's save while the
+    // stage cleared.)
+    let emit_gate = manager.event_emit.lock().await;
+    let settler = {
+        let manager = std::sync::Arc::clone(&manager);
+        let thread_id = turn.thread_id.clone();
+        let turn_id = turn.id.clone();
+        tokio::spawn(async move {
+            manager
+                .settle_claimed_turn_failure(&thread_id, &turn_id, "monitor died")
+                .await;
+        })
+    };
+    for _ in 0..200 {
+        assert!(
+            !settler.is_finished(),
+            "the settlement finished without parking on the emit gate"
+        );
+        let terminalized = manager
+            .store
+            .load_item(&item.id)
+            .map(|stored| stored.status == TurnItemLifecycleStatus::Failed)
+            .unwrap_or(false);
+        if terminalized {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !settler.is_finished(),
+        "the settlement must be parked inside the item-failure emit"
+    );
+
+    // A still-registered sink delivers in exactly this gap — through the
+    // production delivery path, as a detached child reporting after the
+    // monitor died would.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:mid-settle",
+        &route,
+        &Usage {
+            input_tokens: 11,
+            ..Usage::default()
+        },
+    );
+    drop(emit_gate);
+    settler.await.expect("settlement task joins");
+
+    let persisted = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("reload terminal turn");
+    assert_eq!(persisted.status, RuntimeTurnStatus::Failed);
+    assert_eq!(persisted.error.as_deref(), Some("monitor died"));
+    assert_eq!(
+        persisted.routed_usage.len(),
+        1,
+        "a record staged while the settles awaited must ride the terminal save \
+         instead of being wiped by a stale snapshot plus the stage clear"
+    );
+    assert_eq!(persisted.routed_usage[0].usage.input_tokens, 11);
+    assert_eq!(
+        persisted.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:mid-settle"
+        )],
+        "the staged record's (fingerprinted) source id must survive the terminal save"
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the stage clears only once the record is durably carried"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the record, so no journal fallback may exist"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// (#154 review: the failure-settlement path must mark the turn settled too)
+/// `settle_claimed_turn_failure` persists the terminal turn exactly like the
+/// happy monitor path, so a detached child's late report after that save must
+/// also be written THROUGH instead of joining the in-memory stage batch —
+/// with the lease still held, a normal exit would drop a staged record. This
+/// drives the production failure settlement (not a store fixture) and then
+/// delivers through the real sink path, pinning write-through, no journal
+/// fallback, and durability across a fresh store open.
+#[tokio::test]
+async fn late_report_after_failure_settlement_is_written_through_and_survives_reopen() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn("thr_mf_late", "turn_mf_late", RuntimeTurnStatus::InProgress);
+    let item = sample_item(
+        "turn_mf_late",
+        "item_mf_late",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    // The detached child keeps its lease across the failure settlement, so
+    // the sink stays registered and a later report is delivered directly.
+    let _lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path, driven to completion.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+    let settled = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("reload terminal turn");
+    assert_eq!(settled.status, RuntimeTurnStatus::Failed);
+    assert_eq!(settled.error.as_deref(), Some("monitor died"));
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the failure settlement must leave no stage copy behind"
+    );
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late detached child's report after the failure settlement — through
+    // the production delivery path, as it would arrive in the real process.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:late-after-failure",
+        &route,
+        &Usage {
+            input_tokens: 17,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "a failure-settled turn's late report must write through, not stage \
+         (a normal exit with the lease held would drop a staged record)"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the late record, so no journal fallback may exist"
+    );
+    // "Normal exit and restart": a fresh store over the same root must see
+    // the late record — it is on disk, not in process memory.
+    drop(_lease);
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 17);
+    assert_eq!(
+        from_disk.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:late-after-failure"
+        )],
+        "the late record's (fingerprinted) source id must survive the reopen"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// (review 6020048780: a failed settled write-through dropped the record to
+/// the journal fallback, which the retirement flush never drains) A settled
+/// write that fails transiently must keep the appended record in the same
+/// retryable stage the batched writer uses: the sink acknowledges it, no
+/// journal fallback fires, and the sink's retirement flush persists it once
+/// storage recovers — pinned end-to-end through the production delivery
+/// path, a blocked turn file, and the retirement hook.
+///
+/// Unix-only (review 6020684714): the fault injection is the turns
+/// directory's read-only permission mode — the portable way to fail the
+/// atomic write while keeping `load_turn` healthy — so the whole regression
+/// rides the same gate instead of a half-gated setup that would pass the
+/// write through ungated and fail the nonempty-stage assertion on Windows.
+#[cfg(unix)]
+#[tokio::test]
+async fn transient_settled_write_failure_is_retryable_at_sink_retirement() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn(
+        "thr_mf_retry",
+        "turn_mf_retry",
+        RuntimeTurnStatus::InProgress,
+    );
+    let item = sample_item(
+        "thr_mf_retry",
+        "item_mf_retry",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block writes to the turns directory while reads stay healthy: the
+    // settled write-through save fails transiently (the atomic write cannot
+    // create its temp file), but `load_turn` keeps serving the record.
+    let turns_dir = manager.store.turns_dir.clone();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let read_only = std::fs::metadata(&turns_dir)
+            .expect("stat the turns dir")
+            .permissions();
+        std::fs::set_permissions(
+            &turns_dir,
+            std::fs::Permissions::from_mode(read_only.mode() & 0o555),
+        )
+        .expect("read-only the turns dir");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late detached child's report lands while the write fails: the sink
+    // must still acknowledge it (retryably held by the store), not send it
+    // to the in-memory journal fallback.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:retry-after-failed-write",
+        &route,
+        &Usage {
+            input_tokens: 23,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.routed_usage_staged.lock().is_empty(),
+        "a record whose settled write failed must stay in the retryable stage"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the record, so no journal fallback may exist"
+    );
+
+    // Storage recovers; the last lease drops and the sink's retirement is
+    // the durable final-owner boundary: its flush must persist the record.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turns_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the turns dir permissions");
+    }
+    drop(lease);
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the retirement flush must drain the retryable stage"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the retirement flush must not fall back to the journal"
+    );
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 23);
+    assert_eq!(
+        from_disk.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:retry-after-failed-write"
+        )],
+        "the retryable record must be durable across a fresh store open"
+    );
+    // Exactly-once: a re-delivery of the same source id is a no-op.
+    let duplicate = crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek-primary",
+            "deepseek-v4-flash",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            Utc::now(),
+        ),
+        usage: Usage {
+            input_tokens: 23,
+            ..Usage::default()
+        },
+    };
+    let re_acked = reopened
+        .append_routed_usage_staged(&turn.id, "sink:retry-after-failed-write", duplicate)
+        .expect("duplicate delivery after recovery");
+    assert!(
+        !re_acked,
+        "the source fingerprint dedupe must survive the retryable path"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// (review 6024797269: the settled branch's initial read could also lose the
+/// record — a failed load returned before any stage entry existed, the sink
+/// fell back to the in-memory journal, and the retirement flush only reads
+/// the stage) A settled append whose LOAD fails transiently must park the
+/// accepted record in the retryable pending queue: the sink acknowledges it,
+/// no journal fallback fires, and once storage recovers the sink's
+/// retirement flush merges it into the turn and persists it. End-to-end
+/// through production paths: failure settlement, a late report through the
+/// real sink while the turn file is unreadable, recovery, then the last
+/// lease drop.
+#[cfg(unix)]
+#[tokio::test]
+async fn transient_settled_read_failure_is_retryable_at_sink_retirement() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn(
+        "thr_mf_readfail",
+        "turn_mf_readfail",
+        RuntimeTurnStatus::InProgress,
+    );
+    let item = sample_item(
+        "thr_mf_readfail",
+        "item_mf_readfail",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block reads of the turn file only: the settled append's initial load
+    // fails transiently, while atomic writes to the directory stay healthy
+    // (the recovery below is a plain permission restore, so the retirement
+    // flush's own write cannot fail).
+    let turn_path = manager.store.turns_dir.join(format!("{}.json", turn.id));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable the turn file");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late detached child's report lands while the read fails: the sink
+    // must acknowledge it into the retryable pending queue, not the journal.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:retry-after-failed-read",
+        &route,
+        &Usage {
+            input_tokens: 31,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "a record whose settled read failed must park in the pending queue"
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the write-side stage must stay clear on a read failure"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the record, so no journal fallback may exist"
+    );
+    // A duplicate source id while still parked is a no-op.
+    let before = manager.store.settled_pending.lock().len();
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:retry-after-failed-read",
+        &route,
+        &Usage {
+            input_tokens: 31,
+            ..Usage::default()
+        },
+    );
+    assert_eq!(
+        manager.store.settled_pending.lock().len(),
+        before,
+        "a duplicate delivery while parked must not queue a second record"
+    );
+
+    // Storage recovers; the last lease drops and the sink's retirement is
+    // the durable final-owner boundary: its flush must merge the parked
+    // record into the turn and persist it.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the turn file permissions");
+    }
+    drop(lease);
+    assert!(
+        manager.store.settled_pending.lock().is_empty(),
+        "the retirement flush must drain the pending queue"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the retirement flush must not fall back to the journal"
+    );
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 31);
+    assert_eq!(
+        from_disk.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:retry-after-failed-read"
+        )],
+        "the parked record must be durable across a fresh store open"
+    );
+    // Exactly-once after recovery: a re-delivery of the same source id is a
+    // no-op.
+    let duplicate = crate::cost_status::EffectiveRouteUsage {
+        route: crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            ApiProvider::Deepseek,
+            "deepseek-primary",
+            "deepseek-v4-flash",
+            Some(ApiProvider::Deepseek.default_base_url()),
+            Utc::now(),
+        ),
+        usage: Usage {
+            input_tokens: 31,
+            ..Usage::default()
+        },
+    };
+    let re_acked = reopened
+        .append_routed_usage_staged(&turn.id, "sink:retry-after-failed-read", duplicate)
+        .expect("duplicate delivery after recovery");
+    assert!(
+        !re_acked,
+        "the source fingerprint dedupe must cover the parked path"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// (review 6025421726: after the retirement hook's retries are exhausted the
+/// sink is gone and nothing consumed the parked queue) When storage is still
+/// unreadable at the last lease drop, the retirement flush fails all its
+/// attempts and the sink retires — the parked records must stay queued, and
+/// once storage recovers an ordinary read must take over as the recovery
+/// owner: drain the queue into the turn and persist it, so the accepted
+/// usage becomes visible in persisted history even though no append or
+/// retirement ever follows.
+#[cfg(unix)]
+#[tokio::test]
+async fn settled_read_recovery_survives_retirement_exhaustion_via_ordinary_read() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn(
+        "thr_mf_exhaust",
+        "turn_mf_exhaust",
+        RuntimeTurnStatus::InProgress,
+    );
+    let item = sample_item(
+        "thr_mf_exhaust",
+        "item_mf_exhaust",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block reads of the turn file only.
+    let turn_path = manager.store.turns_dir.join(format!("{}.json", turn.id));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable the turn file");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // A late report parks in the pending queue while reads fail.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:exhausted-recovery",
+        &route,
+        &Usage {
+            input_tokens: 37,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "the report must park in the pending queue while reads fail"
+    );
+
+    // The last lease retires while storage is STILL unreadable: the
+    // retirement hook's three attempts each fail (its load cannot read the
+    // turn), the sink is removed, and the queue must survive with its
+    // records — no journal fallback may have absorbed them.
+    drop(lease);
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "exhausted retirement attempts must leave the records parked"
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the write-side stage must stay clear through exhausted retirement"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the accepted report must never reach the journal fallback"
+    );
+
+    // Storage recovers; an ordinary read is now the only remaining owner.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the turn file permissions");
+    }
+    let recovered = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("ordinary read after recovery");
+    assert_eq!(recovered.routed_usage.len(), 1);
+    assert_eq!(recovered.routed_usage[0].usage.input_tokens, 37);
+    assert_eq!(
+        recovered.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:exhausted-recovery"
+        )],
+        "the ordinary read must surface the parked record"
+    );
+    assert!(
+        manager.store.settled_pending.lock().is_empty(),
+        "the recovery read must drain the parked queue"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the recovery drain must not fall back to the journal"
+    );
+    // Persisted history: the drained form is on disk, visible to a fresh
+    // store open.
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 1);
+    assert_eq!(from_disk.routed_usage[0].usage.input_tokens, 37);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
+    // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
+    // would cost ~950 MB of O(N²) disk churn on a maximal fleet turn. The
+    // staging layer batches those writes; this pins the three contracts that
+    // make it safe: staged appends stay visible to readers (`load_turn` and
+    // the directory-scan listings alike), disk trails by at most one batch,
+    // and a plain save supersedes the stage.
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn("thr_staged", "turn_staged", RuntimeTurnStatus::InProgress);
+    store.save_turn(&turn).expect("persist base turn");
+    let turn_path = store.turns_dir.join(format!("{}.json", turn.id));
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = |index: usize| crate::cost_status::EffectiveRouteUsage {
+        route: route.clone(),
+        usage: Usage {
+            input_tokens: index as u32,
+            ..Usage::default()
+        },
+    };
+    let disk_routed_len = || -> usize {
+        let raw = std::fs::read_to_string(&turn_path).expect("read turn from disk");
+        serde_json::from_str::<TurnRecord>(&raw)
+            .expect("parse persisted turn")
+            .routed_usage
+            .len()
+    };
+
+    // BATCH - 1 appends stay staged: readers see them through `load_turn`,
+    // the disk file does not grow.
+    for index in 0..ROUTED_USAGE_FLUSH_BATCH - 1 {
+        assert!(
+            store
+                .append_routed_usage_staged(
+                    &turn.id,
+                    &format!("sink:response:{index}"),
+                    record(index)
+                )
+                .expect("staged append"),
+            "append {index} must be accepted"
+        );
+    }
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("coherent read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH - 1,
+        "load_turn returns the staged form"
+    );
+    assert_eq!(
+        store
+            .list_turns_for_thread(&turn.thread_id)
+            .expect("coherent listing")
+            .iter()
+            .map(|listed| listed.routed_usage.len())
+            .max()
+            .unwrap_or(0),
+        ROUTED_USAGE_FLUSH_BATCH - 1,
+        "the directory-scan listing sees the staged form too — usage \
+         aggregation must not under-report between batch flushes"
+    );
+    assert_eq!(
+        disk_routed_len(),
+        0,
+        "no per-record disk write below the batch threshold"
+    );
+
+    // The BATCH-th append flushes: disk catches up with every staged record.
+    assert!(
+        store
+            .append_routed_usage_staged(
+                &turn.id,
+                &format!("sink:response:{}", ROUTED_USAGE_FLUSH_BATCH - 1),
+                record(ROUTED_USAGE_FLUSH_BATCH - 1)
+            )
+            .expect("batched append")
+    );
+    assert_eq!(
+        disk_routed_len(),
+        ROUTED_USAGE_FLUSH_BATCH,
+        "batch flush persists every staged record"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("post-flush read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH
+    );
+
+    // A plain save of the loaded (staged) record supersedes the stage — the
+    // settlement path's shape: staged records must ride along, not vanish.
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "mailbox:response:0", record(100))
+            .expect("stage one more")
+    );
+    let mut settlement = store.load_turn(&turn.id).expect("load staged turn");
+    settlement.status = RuntimeTurnStatus::Completed;
+    store.save_turn(&settlement).expect("settlement save");
+    assert_eq!(
+        disk_routed_len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1,
+        "the settlement save carries staged records"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("final read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A failed batch flush must not silently drop the staged batch: the
+/// already-acknowledged records whose sinks returned true are journaled only
+/// when the append itself fails, so losing them here would be an
+/// unrecoverable billing gap. A failed write keeps the stage resident and the
+/// next flush retries it.
+#[test]
+fn staged_batch_survives_a_failed_flush_and_retries() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn(
+        "thr_flushfail",
+        "turn_flushfail",
+        RuntimeTurnStatus::InProgress,
+    );
+    store.save_turn(&turn).expect("persist base turn");
+    let turn_path = store.turns_dir.join(format!("{}.json", turn.id));
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = |index: usize| crate::cost_status::EffectiveRouteUsage {
+        route: route.clone(),
+        usage: Usage {
+            input_tokens: index as u32,
+            ..Usage::default()
+        },
+    };
+
+    // Stage up to one short of the batch, then sabotage the target path
+    // (a directory where the JSON file must be) so the batch flush's
+    // atomic write cannot succeed.
+    for index in 0..(ROUTED_USAGE_FLUSH_BATCH - 1) {
+        assert!(
+            store
+                .append_routed_usage_staged(
+                    &turn.id,
+                    &format!("sink:response:{index}"),
+                    record(index)
+                )
+                .expect("stage append"),
+            "record {index} should be newly staged"
+        );
+    }
+    std::fs::remove_file(&turn_path).expect("drop the turn file");
+    std::fs::create_dir(&turn_path).expect("sabotage the turn path with a directory");
+
+    assert!(
+        store
+            .append_routed_usage_staged(
+                &turn.id,
+                &format!("sink:response:{}", ROUTED_USAGE_FLUSH_BATCH - 1),
+                record(ROUTED_USAGE_FLUSH_BATCH - 1)
+            )
+            .is_err(),
+        "the batch flush fails while the turn path is unwritable"
+    );
+    // The whole staged batch is still resident and readable.
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("staged form survives the failed flush")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH,
+        "no acknowledged record is lost to a failed flush"
+    );
+
+    // Repair the path: the next append triggers a retry flush that
+    // persists the whole batch plus the new record.
+    std::fs::remove_dir(&turn_path).expect("clear the sabotaging directory");
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "sink:response:retry", record(9_999))
+            .expect("retry flush succeeds"),
+        "the retried record is newly persisted"
+    );
+    let raw = std::fs::read_to_string(&turn_path).expect("read repaired turn from disk");
+    let persisted: TurnRecord = serde_json::from_str(&raw).expect("parse persisted turn");
+    assert_eq!(
+        persisted.routed_usage.len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1,
+        "the retry flush carries the whole recovered batch"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("post-retry read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -5291,8 +6418,8 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -5434,8 +6561,8 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
+            error_source: None,
             // Completion-time endpoint evidence must be ignored.
             base_url: Some("https://api.stepfun.com/v1/coding".to_string()),
         })
@@ -5536,8 +6663,8 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -5591,8 +6718,8 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -5678,8 +6805,8 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                     compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
-                    error_source: None,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -5743,8 +6870,8 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
                     compaction_id: None,
                     usage: Usage::default(),
                     status: TurnOutcomeStatus::Completed,
-                    error_source: None,
                     error: None,
+                    error_source: None,
                     tool_catalog: None,
                     base_url: None,
                 })
@@ -6858,8 +7985,8 @@ async fn compact_interrupt_persists_canceled_item_for_the_exact_request() -> Res
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -7101,8 +8228,8 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7337,8 +8464,8 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7454,8 +8581,8 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("read")]),
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7531,8 +8658,8 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     },
                     status: TurnOutcomeStatus::Failed,
                     error: Some("provider exploded".to_string()),
-                    error_source: None,
                     tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -7627,8 +8754,8 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
                         },
                         status: TurnOutcomeStatus::Completed,
                         error: None,
-                        error_source: None,
                         tool_catalog: Some(vec![catalog_tool("update_goal")]),
+                        error_source: None,
                         base_url: None,
                     })
                     .await;
@@ -7916,8 +9043,8 @@ async fn approval_required_with_stale_active_turn_is_denied() -> Result<()> {
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -8034,8 +9161,8 @@ async fn approval_required_awaits_external_decision_allow() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8150,8 +9277,8 @@ async fn user_input_snapshot_survives_reload_and_clears_after_submission() -> Re
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8502,8 +9629,8 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8757,8 +9884,8 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8900,8 +10027,8 @@ async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -8973,8 +10100,8 @@ async fn terminal_turn_cancels_pending_user_input_and_clears_snapshot() -> Resul
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -9166,8 +10293,8 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -9355,8 +10482,8 @@ async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Resu
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10188,8 +11315,8 @@ async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10265,8 +11392,8 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Interrupted,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10383,8 +11510,8 @@ async fn approval_required_external_deny_is_denied() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10457,8 +11584,8 @@ async fn auto_review_force_prompt_is_denied_without_opening_a_modal() -> Result<
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -10574,8 +11701,8 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -10654,8 +11781,8 @@ async fn forkguard_pump_never_auto_approves_a_force_prompt_hold() -> Result<()> 
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -10774,8 +11901,8 @@ async fn approval_pends_until_interrupt_and_next_turn_can_start() -> Result<()> 
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11224,8 +12351,8 @@ async fn thinking_delta_emits_agent_reasoning_item() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11365,8 +12492,8 @@ async fn approval_required_remember_flips_thread_auto_approve() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11454,8 +12581,8 @@ async fn elevation_required_with_stale_active_turn_is_denied() -> Result<()> {
             },
             status: TurnOutcomeStatus::Completed,
             error: None,
-            error_source: None,
             tool_catalog: None,
+            error_source: None,
             base_url: None,
         })
         .await?;
@@ -11525,8 +12652,8 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                     },
                     status: TurnOutcomeStatus::Completed,
                     error: None,
-                    error_source: None,
                     tool_catalog: None,
+                    error_source: None,
                     base_url: None,
                 })
                 .await;
@@ -11687,8 +12814,8 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -11778,8 +12905,8 @@ async fn steer_rejects_a_terminal_durable_turn_without_dispatch_or_item() -> Res
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -12057,8 +13184,8 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
-                            error_source: None,
                             tool_catalog: None,
+                            error_source: None,
                             base_url: None,
                         })
                         .await;
@@ -12098,8 +13225,8 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             },
                             status: TurnOutcomeStatus::Completed,
                             error: None,
-                            error_source: None,
                             tool_catalog: None,
+                            error_source: None,
                             base_url: None,
                         })
                         .await;
@@ -13117,8 +14244,8 @@ async fn agent_mail_release_acceptance_two_task_matrix() -> Result<()> {
             compaction_id: None,
             usage: Usage::default(),
             status: TurnOutcomeStatus::Completed,
-            error_source: None,
             error: None,
+            error_source: None,
             tool_catalog: None,
             base_url: None,
         })
@@ -13709,4 +14836,196 @@ async fn update_thread_rejects_a_relative_workspace() -> Result<()> {
     let reloaded = manager.get_thread(&thread.id).await?;
     assert_eq!(reloaded.workspace, workspace);
     Ok(())
+}
+
+/// (reviews 6032888025 + 6033393232: the read-side drain used to remove the
+/// pending queue before trying `turn_mutation`, so a concurrent settled
+/// append could park a new record into the emptied map and the reader's
+/// restore would overwrite it — acknowledged usage lost) The drain must take
+/// the mutation guard BEFORE touching the queue: with the guard contended the
+/// queue — and the record a concurrent append parked — survives untouched,
+/// and the later uncontended read drains both records to disk.
+#[cfg(unix)]
+#[tokio::test]
+async fn contended_read_drain_leaves_concurrently_parked_records_intact() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn("thr_mf_race", "turn_mf_race", RuntimeTurnStatus::InProgress);
+    let item = sample_item(
+        "thr_mf_race",
+        "item_mf_race",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    let _lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    // The production failure-settlement path marks the turn settled.
+    manager
+        .settle_claimed_turn_failure(&turn.thread_id, &turn.id, "monitor died")
+        .await;
+
+    // Block reads of the turn file: reports park instead of writing through.
+    let turn_path = manager.store.turns_dir.join(format!("{}.json", turn.id));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable the turn file");
+    }
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    // Record A parks via the production sink path.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:race-a",
+        &route,
+        &Usage {
+            input_tokens: 41,
+            ..Usage::default()
+        },
+    );
+    assert!(
+        !manager.store.settled_pending.lock().is_empty(),
+        "record A must park while reads fail"
+    );
+
+    // The race's writer half, deterministically: an in-flight settled append
+    // holds `turn_mutation` and parks record B into the map exactly as the
+    // append path does while its own load fails.
+    let guard = manager.store.turn_mutation.lock();
+    let parked_b = vec![super::PendingRoutedUsage {
+        source_id: "sink:race-b".to_string(),
+        usage: crate::cost_status::EffectiveRouteUsage {
+            route: route.clone(),
+            usage: Usage {
+                input_tokens: 43,
+                ..Usage::default()
+            },
+        },
+    }];
+    manager
+        .store
+        .settled_pending
+        .lock()
+        .entry(turn.id.clone())
+        .or_default()
+        .push(super::PendingRoutedUsage {
+            source_id: "sink:race-b".to_string(),
+            usage: crate::cost_status::EffectiveRouteUsage {
+                route: route.clone(),
+                usage: Usage {
+                    input_tokens: 43,
+                    ..Usage::default()
+                },
+            },
+        });
+    drop(parked_b);
+
+    // The reader half: an ordinary read must see the contended guard and
+    // leave the queue — BOTH records — untouched.
+    // The invariant the reviews pin, checked as a property: while the
+    // mutation guard is held, the pending queue must NEVER momentarily
+    // vanish — the drain takes the guard before touching the map, so a
+    // concurrent reader cannot open the remove→restore window a parked
+    // record could fall into. A buggy remove-before-lock order churns the
+    // map under the held guard and this poll observes the absence.
+    let (absence_tx, absence_rx) = std::sync::mpsc::channel();
+    let watcher_store = manager.store.clone();
+    let watch_turn = turn.id.clone();
+    let watcher = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if watcher_store
+                .settled_pending
+                .lock()
+                .get(&watch_turn)
+                .is_none()
+            {
+                absence_tx.send(()).ok();
+                return;
+            }
+            std::thread::yield_now();
+        }
+    });
+
+    // Concurrent reader: repeated contended ordinary reads while the guard
+    // is held. Under the fix each attempt fails the try_lock without
+    // touching the map; under the reported order it churns the map.
+    let reader_store = manager.store.clone();
+    let reader_turn = turn.id.clone();
+    let reader = std::thread::spawn(move || {
+        for _ in 0..2000 {
+            let _ = reader_store.load_turn(&reader_turn);
+        }
+    });
+
+    let read = manager.store.load_turn(&turn.id);
+    assert!(
+        read.is_err(),
+        "storage is still unreadable, so the read must surface that"
+    );
+    reader.join().expect("reader joins");
+    let saw_absence = absence_rx.try_recv().is_ok();
+    watcher.join().expect("watcher joins");
+    assert!(
+        !saw_absence,
+        "a contended read must not remove the queue while the mutation guard \
+         is held (reviews 6032888025/6033393232)"
+    );
+    {
+        let pending = manager.store.settled_pending.lock();
+        let queue = pending.get(&turn.id).expect("the queue must survive");
+        let sources: Vec<&str> = queue.iter().map(|r| r.source_id.as_str()).collect();
+        assert!(
+            sources.contains(&"sink:race-a") && sources.contains(&"sink:race-b"),
+            "the contended read must not clobber the concurrently parked record: {sources:?}"
+        );
+    }
+    drop(guard);
+
+    // Storage recovers; an ordinary read drains both records in one save.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&turn_path, std::fs::Permissions::from_mode(0o644))
+            .expect("restore the turn file permissions");
+    }
+    let recovered = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("ordinary read after recovery");
+    assert_eq!(recovered.routed_usage.len(), 2);
+    assert!(
+        manager.store.settled_pending.lock().is_empty(),
+        "the uncontended read must drain the whole queue"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "neither record may reach the journal fallback"
+    );
+    drop(manager);
+    let reopened = RuntimeThreadStore::open(dir.clone()).expect("reopen store");
+    let from_disk = reopened.load_turn(&turn.id).expect("load after restart");
+    assert_eq!(from_disk.routed_usage.len(), 2);
+    let mut tokens: Vec<u32> = from_disk
+        .routed_usage
+        .iter()
+        .map(|r| r.usage.input_tokens)
+        .collect();
+    tokens.sort_unstable();
+    assert_eq!(tokens, vec![41, 43], "both parked records must persist");
+    let _ = std::fs::remove_dir_all(dir);
 }

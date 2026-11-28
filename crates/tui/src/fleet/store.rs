@@ -334,6 +334,33 @@ impl FleetFile {
         // those rows on read so the roster reads as roles again. The next
         // save writes the clean document.
         fleet.members.retain(|member| !member.is_bare_model_pin());
+        // An over-long display name used to hard-reject the whole member at
+        // read time. Clamp it instead and disclose the clip, so a hand-edited
+        // fleet with a verbose label still loads. [`Self::validate`] keeps the
+        // hard bound for programmatically built documents and saves.
+        for member in &mut fleet.members {
+            if let Some(display_name) = member.display_name.as_deref() {
+                let clipped: String = display_name
+                    .chars()
+                    .take(MAX_MEMBER_DISPLAY_NAME_CHARS)
+                    .collect();
+                if clipped != display_name {
+                    crate::logging::warn(format!(
+                        "member `{}` display_name exceeded {MAX_MEMBER_DISPLAY_NAME_CHARS} characters; clamped",
+                        member.id,
+                    ));
+                    // `logging::warn` is verbose-gated and the TUI force-disables
+                    // verbose, so the primary fleet surface would never see it;
+                    // `tracing` lands in the file log unconditionally.
+                    tracing::warn!(
+                        "fleet member `{}` display_name exceeded \
+                         {MAX_MEMBER_DISPLAY_NAME_CHARS} characters; clamped",
+                        member.id,
+                    );
+                    member.display_name = Some(clipped);
+                }
+            }
+        }
         fleet.validate()?;
         Ok(fleet)
     }
@@ -1084,6 +1111,27 @@ mod tests {
         assert!(text.contains("schema_revision = 2"));
         assert!(text.contains("display_name = \"Flash Scout\""));
         assert!(text.contains("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn parse_clamps_over_long_display_names_instead_of_rejecting() {
+        let long = "x".repeat(MAX_MEMBER_DISPLAY_NAME_CHARS + 10);
+        let text = format!(
+            r#"schema = "fleet"
+schema_revision = 2
+name = "Clamped"
+
+[[members]]
+id = "scout"
+display_name = "{long}"
+"#
+        );
+        let parsed = FleetFile::parse(&text).expect("parse must not reject an over-long label");
+        let display_name = parsed.members[0]
+            .display_name
+            .as_deref()
+            .expect("display_name kept");
+        assert_eq!(display_name.chars().count(), MAX_MEMBER_DISPLAY_NAME_CHARS);
     }
 
     #[test]

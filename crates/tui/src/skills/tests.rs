@@ -2195,3 +2195,108 @@ fn global_skill_roots_come_from_the_os_home_only() {
         "every runtime root is under the OS home or the workspace: {dirs:?}"
     );
 }
+
+#[cfg(unix)]
+fn create_file_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+/// A symlinked *directory* is followed (see
+/// `discover_follows_symlinked_skill_directories`), but the SKILL.md file
+/// itself must not be a symlink: discovery reads it only after rejecting
+/// symlinks, mirroring `skills/audit.rs`. A symlinked file would let a
+/// planted skill change content between discovery and audit.
+#[cfg(any(unix, windows))]
+#[test]
+fn discover_rejects_a_symlinked_skill_md_file() {
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    let real_dir = tmpdir.path().join("elsewhere");
+    write_skill(&real_dir, "planted", "outside the tree", "body");
+
+    let skill_dir = skills_root.join("planted");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    if let Err(err) = create_file_symlink(
+        &real_dir.join("planted").join("SKILL.md"),
+        &skill_dir.join("SKILL.md"),
+    ) {
+        eprintln!("skipping symlink SKILL.md assertion: {err}");
+        return;
+    }
+
+    let registry = super::SkillRegistry::discover(&skills_root);
+    assert!(
+        registry.get("planted").is_none(),
+        "a symlinked SKILL.md must not be discovered"
+    );
+    assert!(
+        registry
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("SKILL.md is a symlink")),
+        "the rejection must be disclosed: {:?}",
+        registry.warnings()
+    );
+}
+
+/// Discovery caps SKILL.md at the auditor's 512 KiB constant so discovery
+/// and `/skills` audit agree on "oversized"; an over-cap file is skipped
+/// with a disclosed warning instead of being fully read and parsed.
+#[test]
+fn discover_skips_an_oversized_skill_md() {
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    let skill_dir = skills_root.join("huge");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let oversized_body = "x".repeat(super::audit::AUDIT_MAX_SKILL_MD_BYTES as usize + 1024);
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: huge\ndescription: over the cap\n---\n{oversized_body}\n"),
+    )
+    .unwrap();
+
+    let registry = super::SkillRegistry::discover(&skills_root);
+    assert!(
+        registry.get("huge").is_none(),
+        "an oversized SKILL.md is skipped"
+    );
+    assert!(
+        registry
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("SKILL.md exceeds the")),
+        "the oversize rejection must be disclosed: {:?}",
+        registry.warnings()
+    );
+}
+
+/// A SKILL.md that is not valid UTF-8 is skipped with a disclosed warning,
+/// never partially parsed.
+#[test]
+fn discover_skips_a_non_utf8_skill_md() {
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    let skill_dir = skills_root.join("binary");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        b"---\nname: binary\ndescription: \xff\xfe broken\n---\nbody\n",
+    )
+    .unwrap();
+
+    let registry = super::SkillRegistry::discover(&skills_root);
+    assert!(registry.get("binary").is_none(), "invalid UTF-8 is skipped");
+    assert!(
+        registry
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("not valid UTF-8")),
+        "the decode rejection must be disclosed: {:?}",
+        registry.warnings()
+    );
+}

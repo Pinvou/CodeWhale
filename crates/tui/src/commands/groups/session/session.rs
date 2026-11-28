@@ -197,7 +197,7 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
                 );
             }
         };
-    if let Err(err) = manager.save_session(&forked) {
+    if let Err(err) = manager.save_session_edit(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
     }
     app.current_session_id = Some(forked.metadata.id.clone());
@@ -303,7 +303,7 @@ pub fn fork(app: &mut App) -> CommandResult {
     parent.work_state = work_state.clone();
     parent.last_auto_route = app.auto_route_for_persistence();
 
-    if let Err(err) = manager.save_session(&parent) {
+    if let Err(err) = manager.save_session_edit(&parent) {
         return CommandResult::error(format!("Failed to save parent session: {err}"));
     }
 
@@ -334,7 +334,7 @@ pub fn fork(app: &mut App) -> CommandResult {
     forked.work_state = work_state;
     forked.last_auto_route = app.auto_route_for_persistence();
 
-    if let Err(err) = manager.save_session(&forked) {
+    if let Err(err) = manager.save_session_edit(&forked) {
         return CommandResult::error(format!("Failed to save forked session: {err}"));
     }
     if let Err(err) = app.publish_pending_work_state() {

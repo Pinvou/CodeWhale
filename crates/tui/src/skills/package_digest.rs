@@ -12,7 +12,11 @@ use sha2::{Digest, Sha256};
 use super::install::{DEFAULT_MAX_SIZE_BYTES, INSTALLED_FROM_MARKER, TRUSTED_MARKER};
 
 pub const PACKAGE_DIGEST_MAX_BYTES: u64 = DEFAULT_MAX_SIZE_BYTES;
-pub const PACKAGE_DIGEST_MAX_FILES: usize = 256;
+/// File-count bound for the digest walk. Generous enough that a legitimately
+/// vendored skill with examples/assets still digests (a cap this walk exceeds
+/// permanently shows "digest unknown", degrading the trust signal without
+/// blocking use).
+pub const PACKAGE_DIGEST_MAX_FILES: usize = 1024;
 pub const PACKAGE_DIGEST_MAX_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,4 +153,17 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
         let _ = write!(&mut out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod digest_pin_tests {
+    use super::*;
+
+    /// Literal pin for the audited file-count ceiling (256 → 1024): a silent
+    /// revert passes every behavioral test, since >256-file packages are
+    /// rare in fixtures.
+    #[test]
+    fn package_digest_file_ceiling_is_the_audited_literal() {
+        assert_eq!(PACKAGE_DIGEST_MAX_FILES, 1024);
+    }
 }

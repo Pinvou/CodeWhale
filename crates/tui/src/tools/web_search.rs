@@ -35,6 +35,12 @@ const BING_HOST: &str = "www.bing.com";
 const BING_ENDPOINT: &str = "https://www.bing.com/search";
 const FIRECRAWL_ENDPOINT: &str = "https://api.firecrawl.dev/v2/search";
 const TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
+
+/// Tavily's documented `max_results` upper bound (their API reference caps
+/// the field at 20). The tool-level contract allows up to
+/// [`MAX_SEARCH_RESULTS`]; each backend adapts the generic count to its own
+/// provider contract.
+const TAVILY_MAX_RESULTS: usize = 20;
 const BOCHA_ENDPOINT: &str = "https://api.bochaai.com/v1/web-search";
 const METASO_ENDPOINT: &str = "https://metaso.cn/api/v1";
 const BAIDU_ENDPOINT: &str = "https://qianfan.baidubce.com/v2/ai_search/web_search";
@@ -215,7 +221,7 @@ impl ToolSpec for WebSearchTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 5, max: 10)"
+                    "description": "Maximum number of results to return (default: 10, max: 25)"
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -401,6 +407,20 @@ impl WebSearchTool {
     }
 
     /// Search via Tavily AI Search API (<https://tavily.com>).
+    /// The request body for one Tavily search. The provider documents
+    /// `max_results` as 1-20 while the tool's generic contract admits up to
+    /// [`MAX_SEARCH_RESULTS`], so counts above the provider cap are clamped
+    /// here instead of being sent invalid and falling into
+    /// unavailable/fallback handling (review 5926566445).
+    fn tavily_search_payload(api_key: &str, query: &str, max_results: usize) -> Value {
+        json!({
+            "api_key": api_key, // noqa: api-key-in-body
+            "query": query,
+            "search_depth": "basic",
+            "max_results": max_results.min(TAVILY_MAX_RESULTS),
+        })
+    }
+
     async fn run_tavily_search(
         &self,
         query: &str,
@@ -424,12 +444,7 @@ impl WebSearchTool {
                 ToolError::execution_failed(format!("Failed to build HTTP client: {e}"))
             })?;
 
-        let payload = json!({
-            "api_key": api_key, // noqa: api-key-in-body
-            "query": query,
-            "search_depth": "basic",
-            "max_results": max_results,
-        });
+        let payload = Self::tavily_search_payload(api_key, query, max_results);
 
         let resp = client
             .post(TAVILY_ENDPOINT)
@@ -2598,11 +2613,14 @@ mod tests {
 
     #[test]
     fn optional_max_results_uses_default_when_neither_set() {
-        assert_eq!(optional_search_max_results(&json!({"query": "x"})), 5);
+        // Literal pins: the fallback must equal DEFAULT_SEARCH_RESULTS and the
+        // hard max must bound it, so a default raised past the cap fails here.
+        assert_eq!(optional_search_max_results(&json!({"query": "x"})), 10);
         assert_eq!(
             optional_search_max_results(&json!({"search_query": [{"q": "y"}]})),
-            5,
+            10,
         );
+        assert_eq!(crate::tools::web_search::DEFAULT_SEARCH_RESULTS, 10);
     }
 
     #[test]
@@ -2866,6 +2884,27 @@ mod tests {
             Some("description for blank content")
         );
         assert_eq!(results[4].snippet, None);
+    }
+
+    #[test]
+    fn tavily_payload_clamps_max_results_to_the_provider_cap() {
+        // Review 5926566445: the tool contract admits up to 25 results, but
+        // Tavily documents `max_results` as 1-20. Counts above the provider
+        // cap clamp instead of sending an invalid request; valid counts pass
+        // through unchanged.
+        assert_eq!(super::TAVILY_MAX_RESULTS, 20);
+        assert_eq!(
+            WebSearchTool::tavily_search_payload("tvly-x", "q", 25)["max_results"],
+            json!(20)
+        );
+        assert_eq!(
+            WebSearchTool::tavily_search_payload("tvly-x", "q", 21)["max_results"],
+            json!(20)
+        );
+        assert_eq!(
+            WebSearchTool::tavily_search_payload("tvly-x", "q", 5)["max_results"],
+            json!(5)
+        );
     }
 
     #[test]

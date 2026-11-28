@@ -531,10 +531,16 @@ pub struct RuntimeUsageRecord {
 
 pub(crate) type RuntimeUsageSink = Arc<dyn Fn(RuntimeUsageRecord) -> bool + Send + Sync>;
 
+/// Invoked exactly once when the owner's sink entry is removed from the
+/// registry — the durable final-owner boundary for usage a detached child
+/// reported after the parent's final settlement save (review 5926566445).
+pub(crate) type RuntimeUsageRetireHook = Arc<dyn Fn() + Send + Sync>;
+
 struct RuntimeUsageSinkEntry {
     sink: RuntimeUsageSink,
     leases: usize,
     terminal: bool,
+    on_retire: Option<RuntimeUsageRetireHook>,
 }
 
 /// Keeps an owner sink alive while a detached child can still report usage.
@@ -668,7 +674,19 @@ fn record_runtime_usage(
 /// Install a synchronous durability sink for one active runtime turn.
 /// Compaction calls invoke this before they return to the engine, so a process
 /// crash cannot erase already-reported usage from an in-memory journal.
-pub(crate) fn register_runtime_usage_sink(owner: &str, sink: RuntimeUsageSink) {
+/// Install a synchronous durability sink for one active runtime turn.
+/// Compaction calls invoke this before they return to the engine, so a
+/// process crash cannot erase already-reported usage from an in-memory
+/// journal. `on_retire` — when present — is invoked exactly once when the
+/// entry leaves the registry (terminal retirement with zero leases, from
+/// either [`finish_runtime_usage_owner`] or the last lease drop); it is the
+/// durable final-owner boundary for usage a detached child reported after
+/// the parent's final settlement save (review 5926566445).
+pub(crate) fn register_runtime_usage_sink_with_retirement(
+    owner: &str,
+    sink: RuntimeUsageSink,
+    on_retire: Option<RuntimeUsageRetireHook>,
+) {
     let owner = owner.trim();
     if owner.is_empty() {
         return;
@@ -680,6 +698,7 @@ pub(crate) fn register_runtime_usage_sink(owner: &str, sink: RuntimeUsageSink) {
                 sink,
                 leases: 0,
                 terminal: false,
+                on_retire,
             },
         );
     });
@@ -698,12 +717,13 @@ pub(crate) fn usage_source_fingerprint(source_id: &str) -> String {
 /// this sink alive, while the captured scope prevents a later session from
 /// inheriting the spend.
 pub(crate) fn register_interactive_runtime_usage_sink(owner: &str, scope: CostScopeToken) {
-    register_runtime_usage_sink(
+    register_runtime_usage_sink_with_retirement(
         owner,
         Arc::new(move |record| {
             record_interactive_runtime_usage(scope, record);
             true
         }),
+        None,
     );
 }
 
@@ -759,30 +779,38 @@ impl Drop for RuntimeUsageLease {
         if !self.active {
             return;
         }
-        with_existing_runtime_usage_sinks(|sinks| {
-            let should_remove = sinks.get_mut(&self.owner).is_some_and(|entry| {
-                entry.leases = entry.leases.saturating_sub(1);
-                entry.terminal && entry.leases == 0
-            });
-            if should_remove {
-                sinks.remove(&self.owner);
+        let retire_hook = with_existing_runtime_usage_sinks(|sinks| {
+            let entry = sinks.get_mut(&self.owner)?;
+            entry.leases = entry.leases.saturating_sub(1);
+            if entry.terminal && entry.leases == 0 {
+                sinks
+                    .remove(&self.owner)
+                    .and_then(|removed| removed.on_retire)
+            } else {
+                None
             }
         });
+        if let Some(Some(hook)) = retire_hook {
+            hook();
+        }
     }
 }
 
 /// Mark the parent turn terminal. An owner with detached children stays live
 /// until their cloned leases drop; owners without children retire now.
 pub(crate) fn finish_runtime_usage_owner(owner: &str) {
-    with_existing_runtime_usage_sinks(|sinks| {
-        let should_remove = sinks.get_mut(owner).is_some_and(|entry| {
-            entry.terminal = true;
-            entry.leases == 0
-        });
-        if should_remove {
-            sinks.remove(owner);
+    let retire_hook = with_existing_runtime_usage_sinks(|sinks| {
+        let entry = sinks.get_mut(owner)?;
+        entry.terminal = true;
+        if entry.leases == 0 {
+            sinks.remove(owner).and_then(|removed| removed.on_retire)
+        } else {
+            None
         }
     });
+    if let Some(Some(hook)) = retire_hook {
+        hook();
+    }
 }
 
 /// Take only the background usage assigned to one runtime turn.
@@ -1419,6 +1447,53 @@ mod tests {
     /// another thread must be invisible here, and usage reported here must not
     /// reach it.
     #[test]
+    fn runtime_usage_retire_hook_fires_once_per_retirement_path() {
+        let _g = test_scope();
+        let owner = "retire-hook-owner";
+        let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // Path 1: finish with zero leases retires immediately.
+        let hook = Arc::clone(&fired);
+        register_runtime_usage_sink_with_retirement(
+            owner,
+            Arc::new(|_record| true),
+            Some(Arc::new(move || {
+                hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        );
+        finish_runtime_usage_owner(owner);
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an owner retiring at finish must fire its hook exactly once"
+        );
+
+        // Path 2: a detached child's lease keeps the owner alive past
+        // finish; the hook fires at the LAST lease drop instead.
+        let hook = Arc::clone(&fired);
+        register_runtime_usage_sink_with_retirement(
+            owner,
+            Arc::new(|_record| true),
+            Some(Arc::new(move || {
+                hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        );
+        let lease = acquire_runtime_usage_lease(owner).expect("lease");
+        finish_runtime_usage_owner(owner);
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a leased owner must survive finish without firing the hook again"
+        );
+        drop(lease);
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the last lease drop must fire the hook exactly once"
+        );
+    }
+
+    #[test]
     fn runtime_usage_sinks_do_not_leak_across_test_threads() {
         let _g = test_scope();
         let owner = "shared-owner";
@@ -1430,12 +1505,13 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let other = std::thread::spawn(move || {
-            register_runtime_usage_sink(
+            register_runtime_usage_sink_with_retirement(
                 owner,
                 Arc::new(move |_record| {
                     deliveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     true
                 }),
+                None,
             );
             ready_tx.send(()).expect("signal registration");
             // Hold the registration open across this thread's assertions.

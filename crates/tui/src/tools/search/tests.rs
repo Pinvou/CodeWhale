@@ -4,9 +4,110 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::spec::{ApprovalRequirement, ToolContext, ToolSpec};
+use crate::tools::spec::{ApprovalRequirement, ToolContext, ToolError, ToolSpec};
 
 use super::{GrepFilesTool, matches_glob};
+
+/// The audited result cap moved 100 → 250 with the limits batch; pin the
+/// literal so a silent revert does not leave the description copy ("default
+/// 250") lying about where the walk actually stops. The description and the
+/// `max_results` schema cannot interpolate consts, so both copies are pinned
+/// here too (mirrors the file_search limit pin).
+#[test]
+fn grep_max_results_pins_the_audited_literal() {
+    assert_eq!(super::MAX_RESULTS, 250, "the audited grep result cap");
+    assert_eq!(
+        super::GREP_FILES_TIMEOUT.as_secs(),
+        120,
+        "the audited grep timeout"
+    );
+    let description = GrepFilesTool.description();
+    assert!(
+        description.contains("(default 250)"),
+        "description copy must state the default cap: {description}"
+    );
+    let schema = GrepFilesTool.input_schema();
+    let max_results_copy = schema["properties"]["max_results"]["description"]
+        .as_str()
+        .expect("max_results schema description");
+    assert!(
+        max_results_copy.contains("default: 250"),
+        "schema copy must state the default: {max_results_copy}"
+    );
+}
+
+/// A timed-out walk is detached when its JoinHandle is dropped. The
+/// walk-local child token must be signalled in the timeout path so the
+/// detached walk stops promptly instead of consuming a blocking worker and
+/// file IO for its natural lifetime (up to the 120s grep budget) — and the
+/// caller's own token must stay untouched: cancelling it would abort the
+/// whole turn and misreport the timeout as a user stop.
+#[tokio::test]
+async fn grep_timeout_cancels_the_detached_walk() {
+    let caller_token = CancellationToken::new();
+    let err = super::run_blocking_grep(
+        std::time::Duration::from_millis(20),
+        Some(caller_token.clone()),
+        move |walk_cancel| {
+            // Stand in for a long walk that only ends early when cancelled.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let stopped = match walk_cancel {
+                Some(walk_token) => {
+                    while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    walk_token.is_cancelled()
+                }
+                None => false,
+            };
+            Ok(json!({"stopped": stopped}))
+        },
+    )
+    .await
+    .expect_err("a walk past the timeout must surface the timeout error");
+
+    assert!(
+        matches!(err, ToolError::Timeout { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        !caller_token.is_cancelled(),
+        "the timeout is walk-local: cancelling the caller's per-turn token would abort the turn"
+    );
+}
+
+/// An external stop (caller token cancelled) still reaches the walk through
+/// the child token and surfaces as the cancelled error.
+#[tokio::test]
+async fn grep_external_stop_cancels_the_walk_via_the_child_token() {
+    let caller_token = CancellationToken::new();
+    let stop_token = caller_token.clone();
+    let stopper = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        stop_token.cancel();
+    });
+    let err = super::run_blocking_grep(
+        std::time::Duration::from_secs(30),
+        Some(caller_token.clone()),
+        move |walk_cancel| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            if let Some(walk_token) = walk_cancel {
+                while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            Ok(json!({}))
+        },
+    )
+    .await
+    .expect_err("an external stop must surface the cancelled error");
+
+    assert!(
+        matches!(err, ToolError::Cancelled { .. }),
+        "unexpected error: {err:?}"
+    );
+    stopper.await.expect("stopper task");
+}
 
 #[test]
 fn grep_description_matches_default_exclusion_behavior() {
@@ -28,7 +129,7 @@ fn grep_description_matches_default_exclusion_behavior() {
     assert!(description.contains(
         "Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing"
     ));
-    assert!(description.contains("after 30s"));
+    assert!(description.contains("after 120s"));
     assert!(description.contains("replaces that default list entirely"));
 }
 

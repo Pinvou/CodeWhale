@@ -129,10 +129,10 @@ impl ToolSpec for GithubTool {
     fn description(&self) -> &'static str {
         match self.forced_action {
             Some("issue_context") => {
-                "Read GitHub issue context using gh. Read-only: bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); comments, labels, and state pass through verbatim."
+                "Read GitHub issue context using gh. Read-only: bodies over ~32KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); comments, labels, and state pass through verbatim."
             }
             Some("pr_context") => {
-                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. The body is condensed like issue bodies when large (~4KB to a ~1200-char excerpt, full text to a task artifact only when a durable task is active). include_diff returns a ~900-char diff summary; the full diff is captured as an artifact only when it exceeds 8,000 bytes and a durable task is active. Read-only; no push/merge/close."
+                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. The body is condensed like issue bodies when large (~32KB to a ~1200-char excerpt, full text to a task artifact only when a durable task is active). include_diff returns a ~900-char diff summary; the full diff is captured as an artifact only when it exceeds 64,000 bytes and a durable task is active. Read-only; no push/merge/close."
             }
             Some("comment") => {
                 "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
@@ -144,10 +144,10 @@ impl ToolSpec for GithubTool {
                 "Close a GitHub pull request only when structured acceptance evidence is present and approved. Rejected when the worktree is dirty unless allow_dirty=true. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
             }
             _ if self.read_only => {
-                "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\". Bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); smaller bodies, comments, labels, and state pass through verbatim."
+                "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\". Bodies over ~32KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); smaller bodies, comments, labels, and state pass through verbatim."
             }
             _ => {
-                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; bodies over ~4KB are condensed to a ~1200-char excerpt (a durable task additionally captures the full text as an artifact)), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
+                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; bodies over ~32KB are condensed to a ~1200-char excerpt (a durable task additionally captures the full text as an artifact)), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
             }
         }
     }
@@ -198,8 +198,8 @@ impl ToolSpec for GithubTool {
             "issue_context" => self.execute_issue_context(&input, context).await,
             "pr_context" => self.execute_pr_context(&input, context).await,
             "comment" => self.execute_comment(&input, context).await,
-            "close_issue" => close_github_thread(input, context, GithubCloseTarget::Issue),
-            "close_pr" => close_github_thread(input, context, GithubCloseTarget::Pr),
+            "close_issue" => close_github_thread(input, context, GithubCloseTarget::Issue).await,
+            "close_pr" => close_github_thread(input, context, GithubCloseTarget::Pr).await,
             action => Err(ToolError::invalid_input(format!(
                 "github: invalid action `{action}`"
             ))),
@@ -307,6 +307,26 @@ mod tests {
                 .description()
                 .contains("pass through verbatim"),
             "forced issue_context arm must state what passes through verbatim"
+        );
+        // Literal pins for the audited artifact thresholds (4k/8k → 32k/64k).
+        assert_eq!(shape::BODY_ARTIFACT_THRESHOLD, 32_000);
+        assert_eq!(shape::DIFF_ARTIFACT_THRESHOLD, 64_000);
+    }
+
+    #[test]
+    fn pr_diff_within_the_artifact_threshold_ships_inline_verbatim() {
+        // Review 5926566445: the artifact writer skips diffs at or below the
+        // 64,000-byte threshold, so that whole band must ship inline — a
+        // 901-byte to 64,000-byte diff with only the 900-char summary would
+        // have no full copy in the product at all.
+        let boundary = "x".repeat(shape::DIFF_ARTIFACT_THRESHOLD);
+        assert_eq!(
+            shape::pr_diff_shaping(&boundary),
+            shape::PrDiffShaping::Inline
+        );
+        assert_eq!(
+            shape::pr_diff_shaping(&(boundary + "x")),
+            shape::PrDiffShaping::Condensed
         );
     }
 
@@ -457,9 +477,9 @@ mod tests {
         })
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn stringy_dry_run_never_closes_the_thread() {
+    async fn stringy_dry_run_never_closes_the_thread() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let log = tmp.path().join("gh-calls.log");
         let bin = install_recording_gh(tmp.path(), &log);
@@ -474,7 +494,8 @@ mod tests {
             close_input_with_dry_run(json!("true")),
             &ctx,
             GithubCloseTarget::Issue,
-        );
+        )
+        .await;
         // SAFETY: same lock; restores the process environment.
         unsafe {
             std::env::remove_var("CODEWHALE_GH_BIN");
@@ -494,9 +515,9 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(unix)]
-    fn real_dry_run_bool_still_short_circuits() {
+    async fn real_dry_run_bool_still_short_circuits() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let log = tmp.path().join("gh-calls.log");
         let bin = install_recording_gh(tmp.path(), &log);
@@ -511,7 +532,8 @@ mod tests {
             close_input_with_dry_run(json!(true)),
             &ctx,
             GithubCloseTarget::Issue,
-        );
+        )
+        .await;
         // SAFETY: same lock; restores the process environment.
         unsafe {
             std::env::remove_var("CODEWHALE_GH_BIN");

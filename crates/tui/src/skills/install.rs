@@ -747,24 +747,19 @@ async fn sync_one_skill(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        // Same receipt-bounded read as the install path: the cap must bound
+        // memory during receipt, not just the final buffer
+        // (review 5916462145).
         let compressed_cap = max_size.saturating_mul(4);
-        let bytes = match resp.bytes().await {
+        let bytes = match read_body_capped(resp, url, compressed_cap).await {
             Ok(b) => b,
             Err(err) => {
                 return SkillSyncOutcome::Failed {
                     name: name.to_string(),
-                    reason: format!("failed to read body from {url}: {err:#}"),
+                    reason: format!("download from {url} failed: {err:#}"),
                 };
             }
         };
-        if bytes.len() as u64 > compressed_cap {
-            return SkillSyncOutcome::Failed {
-                name: name.to_string(),
-                reason: format!(
-                    "download from {url} exceeds compressed size cap ({compressed_cap} bytes)"
-                ),
-            };
-        }
 
         // Compute SHA-256 of the downloaded bytes.
         let sha256 = sha256_hex(&bytes);
@@ -1120,14 +1115,43 @@ async fn download_first_success(
     );
 }
 
+#[derive(Debug)]
 enum DownloadAttempt {
     Bytes(Vec<u8>),
     NotFound(reqwest::StatusCode),
 }
 
-/// Stream a URL into memory with a size cap. Aborts on the first read that
-/// would push the buffer over `max_size * 4` (the *4 accounts for compression;
-/// the unpack step still enforces `max_size` on the *uncompressed* bytes).
+/// Read a response body into memory with a compressed-size cap ENFORCED
+/// DURING RECEIPT (review 5916462145): an oversized declared
+/// `Content-Length` is rejected before any body byte is buffered, and the
+/// body is read chunk-by-chunk with the cap checked BEFORE each chunk is
+/// appended — the cap bounds process memory, not just the final buffer.
+async fn read_body_capped(
+    resp: reqwest::Response,
+    url: &str,
+    compressed_cap: u64,
+) -> Result<Vec<u8>> {
+    if let Some(declared) = resp.content_length()
+        && declared > compressed_cap
+    {
+        bail!("{url} declares {declared} bytes, over the compressed cap of {compressed_cap}");
+    }
+    let mut stream = resp.bytes_stream();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("failed to read body of {url}"))?;
+        if bytes.len() as u64 + chunk.len() as u64 > compressed_cap {
+            bail!("{url} exceeds compressed size cap of {compressed_cap} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Stream a URL into memory with a size cap ENFORCED DURING RECEIPT
+/// (review 5916462145) — see [`read_body_capped`]. (The *4 accounts for
+/// compression; the unpack step still enforces `max_size` on the
+/// *uncompressed* bytes.)
 async fn download_with_cap(url: &str, max_size: u64) -> Result<DownloadAttempt> {
     let resp = reqwest_client()
         .get(url)
@@ -1144,14 +1168,8 @@ async fn download_with_cap(url: &str, max_size: u64) -> Result<DownloadAttempt> 
     // Soft cap on the *compressed* download — well above max_size to allow
     // for highly compressible payloads but still bounded.
     let compressed_cap = max_size.saturating_mul(4);
-    let bytes = resp
-        .bytes()
-        .await
-        .with_context(|| format!("failed to read body of {url}"))?;
-    if (bytes.len() as u64) > compressed_cap {
-        bail!("download {url} exceeds compressed size cap of {compressed_cap} bytes");
-    }
-    Ok(DownloadAttempt::Bytes(bytes.to_vec()))
+    let bytes = read_body_capped(resp, url, compressed_cap).await?;
+    Ok(DownloadAttempt::Bytes(bytes))
 }
 
 struct StagedSkill {
@@ -1879,5 +1897,71 @@ mod tests {
             source_spec_string(&InstallSource::Registry("x".into())),
             "x"
         );
+    }
+
+    #[tokio::test]
+    async fn download_cap_bounds_receipt_not_just_the_final_buffer() {
+        // Review 5916462145: the cap must hold DURING receipt — an
+        // oversized body must abort mid-read instead of buffering whole.
+        // download_with_cap applies the *4 compression allowance itself;
+        // size the fixture against the compressed cap it will compare.
+        let max_size: u64 = 4096;
+        let compressed_cap: u64 = max_size * 4; // 16 KiB
+
+        // Listener serving two shapes.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            // Shape 1: declares an oversize Content-Length up front.
+            let (mut sock, _) = listener.accept().await.expect("accept 1");
+            let mut buf = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let body = vec![b'a'; (compressed_cap + 1024) as usize]; // 17 KiB > cap
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            use tokio::io::AsyncWriteExt;
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&body).await;
+
+            // Shape 2: no Content-Length (streamed); keeps writing past the
+            // cap and tolerates the client hanging up mid-flight.
+            let (mut sock, _) = listener.accept().await.expect("accept 2");
+            let mut buf = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let head = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}", "");
+            let _ = sock.write_all(head.as_bytes()).await;
+            let chunk = vec![b'b'; 16 * 1024];
+            for _ in 0..8 {
+                if sock.write_all(&chunk).await.is_err() {
+                    break; // the client's cap aborted the read
+                }
+            }
+        });
+
+        // Shape 1: the declared oversize is refused before any body byte.
+        let error = match download_with_cap(&format!("http://{addr}/declared"), max_size).await {
+            Err(error) => error,
+            Ok(attempt) => panic!("a declared oversize must be refused, got {attempt:?}"),
+        };
+        assert!(
+            error.to_string().contains("declares"),
+            "declared-size refusal: {error:#}"
+        );
+
+        // Shape 2: a streamed oversize aborts at the cap, not after.
+        let error = match download_with_cap(&format!("http://{addr}/streamed"), max_size).await {
+            Err(error) => error,
+            Ok(_) => panic!("a streamed oversize must abort at the cap"),
+        };
+        assert!(
+            error.to_string().contains("exceeds compressed size cap"),
+            "receipt-bound refusal: {error:#}"
+        );
+
+        let _ = server.await;
     }
 }

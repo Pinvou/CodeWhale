@@ -31,7 +31,8 @@ pub use system::{
     BundledSkillTier, bundled_skill_tier, install_system_skills, is_bundled_skill_name,
 };
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
@@ -46,6 +47,14 @@ use crate::logging;
 /// — survives shortening. Over-length descriptions are reported by
 /// `/skills` as a load warning rather than silently cut mid-sentence.
 pub(crate) const MAX_SKILL_DESCRIPTION_CHARS: usize = 400;
+/// Upper bound on `SKILL.md` size during discovery. One shared constant with
+/// the audit-side guard in `skills/audit.rs`: discovery and `/skills` audit
+/// must agree on what "oversized" means, or a file loads into the
+/// model-facing registry and is then flagged Oversized by audit. Instruction
+/// files are small, so a file near this cap is corrupt or hostile, and
+/// discovery must not read arbitrary disk contents into memory. Oversized
+/// files are reported as a discovery warning and the skill is skipped.
+const DISCOVERY_MAX_SKILL_MD_BYTES: u64 = audit::AUDIT_MAX_SKILL_MD_BYTES;
 /// Floor for the model-facing skill index budget, in chars. The real budget
 /// scales with the route's context window ([`skills_prompt_budget_chars`]);
 /// this floor keeps tiny local windows from erasing the index altogether.
@@ -100,7 +109,7 @@ pub const fn skills_prompt_budget_chars(window_tokens: Option<u32>) -> usize {
 ///   roots that are missing or are not directories.
 /// - `directories_visited`: unique directories accepted by cycle detection and
 ///   then submitted to `read_dir` by the recursive walker.
-/// - `skill_md_read_attempts`: calls to `read_to_string(<child>/SKILL.md)`,
+/// - `skill_md_read_attempts`: calls to the bounded `<child>/SKILL.md` read,
 ///   including expected not-found results for organizational directories.
 ///
 /// These counters do not cache or otherwise change discovery behavior. They are
@@ -381,6 +390,61 @@ pub(crate) fn watched_path_stamp(path: &Path) -> Option<WatchedPathStamp> {
     })
 }
 
+/// Outcome of a bounded discovery read of one candidate `SKILL.md`.
+enum SkillMdRead {
+    /// File read successfully, within the size cap.
+    Content(String),
+    /// No usable `SKILL.md` at this path — keep descending.
+    Absent,
+    /// The file exists but cannot be used; the reason is surfaced as a
+    /// discovery warning and the skill is skipped.
+    Unusable(String),
+}
+
+/// Read a candidate `SKILL.md` with a size cap and symlink rejection,
+/// mirroring `skills/audit.rs` (`parse_skill_md_bounded`). Discovery used to
+/// read this file unbounded, so a multi-gigabyte `SKILL.md` would be fully
+/// read and parsed on every walk.
+fn read_skill_md_bounded(path: &Path) -> SkillMdRead {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return SkillMdRead::Absent;
+        }
+        Err(err) => return SkillMdRead::Unusable(format!("cannot stat SKILL.md: {err}")),
+    };
+    if meta.file_type().is_symlink() {
+        return SkillMdRead::Unusable("SKILL.md is a symlink".into());
+    }
+    if meta.len() > DISCOVERY_MAX_SKILL_MD_BYTES {
+        return SkillMdRead::Unusable(skill_md_oversize_reason());
+    }
+
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(err) => return SkillMdRead::Unusable(format!("cannot open SKILL.md: {err}")),
+    };
+    let mut limited = file.take(DISCOVERY_MAX_SKILL_MD_BYTES + 1);
+    let mut buf = Vec::new();
+    if let Err(err) = limited.read_to_end(&mut buf) {
+        return SkillMdRead::Unusable(format!("cannot read SKILL.md: {err}"));
+    }
+    if buf.len() as u64 > DISCOVERY_MAX_SKILL_MD_BYTES {
+        return SkillMdRead::Unusable(skill_md_oversize_reason());
+    }
+    match String::from_utf8(buf) {
+        Ok(content) => SkillMdRead::Content(content),
+        Err(_) => SkillMdRead::Unusable("SKILL.md is not valid UTF-8".into()),
+    }
+}
+
+fn skill_md_oversize_reason() -> String {
+    format!(
+        "SKILL.md exceeds the {} byte discovery limit; skill skipped",
+        DISCOVERY_MAX_SKILL_MD_BYTES
+    )
+}
+
 impl SkillRegistry {
     /// Maximum directory-traversal depth when discovering skills.
     ///
@@ -503,8 +567,8 @@ impl SkillRegistry {
             let skill_path = path.join("SKILL.md");
             #[cfg(test)]
             record_skill_md_read_attempt();
-            match fs::read_to_string(&skill_path) {
-                Ok(content) => match Self::parse_skill(&skill_path, &content) {
+            match read_skill_md_bounded(&skill_path) {
+                SkillMdRead::Content(content) => match Self::parse_skill(&skill_path, &content) {
                     Ok(mut skill) => {
                         if !Self::mark_discovered_dir(&path, visited) {
                             continue;
@@ -552,15 +616,17 @@ impl SkillRegistry {
                         continue;
                     }
                 },
-                Err(err) if skill_path.exists() => {
+                SkillMdRead::Unusable(reason) => {
                     if !Self::mark_discovered_dir(&path, visited) {
                         continue;
                     }
-                    registry
-                        .push_warning(format!("Failed to read {}: {err}", skill_path.display()));
+                    registry.push_warning(format!("{}: {}", skill_path.display(), reason));
+                    // Still treat this directory as "claimed" — a
+                    // malformed or oversized SKILL.md shouldn't cause
+                    // us to double-load nested fixtures as skills.
                     continue;
                 }
-                Err(_) => {
+                SkillMdRead::Absent => {
                     // No SKILL.md here — recurse to look for nested
                     // skill directories (e.g. `<vendor>/<skill>/SKILL.md`).
                 }

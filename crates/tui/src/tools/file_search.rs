@@ -20,6 +20,13 @@ use super::spec::{
 
 const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default and maximum values for the `limit` parameter (the limits batch
+/// moved this clamp 20/200 → 50/1000). The description and the `limit` schema
+/// copy state these numbers verbatim — `&'static str` literals cannot
+/// interpolate consts — so the pinning test keeps values and copy in sync.
+const FILE_SEARCH_DEFAULT_LIMIT: u64 = 50;
+const FILE_SEARCH_MAX_LIMIT: u64 = 1000;
+
 #[derive(Debug, Clone, Serialize)]
 struct FileSearchMatch {
     path: String,
@@ -40,7 +47,7 @@ impl ToolSpec for FileSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts — any `exclude` you provide fully replaces that default list, so repeat the defaults you still want. `limit` accepts at most 200. Pass `extensions` to filter by suffix."
+        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts — any `exclude` you provide fully replaces that default list, so repeat the defaults you still want. `limit` accepts at most 1000. Pass `extensions` to filter by suffix."
     }
 
     fn input_schema(&self) -> Value {
@@ -57,7 +64,7 @@ impl ToolSpec for FileSearchTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 20)."
+                    "description": "Maximum number of results to return (default: 50)."
                 },
                 "extensions": {
                     "type": "array",
@@ -93,7 +100,8 @@ impl ToolSpec for FileSearchTool {
             return Err(ToolError::invalid_input("query cannot be empty"));
         }
 
-        let limit = optional_u64(&input, "limit", 20)?.clamp(1, 200) as usize;
+        let limit = optional_u64(&input, "limit", FILE_SEARCH_DEFAULT_LIMIT)?
+            .clamp(1, FILE_SEARCH_MAX_LIMIT) as usize;
         // S1: enumerating names inside a denied tree is a read of that tree —
         // Seatbelt's `deny file-read*` blocks readdir of denied dirs, so a
         // denied search root is refused rather than walked. The raw spelling is
@@ -136,15 +144,14 @@ async fn search_files_async(
     timeout: Duration,
     follow_symlinks: bool,
 ) -> Result<Vec<FileSearchMatch>, ToolError> {
-    let worker_cancel_token = cancel_token.clone();
-    run_blocking_file_search(timeout, cancel_token, move || {
+    run_blocking_file_search(timeout, cancel_token, move |walk_cancel| {
         search_files(
             &query,
             &base_path,
             extensions,
             exclude_patterns,
             limit,
-            worker_cancel_token.as_ref(),
+            walk_cancel,
             follow_symlinks,
         )
     })
@@ -157,7 +164,9 @@ async fn run_blocking_file_search<F>(
     search: F,
 ) -> Result<Vec<FileSearchMatch>, ToolError>
 where
-    F: FnOnce() -> Result<Vec<FileSearchMatch>, ToolError> + Send + 'static,
+    F: FnOnce(Option<&CancellationToken>) -> Result<Vec<FileSearchMatch>, ToolError>
+        + Send
+        + 'static,
 {
     if cancel_token
         .as_ref()
@@ -166,19 +175,41 @@ where
         return Err(file_search_cancelled());
     }
 
-    let task = tokio::task::spawn_blocking(search);
-    let result = match cancel_token {
+    // The closure gets a walk-local child of the caller's token: cancelled
+    // when the caller's token is cancelled (an external stop) or when the
+    // timeout fires, but cancelling it never touches the caller's token — a
+    // search timeout must surface as a tool error the turn can react to,
+    // never as a turn-wide stop (the per-turn token belongs to the engine).
+    let walk_token = cancel_token.as_ref().map(|token| token.child_token());
+    let task_token = walk_token.clone();
+    let task = tokio::task::spawn_blocking(move || search(task_token.as_ref()));
+    let result = match &cancel_token {
         Some(token) => {
             tokio::select! {
                 biased;
-                () = token.cancelled() => return Err(file_search_cancelled()),
+                () = token.cancelled() => {
+                    if let Some(walk) = walk_token.as_ref() {
+                        walk.cancel();
+                    }
+                    return Err(file_search_cancelled());
+                },
                 result = tokio::time::timeout(timeout, task) => result,
             }
         }
         None => tokio::time::timeout(timeout, task).await,
     };
 
-    let joined = result.map_err(|_| file_search_timeout(timeout))?;
+    let joined = result.map_err(|_| {
+        // The timeout drops the JoinHandle, detaching the walk: it would keep
+        // consuming a blocking worker and file IO for its natural lifetime.
+        // The closure checks the walk-local child per entry, so cancelling it
+        // stops the detached walk promptly without cancelling the caller's
+        // per-turn token.
+        if let Some(walk) = walk_token.as_ref() {
+            walk.cancel();
+        }
+        file_search_timeout(timeout)
+    })?;
     joined.map_err(|err| {
         ToolError::execution_failed(format!(
             "file_search worker failed before completion: {err}"
@@ -579,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_search_blocking_wrapper_reports_timeout() {
-        let err = run_blocking_file_search(Duration::from_millis(1), None, || {
+        let err = run_blocking_file_search(Duration::from_millis(1), None, |_walk_cancel| {
             std::thread::sleep(Duration::from_millis(50));
             Ok(Vec::new())
         })
@@ -590,6 +621,75 @@ mod tests {
             matches!(err, ToolError::Timeout { seconds: 1 }),
             "unexpected error: {err:?}"
         );
+    }
+
+    /// A timed-out walk is detached when its JoinHandle is dropped. The
+    /// walk-local child token must be signalled in the timeout path so the
+    /// detached walk stops promptly instead of consuming a blocking worker
+    /// and file IO for its natural lifetime — and the caller's own token must
+    /// stay untouched: cancelling it would abort the whole turn and misreport
+    /// the timeout as a user stop.
+    #[tokio::test]
+    async fn test_file_search_timeout_cancels_the_detached_walk() {
+        let caller_token = CancellationToken::new();
+        let err = run_blocking_file_search(
+            Duration::from_millis(20),
+            Some(caller_token.clone()),
+            move |walk_cancel| {
+                // Stand in for a long walk that only ends early when cancelled.
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                if let Some(walk_token) = walk_cancel {
+                    while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Ok(Vec::new())
+            },
+        )
+        .await
+        .expect_err("a walk past the timeout must surface the timeout error");
+
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !caller_token.is_cancelled(),
+            "the timeout is walk-local: cancelling the caller's per-turn token would abort the turn"
+        );
+    }
+
+    /// An external stop (caller token cancelled) still reaches the walk
+    /// through the child token and surfaces as the cancelled error.
+    #[tokio::test]
+    async fn test_file_search_external_stop_cancels_the_walk_via_the_child_token() {
+        let caller_token = CancellationToken::new();
+        let stop_token = caller_token.clone();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            stop_token.cancel();
+        });
+        let err = run_blocking_file_search(
+            Duration::from_secs(30),
+            Some(caller_token.clone()),
+            move |walk_cancel| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                if let Some(walk_token) = walk_cancel {
+                    while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Ok(Vec::new())
+            },
+        )
+        .await
+        .expect_err("an external stop must surface the cancelled error");
+
+        assert!(
+            matches!(err, ToolError::Cancelled { .. }),
+            "unexpected error: {err:?}"
+        );
+        stopper.await.expect("stopper task");
     }
 
     #[tokio::test]
@@ -676,5 +776,52 @@ mod tests {
             .expect("execute");
         assert!(result.success);
         assert!(result.content.contains("needle.txt"));
+    }
+
+    /// Pin the audited clamp window (20/200 → 50/1000) and keep the
+    /// model-facing copy honest about it: the description and the `limit`
+    /// schema cannot interpolate consts, so a value change without a copy
+    /// edit must fail here.
+    #[test]
+    fn file_search_limit_pins_the_audited_literals_and_the_copy() {
+        assert_eq!(FILE_SEARCH_DEFAULT_LIMIT, 50, "the audited default limit");
+        assert_eq!(FILE_SEARCH_MAX_LIMIT, 1000, "the audited clamp maximum");
+        let description = FileSearchTool.description();
+        assert!(
+            description.contains(&format!("at most {FILE_SEARCH_MAX_LIMIT}")),
+            "description copy must state the clamp maximum: {description}"
+        );
+        let schema = FileSearchTool.input_schema();
+        let limit_copy = schema["properties"]["limit"]["description"]
+            .as_str()
+            .expect("limit schema description");
+        assert!(
+            limit_copy.contains(&format!("default: {FILE_SEARCH_DEFAULT_LIMIT}")),
+            "schema copy must state the default: {limit_copy}"
+        );
+    }
+
+    /// The clamp is inclusive on both ends: 1 is a legal floor, 1000 is a
+    /// legal ceiling, and anything above collapses to the ceiling rather
+    /// than erroring (mirrors the web-search clamp shape).
+    #[tokio::test]
+    async fn test_file_search_limit_clamps_to_the_audited_window() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("a.txt"), "x\n").expect("write");
+        std::fs::write(root.join("b.txt"), "x\n").expect("write");
+
+        let ctx = ToolContext::new(root.to_path_buf());
+        let tool = FileSearchTool;
+        for limit in [0u64, 1, 5, 1000, 5000] {
+            let result = tool
+                .execute(json!({"query": "txt", "limit": limit}), &ctx)
+                .await
+                .expect("execute");
+            assert!(
+                result.success,
+                "limit {limit} is inside the clamped window and must not error"
+            );
+        }
     }
 }

@@ -16,6 +16,7 @@ pub mod account;
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +43,11 @@ pub const SECRET_BACKEND_ENV: &str = "CODEWHALE_SECRET_BACKEND";
 /// Legacy alias for [`SECRET_BACKEND_ENV`].
 pub const LEGACY_SECRET_BACKEND_ENV: &str = "DEEPSEEK_SECRET_BACKEND";
 const FILE_BACKEND_LABEL: &str = "file-based (~/.codewhale/secrets/)";
+/// Upper bound on the file-backed secrets blob read. Real credential JSON is
+/// a few kilobytes; the cap keeps a corrupt or bloated file from being read
+/// into memory on every startup/read, mirroring the xAI OAuth file guard in
+/// `codewhale-config` (`XAI_OAUTH_FILE_LIMIT`).
+const FILE_BLOB_READ_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Errors that may arise from a [`KeyringStore`] backend.
 #[derive(Debug, Error)]
@@ -52,9 +58,22 @@ pub enum SecretsError {
     /// File-backed fallback I/O error.
     #[error("file-backed secret store I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// File-backed fallback JSON (de)serialisation error.
-    #[error("file-backed secret store JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    /// File-backed fallback JSON (de)serialisation error. The parser's own
+    /// message embeds the offending input text — for a schema-drifted or
+    /// corrupt store that text is the store's contents — so the variant
+    /// carries the parser's category and position instead of the parser
+    /// error, and every presentation of the error chain (CLI stderr,
+    /// credential snapshots, TUI surfaces, diagnostic logs) stays
+    /// payload-free by construction.
+    #[error("file-backed secret store JSON error ({category}) at line {line} column {column}")]
+    Json {
+        /// serde_json error category name.
+        category: &'static str,
+        /// 1-based line of the parse failure.
+        line: usize,
+        /// 1-based column of the parse failure.
+        column: usize,
+    },
     /// Caught when a stored secret on disk has unsafe permissions.
     #[error("file-backed secret store at {path} has insecure permissions {mode:o} (expected 0600)")]
     InsecurePermissions {
@@ -63,9 +82,65 @@ pub enum SecretsError {
         /// Observed unix permission mode.
         mode: u32,
     },
+    /// Caught when the file-backed secrets blob exceeds the read cap. The blob
+    /// is a small JSON map of credentials; anything near the cap is corrupt or
+    /// hostile, and reading it unbounded would pull arbitrary disk contents
+    /// into memory on every startup/read.
+    #[error("file-backed secret store at {path} exceeds the {limit} byte read limit (size {size})")]
+    SecretsFileTooLarge {
+        /// Absolute path to the secrets file.
+        path: PathBuf,
+        /// Observed file size in bytes.
+        size: u64,
+        /// Configured read cap in bytes.
+        limit: u64,
+    },
     /// A caller attempted to modify a diagnostic-only secret store.
     #[error("secret store is read-only")]
     ReadOnly,
+}
+
+impl SecretsError {
+    /// The error's category and source position for diagnostic logs — never
+    /// a payload. The JSON variant's Display already carries only the
+    /// category and position (the parser error is never stored), so this
+    /// summary and the Display agree; the remaining variants label their
+    /// fixed shapes for the same uniform log contract.
+    fn log_summary(&self) -> String {
+        match self {
+            SecretsError::Keyring(_) => "keyring backend error".to_string(),
+            SecretsError::Io(err) => format!("io error: {}", err.kind()),
+            SecretsError::Json {
+                category,
+                line,
+                column,
+            } => format!("json {category} error at line {line} column {column}"),
+            SecretsError::InsecurePermissions { .. } => "insecure file permissions".to_string(),
+            SecretsError::SecretsFileTooLarge { .. } => "secrets file too large".to_string(),
+            SecretsError::ReadOnly => "read-only store".to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for SecretsError {
+    fn from(err: serde_json::Error) -> Self {
+        SecretsError::Json {
+            category: json_error_category(&err),
+            line: err.line(),
+            column: err.column(),
+        }
+    }
+}
+
+/// The serde_json error category as a plain name; the category type's shape
+/// is a dependency detail the log contract does not need.
+fn json_error_category(err: &serde_json::Error) -> &'static str {
+    match err.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    }
 }
 
 /// Abstract secret store trait.
@@ -418,14 +493,18 @@ impl FileKeyringStore {
                 Ok(legacy) => {
                     if let Err(err) = Self::migrate_legacy_file_if_needed(&primary, &legacy) {
                         tracing::warn!(
-                            "could not migrate legacy secret store from {} to {}: {err}",
+                            "could not migrate legacy secret store from {} to {}: {}",
                             legacy.display(),
-                            primary.display()
+                            primary.display(),
+                            err.log_summary()
                         );
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("could not resolve legacy secret store path: {err}");
+                    tracing::warn!(
+                        "could not resolve legacy secret store path: {}",
+                        err.log_summary()
+                    );
                 }
             }
         }
@@ -481,16 +560,40 @@ impl FileKeyringStore {
     }
 
     fn load_unlocked(&self) -> Result<FileSecretsBlob, SecretsError> {
+        // Fail-neutral stays the design: resolution paths map load errors to
+        // "not set" and fall back to env, so a pre-existing store that trips
+        // one of these errors would otherwise lose its credentials silently.
+        // This warning only makes the swallow observable. Log paths, sizes,
+        // and error kinds only — never secret material.
+        match self.load_unlocked_inner() {
+            Ok(blob) => Ok(blob),
+            Err(err) => {
+                // Action-neutral wording: whether a caller falls back to the
+                // environment is decided later, at the resolution layer —
+                // this store's direct get/set/delete paths surface the
+                // failure as-is and must not narrate a fallback that does
+                // not happen here.
+                tracing::warn!(
+                    "file-backed secret store at {} failed to load: {}",
+                    self.path.display(),
+                    err.log_summary()
+                );
+                Err(err)
+            }
+        }
+    }
+
+    fn load_unlocked_inner(&self) -> Result<FileSecretsBlob, SecretsError> {
         if !self.path.exists() {
             return Ok(FileSecretsBlob::default());
         }
         // Reject files with unsafe permissions on unix. On Windows the
         // ACL model is too different to enforce here; the caller is
         // responsible for placing the file in a per-user directory.
+        let meta = fs::metadata(&self.path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = fs::metadata(&self.path)?;
             let mode = meta.permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
                 return Err(SecretsError::InsecurePermissions {
@@ -499,7 +602,27 @@ impl FileKeyringStore {
                 });
             }
         }
-        let raw = fs::read_to_string(&self.path)?;
+        // Cap the read so a corrupt or hostile secrets file cannot be pulled
+        // into memory in full. Reads up to limit+1 bytes so an over-limit file
+        // is detected explicitly instead of silently truncated.
+        if meta.len() > FILE_BLOB_READ_LIMIT {
+            return Err(SecretsError::SecretsFileTooLarge {
+                path: self.path.clone(),
+                size: meta.len(),
+                limit: FILE_BLOB_READ_LIMIT,
+            });
+        }
+        let file = fs::File::open(&self.path)?;
+        let mut raw = String::new();
+        file.take(FILE_BLOB_READ_LIMIT + 1)
+            .read_to_string(&mut raw)?;
+        if raw.len() as u64 > FILE_BLOB_READ_LIMIT {
+            return Err(SecretsError::SecretsFileTooLarge {
+                path: self.path.clone(),
+                size: raw.len() as u64,
+                limit: FILE_BLOB_READ_LIMIT,
+            });
+        }
         if raw.trim().is_empty() {
             return Ok(FileSecretsBlob::default());
         }
@@ -518,7 +641,18 @@ impl FileKeyringStore {
                 let _ = fs::set_permissions(parent, perms);
             }
         }
+        // Mirror the read cap on the write side: without this, one oversized
+        // `set` (or a legacy migration merge) would persist a blob the store
+        // then refuses to read on every later get/set/delete until the file
+        // is deleted by hand.
         let body = serde_json::to_string_pretty(blob)?;
+        if body.len() as u64 > FILE_BLOB_READ_LIMIT {
+            return Err(SecretsError::SecretsFileTooLarge {
+                path: self.path.clone(),
+                size: body.len() as u64,
+                limit: FILE_BLOB_READ_LIMIT,
+            });
+        }
         write_private_file(&self.path, body.as_bytes())?;
         #[cfg(unix)]
         {
@@ -2373,11 +2507,60 @@ mod tests {
         let store = FileKeyringStore::new(path.clone());
         let err = store.set("deepseek", "sk-new").unwrap_err();
         assert!(
-            matches!(err, SecretsError::Json(_)),
+            matches!(err, SecretsError::Json { .. }),
             "set must surface the parse error rather than wiping the file; got: {err}"
         );
         let on_disk = fs::read_to_string(&path).unwrap();
         assert_eq!(on_disk, "{ this is not valid json");
+    }
+
+    #[test]
+    fn file_store_set_refuses_an_oversized_blob_instead_of_writing_it() {
+        // The read cap must be mirrored on the write side: without this, one
+        // oversized `set` persists a blob the store then refuses to read on
+        // every later get/set/delete until the file is deleted by hand.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.json");
+        let store = FileKeyringStore::new(path.clone());
+
+        // A single value whose serialized store exceeds the cap (16 MiB).
+        let huge = "x".repeat((FILE_BLOB_READ_LIMIT as usize) + 1024);
+        let err = store.set("deepseek", &huge).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::SecretsFileTooLarge { .. }),
+            "oversized set must fail with the explicit cap error; got: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "the over-cap blob must not be written to disk"
+        );
+        // The store stays usable for normal values afterwards.
+        store.set("deepseek", "sk-ok").unwrap();
+        assert_eq!(store.get("deepseek").unwrap(), Some("sk-ok".to_string()));
+    }
+
+    #[test]
+    fn file_store_get_refuses_an_oversized_blob_with_the_explicit_error() {
+        // The load side of the 16 MiB mirror: a store file that grew past
+        // the cap by any means (hand-merge, older version, external writer)
+        // must fail reads with the explicit cap error instead of silently
+        // falling into the fail-neutral "not set" path.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.json");
+        std::fs::write(&path, "x".repeat((FILE_BLOB_READ_LIMIT as usize) + 1024)).unwrap();
+        // The permission gate runs first; the file must look like a store
+        // file so the size check is the one that fires.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let store = FileKeyringStore::new(path);
+        let err = store.get("deepseek").unwrap_err();
+        assert!(
+            matches!(err, SecretsError::SecretsFileTooLarge { .. }),
+            "over-cap load must fail with the explicit cap error; got: {err}"
+        );
     }
 
     #[test]
@@ -2477,6 +2660,160 @@ mod tests {
         let _key = EnvVarGuard::set(DAYTONA_API_KEY_ENV, "dtn_env");
         assert_eq!(daytona_credential_source(&secrets), Some("env"));
         assert_eq!(env_for("daytona").as_deref(), Some("dtn_env"));
+    }
+
+    /// Test-only capturing subscriber, shaped like the config crate's
+    /// `test_tracing` helper: clones share one buffer; install with
+    /// `tracing::subscriber::with_default` around the synchronous code whose
+    /// events should be captured.
+    #[derive(Clone, Default)]
+    struct CapturedEvents(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl CapturedEvents {
+        fn messages(&self) -> Vec<String> {
+            self.0.lock().expect("event capture lock").clone()
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.level() <= &tracing::Level::WARN
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0
+                            .lock()
+                            .expect("event capture lock")
+                            .push(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut visitor = Visitor(std::sync::Arc::clone(&self.0));
+            event.record(&mut visitor);
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows_from: &tracing::Id) {}
+    }
+
+    /// The per-load warning must carry the error's category and position,
+    /// never the error Display: for a schema-drifted store the deserializer's
+    /// message embeds the offending input text — the store's own contents —
+    /// and interpolating that Display into the warning would copy secret
+    /// material into the diagnostic log. The summary keeps the swallow
+    /// observable (fail-neutral) without the payload.
+    #[test]
+    fn load_warning_carries_category_and_position_not_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.json");
+        // A schema-drifted store: structurally valid JSON whose field carries
+        // a string where the blob shape expects a map. The deserializer's
+        // message for this data-category error embeds the string itself, so
+        // a Display-interpolating warning would copy the value verbatim.
+        let payload = "sk-live-CONFIDENTIAL-STORE-VALUE";
+        std::fs::write(&path, format!(r#"{{"entries": "{payload}"}}"#))
+            .expect("write schema-drifted store");
+        // The store's unix guard refuses a world-readable store before the
+        // deserializer ever runs, and the fixture's point is the parse path.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("set 0600 on the fixture store");
+        }
+
+        let store = FileKeyringStore::new(&path);
+        let captured = CapturedEvents::default();
+        tracing::subscriber::with_default(captured.clone(), || {
+            let _ = KeyringStore::get(&store, "any-key");
+        });
+
+        let warning = captured
+            .messages()
+            .into_iter()
+            .find(|message| message.contains("failed to load"))
+            .expect("the load failure must stay observable as a warning");
+        assert!(
+            warning.contains("json data error at line 1 column"),
+            "the warning must name the json category and position: {warning}"
+        );
+        assert!(
+            !warning.contains(payload),
+            "the warning must not carry the store payload: {warning}"
+        );
+        // Action-neutral wording: this store's direct get/set/delete
+        // surfaces the failure as-is — whether anything falls back to the
+        // environment is decided later, at the resolution layer, so the
+        // load-time warning must not narrate one.
+        assert!(
+            !warning.contains("falling back"),
+            "the load warning must not claim a fallback this layer does not perform: {warning}"
+        );
+    }
+
+    /// The typed error's own presentation must be payload-free, not just
+    /// the log line: the load failure reaches direct consumers (a get/set
+    /// caller, a CLI credential snapshot, a TUI surface) as a
+    /// `SecretsError` whose Display and Debug are printed verbatim. The
+    /// JSON variant therefore stores the parser's category and position
+    /// instead of the parser error, and every rendering of the chain is
+    /// safe by construction.
+    #[test]
+    fn displayed_error_chain_is_payload_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.json");
+        let payload = "sk-live-CONFIDENTIAL-STORE-VALUE";
+        std::fs::write(&path, format!(r#"{{"entries": "{payload}"}}"#))
+            .expect("write schema-drifted store");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("set 0600 on the fixture store");
+        }
+
+        let store = FileKeyringStore::new(&path);
+        let err = KeyringStore::get(&store, "any-key").expect_err("the drifted store must fail");
+        assert!(
+            matches!(err, SecretsError::Json { .. }),
+            "the typed variant must survive the reshape: {err:?}"
+        );
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("JSON error (data) at line 1 column"),
+            "the displayed chain must name the category and position: {rendered}"
+        );
+        assert!(
+            !rendered.contains(payload),
+            "the displayed chain must not carry the store payload: {rendered}"
+        );
+        let debug = format!("{err:?}");
+        assert!(
+            !debug.contains(payload),
+            "the debug chain must not carry the store payload either: {debug}"
+        );
+        // The mutating path surfaces the same typed error without wiping
+        // the store, and its presentation is equally safe.
+        let err = KeyringStore::set(&store, "any-key", "v").expect_err("set must abort");
+        assert!(matches!(err, SecretsError::Json { .. }));
+        assert!(!format!("{err}").contains(payload));
     }
 
     #[path = "diagnostic_tests.rs"]

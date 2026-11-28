@@ -41,10 +41,16 @@ use crate::cloud_dispatch::{
 };
 use crate::dependencies::ExternalTool;
 
-/// Ceiling for PR titles (forges truncate longer titles).
-const MAX_TITLE_CHARS: usize = 96;
-/// Ceiling for the PR body, kept well under forge limits.
-const MAX_BODY_CHARS: usize = 6_000;
+/// Ceiling for PR titles. Real forge bounds are much higher (GitHub accepts
+/// roughly 256 characters), so this stays generous while keeping titles
+/// readable.
+const MAX_TITLE_CHARS: usize = 200;
+/// Ceiling for the PR body, kept well under forge limits (GitHub accepts
+/// roughly 65,536 characters).
+const MAX_BODY_CHARS: usize = 60_000;
+/// Body-summary budget inside the PR prefix (the title carries the 72-char
+/// form; this bounds the body's own copy so the receipts footer always fits).
+const MAX_SUMMARY_BODY_CHARS: usize = 2_000;
 /// Harness timeout for one cloud-agent turn.
 const HARNESS_TIMEOUT_SECS: u32 = 3_600;
 
@@ -234,7 +240,7 @@ fn drive(
     job.head_sha = Some(patch.head_sha.clone()); // replaced with the pushed sha after `forge.open`
     job.note = format!(
         "Agent turn complete ({}); raising branch {} and opening the PR on {}.",
-        patch.summary,
+        one_line(&patch.summary, MAX_SUMMARY_BODY_CHARS),
         job.branch,
         job.forge.as_str()
     );
@@ -317,15 +323,12 @@ fn teardown_note(launcher: &dyn DaytonaLauncher, receipt: &SandboxReceipt) -> St
 
 /// The exact harness invocation the sandbox runs: the one-shot
 /// `codewhale exec --auto` entry — the same single-`Engine::run_turn` path
-/// local non-interactive callers use, never a second engine.
+/// local non-interactive callers use, never a second engine. The argv shape
+/// is owned by `cloud_dispatch::harness_argv` so validation and the wire
+/// cannot drift.
 pub fn harness_command(job: &CloudJob) -> HarnessCommand {
     HarnessCommand {
-        argv: vec![
-            "codewhale".to_string(),
-            "exec".to_string(),
-            "--auto".to_string(),
-            job.prompt.clone(),
-        ],
+        argv: crate::cloud_dispatch::harness_argv(&job.prompt),
         cwd: SANDBOX_WORKSPACE.to_string(),
         timeout_secs: HARNESS_TIMEOUT_SECS,
     }
@@ -381,22 +384,35 @@ pub fn compose_pr_title(job: &CloudJob, patch: &PatchReceipt) -> String {
 
 /// PR body whose `Head:` is the sha actually applied/pushed.
 pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: &str) -> String {
-    let summary = if patch.summary.trim().is_empty() {
+    // The summary rides in the prefix, so it needs its own budget: an
+    // unbudgeted commit subject (possible up to the 200k harness-output cap)
+    // would saturate the task budget below and push the receipts footer past
+    // the final truncation. The title already shows a 72-char form of it, so
+    // a clipped body summary discloses the elision and loses nothing the
+    // title does not carry.
+    let trimmed_summary = patch.summary.trim();
+    let summary = if trimmed_summary.is_empty() {
         "(the agent's commit list is the record)".to_string()
     } else {
-        patch.summary.trim().to_string()
+        // `one_line` flattens control characters one-for-one, so only an
+        // actually clipped summary gets the elision marker; a short summary
+        // passes through verbatim and must not claim a truncation that
+        // never happened.
+        let flat = one_line(trimmed_summary, MAX_SUMMARY_BODY_CHARS);
+        if trimmed_summary.chars().count() > MAX_SUMMARY_BODY_CHARS {
+            format!("{flat}[…truncated]")
+        } else {
+            flat
+        }
     };
-    let body = format!(
-        "Automated change by a Codewhale cloud agent.\n\n\
-         ## What the agent did\n{summary}\n\n\
-         ## Task\n{}\n\n\
+    let receipts = format!(
+        "\n\n\
          ## Receipts\n\
          - Cloud job: {}\n\
          - Sandbox: {}\n\
          - Branch: `{}` (base `{}`)\n\
          - Head: `{}`\n\n\
          No-Issue: cloud dispatch {} (no tracked issue; receipts above)",
-        job.prompt,
         job.id,
         job.sandbox_id.as_deref().unwrap_or("(pending)"),
         job.branch,
@@ -404,6 +420,17 @@ pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: 
         head_sha,
         job.id,
     );
+    let prefix = format!(
+        "Automated change by a Codewhale cloud agent.\n\n\
+         ## What the agent did\n{summary}\n\n\
+         ## Task\n"
+    );
+    // A near-cap prompt must truncate the Task section, never the receipts
+    // footer: the task line gets the room the rest of the body leaves.
+    let task_budget = MAX_BODY_CHARS
+        .saturating_sub(prefix.chars().count() + receipts.chars().count())
+        .max(1);
+    let body = format!("{prefix}{}{receipts}", one_line(&job.prompt, task_budget));
     one_line(&body, MAX_BODY_CHARS)
 }
 
@@ -1629,7 +1656,7 @@ mod tests {
             id: "cloud_00000000000000bb".to_string(),
             kind: "cloud".to_string(),
             status: CloudJobStatus::OpeningPr,
-            prompt: "p".repeat(9_000),
+            prompt: "p".repeat(MAX_BODY_CHARS + 5_000),
             forge: Forge::Github,
             remote_name: "github".to_string(),
             remote_url: "https://github.com/org/repo.git".to_string(),
@@ -1649,6 +1676,45 @@ mod tests {
         let patch = fixture_patch();
         let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.chars().count() <= MAX_BODY_CHARS);
+        // A short summary passes through verbatim and must not claim an
+        // elision that never happened.
+        assert!(
+            !body.contains("[…truncated]"),
+            "a short summary must not claim a truncation that never happened"
+        );
+        assert!(body.contains("## What the agent did\nFix the flaky dispatch test\n"));
+        // Truncation must eat the Task section, never the receipts footer.
+        assert!(body.contains("## Receipts"));
+        assert!(body.contains("No-Issue: cloud dispatch cloud_00000000000000bb"));
+        assert!(body.ends_with("(no tracked issue; receipts above)"));
+
+        // The receipts-survival guarantee has a second axis: an unbudgeted
+        // commit summary (possible up to the 200k harness-output cap) rides
+        // in the prefix and would saturate the task budget, pushing the
+        // footer past the final truncation. The body summary is clamped and
+        // the elision disclosed, so the footer survives this too.
+        let bloated = PatchReceipt {
+            summary: "s".repeat(MAX_BODY_CHARS),
+            ..fixture_patch()
+        };
+        let body = compose_pr_body_for_head(&job, &bloated, &bloated.head_sha);
+        assert!(body.chars().count() <= MAX_BODY_CHARS);
+        assert!(
+            body.contains("[…truncated]"),
+            "summary elision is disclosed"
+        );
+        assert!(body.contains("## Receipts"));
+        assert!(body.ends_with("(no tracked issue; receipts above)"));
+        // Literal pins for the audited forge bounds (96/6000 → 200/60000):
+        // GitHub's real caps are 256/65,536, so a bound raised past those or
+        // lowered back toward the old ones fails here. The upper bounds are
+        // const-asserted (a runtime `assert!` on a constant would trip
+        // clippy's `assertions_on_constants` under newer toolchains); the
+        // exact values stay runtime pins.
+        const _: () = assert!(MAX_TITLE_CHARS <= 256);
+        const _: () = assert!(MAX_BODY_CHARS <= 65_536);
+        assert_eq!(MAX_TITLE_CHARS, 200);
+        assert_eq!(MAX_BODY_CHARS, 60_000);
     }
 
     #[test]

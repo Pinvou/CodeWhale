@@ -555,7 +555,10 @@ fn millis_to_timeout_seconds(timeout_ms: u64) -> u64 {
 }
 
 fn truncate_for_error(text: &str) -> String {
-    const MAX_ERROR_CHARS: usize = 120;
+    // Error bodies are the only diagnostic for a failed upstream quote —
+    // JSON error envelopes regularly exceed 120 chars, so keep enough of the
+    // body to actually read the provider's message.
+    const MAX_ERROR_CHARS: usize = 600;
     let mut out = String::new();
     for ch in text.chars().take(MAX_ERROR_CHARS) {
         out.push(ch);

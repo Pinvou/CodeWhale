@@ -104,7 +104,7 @@ export async function checkRuntime(config: RuntimeConfig): Promise<RuntimeState>
 
 export async function listThreadSummaries(
   config: RuntimeConfig,
-  limit = 8,
+  limit = 50,
 ): Promise<ThreadSummary[]> {
   const baseUrl = runtimeBaseUrl(config);
   const response = await requestJson(
@@ -122,7 +122,10 @@ export async function listThreadSummaries(
   return readThreadSummaries(response.body);
 }
 
-export async function listSnapshots(config: RuntimeConfig, limit = 8): Promise<SnapshotEntry[]> {
+// Note: the snapshots endpoint hard-rejects limits outside 1..=100 with a
+// 400 (unlike /v1/threads/summary, which clamps to 1..=500) — keep this
+// default at or below 100.
+export async function listSnapshots(config: RuntimeConfig, limit = 50): Promise<SnapshotEntry[]> {
   const baseUrl = runtimeBaseUrl(config);
   const response = await requestJson(
     `${baseUrl}/v1/snapshots?limit=${encodeURIComponent(String(limit))}`,
@@ -173,7 +176,9 @@ async function requestJson(
       const request = http.get(
         url,
         {
-          timeout: 2500,
+          // A busy runtime (e.g. mid-indexing) can legitimately exceed a
+          // tighter socket timeout and make the panel show a false outage.
+          timeout: 10000,
           headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         },
         (response) => {

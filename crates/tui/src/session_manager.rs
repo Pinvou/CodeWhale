@@ -27,8 +27,21 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
-/// Maximum number of sessions to retain
-const MAX_SESSIONS: usize = 50;
+/// Maximum number of non-archived sessions the retention janitor keeps.
+/// Archived sessions are exempt: archiving is a deliberate user action, so the
+/// retention cap must not silently destroy what the user explicitly put away.
+const MAX_SESSIONS: usize = 1_000;
+/// Minimum wall-clock spacing between retention-janitor runs triggered by
+/// [`SessionManager::save_session`]. The janitor's scan reads every record
+/// file, and the archived set (exempt from [`MAX_SESSIONS`]) grows that set
+/// without bound over the life of the install, so an unthrottled per-save
+/// scan would tax the recurring autosave path with a cost that only grows.
+/// Lifecycle edits are protected by routing instead: they go through
+/// [`SessionManager::save_session_edit`] and never reach this janitor at
+/// all. Sixty seconds keeps retention prompt (it is best-effort pruning,
+/// not a correctness bound) while making the per-save cost `O(1)` in save
+/// frequency.
+const JANITOR_MIN_INTERVAL_SECS: i64 = 60;
 /// Maximum session title length, in `char`s. Matches the bound the session
 /// picker's rename prompt has always enforced.
 pub const MAX_SESSION_TITLE_CHARS: usize = 100;
@@ -948,6 +961,16 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
 pub struct SessionManager {
     /// Directory where sessions are stored
     sessions_dir: PathBuf,
+
+    /// Unix seconds of the last save-triggered retention-janitor run (0 =
+    /// never run this instance). Throttles the per-save scan; see
+    /// [`JANITOR_MIN_INTERVAL_SECS`]. Direct
+    /// [`SessionManager::cleanup_old_sessions`] calls are never throttled.
+    janitor_last_run_secs: std::sync::atomic::AtomicI64,
+    /// Test-only count of retention-janitor executions (throttled and
+    /// direct), so tests can observe the throttle without timing races.
+    #[cfg(test)]
+    janitor_runs: std::sync::atomic::AtomicU32,
 }
 
 /// Origin of a crash-recovery checkpoint file.
@@ -1109,7 +1132,12 @@ impl SessionManager {
         let sessions_dir = normalize_managed_dir(sessions_dir)?;
         // Ensure the sessions directory exists
         fs::create_dir_all(&sessions_dir)?;
-        Ok(Self { sessions_dir })
+        Ok(Self {
+            sessions_dir,
+            janitor_last_run_secs: std::sync::atomic::AtomicI64::new(0),
+            #[cfg(test)]
+            janitor_runs: std::sync::atomic::AtomicU32::new(0),
+        })
     }
 
     /// Create a `SessionManager` using the default location.
@@ -1120,6 +1148,36 @@ impl SessionManager {
     /// Return the resolved sessions directory path.
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
+    }
+
+    /// Open the storage-scoped archive/retention exclusion for this store
+    /// (reviews 6051224372, 6051443775, 6057332xxx, 6069398276, and
+    /// 6069674738 on #154): an advisory lock file beside the session
+    /// documents, so the exclusion between archive persistence and
+    /// retention deletion holds between every process that addresses the
+    /// same sessions directory — not only between the managers of one
+    /// process. The shipped topologies construct separate managers for the
+    /// same directory (the boot janitor in lib.rs, the exact-id archive
+    /// command in session.rs), and ordinary desktop use can run two
+    /// CodeWhale processes against one store; a process-local mutex
+    /// serialized the former but not the latter. The lock is advisory and
+    /// keyed on the (normalized) directory, so it releases on process
+    /// death without a stale marker, and holding it across selection
+    /// through deletion costs no more than the in-process gate it
+    /// replaces. The file's name keeps it outside every store scan: only
+    /// `.json` documents list, and only per-session subdirectories
+    /// reclaim. Callers hold the returned lock's `write()` guard across
+    /// their whole selection/persistence span; an acquisition error
+    /// aborts the operation instead of running it uncoordinated
+    /// (fail-closed).
+    fn open_retention_store_lock(&self) -> std::io::Result<fd_lock::RwLock<std::fs::File>> {
+        let lock_path = self.sessions_dir.join(".retention.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)?;
+        Ok(fd_lock::RwLock::new(lock_file))
     }
 
     /// Persist the bounded goal control state for one saved session.
@@ -1171,7 +1229,49 @@ impl SessionManager {
     }
 
     /// Save a session to disk using atomic write (temp file + fsync + rename).
+    ///
+    /// This save also runs the throttled retention janitor (it can return a
+    /// retention error after the session itself persisted), so it is the
+    /// path for recurring/per-turn saves and the deliberate one-shot
+    /// retention points (`codewhale exec`'s persist; the first run on a
+    /// fresh manager is also what boot/exec retention rides). Lifecycle
+    /// edits (archive, rename, title, branch, import, fork, HTTP
+    /// PATCH/POST/PUT) MUST use [`Self::save_session_edit`], which skips
+    /// retention entirely — see its doc comment for the full caller list
+    /// and the fresh-manager rule.
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
+        let path = self.persist_session(session)?;
+
+        // Clean up old sessions if we have too many — throttled, since the
+        // scan reads every record file and the archived set is unbounded
+        // (see [`JANITOR_MIN_INTERVAL_SECS`]). Lifecycle edits must go
+        // through [`Self::save_session_edit`]; see its doc comment.
+        self.run_janitor_throttled()?;
+
+        Ok(path)
+    }
+
+    /// Persist a lifecycle edit (archive/rename/title/branch/import/fork and
+    /// the HTTP PATCH/POST/PUT session routes) without triggering the
+    /// retention scan. These paths fire per user action — usually on a fresh
+    /// [`SessionManager`] whose throttle has not armed (`janitor_due(0, _)`
+    /// is always true), so routing them through [`Self::save_session`] would
+    /// run the full O(records) scan synchronously on the caller's thread
+    /// every time. Retention stays enforced by the per-turn autosave actor
+    /// (throttled), the boot janitor, `codewhale exec`'s one-shot persist,
+    /// and explicit `/sessions prune`.
+    ///
+    /// This split is the load-bearing guard of the retention design: any
+    /// recurring save that constructs a fresh [`SessionManager`] per call
+    /// MUST use this method, or it reintroduces a full scan per save.
+    pub fn save_session_edit(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
+        self.persist_session(session)
+    }
+
+    /// Shared persistence body of [`Self::save_session`] and
+    /// [`Self::save_session_edit`]: validate, archive-first-write receipts,
+    /// hydrate, and atomically write the record. No retention side effects.
+    fn persist_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.validated_session_path(&session.metadata.id)?;
         let already_persisted = path.exists()
             || self
@@ -1187,9 +1287,6 @@ impl SessionManager {
         // Atomic write via write_atomic (NamedTempFile + fsync + persist)
         write_atomic(&path, content.as_bytes())?;
         self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
-
-        // Clean up old sessions if we have too many
-        self.cleanup_old_sessions()?;
 
         Ok(path)
     }
@@ -1645,12 +1742,26 @@ impl SessionManager {
         // process-local and the External mutator's only lane (the runtime
         // HTTP server) never coexists with an interactive surface in a
         // shipped topology, so the check could never engage.
+        // The gate covers LOAD THROUGH PERSIST-AND-RECEIPT (reviews
+        // 6051224372 / 6051443775 on #154): with the janitor's
+        // selection-and-delete pass inside the same gate, an archive that
+        // returned success here can never be deleted by a cleanup whose
+        // selection predates it — the cleanup either selected before this
+        // load (then it already deleted, and the load below misses with a
+        // real error) or runs after this receipt (its snapshot then sees
+        // `archived = true` and exempts the record).
+        // The gate is storage-scoped: the exclusion holds between every
+        // process sharing this sessions directory, so an acknowledged
+        // archive cannot be deleted by another process's stale selection
+        // either (reviews 6069398276 / 6069674738).
+        let mut retention_store_lock = self.open_retention_store_lock()?;
+        let _retention_gate = retention_store_lock.write()?;
         let mut session = self.load_session(id)?;
         if session.metadata.archived == archived {
             return Ok(session.metadata);
         }
         session.metadata.archived = archived;
-        self.save_session(&session)?;
+        self.save_session_edit(&session)?;
         Ok(session.metadata)
     }
 
@@ -1718,7 +1829,7 @@ impl SessionManager {
             return Ok(session.metadata);
         }
         session.metadata.title = title;
-        self.save_session(&session)?;
+        self.save_session_edit(&session)?;
         Ok(session.metadata)
     }
 
@@ -1854,25 +1965,96 @@ impl SessionManager {
         }
     }
 
-    /// Clean up old sessions to stay within `MAX_SESSIONS` limit.
+    /// Clean up old sessions to stay within the `MAX_SESSIONS` limit.
+    /// Archived sessions are exempt and may exceed the cap.
     pub fn cleanup_old_sessions(&self) -> std::io::Result<()> {
         self.cleanup_old_sessions_keeping(None)
     }
 
+    /// Run the retention janitor at most once per
+    /// [`JANITOR_MIN_INTERVAL_SECS`], on the save path only. The first save
+    /// on a fresh manager always runs (nothing has been scanned yet); a save
+    /// inside the window is a no-op. A failed compare-and-swap means a
+    /// concurrent save already claimed this run — skip. Explicit
+    /// [`SessionManager::cleanup_old_sessions`] calls bypass the throttle so
+    /// tests keep their exact semantics; production retention runs only
+    /// through this throttled path, the boot janitor, `codewhale exec`'s
+    /// one-shot persist, and `/sessions prune`.
+    fn run_janitor_throttled(&self) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let last = self.janitor_last_run_secs.load(Ordering::Relaxed);
+        if !Self::janitor_due(last, now_secs) {
+            return Ok(());
+        }
+        if self
+            .janitor_last_run_secs
+            .compare_exchange(last, now_secs, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            // A concurrent save claimed this window's run.
+            return Ok(());
+        }
+        // Best-effort retention: the window is consumed before the scan runs,
+        // so a failed scan locks the janitor out until the next window, and
+        // the error surfaces to the save caller even though the record itself
+        // was already written. Retention is advisory; the save is not.
+        self.cleanup_old_sessions()
+    }
+
+    /// Whether a save-triggered janitor run is due: always on the first run
+    /// of the instance, afterwards only once the spacing elapses. A wall
+    /// clock that jumped backwards simply waits for real time to pass.
+    fn janitor_due(last_run_secs: i64, now_secs: i64) -> bool {
+        last_run_secs == 0 || now_secs >= last_run_secs + JANITOR_MIN_INTERVAL_SECS
+    }
+
     /// As [`Self::cleanup_old_sessions`], but never deletes `keep` — the
     /// session being resumed at boot. Without this, a background cleanup that
-    /// races session restore can prune the just-resumed session when 50+
-    /// newer records exist (its `updated_at` is not bumped until first save).
+    /// races session restore can prune the just-resumed session when
+    /// `MAX_SESSIONS` or more newer records exist (its `updated_at` is not
+    /// bumped until first save). User-archived sessions are also exempt:
+    /// archiving is a deliberate act of putting a session away, not an
+    /// invitation to delete it, so archived records may exceed the cap.
     pub fn cleanup_old_sessions_keeping(&self, keep: Option<&str>) -> std::io::Result<()> {
+        #[cfg(test)]
+        self.janitor_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The gate covers SELECTION THROUGH DELETION (reviews 6051224372 /
+        // 6051443775 on #154): a snapshot taken outside it would let
+        // `/sessions archive <exact-id>` persist `archived = true` and
+        // report success while this loop deletes the just-archived record
+        // with its stale candidate metadata. Holding the gate across the
+        // whole pass makes the archive either land before the selection
+        // (the snapshot then excludes the record) or after the deletes
+        // (its exact-id load then misses and reports a real error).
+        // The gate is storage-scoped: the shipped callers construct
+        // separate managers for the same directory, and a second OS
+        // process sharing the store serializes on the same lock file, so
+        // the exclusion holds across every reader of this directory
+        // (reviews 6069398276 / 6069674738).
+        let mut retention_store_lock = self.open_retention_store_lock()?;
+        let _retention_gate = retention_store_lock.write()?;
         let sessions = self.list_sessions()?;
 
-        if sessions.len() > MAX_SESSIONS {
-            for session in sessions.iter().skip(MAX_SESSIONS) {
-                if keep.is_some_and(|id| id == session.id) {
-                    continue;
-                }
-                let _ = self.delete_session(&session.id);
+        // Cap only the non-archived history: archived records are exempt (see
+        // `MAX_SESSIONS`), and the retention window must be cut from the
+        // non-archived sub-list — otherwise archived records occupying the
+        // newest slots push old live sessions past the window where they would
+        // be deleted even though their own count is far below the cap.
+        for session in sessions
+            .iter()
+            .filter(|session| !session.archived)
+            .skip(MAX_SESSIONS)
+        {
+            if keep.is_some_and(|id| id == session.id) {
+                continue;
             }
+            let _ = self.delete_session(&session.id);
         }
         self.reclaim_orphaned_session_dirs();
 
@@ -2999,13 +3181,13 @@ mod tests {
         assert_eq!(usd_only.total_cny(), 0.0);
     }
 
-    fn write_session_record(
-        manager: &SessionManager,
+    fn make_saved_session(
         id: &str,
         workspace: &Path,
         updated_at: DateTime<Utc>,
-    ) {
-        let session = SavedSession {
+        archived: bool,
+    ) -> SavedSession {
+        SavedSession {
             schema_version: CURRENT_SESSION_SCHEMA_VERSION,
             messages: vec![make_test_message("user", "hi")],
             metadata: SessionMetadata {
@@ -3025,7 +3207,7 @@ mod tests {
                 parent_session_id: None,
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
-                archived: false,
+                archived,
                 spawn_depth: 0,
             },
             journal: None,
@@ -3037,8 +3219,52 @@ mod tests {
             work_state: None,
             window_title: None,
             last_auto_route: None,
-        };
+        }
+    }
+
+    fn write_session_record(
+        manager: &SessionManager,
+        id: &str,
+        workspace: &Path,
+        updated_at: DateTime<Utc>,
+        archived: bool,
+    ) {
+        let session = make_saved_session(id, workspace, updated_at, archived);
         manager.save_session(&session).expect("save");
+    }
+
+    /// Lifecycle edits (archive/rename/title/branch/import/PATCH) must not
+    /// trigger the retention scan: they fire per user action, usually on a
+    /// fresh manager whose throttle has not armed, so the full record scan
+    /// would be paid synchronously on the caller's thread every time. The
+    /// autosave-actor path keeps the throttled janitor.
+    #[test]
+    fn lifecycle_edit_save_skips_retention_but_actor_save_keeps_the_throttled_janitor() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let run_count = || {
+            manager
+                .janitor_runs
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        let edited = make_saved_session("edit-a", &workspace, Utc::now(), false);
+        manager.save_session_edit(&edited).expect("edit save");
+        assert_eq!(
+            run_count(),
+            0,
+            "a lifecycle edit never runs the retention scan"
+        );
+        manager.save_session_edit(&edited).expect("edit save again");
+        assert_eq!(run_count(), 0, "repeated edits stay scan-free");
+
+        // The actor's per-turn autosave path still runs the throttled janitor
+        // (first run on a fresh manager), and the window spacing applies.
+        write_session_record(&manager, "actor-a", &workspace, Utc::now(), false);
+        assert_eq!(run_count(), 1, "the autosave path runs the janitor");
+        write_session_record(&manager, "actor-b", &workspace, Utc::now(), false);
+        assert_eq!(run_count(), 1, "a save inside the window is throttled");
     }
 
     fn write_empty_session_record(
@@ -3101,7 +3327,7 @@ mod tests {
             fs::write(artifacts.join("art_evidence.txt"), b"stdout").expect("artifact");
         }
         // Only `live` still has a session document.
-        write_session_record(&manager, live, &workspace, Utc::now());
+        write_session_record(&manager, live, &workspace, Utc::now(), false);
 
         manager.cleanup_old_sessions().expect("cleanup");
 
@@ -3184,6 +3410,478 @@ mod tests {
             not_a_session.exists(),
             "a name that is not a valid session id is not ours to remove"
         );
+    }
+
+    // === MAX_SESSIONS retention janitor ===
+
+    /// The retention janitor keeps the `MAX_SESSIONS` newest records and
+    /// deletes the rest. Driven by the constant so raising the cap never
+    /// leaves a stale literal behind; the literal pin below keeps the audit's
+    /// headline number (50 → 1000) honest in the other direction.
+    #[test]
+    fn cleanup_keeps_max_sessions_newest_records_and_deletes_the_rest() {
+        assert_eq!(MAX_SESSIONS, 1_000, "the audited retention cap");
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let extra = 5usize;
+
+        // Oldest first, so record `i`'s `updated_at` orders before `i + 1`.
+        for i in 0..MAX_SESSIONS + extra {
+            let id = format!("retained-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
+                false,
+            );
+        }
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        let remaining = manager.list_sessions().expect("list");
+        assert_eq!(
+            remaining.len(),
+            MAX_SESSIONS,
+            "the janitor keeps exactly MAX_SESSIONS non-archived records"
+        );
+        for i in 0..extra {
+            let id = format!("retained-{i:04}");
+            assert!(
+                remaining.iter().all(|s| s.id != id),
+                "the oldest record {id} falls outside the cap and is deleted"
+            );
+        }
+        for i in extra..MAX_SESSIONS + extra {
+            let id = format!("retained-{i:04}");
+            assert!(
+                remaining.iter().any(|s| s.id == id),
+                "a record within the cap ({id}) survives"
+            );
+        }
+    }
+
+    /// Archiving is the user putting a session away on purpose. The retention
+    /// janitor must never delete an archived record, even when it is old
+    /// enough to fall outside `MAX_SESSIONS`.
+    /// (reviews 6051224372 / 6051443775 on #154: archive success vs stale
+    /// retention deletion) The retention gate serializes
+    /// `set_session_archived`'s load-persist-receipt sequence against the
+    /// janitor's selection-and-delete pass. While the gate is held, BOTH
+    /// operations block; each completes after release; and whatever order
+    /// they land in, an archive that returned success is never deleted by
+    /// the cleanup — its snapshot either predates the receipt (impossible:
+    /// the gate orders them) or follows it and exempts the record.
+    #[test]
+    fn retention_gate_serializes_archive_receipt_against_cleanup_deletion() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        // The two production owners, built exactly as the shipped
+        // topologies build them: each constructs its own manager over the
+        // same directory.
+        let janitor_manager =
+            Arc::new(SessionManager::new(sessions_dir.clone()).expect("janitor manager"));
+        let archive_manager =
+            Arc::new(SessionManager::new(sessions_dir.clone()).expect("archive manager"));
+        let workspace = tmp.path().join("ws");
+        let extra = 5usize;
+
+        // A stale candidate beyond the cap plus enough active records to
+        // fill it — the exact janitor shape the reviews describe.
+        write_session_record(
+            &janitor_manager,
+            "stale-candidate",
+            &workspace,
+            Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra + 1) as i64),
+            false,
+        );
+        for i in 0..MAX_SESSIONS + extra - 1 {
+            let id = format!("active-{i:04}");
+            write_session_record(
+                &janitor_manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
+                false,
+            );
+        }
+
+        // The archive side holds the gate first: the janitor must block
+        // until the receipt is durable — it must never delete the record
+        // with a snapshot taken before the archive persisted. The holder
+        // takes the same storage lock the production sides take, so the
+        // exclusion this pins is the one the operations acquire.
+        let mut gate_holder = janitor_manager.open_retention_store_lock().expect("lock");
+        let gate = gate_holder.write().expect("hold the storage lock");
+        let archiver_manager = Arc::clone(&archive_manager);
+        let archiver = std::thread::spawn(move || {
+            archiver_manager
+                .set_session_archived("stale-candidate", true, SessionMutator::External)
+                .expect("archive the stale candidate")
+        });
+        for _ in 0..30 {
+            assert!(
+                !archiver.is_finished(),
+                "the archive must block while the janitor side holds the gate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(gate);
+        let metadata = archiver.join().expect("archive joins");
+        assert!(metadata.archived, "the archive receipt reports success");
+
+        // The janitor now runs inside the same gate: its snapshot sees the
+        // persisted `archived = true` and exempts the record. The
+        // acknowledged archive — document and artifact directory — survives.
+        let artifact_dir = sessions_dir.join("stale-candidate").join("artifacts");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        fs::write(artifact_dir.join("art.txt"), "evidence").expect("artifact file");
+
+        janitor_manager.cleanup_old_sessions().expect("cleanup");
+
+        let remaining = janitor_manager.list_sessions().expect("list");
+        assert!(
+            remaining.iter().any(|s| s.id == "stale-candidate"),
+            "an archive that returned success must survive the retention pass"
+        );
+        assert!(
+            artifact_dir.join("art.txt").exists(),
+            "the archived record's artifacts must survive too"
+        );
+
+        // The janitor side also holds the gate: a concurrent archive must
+        // block until the selection-and-delete pass completes, then either
+        // land on the surviving record or miss it with a real error — never
+        // report success for a document the cleanup deleted.
+        let mut gate_holder = janitor_manager.open_retention_store_lock().expect("lock");
+        let gate = gate_holder.write().expect("hold the storage lock");
+        let janitor_thread_manager = Arc::clone(&janitor_manager);
+        let janitor = std::thread::spawn(move || {
+            janitor_thread_manager
+                .cleanup_old_sessions()
+                .expect("cleanup joins")
+        });
+        for _ in 0..30 {
+            assert!(
+                !janitor.is_finished(),
+                "the cleanup must block while the archive side holds the gate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(gate);
+        janitor.join().expect("cleanup joins");
+    }
+
+    /// Cross-process serialization (reviews 6069398276 / 6069674738): a
+    /// second OS process holding the storage lock blocks this process's
+    /// identical acquisition until it releases. The child is this same
+    /// test binary running the companion test below through the
+    /// production acquisition path, so the pin covers the real
+    /// cross-process primitive (fd-lock → flock/LockFileEx), not an
+    /// in-process stand-in.
+    #[cfg(unix)]
+    #[test]
+    fn retention_store_lock_serializes_across_processes() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempdir().expect("tempdir");
+        let sessions_dir = tmp.path().join("sessions");
+        let manager = SessionManager::new(sessions_dir.clone()).expect("manager");
+
+        let exe = std::env::current_exe().expect("current exe");
+        let mut child = std::process::Command::new(exe)
+            // A substring filter (no `--exact`): the full libtest name
+            // carries the module path, and this suffix is unique.
+            .args([
+                "retention_store_lock_child_holds_and_releases",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CW_RETENTION_CHILD_DIR", &sessions_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the holder child");
+
+        let held_marker = sessions_dir.join("child-holds");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !held_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the child never reported the held lock"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // While the child holds the storage lock, this process's identical
+        // acquisition must not take it: the exclusion is keyed on the
+        // store, not on the process.
+        let mut contender = manager.open_retention_store_lock().expect("open the lock");
+        assert!(
+            contender.try_write().is_err(),
+            "the storage lock must stay held by the other process"
+        );
+
+        // Acknowledge; the child exits and releases the lock by process
+        // death, and the same acquisition then succeeds.
+        std::fs::write(sessions_dir.join("parent-seen"), "ok").expect("ack the child");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match contender.try_write() {
+                Ok(_guard) => break,
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the child never released the storage lock"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+        let _ = child.wait();
+    }
+
+    /// Companion for `retention_store_lock_serializes_across_processes`:
+    /// runs only when spawned by that test (`--ignored` plus the marker
+    /// env var; a plain ignored-test run is a no-op). Acquires the same
+    /// storage lock through the production path, reports the hold, waits
+    /// for the parent's acknowledgement, and exits — the lock releases by
+    /// process death.
+    #[test]
+    #[ignore = "spawned only by retention_store_lock_serializes_across_processes"]
+    fn retention_store_lock_child_holds_and_releases() {
+        use std::time::{Duration, Instant};
+
+        let Ok(dir) = std::env::var("CW_RETENTION_CHILD_DIR") else {
+            return;
+        };
+        let manager = SessionManager::new(std::path::PathBuf::from(dir)).expect("child manager");
+        let mut lock = manager.open_retention_store_lock().expect("child lock");
+        let _guard = lock.write().expect("child holds the storage lock");
+        std::fs::write(manager.sessions_dir().join("child-holds"), "held")
+            .expect("report the hold");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !manager.sessions_dir().join("parent-seen").exists() {
+            assert!(Instant::now() < deadline, "the parent never acknowledged");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn cleanup_never_deletes_archived_sessions_even_beyond_the_cap() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let extra = 5usize;
+
+        // One archived record older than everything else.
+        write_session_record(
+            &manager,
+            "archived-old",
+            &workspace,
+            Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra + 1) as i64),
+            true,
+        );
+        for i in 0..MAX_SESSIONS + extra {
+            let id = format!("active-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
+                false,
+            );
+        }
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        let remaining = manager.list_sessions().expect("list");
+        assert!(
+            remaining.iter().any(|s| s.id == "archived-old"),
+            "an archived session survives the retention janitor"
+        );
+        assert_eq!(
+            remaining.iter().filter(|s| !s.archived).count(),
+            MAX_SESSIONS,
+            "non-archived records are still bounded by MAX_SESSIONS"
+        );
+    }
+
+    /// Archived records occupying the newest slots must not push live
+    /// sessions out of the retention window. The cap bounds non-archived
+    /// history only, so archiving recent work preserves older active
+    /// sessions even though the combined record count exceeds
+    /// `MAX_SESSIONS`.
+    #[test]
+    fn cleanup_bounds_non_archived_history_when_archived_records_fill_the_window() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let extra = 5usize;
+
+        // `MAX_SESSIONS` archived records are the newest; only `extra` old
+        // non-archived records exist. The combined count exceeds the cap.
+        for i in 0..MAX_SESSIONS {
+            let id = format!("archived-recent-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::minutes((MAX_SESSIONS - i) as i64),
+                true,
+            );
+        }
+        for i in 0..extra {
+            let id = format!("active-old-{i:04}");
+            write_session_record(
+                &manager,
+                &id,
+                &workspace,
+                Utc::now() - chrono::Duration::hours((MAX_SESSIONS + extra - i) as i64),
+                false,
+            );
+        }
+
+        manager.cleanup_old_sessions().expect("cleanup");
+
+        let remaining = manager.list_sessions().expect("list");
+        assert_eq!(
+            remaining.iter().filter(|s| !s.archived).count(),
+            extra,
+            "every non-archived record is under the cap and must survive"
+        );
+        assert_eq!(
+            remaining.iter().filter(|s| s.archived).count(),
+            MAX_SESSIONS,
+            "archived records survive the retention janitor"
+        );
+    }
+
+    /// The throttle arithmetic itself: first run always due, in-window saves
+    /// skipped, the boundary due, and a backwards wall clock simply waits.
+    #[test]
+    fn janitor_due_pins_the_throttle_arithmetic() {
+        // First run of an instance is always due.
+        assert!(SessionManager::janitor_due(0, 0));
+        assert!(SessionManager::janitor_due(0, 5));
+        // Inside the window: not due.
+        assert!(!SessionManager::janitor_due(
+            100,
+            100 + JANITOR_MIN_INTERVAL_SECS - 1
+        ));
+        assert!(!SessionManager::janitor_due(100, 100));
+        // At the boundary and after: due.
+        assert!(SessionManager::janitor_due(
+            100,
+            100 + JANITOR_MIN_INTERVAL_SECS
+        ));
+        assert!(SessionManager::janitor_due(
+            100,
+            100 + 10 * JANITOR_MIN_INTERVAL_SECS
+        ));
+        // A wall clock that jumped backwards waits for real time to pass.
+        assert!(!SessionManager::janitor_due(100, 50));
+    }
+
+    /// Save-triggered janitor runs are spaced by
+    /// [`JANITOR_MIN_INTERVAL_SECS`]; explicit cleanup calls bypass the
+    /// throttle. Observed through the test-only run counter rather than
+    /// wall-clock timing, so the test is race-free.
+    #[test]
+    fn save_triggered_janitor_is_throttled_but_explicit_cleanup_is_not() {
+        assert_eq!(
+            JANITOR_MIN_INTERVAL_SECS, 60,
+            "the audited per-save throttle window"
+        );
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let run_count = || {
+            manager
+                .janitor_runs
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        write_session_record(&manager, "throttle-a", &workspace, Utc::now(), false);
+        assert_eq!(
+            run_count(),
+            1,
+            "the first save on a fresh manager runs the janitor"
+        );
+        write_session_record(&manager, "throttle-b", &workspace, Utc::now(), false);
+        assert_eq!(
+            run_count(),
+            1,
+            "a save inside the window does not re-run the janitor"
+        );
+        manager.cleanup_old_sessions().expect("explicit cleanup");
+        assert_eq!(run_count(), 2, "explicit cleanup calls bypass the throttle");
+        manager
+            .cleanup_old_sessions()
+            .expect("explicit cleanup again");
+        assert_eq!(run_count(), 3, "every explicit call runs");
+    }
+
+    /// Boot checkpoint recovery (`lib.rs`'s
+    /// `recover_interrupted_checkpoint_for_resume`) persists the recovered
+    /// record on a fresh per-boot manager whose janitor throttle has not
+    /// armed. It must route through [`SessionManager::save_session_edit`]:
+    /// the throttled janitor's first run always fires with no `keep`, so a
+    /// `save_session` there would prune the just-recovered (stale) record
+    /// whenever `MAX_SESSIONS` newer non-archived records exist. Boot-time
+    /// retention belongs to the keep-protected boot janitor instead.
+    /// Observed behaviorally (the recovered record survives beyond the cap)
+    /// because the recovery path constructs its own manager, so the
+    /// instance-local `janitor_runs` counter cannot see it.
+    #[test]
+    fn boot_checkpoint_recovery_never_arms_the_retention_janitor() {
+        assert_eq!(MAX_SESSIONS, 1_000, "the audited retention cap");
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home = crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let manager = SessionManager::default_location().expect("manager");
+
+        // The interrupted checkpoint's record is stale: older than the
+        // retention window's newest occupants.
+        let recovered = make_saved_session(
+            "recover-a",
+            &workspace,
+            Utc::now() - chrono::Duration::hours(MAX_SESSIONS as i64 + 2),
+            false,
+        );
+        manager
+            .save_checkpoint(&recovered)
+            .expect("save checkpoint");
+
+        // Fill the retention window with newer non-archived records so a
+        // keep-less cleanup would delete the recovered record.
+        for i in 0..MAX_SESSIONS {
+            write_session_record(
+                &manager,
+                &format!("newer-{i:04}"),
+                &workspace,
+                Utc::now(),
+                false,
+            );
+        }
+
+        let session_id =
+            crate::recover_interrupted_checkpoint_for_resume(&workspace).expect("recovered");
+        assert_eq!(session_id, recovered.metadata.id);
+
+        let persisted = manager
+            .load_session(&session_id)
+            .expect("recovered session must survive boot recovery");
+        assert_eq!(persisted.metadata.id, session_id);
     }
 
     #[test]
@@ -3279,7 +3977,7 @@ mod tests {
 
         // A record this instance creates is stamped with this boot id and is
         // therefore not prior-instance work.
-        write_session_record(&manager, "mine", &workspace, Utc::now());
+        write_session_record(&manager, "mine", &workspace, Utc::now(), false);
         assert_eq!(
             manager.session_boot_owner("mine").as_deref(),
             Some(current_session_boot_id())
@@ -3296,7 +3994,7 @@ mod tests {
         manager
             .record_session_boot_owner("theirs", "boot_other_instance")
             .expect("stamp");
-        write_session_record(&manager, "theirs", &workspace, Utc::now());
+        write_session_record(&manager, "theirs", &workspace, Utc::now(), false);
         assert_eq!(
             manager.session_boot_owner("theirs").as_deref(),
             Some("boot_other_instance")
@@ -3305,10 +4003,10 @@ mod tests {
 
         // A legacy record with no marker is classified as prior-instance
         // work, and a later re-save keeps it unclaimed.
-        write_session_record(&manager, "legacy", &workspace, Utc::now());
+        write_session_record(&manager, "legacy", &workspace, Utc::now(), false);
         manager.clear_session_boot_owner("legacy");
         assert!(manager.session_from_prior_instance("legacy"));
-        write_session_record(&manager, "legacy", &workspace, Utc::now());
+        write_session_record(&manager, "legacy", &workspace, Utc::now(), false);
         assert!(manager.session_from_prior_instance("legacy"));
 
         // Deleting the record drops its marker.
@@ -3320,7 +4018,7 @@ mod tests {
     fn session_boot_owner_sidecar_never_lists_as_a_session() {
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
-        write_session_record(&manager, "real", &tmp.path().join("ws"), Utc::now());
+        write_session_record(&manager, "real", &tmp.path().join("ws"), Utc::now(), false);
         assert!(manager.session_boot_owners_path().exists());
         let listed = manager.list_sessions().expect("list");
         assert_eq!(listed.len(), 1);
@@ -3883,8 +4581,9 @@ mod tests {
             "current-workspace",
             &workspace_a,
             Utc::now() - chrono::Duration::minutes(10),
+            false,
         );
-        write_session_record(&manager, "other-workspace", &workspace_b, Utc::now());
+        write_session_record(&manager, "other-workspace", &workspace_b, Utc::now(), false);
 
         let global = manager
             .list_sessions()
@@ -3920,8 +4619,9 @@ mod tests {
             "same-repo",
             &repo_app,
             Utc::now() - chrono::Duration::minutes(5),
+            false,
         );
-        write_session_record(&manager, "other-repo", &other_repo, Utc::now());
+        write_session_record(&manager, "other-repo", &other_repo, Utc::now(), false);
 
         let scoped = manager
             .get_latest_session_for_workspace(&repo_crate)
@@ -3942,6 +4642,7 @@ mod tests {
             "interrupted-user-turn",
             &workspace,
             Utc::now() - chrono::Duration::minutes(5),
+            false,
         );
         write_empty_session_record(&manager, "empty-auto-shell", &workspace, Utc::now());
 
@@ -4913,7 +5614,7 @@ mod tests {
         // to whatever the helper functions emit; we just need a
         // metadata block whose `updated_at` matches the requested
         // value.
-        write_session_record(manager, id, Path::new("/tmp"), updated_at);
+        write_session_record(manager, id, Path::new("/tmp"), updated_at, false);
     }
 
     #[test]

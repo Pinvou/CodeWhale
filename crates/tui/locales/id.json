@@ -1140,6 +1140,7 @@
   "VoiceErrNetwork": "Suara: permintaan transkripsi gagal",
   "VoiceErrEmptySend": "Suara: tidak ada yang dikirim",
   "VoiceErrTooShort": "Suara: tidak ada ucapan terdeteksi, rekaman terlalu pendek",
+  "VoiceErrRecorderStalled": "Suara: perekam berhenti merespons, audio yang terekam dibuang. Periksa mikrofon dan coba lagi.",
   "VoiceRecording": "🎙 Merekam... bicaralah sekarang",
   "VoiceProcessing": "🎙 Mentranskripsikan...",
   "VoiceTranscribed": "🎙 Tertranskripsi",

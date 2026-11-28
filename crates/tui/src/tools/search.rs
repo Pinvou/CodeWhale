@@ -22,15 +22,16 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Maximum number of results to return to avoid overwhelming output
-const MAX_RESULTS: usize = 100;
+const MAX_RESULTS: usize = 250;
 
 /// Maximum file size to search (skip large binaries)
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
 /// Hard cap on a single grep_files run. The directory walk plus per-file regex
-/// is synchronous blocking work; without this it can run for minutes on a large
-/// tree. Mirrors the file_search tool so both blocking searches behave the same.
-const GREP_FILES_TIMEOUT: Duration = Duration::from_secs(30);
+/// is synchronous blocking work; without this it can run for minutes on a
+/// large tree. (The file_search tool keeps its own separate, shorter budget —
+/// these are intentionally no longer mirrored.)
+const GREP_FILES_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Result of a grep match
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +57,7 @@ impl ToolSpec for GrepFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `bash` — pure-Rust; skips common non-code directories (node_modules, .git, target, ...) by default, and any `exclude` you pass replaces that default list entirely; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match). The result set is capped (default 100): when the cap is reached `truncated` is true — narrow the search instead of assuming the list is complete. Files over 10MB and files containing invalid UTF-8 are skipped silently, as are entries that cannot be read and (by default) symlinked entries. Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing. The run aborts with a timeout error after 30s."
+        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `bash` — pure-Rust; skips common non-code directories (node_modules, .git, target, ...) by default, and any `exclude` you pass replaces that default list entirely; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match). The result set is capped (default 250): when the cap is reached `truncated` is true — narrow the search instead of assuming the list is complete. Files over 10MB and files containing invalid UTF-8 are skipped silently, as are entries that cannot be read and (by default) symlinked entries. Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing. The run aborts with a timeout error after 120s."
     }
 
     fn input_schema(&self) -> Value {
@@ -91,7 +92,7 @@ impl ToolSpec for GrepFilesTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 100)"
+                    "description": "Maximum number of results to return (default: 250)"
                 }
             },
             "required": ["pattern"]
@@ -188,96 +189,105 @@ impl ToolSpec for GrepFilesTool {
         // The directory walk and per-file regex are synchronous blocking work.
         // Run them on a blocking worker bounded by a hard timeout so a huge tree
         // can't pin the async runtime and leave the stop button unresponsive.
-        let result = run_blocking_grep(GREP_FILES_TIMEOUT, cancel_token.clone(), move || {
-            let cancel_token = cancel_token.as_ref();
+        let result = run_blocking_grep(
+            GREP_FILES_TIMEOUT,
+            cancel_token.clone(),
+            move |walk_cancel| {
+                let cancel_token = walk_cancel;
 
-            // Stream the walk: each file is searched as it is discovered and
-            // the traversal stops as soon as the match budget is exhausted.
-            // Files are never materialized in a big Vec and file contents are
-            // read line-by-line, so memory stays bounded by the result set.
-            let mut results: Vec<GrepMatch> = Vec::new();
-            let mut files_searched = 0;
-            let mut total_matches = 0;
+                // Stream the walk: each file is searched as it is discovered and
+                // the traversal stops as soon as the match budget is exhausted.
+                // Files are never materialized in a big Vec and file contents are
+                // read line-by-line, so memory stays bounded by the result set.
+                let mut results: Vec<GrepMatch> = Vec::new();
+                let mut files_searched = 0;
+                let mut total_matches = 0;
 
-            visit_files(
-                &search_path,
-                &include_patterns,
-                &exclude_patterns,
-                cancel_token,
-                follow_symlinks,
-                &mut |file_path| {
-                    if results.len() >= max_results {
-                        return Ok(WalkControl::Stop);
-                    }
-                    check_cancelled(cancel_token)?;
+                visit_files(
+                    &search_path,
+                    &include_patterns,
+                    &exclude_patterns,
+                    cancel_token,
+                    follow_symlinks,
+                    &mut |file_path| {
+                        if results.len() >= max_results {
+                            return Ok(WalkControl::Stop);
+                        }
+                        check_cancelled(cancel_token)?;
 
-                    // Skip files that are too large
-                    if let Ok(metadata) = fs::metadata(file_path)
-                        && metadata.len() > MAX_FILE_SIZE
-                    {
-                        return Ok(WalkControl::Continue);
-                    }
+                        // Skip files that are too large
+                        if let Ok(metadata) = fs::metadata(file_path)
+                            && metadata.len() > MAX_FILE_SIZE
+                        {
+                            return Ok(WalkControl::Continue);
+                        }
 
-                    // Get relative path from workspace
-                    let relative_path = file_path
-                        .strip_prefix(&workspace)
-                        .unwrap_or(file_path)
-                        .to_string_lossy()
-                        .to_string();
+                        // Get relative path from workspace
+                        let relative_path = file_path
+                            .strip_prefix(&workspace)
+                            .unwrap_or(file_path)
+                            .to_string_lossy()
+                            .to_string();
 
-                    let budget = max_results - results.len();
-                    let Some(file_matches) = search_file_streaming(
-                        file_path,
-                        &relative_path,
-                        &regex,
-                        context_lines,
-                        budget,
-                        cancel_token,
-                    )?
-                    else {
-                        return Ok(WalkControl::Continue); // Skip binary or unreadable files
-                    };
+                        let budget = max_results - results.len();
+                        let Some(file_matches) = search_file_streaming(
+                            file_path,
+                            &relative_path,
+                            &regex,
+                            context_lines,
+                            budget,
+                            cancel_token,
+                        )?
+                        else {
+                            return Ok(WalkControl::Continue); // Skip binary or unreadable files
+                        };
 
-                    files_searched += 1;
-                    total_matches += file_matches.len();
-                    results.extend(file_matches);
-                    Ok(WalkControl::Continue)
-                },
-            )?;
+                        files_searched += 1;
+                        total_matches += file_matches.len();
+                        results.extend(file_matches);
+                        Ok(WalkControl::Continue)
+                    },
+                )?;
 
-            let matches_json: Vec<Value> = results
-                .iter()
-                .map(|item| grep_match_to_json(item, context_lines))
-                .collect();
+                let matches_json: Vec<Value> = results
+                    .iter()
+                    .map(|item| grep_match_to_json(item, context_lines))
+                    .collect();
 
-            // Build result. When context_lines == 1, return the single context
-            // line as a string instead of a one-item array. That keeps the common
-            // "show just the adjacent line" case easy for model callers to read.
-            Ok(json!({
-                "matches": matches_json,
-                "total_matches": total_matches,
-                "files_searched": files_searched,
-                // The walk stops as soon as the budget is full, so
-                // total_matches can never exceed max_results. Reaching the
-                // cap is the truncation signal; `>` could never fire.
-                "truncated": total_matches >= max_results,
-            }))
-        })
+                // Build result. When context_lines == 1, return the single context
+                // line as a string instead of a one-item array. That keeps the common
+                // "show just the adjacent line" case easy for model callers to read.
+                Ok(json!({
+                    "matches": matches_json,
+                    "total_matches": total_matches,
+                    "files_searched": files_searched,
+                    // The walk stops as soon as the budget is full, so
+                    // total_matches can never exceed max_results. Reaching the
+                    // cap is the truncation signal; `>` could never fire.
+                    "truncated": total_matches >= max_results,
+                }))
+            },
+        )
         .await?;
 
         ToolResult::json(&result).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 }
 
-/// Run the synchronous grep walk on a blocking worker, cancellable via the
-/// token and bounded by `timeout`. Mirrors `run_blocking_file_search`.
+/// Run the synchronous grep walk on a blocking worker, cancellable and
+/// bounded by `timeout`. The closure receives a walk-local child of
+/// `cancel_token`: it is cancelled when the caller's token is cancelled
+/// (an external stop) and when the timeout fires, but cancelling it never
+/// touches the caller's token itself — a grep timeout must surface as a
+/// tool error the turn can react to, never as a turn-wide stop. Mirrors
+/// `run_blocking_file_search`.
 async fn run_blocking_grep<F>(
     timeout: Duration,
     cancel_token: Option<CancellationToken>,
     search: F,
 ) -> Result<Value, ToolError>
 where
-    F: FnOnce() -> Result<Value, ToolError> + Send + 'static,
+    F: FnOnce(Option<&CancellationToken>) -> Result<Value, ToolError> + Send + 'static,
 {
     if cancel_token
         .as_ref()
@@ -286,19 +296,36 @@ where
         return Err(grep_cancelled());
     }
 
-    let task = tokio::task::spawn_blocking(search);
-    let result = match cancel_token {
+    let walk_token = cancel_token.as_ref().map(|token| token.child_token());
+    let task_token = walk_token.clone();
+    let task = tokio::task::spawn_blocking(move || search(task_token.as_ref()));
+    let result = match &cancel_token {
         Some(token) => {
             tokio::select! {
                 biased;
-                () = token.cancelled() => return Err(grep_cancelled()),
+                () = token.cancelled() => {
+                    if let Some(walk) = walk_token.as_ref() {
+                        walk.cancel();
+                    }
+                    return Err(grep_cancelled());
+                },
                 result = tokio::time::timeout(timeout, task) => result,
             }
         }
         None => tokio::time::timeout(timeout, task).await,
     };
 
-    let joined = result.map_err(|_| grep_timeout(timeout))?;
+    let joined = result.map_err(|_| {
+        // The timeout drops the JoinHandle, detaching the walk: it would keep
+        // consuming a blocking worker and file IO for its natural lifetime.
+        // The closure checks the walk-local child per file (and per line), so
+        // cancelling it stops the detached walk promptly without cancelling
+        // the caller's per-turn token.
+        if let Some(walk) = walk_token.as_ref() {
+            walk.cancel();
+        }
+        grep_timeout(timeout)
+    })?;
     joined.map_err(|err| {
         ToolError::execution_failed(format!("grep_files worker failed before completion: {err}"))
     })?

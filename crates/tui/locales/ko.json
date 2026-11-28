@@ -1163,6 +1163,7 @@
   "VoiceErrNetwork": "음성: 받아쓰기 요청이 실패했습니다",
   "VoiceErrEmptySend": "음성: 전송할 내용이 없습니다",
   "VoiceErrTooShort": "음성: 음성이 감지되지 않았습니다. 녹음이 너무 짧습니다",
+  "VoiceErrRecorderStalled": "음성: 녹음기가 응답하지 않아 캡처된 오디오를 폐기했습니다. 마이크 장치를 확인하고 다시 시도하세요.",
   "VoiceRecording": "🎙 녹음 중... 지금 말하세요",
   "VoiceProcessing": "🎙 받아쓰는 중...",
   "VoiceTranscribed": "🎙 받아쓰기 완료",

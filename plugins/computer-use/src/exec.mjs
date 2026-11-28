@@ -23,10 +23,19 @@ export function run(cmd, args = [], opts = {}) {
       resolve({ code: -1, stdout: "", stderr: String(err?.message ?? err), timedOut: false, signal: null });
       return;
     }
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let timedOut = false;
     let settled = false;
+    // Diagnostics from the 'error' event are kept outside the capture cap:
+    // appended into the chunks after an over-cap stderr they would sit past
+    // the cap cut and be lost, leaving the truncation marker as the only
+    // trace of a failed spawn/kill.
+    let spawnError = null;
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill("SIGTERM"); } catch {}
@@ -34,19 +43,52 @@ export function run(cmd, args = [], opts = {}) {
       setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 1500);
     }, timeoutMs);
     child.stdout.on("data", (d) => {
-      if (stdout.length < maxBuffer) stdout += d.toString();
+      if (stdoutBytes < maxBuffer) stdoutChunks.push(d);
+      stdoutBytes += Buffer.byteLength(d);
+      if (stdoutBytes > maxBuffer) stdoutTruncated = true;
     });
     child.stderr.on("data", (d) => {
-      if (stderr.length < maxBuffer) stderr += d.toString();
+      if (stderrBytes < maxBuffer) stderrChunks.push(d);
+      stderrBytes += Buffer.byteLength(d);
+      if (stderrBytes > maxBuffer) stderrTruncated = true;
     });
+    // Cap the kept prefix to maxBuffer bytes, dropping a trailing partial
+    // UTF-8 sequence the cut may have split, so the truncation marker's byte
+    // claim stays truthful and the kept prefix never ends in a replacement
+    // character that was never in the output.
+    const capToBytes = (buf) => {
+      let end = Math.min(buf.length, maxBuffer);
+      let start = end - 1;
+      while (start >= 0 && end - start < 4 && (buf[start] & 0xc0) === 0x80) start -= 1;
+      if (start >= 0 && (buf[start] & 0xc0) !== 0x80) {
+        const lead = buf[start];
+        const expected = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+        if (end - start < expected) end = start;
+      }
+      return buf.subarray(0, end);
+    };
     const finish = (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Decode the raw chunks once, at the end: per-chunk string decodes
+      // would turn a multi-byte sequence split across pipe-read chunks into
+      // a fabricated replacement character at each internal join.
+      let out = Buffer.concat(stdoutChunks);
+      let err = Buffer.concat(stderrChunks);
+      // Collection stops at maxBuffer; mark the cut so consumers know data
+      // was dropped instead of mistaking the prefix for the whole output.
+      if (stdoutTruncated) out = capToBytes(out);
+      if (stderrTruncated) err = capToBytes(err);
+      let stdout = out.toString("utf8");
+      let stderr = err.toString("utf8");
+      if (stdoutTruncated) stdout += `\n…[stdout truncated at ${maxBuffer} byte capture limit]`;
+      if (stderrTruncated) stderr += `\n…[stderr truncated at ${maxBuffer} byte capture limit]`;
+      if (spawnError) stderr += `${stderr ? "\n" : ""}spawn error: ${spawnError}`;
       resolve({ code, stdout, stderr, timedOut, signal });
     };
     child.on("error", (err) => {
-      stderr += String(err?.message ?? err);
+      spawnError = String(err?.message ?? err);
       finish(-1, null);
     });
     child.on("close", (code, signal) => finish(code, signal));
