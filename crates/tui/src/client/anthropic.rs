@@ -120,8 +120,21 @@ impl DeepSeekClient {
                 tools
                     .iter()
                     .map(|tool| {
+                        // A schema-less MCP tool (no `inputSchema` in the
+                        // server manifest) deserializes to JSON null and
+                        // `McpTool::to_api_tools` forwards it verbatim; null
+                        // is not "A JSON Schema object", so no lane can ship
+                        // it as declared. The narrowing lane already replaces
+                        // non-object roots with `{}`; restore the same empty
+                        // object here so every lane keeps the pre-#146
+                        // baseline while real schemas stay byte-verbatim.
+                        let input_schema = if tool.input_schema.is_null() {
+                            json!({})
+                        } else {
+                            tool.input_schema.clone()
+                        };
                         let (description, schema) = if narrow_root_compositions {
-                            let mut schema = tool.input_schema.clone();
+                            let mut schema = input_schema;
                             let constraint_note =
                                 schema_sanitize::sanitize_for_anthropic_messages(&mut schema);
                             let description = match constraint_note {
@@ -133,7 +146,7 @@ impl DeepSeekClient {
                             };
                             (description, schema)
                         } else {
-                            (tool.description.clone(), tool.input_schema.clone())
+                            (tool.description.clone(), input_schema)
                         };
                         let mut value = json!({
                             "name": tool.name,
@@ -1395,6 +1408,51 @@ mod tests {
             assert_eq!(
                 body["tools"][0]["description"], "Patch files",
                 "no constraint note is synthesized for a schema that ships as declared: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn schemaless_mcp_tools_ship_an_empty_object_on_every_messages_lane() {
+        // A schema-less MCP tool (`inputSchema` absent from the server
+        // manifest) deserializes to JSON null via `#[serde(default)]` and
+        // reaches this adapter unfiltered through `McpTool::to_api_tools`.
+        // Pre-#146 every lane replaced a non-object root with `{}`; the
+        // verbatim rewrite restored real schemas but left this edge shipping
+        // `"input_schema": null`, which no Anthropic-compatible endpoint
+        // accepts as a schema — and which the narrowing lane still refuses
+        // to send, so the lanes disagreed. Pin the empty-object baseline on
+        // every lane: real schemas stay verbatim, null becomes `{}`.
+        for client in [
+            deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL),
+            minimax_test_client(),
+            modelstudio_test_client(crate::config::MODELSTUDIO_TOKEN_PLAN_ANTHROPIC_BASE_URL),
+            openmodel_test_client(),
+            anthropic_test_client(None),
+        ] {
+            let mut request = request_with("claude-sonnet-4-6", None, None, None);
+            request.tools = Some(vec![Tool {
+                tool_type: None,
+                name: "no_schema".to_string(),
+                description: String::new(),
+                input_schema: serde_json::Value::Null,
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            }]);
+
+            let body = client.build_anthropic_body(&request, true);
+
+            assert_eq!(
+                body["tools"][0]["input_schema"],
+                json!({}),
+                "a schema-less tool must not ship JSON null as its input_schema: {body}"
+            );
+            assert_eq!(
+                body["tools"][0]["description"], "",
+                "an empty-object schema synthesizes no constraint note: {body}"
             );
         }
     }

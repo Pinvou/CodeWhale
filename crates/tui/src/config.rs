@@ -3314,9 +3314,11 @@ pub struct Config {
     /// gate is `strict_tool_mode_for_route`), because the schema reshaping
     /// follows DeepSeek's strict documents and would otherwise strip
     /// keywords other providers document (e.g. OpenAI's
-    /// `minItems`/`maxItems`). At this stack layer every consuming surface
-    /// still keys on the bare flag — the route-gated wiring lands with this
-    /// stack's engine, subagent, and doctor layers. On gated routes
+    /// `minItems`/`maxItems`). Since this stack's engine and subagent
+    /// layers landed, the turn loop, preview, and child sub-agent surfaces
+    /// key on the route-gated predicate (`strict_tool_mode_for_route`);
+    /// the doctor's route report lands with the doctor layer. On gated
+    /// routes
     /// optional parameters are removed from the schema (reported in the
     /// tool description), non-numeric `const` values land on `enum`, and
     /// `dependentRequired` tables are stripped, per the strict contract.

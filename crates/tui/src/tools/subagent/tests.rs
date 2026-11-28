@@ -6160,27 +6160,28 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     );
 
     // The raw reshape (direct `sanitize_for_strict`, bypassing the usability
-    // gate) removes optional properties outright (the Fleet role is
-    // optional), so the property — and with it the enum — leaves the schema,
-    // and the removals are reported. That is the documented strict contract,
-    // and it is exactly why the funnel, not the reshape, owns the agent
-    // surface. When the role is required, the property survives and its
-    // enum must be neither erased nor widened.
+    // The raw reshape (direct `sanitize_for_strict`, bypassing the usability
+    // gate) removes optional properties — everything but the required
+    // `action` discriminator — and reports the removals. That is the
+    // documented strict contract, and it is exactly why the funnel, not the
+    // reshape, owns the agent surface.
     let mut strict = agent_schema.clone();
     let removed = schema_sanitize::sanitize_for_strict(&mut strict);
     assert!(
         removed.contains(&"type".to_string()),
         "the optional role selector is removed and reported: {removed:?}"
     );
-    assert!(
-        strict["properties"].get("type").is_none(),
-        "the strict contract removes the optional role property outright: {strict}"
-    );
+
     assert_eq!(
         strict["required"],
         json!(["action"]),
         "only the required discriminator survives the reshape"
     );
+    assert!(
+        strict["properties"]["type"].is_null(),
+        "the removed role selector is gone from the enforced schema"
+    );
+
     // When the role is required, the property survives and its enum must
     // be neither erased nor widened.
     let mut strict_required = agent_schema.clone();

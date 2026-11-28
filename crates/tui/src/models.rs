@@ -40,10 +40,14 @@ pub const KIMI_K31_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
 /// the family's default-sized conservative ceiling (review 5929534479).
 #[must_use]
 pub(crate) fn is_kimi_k31_documented_maximum_row(model: &str) -> bool {
-    matches!(
-        model,
-        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
-    )
+    // Delegate to the shared family matcher (case-insensitive with
+    // insignificant padding): the downgrade guard runs on the
+    // user-configured spelling, so a `KIMI-K3.1-PRO` variant must name the
+    // same row as its lowercase form instead of dodging the conservative
+    // gateway ceiling. The roster constants list exactly these four
+    // spellings, so delegation is behavior-preserving for the lowercase
+    // forms and strictly wider for the variants.
+    crate::config::is_kimi_k31_model_spelling(model)
 }
 /// Documented maximum output for the exact direct Kimi K3 API route.
 ///

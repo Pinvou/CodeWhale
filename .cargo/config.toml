@@ -1,0 +1,11 @@
+# Local parity with CI: fork-ci.yml pins RUST_MIN_STACK=16 MiB for the rust
+# test lanes, and two engine tests added in the 2026-11 merge window
+# (auto_review_guardian_allow_executes_once_and_accounts_usage_without_prompt_leak,
+# partial_input_engine_network_error_preserves_partial_tool_feedback)
+# deterministically overflow the 8 MiB libtest default on a stock local
+# `cargo test` (SIGABRT) while passing under CI's larger stack. Pin the same
+# floor here so local runs exercise the CI condition instead of a stricter
+# one CI never sees. Root-cause shrinkage of the engine future remains a
+# follow-up; this only stops the local/CI divergence.
+[env]
+RUST_MIN_STACK = "16777216"

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::dispatch::normalize_schema_json_containers;
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
+use crate::core::events::TOOL_CALL_CANCELLED_METADATA_KEY;
 use crate::core::ops::UserInputProvenance;
 use crate::models::Role;
 use crate::prompt_zones::PinnedPrefix;
@@ -18,6 +19,7 @@ use crate::runtime_handoff::{
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
 use crate::tools::canonical_action::canonical_action_alias;
+use crate::tools::spec::ToolTerminalStatus;
 use crate::tools::tool_call_budget::ToolCallBudget;
 use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
@@ -4753,13 +4755,12 @@ impl Engine {
             if self.cancel_token.is_cancelled() {
                 for plan in plans {
                     let terminal = ToolExecutionOutcome::cancelled(interrupted_tool_result());
-                    let result = terminal.legacy_result();
                     let _ = self
                         .tx_event
                         .send(Event::ToolCallComplete {
                             id: plan.id.clone(),
                             name: plan.name.clone(),
-                            result: result.clone(),
+                            result: tool_completion_result(&terminal),
                         })
                         .await;
                     outcomes[plan.index] = Some(ToolExecOutcome {
@@ -4906,12 +4907,14 @@ impl Engine {
                             .as_ref()
                             .map(|result| result.content_blocks.clone())
                             .unwrap_or_default();
-                        let legacy_result = result.map(RichToolResult::into_result);
+                        let terminal = ToolExecutionOutcome::from_legacy(
+                            result.map(RichToolResult::into_result),
+                        );
                         let _ = tx_event
                             .send(Event::ToolCallComplete {
                                 id: plan.id.clone(),
                                 name: plan.name.clone(),
-                                result: legacy_result.clone(),
+                                result: tool_completion_result(&terminal),
                             })
                             .await;
 
@@ -4921,7 +4924,7 @@ impl Engine {
                             name: plan.name,
                             input: plan.input,
                             started_at,
-                            terminal: ToolExecutionOutcome::from_legacy(legacy_result),
+                            terminal,
                             content_blocks,
                         }
                     };
@@ -4953,13 +4956,12 @@ impl Engine {
                             continue;
                         }
                         let terminal = ToolExecutionOutcome::cancelled(interrupted_tool_result());
-                        let result = terminal.legacy_result();
                         let _ = self
                             .tx_event
                             .send(Event::ToolCallComplete {
                                 id: id.clone(),
                                 name: name.clone(),
-                                result: result.clone(),
+                                result: tool_completion_result(&terminal),
                             })
                             .await;
                         outcomes[index] = Some(ToolExecOutcome {
@@ -5082,14 +5084,12 @@ impl Engine {
                                 ),
                             },
                         };
-                        let result = terminal.legacy_result();
-
                         let _ = self
                             .tx_event
                             .send(Event::ToolCallComplete {
                                 id: tool_id.clone(),
                                 name: tool_name.clone(),
-                                result: result.clone(),
+                                result: tool_completion_result(&terminal),
                             })
                             .await;
 
@@ -5490,15 +5490,6 @@ impl Engine {
                         .map(|result| result.content_blocks.clone())
                         .unwrap_or_default();
                     let legacy_result = result.map(RichToolResult::into_result);
-                    let _ = self
-                        .tx_event
-                        .send(Event::ToolCallComplete {
-                            id: tool_id.clone(),
-                            name: tool_name.clone(),
-                            result: legacy_result.clone(),
-                        })
-                        .await;
-
                     let terminal = if cancelled_before_completion {
                         ToolExecutionOutcome::cancelled(
                             legacy_result.expect("cancelled tool result is always model-visible"),
@@ -5506,6 +5497,14 @@ impl Engine {
                     } else {
                         ToolExecutionOutcome::from_legacy(legacy_result)
                     };
+                    let _ = self
+                        .tx_event
+                        .send(Event::ToolCallComplete {
+                            id: tool_id.clone(),
+                            name: tool_name.clone(),
+                            result: tool_completion_result(&terminal),
+                        })
+                        .await;
                     outcomes[plan.index] = Some(ToolExecOutcome {
                         index: plan.index,
                         id: tool_id,
@@ -7017,9 +7016,51 @@ fn interrupted_tool_result() -> ToolResult {
     ToolResult::error("Tool not executed: the request was cancelled before this tool ran.")
 }
 
+// Keep transcript projection intact and reserve the host marker for the engine.
+fn tool_completion_result(terminal: &ToolExecutionOutcome) -> Result<ToolResult, ToolError> {
+    let mut projected = terminal.legacy_result();
+    if let Ok(result) = &mut projected {
+        let cancelled = terminal.status == ToolTerminalStatus::Cancelled;
+        match &mut result.metadata {
+            Some(Value::Object(fields)) if cancelled => {
+                fields.insert(TOOL_CALL_CANCELLED_METADATA_KEY.into(), Value::Bool(true));
+            }
+            Some(Value::Object(fields)) => {
+                if fields.remove(TOOL_CALL_CANCELLED_METADATA_KEY).is_some() && fields.is_empty() {
+                    result.metadata = None;
+                }
+            }
+            None if cancelled => {
+                result.metadata = Some(json!({ (TOOL_CALL_CANCELLED_METADATA_KEY): true }));
+            }
+            _ => {}
+        }
+    }
+    projected
+}
+
 #[cfg(test)]
 mod cancel_batch_tests {
     use super::*;
+
+    #[test]
+    fn tool_completion_event_rejects_a_tool_supplied_cancel_marker() {
+        let legacy = ToolResult::error("tool failed").with_metadata(json!({
+            (TOOL_CALL_CANCELLED_METADATA_KEY): true,
+            "status": "Failed"
+        }));
+        let terminal = ToolExecutionOutcome::from_legacy(Ok(legacy));
+        let host = tool_completion_result(&terminal).expect("host result");
+        assert_eq!(host.metadata, Some(json!({"status": "Failed"})));
+        assert!(!host.success);
+        assert_eq!(terminal.status, ToolTerminalStatus::Failed);
+
+        let timeout = ToolExecutionOutcome::from_legacy(Err(ToolError::Timeout { seconds: 1 }));
+        assert!(matches!(
+            tool_completion_result(&timeout),
+            Err(ToolError::Timeout { seconds: 1 })
+        ));
+    }
 
     #[test]
     fn interrupted_tool_result_is_a_non_error_unexecuted_marker() {
