@@ -1541,8 +1541,18 @@ fn oneof_node_defect(
         return None;
     }
     // R1: identical branches.
+    // Round 32: the pairwise scan is proof-work like the R2 admission arm
+    // — a hostile under-cap union paid the full B²/2 deep `Value`
+    // compares per node per request outside every budget. The same
+    // pair-proof cap bounds it; exhaustion abstains to pass-through, the
+    // no-mutation answer the branch cap and the pair-proof cap draw.
+    let mut proofs = 0usize;
     for (left, left_branch) in branches.iter().enumerate() {
         for (right, right_branch) in branches.iter().enumerate().skip(left + 1) {
+            proofs += 1;
+            if proofs > XAI_DEFECT_PAIR_PROOF_CAP {
+                return None;
+            }
             if left_branch == right_branch {
                 return Some(format!(
                     "R1 identical branches {left} and {right} at {path}"
@@ -1603,14 +1613,34 @@ fn oneof_node_defect(
                 .all(|candidate| !right_set.contains(candidate))
         })
     };
-    let non_discriminating = required_free
-        .iter()
-        .filter(|branch| {
-            !required_free
-                .iter()
-                .all(|other| std::ptr::eq(**branch, *other) || pin_discriminated(branch, other))
-        })
-        .count();
+    // Round 32: the pin-exemption filter pays `pin_discriminated` per
+    // ordered pair — proof-work like the admission arm it feeds, so it
+    // ticks the same pair-proof cap and abstains to pass-through on
+    // exhaustion.
+    let mut exemption_proofs = 0usize;
+    let mut non_discriminating = 0usize;
+    for branch in required_free.iter() {
+        let mut discriminates_every_other = true;
+        for other in required_free.iter() {
+            if std::ptr::eq(*branch, *other) {
+                continue;
+            }
+            exemption_proofs += 1;
+            if exemption_proofs > XAI_DEFECT_PAIR_PROOF_CAP {
+                return None;
+            }
+            if !pin_discriminated(branch, other) {
+                discriminates_every_other = false;
+                break;
+            }
+        }
+        if !discriminates_every_other {
+            non_discriminating += 1;
+            if non_discriminating >= 2 {
+                break;
+            }
+        }
+    }
     if non_discriminating >= 2 {
         return Some(format!(
             "R2 {non_discriminating} non-discriminating branches at {path}"
@@ -21365,6 +21395,31 @@ mod strict_fixwave_r32 {
         assert!(
             plain.get("nullable") == Some(&Value::Bool(true)),
             "the closure-free parent still collapses ({plain})"
+        );
+    }
+
+    #[test]
+    fn xai_identical_branch_scan_ticks_the_pair_proof_budget() {
+        // Round 32: the R1 identical-branch scan was pairwise proof-work
+        // outside every budget — a hostile under-cap union paid the full
+        // B²/2 deep Value compares per node per request. The scan ticks
+        // the pair-proof cap and abstains to pass-through on exhaustion:
+        // 300 distinct branches put the late identical pair (260, 261)
+        // past the 20k cap (~44k pairs precede it), so the walk abstains
+        // instead of detecting.
+        let mut branches = Vec::new();
+        for i in 0..300usize {
+            branches.push(json!({
+                "type": "object",
+                "properties": {"f": {"type": "string", "enum": [format!("v{i}")]
+                }}
+            }));
+        }
+        branches[260] = branches[261].clone();
+        let mut walk = DefectWalk::default();
+        assert!(
+            oneof_node_defect(&branches, &Map::new(), "#", &mut walk).is_none(),
+            "the scan must abstain past the pair-proof cap"
         );
     }
 }
