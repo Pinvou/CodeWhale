@@ -5113,6 +5113,15 @@ fn serialized_len_capped(value: &Value, cap: usize, total: &mut usize) {
     }
 }
 
+/// Whether one side's `enum` value stays within the pair judge's
+/// membership-scan cap: at most [`ENUM_PAIR_MEMBER_BYTES_CAP`] serialized
+/// most [`ENUM_PAIR_MEMBER_BYTES_CAP`] serialized bytes. The count cap
+/// alone made the worst case a function of member BYTES — 256 members of
+/// 60 KB strings each are 4 GB of `Value` equality per pair call within
+/// the catalog budget — so the scan is bounded by total size, not count.
+/// Past either cap the membership judgment abstains compatible-by-default
+/// (a keep decision, never an overclosure: abstention can only miss an
+/// unsatisfiability detection, never reject a satisfiable schema).
 fn enum_members_within_judge_cap(members: &[Value]) -> bool {
     // Round 24: the member-COUNT cap is gone — the count cap existed to
     // bound the quadratic value-equality scan, which the hash-based
