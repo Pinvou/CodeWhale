@@ -3351,11 +3351,40 @@ fn parent_keyword_collides(obj: &Map<String, Value>, key: &str, branch_value: &V
             // must not merge open (`allOf: []` is the identity and
             // `required: []` asserts no names, so both stay mergeable).
             if parent.is_object() {
-                return obj.get("additionalProperties").is_some_and(|ap| match ap {
+                if obj.get("additionalProperties").is_some_and(|ap| match ap {
                     Value::Bool(false) => true,
                     Value::Object(_) => key == "properties",
                     _ => false,
-                });
+                }) {
+                    return true;
+                }
+                // Round 32 (fresh r4 review, live-proven): the
+                // `unevaluated` spellings are the same closure family.
+                // `unevaluatedProperties` constrains every key the
+                // evaluated containers do not admit — `{"properties": {},
+                // "unevaluatedProperties": false}` asserts objects with NO
+                // keys, and merging a branch's `properties` into the empty
+                // container made those keys evaluated, silently narrowing
+                // the closure away: the authored schema admitted nothing
+                // and the merged shape admitted `{"tags": []}` with no
+                // note. The bool-false form collides outright; the schema
+                // form constrains keys OUTSIDE `properties`, so only the
+                // properties merge escapes it (the additionalProperties
+                // reasoning one family over). `unevaluatedItems` mirrors
+                // this beside `items`/`prefixItems`.
+                match obj.get("unevaluatedProperties") {
+                    Some(Value::Bool(false)) => return true,
+                    Some(Value::Object(_)) if key == "properties" => return true,
+                    _ => {}
+                }
+                match obj.get("unevaluatedItems") {
+                    Some(Value::Bool(false)) => return true,
+                    Some(Value::Object(_)) if key == "items" || key == "prefixItems" => {
+                        return true;
+                    }
+                    _ => {}
+                }
+                return false;
             }
             return matches!(key, "enum" | "anyOf" | "oneOf");
         }
@@ -21266,5 +21295,76 @@ mod strict_fixwave_r32 {
         }));
         assert!(all, "the admitted sibling pin keeps the union satisfiable");
         assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn unevaluated_closures_collide_in_the_nullable_collapse() {
+        // Live-proven pre-fix (generic sanitize, every non-strict lane):
+        // the authored closure admits objects with NO keys — every key is
+        // unevaluated and rejected — so the authored non-null language is
+        // empty and the whole union admits nothing. The nullable collapse
+        // merged the branch's properties inside the closure anyway and
+        // the shipped shape admitted {"tags": []} with no note. The
+        // collision keeps the union (no merge, no nullable landing).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {},
+            "unevaluatedProperties": false,
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_some(),
+            "the closure must collide: the union stays a union ({schema})"
+        );
+        assert!(
+            schema.get("nullable").is_none(),
+            "no nullable landing past the collision ({schema})"
+        );
+        assert!(
+            schema["properties"].as_object().is_some_and(Map::is_empty),
+            "the branch properties must not merge into the closure ({schema})"
+        );
+    }
+
+    #[test]
+    fn unevaluated_closures_keep_the_open_form_mergeable() {
+        // Keep-sides: `unevaluatedProperties: true` constrains nothing and
+        // stays mergeable (the additionalProperties true-form line), and
+        // a parent with NO closure still collapses losslessly — the
+        // collision must not over-fail the documented nullable merge.
+        let mut open = json!({
+            "type": "object",
+            "properties": {},
+            "unevaluatedProperties": true,
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]}
+            ]
+        });
+        sanitize(&mut open);
+        assert!(
+            open.get("nullable") == Some(&Value::Bool(true)),
+            "the true-form closure merges ({open})"
+        );
+        let mut plain = json!({
+            "type": "object",
+            "properties": {},
+            "anyOf": [
+                {"type": "null"},
+                {"type": "object", "properties": {"tags": {"type": "array"}},
+                 "required": ["tags"]}
+            ]
+        });
+        sanitize(&mut plain);
+        assert!(
+            plain.get("nullable") == Some(&Value::Bool(true)),
+            "the closure-free parent still collapses ({plain})"
+        );
     }
 }
