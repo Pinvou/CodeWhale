@@ -1682,3 +1682,37 @@ fn receipts_written_before_the_ocean_load_with_ocean_on() {
         .unwrap();
     assert!(record.ocean_enabled);
 }
+
+#[test]
+fn route_identity_with_model_selector_keys_the_identity_on_the_explicit_model() {
+    // Round 31: the doctor's dsh section passes the LAUNCH model (the
+    // settings chain) through this selector while session-side callers keep
+    // the config default — pin that the selector, not the config default,
+    // keys the identity's model, and that the plain wrapper still answers
+    // the config default. Without this pin, reverting the doctor to the
+    // raw-root `codewhale_route_identity` failed nothing (the change rode
+    // on sibling-section similarity).
+    let config = crate::config::Config {
+        provider: Some("deepseek".to_string()),
+        ..Default::default()
+    };
+    let workspace = PathBuf::new();
+    let default_identity =
+        codewhale_route_identity(&config, &workspace).expect("config-default route identity");
+    let selected = codewhale_route_identity_with_model(&config, "deepseek-reasoner", &workspace)
+        .expect("selector route identity");
+    assert_eq!(
+        selected.model, "deepseek-reasoner",
+        "the explicit selector, not the config default, keys the identity model"
+    );
+    assert_ne!(selected.model, default_identity.model);
+    assert_eq!(
+        selected.base_url, default_identity.base_url,
+        "the selector changes the model, not the endpoint, on a plain deepseek route"
+    );
+    assert_eq!(
+        default_identity.model,
+        config.default_model(),
+        "the session-side wrapper keeps the config-default contract"
+    );
+}

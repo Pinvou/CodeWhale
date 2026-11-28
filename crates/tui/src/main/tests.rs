@@ -509,6 +509,11 @@ fn doctor_mcp_reports_redact_url_argv_and_env_values() {
 }
 #[test]
 fn doctor_provider_json_redacts_every_credential_url_to_its_authority() {
+    // Round 33: the launch-surface derivation reads persisted settings, so
+    // the loop must run on a sealed empty home — an ambient
+    // `default_provider` would re-point every iteration through one
+    // provider and silently collapse the coverage the loop exists for.
+    let _sealed_settings_env = crate::test_support::sealed_empty_settings_env();
     let mut providers = crate::config::ApiProvider::all().to_vec();
     providers.push(crate::config::ApiProvider::DeepseekCN);
 
@@ -517,7 +522,12 @@ fn doctor_provider_json_redacts_every_credential_url_to_its_authority() {
             provider: Some(provider.as_str().to_string()),
             ..Config::default()
         };
-        let report = doctor_provider_model_report_json(&config);
+        let surface = doctor_launch_surface_full(&config);
+        let report = doctor_provider_model_report_json(
+            &config,
+            &surface,
+            &resolve_credential_diagnostic_for(&surface),
+        );
         for field in ["credential_url", "credential_docs_url"] {
             let Some(value) = report["auth"][field].as_str() else {
                 continue;
@@ -650,7 +660,13 @@ fn resolve_api_key_source_does_not_clone_openai_codex_env_tokens() {
     };
 
     let source = resolve_api_key_source(&config);
-    let report = doctor_provider_model_report_json(&config).to_string();
+    let surface = doctor_launch_surface_full(&config);
+    let report = doctor_provider_model_report_json(
+        &config,
+        &surface,
+        &resolve_credential_diagnostic_for(&surface),
+    )
+    .to_string();
 
     assert_eq!(source, ApiKeySource::OAuth);
     assert_eq!(doctor_api_key_source_label(source), "oauth_unprobed");
@@ -862,7 +878,13 @@ fn unavailable_sentinel_routes_stay_distinct_from_unknown_and_unprobed() {
             )
         );
         assert!(!doctor_has_credentials_or_local_runtime(&named_custom));
-        let setup = doctor_setup_report_json(&named_custom, &workspace);
+        let setup_surface = doctor_launch_surface_full(&named_custom);
+        let setup = doctor_setup_report_json_for(
+            &named_custom,
+            &setup_surface,
+            &resolve_credential_diagnostic_for(&setup_surface),
+            &workspace,
+        );
         assert_eq!(setup["credential"]["source"], "secret_store_unavailable");
         assert_eq!(setup["credential"]["availability"], "unavailable");
         assert_eq!(setup["credential"]["ready"], false);
@@ -1114,7 +1136,13 @@ fn credential_declarations_do_not_certify_setup_or_fleet_readiness() {
         env_diagnostic.availability,
         CredentialAvailability::NotProbed
     );
-    let env_setup = doctor_setup_report_json(&env_config, &workspace);
+    let setup_surface = doctor_launch_surface_full(&env_config);
+    let env_setup = doctor_setup_report_json_for(
+        &env_config,
+        &setup_surface,
+        &resolve_credential_diagnostic_for(&setup_surface),
+        &workspace,
+    );
     assert_eq!(env_setup["credential"]["ready"], false);
     assert_eq!(
         env_setup["operate_fleet"]["provider"]["auth"]["present_or_local"],

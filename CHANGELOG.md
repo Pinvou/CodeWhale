@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `codewhale doctor` now serves the launch model everywhere, not just the
+  launch identity. The model answer the doctor fed the shared launch chain
+  was the raw `CODEWHALE_MODEL`/`DEEPSEEK_MODEL` spelling; the launch feeds
+  the env-applied config's `default_model()`, so with a provider-table
+  model (the env override lands in the root slot the table shadows) or an
+  alias spelling (normalized at read) the doctor named a model no session
+  would launch. The structural config load applies the ordinary model
+  overrides, so the doctor now reads the same resolved answer the launch
+  does.
+- The doctor's live probe (`--probe-api`) dispatches the launch model's
+  route instead of the scoped config default: `DeepSeekClient::new`
+  resolves ModelAware routes with a `None` selector, so a
+  settings-remembered model produced a report naming the remembered route
+  while the probe authenticated against the config default's endpoint.
+  Probe and api-target now resolve through the same call, and an
+  unresolved route fails the probe with the resolver's reason instead of
+  dispatching a route no session serves.
+- `codewhale doctor` auth scheme answers the served wire: every
+  Anthropic Messages route except OpenModel is authenticated with
+  `x-api-key` by the transport, while the scheme line answered `bearer`
+  for the DeepSeek Anthropic-dialect route (keyed on provider typing
+  instead of the wire).
+- One launch-surface derivation feeds the `codewhale doctor` JSON report's
+  sections, and the human report threads the same derivation through its
+  api-target, probe gates, timeout lines, and connectivity probe (settings
+  were loaded up to sixteen times per report at the worst intermediate
+  state, each with an identity re-derivation and a scoped config clone;
+  the setup section still derives its own credential facts before the
+  surface exists), and the route report stops re-resolving the route a
+  second and third time: the api-target line carries the resolved context
+  window.
+- The doctor's route scope discloses its fidelity boundary in the report
+  itself (the human scope line and a new `route_scope_boundary` JSON key
+  name the two channels a real launch layers on top of what the doctor
+  reads: a selected Fleet's operator route and project config overlays).
+- The strict-doctor Anthropic Messages verdict discloses the fail-closed
+  outcome the chat verdicts already disclose: per-tool schemas that
+  cannot conform ship unchanged and non-strict.
+- Docs: the CONFIGURATION.md `wire` row no longer claims MiniMax and
+  Model Studio tables are key-inert for dispatch and diagnostics (the
+  client-side pin states the opposite — Fixed-family dispatch honors the
+  key); the CONFIGURATION.md `tool_choice` carve-out states the
+  Messages half precisely (the contract rejects the forced `any`/`tool`
+  values beside thinking while `auto`/`none` stay valid); CACHE.md
+  labels the strict-shaping budgets per tool (they stopped being
+  per-request in round 28/29).
+
 - Base-URL route security: the loopback/host extraction behind the
   plaintext-HTTP admission now reads the authority the request actually
   dials. `http://evil.com\@localhost` (WHATWG ends the authority at a
@@ -37,6 +84,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key either (that opt-in is the `deepseek-anthropic` identity — a
   key-driven flip stranded DeepSeek's forced chat endpoint key on the
   Messages-only host).
+- `codewhale doctor` route JSON: the `wire_protocol` line no longer
+  reports the static-policy placeholder `model_aware` — it names the
+  dispatch dialect the resolved route's candidate actually binds
+  (`chat_completions`/`responses`/`anthropic_messages`), falling back to
+  the static composition only when route resolution failed. Consumers
+  keying on the literal `model_aware` value must switch to the concrete
+  labels.
+- `codewhale doctor` JSON surfaces are launch-identity-scoped throughout
+  (capability, route, TLS, auth scheme, credential, probe, timeout,
+  `provider_config_table`, `provider_model`, `operate_fleet`,
+  `dsh_integration`), and several values changed as a result: the
+  `provider_config_table` label keys on the launch identity's exact id
+  (`providers.<key>` for a named custom table, `root (legacy literal
+  custom)` off a legacy root, `ollama` for a migrated legacy OllamaCloud
+  identity); `provider_model.model.resolved` follows the launch model
+  chain (per-provider `/model` memory, then DeepSeek-family
+  `settings.default_model`, over the config default), so it can differ
+  from every config table; `provider_source` gained `settings` and
+  `override` values naming which surface picked the route; the route
+  report's `base_url` gained a `source` marker
+  (`prepared_route`/`configured`); and `recommended_base_url` ships
+  verbatim including its `/beta` path (previously authority-redacted, a
+  form the chat wire still strips — consumers matching the redacted
+  prefix must allow the path). On a route-resolution failure the report
+  now answers `base_url` from the launch identity's table instead of the
+  raw config root.
 - API-backed `[search]` providers now visibly degrade directly to the
   keyless Bing tail instead of routing through DuckDuckGo when
   unavailable: DuckDuckGo is unreachable from mainland-China networks

@@ -19251,12 +19251,16 @@ mod strict_fixwave_r27 {
     #[test]
     fn agent_tool_fails_closed_by_name_like_its_hidden_siblings() {
         // Round 27 MAJOR-4: `agent` (the model-facing sub-agent surface)
-        // carries its per-action requirements in a `dependentSchemas` tree
-        // the strip pass deletes, so a strict `agent` shipped callable with
-        // `action` alone while the runtime rejected every targeted call
-        // (only `roster`, a scope-less `status`, and the vacuous `wait`
-        // answer). The tool now ships unchanged and non-strict by
-        // name; the real-schema census beside the tool pins the binding.
+        // carries its per-action requirements in a `dependentSchemas` tree.
+        // Round 28 told this story as "the strip pass deletes the tree, so
+        // a strict `agent` shipped callable with `action` alone" — round 29
+        // corrected the narrative: the strict path NEVER strips
+        // `dependentSchemas`; the composition gate's presence arm fails the
+        // tool closed on the keyword itself, and the runtime-truth sentence
+        // (a strict `agent` answering only `roster`, a scope-less `status`,
+        // and the vacuous `wait`) describes what would break without that
+        // arm. The tool ships unchanged and non-strict by name; the
+        // real-schema census beside the tool pins the binding.
         let schema = strict_verdict_named(
             "agent",
             json!({

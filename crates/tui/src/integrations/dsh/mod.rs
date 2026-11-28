@@ -930,10 +930,24 @@ pub(crate) fn codewhale_route_identity(
     config: &crate::config::Config,
     workspace: &Path,
 ) -> Result<CodewhaleRouteIdentity, String> {
-    let provider = config.api_provider();
     let configured_model = config.default_model();
+    codewhale_route_identity_with_model(config, &configured_model, workspace)
+}
+
+/// [`codewhale_route_identity`] with an explicit model selector: the
+/// doctor passes the launch model from its one launch-surface derivation
+/// (the settings chain) while the session-side callers keep the config
+/// default. The config handed in must already be scoped to the identity
+/// the caller serves — the provider-keyed resolver re-derives the route
+/// identity from the config root.
+pub(crate) fn codewhale_route_identity_with_model(
+    config: &crate::config::Config,
+    model_selector: &str,
+    workspace: &Path,
+) -> Result<CodewhaleRouteIdentity, String> {
+    let provider = config.api_provider();
     let route =
-        crate::route_runtime::resolve_runtime_route(config, provider, Some(&configured_model))?;
+        crate::route_runtime::resolve_runtime_route(config, provider, Some(model_selector))?;
     let candidate = &route.candidate;
     let base_url = candidate.endpoint().base_url.clone();
     let protocol = match candidate.protocol() {

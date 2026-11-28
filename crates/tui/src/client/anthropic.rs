@@ -165,10 +165,6 @@ impl DeepSeekClient {
             );
         }
 
-        if let Some(tool_choice) = request.tool_choice.as_ref() {
-            body["tool_choice"] = anthropic_tool_choice(tool_choice);
-        }
-
         // Thinking + effort shaping. MiniMax supports adaptive/disabled but
         // not Anthropic's output_config effort field; native Anthropic routes
         // keep the existing effort mapping. Other Messages-compatible
@@ -269,6 +265,37 @@ impl DeepSeekClient {
             && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
         {
             strip_thinking_from_final_tool_turn(messages);
+        }
+        // Round 28: thinking + tool_choice conflict. The chat dialect
+        // already omits `tool_choice` on thinking-enabled DeepSeek requests
+        // (`should_send_tool_choice_for_chat`) because the provider rejects
+        // the pair; the Messages dialect now mirrors that on
+        // DeepseekAnthropic routes: when thinking is on the wire, the strict
+        // surface's `{"type":"any"}` is omitted and tool choice falls back
+        // to the server default. DeepSeek's Anthropic-API documents reject
+        // the FORCED choices beside thinking — `any`: "in thinking mode …
+        // returns a 400 error when only client tools are declared", `tool`:
+        // "returns a 400 error in thinking mode" — while `auto` stays
+        // supported there, so omitting all values is the chat dialect's own
+        // over-suppression mirrored (the server default makes it
+        // behavior-neutral for `auto`);
+        // https://api-docs.deepseek.com/guides/anthropic_api, fetched
+        // 2026-11-27. A thinking-off request keeps `required` — that
+        // pairing is the strict gate's contract. Other Messages providers
+        // keep the pre-existing pairing untouched (out of this change's
+        // scope; only the DeepSeek-gated strict pipeline produces a forced
+        // choice today, so no reachable non-DeepSeek lane carries one). The
+        // write runs after the shaping so the on-wire thinking state is
+        // final.
+        if let Some(tool_choice) = request.tool_choice.as_ref() {
+            let thinking_on_wire = body
+                .get("thinking")
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind != "disabled");
+            if !(is_deepseek && thinking_on_wire) {
+                body["tool_choice"] = anthropic_tool_choice(tool_choice);
+            }
         }
         // Anthropic documents `redacted_thinking.data` as opaque encrypted
         // content to pass back unchanged and says nothing about third-party
@@ -1281,6 +1308,65 @@ mod tests {
             strict: None,
             cache_control: None,
         }
+    }
+
+    #[test]
+    fn deepseek_anthropic_omits_tool_choice_while_thinking_is_on_the_wire() {
+        // Round 28: the Messages dialect mirrors the chat dialect's
+        // thinking suppression — DeepSeek's Anthropic-API documents reject
+        // the FORCED choices beside thinking (`any`/`tool` return 400 in
+        // thinking mode; `auto`/`none` stay valid), and the strict
+        // surface's `{"type":"any"}` shipped beside `thinking` on a
+        // DeepseekAnthropic route was a 400 every turn. Thinking OFF keeps
+        // `required` (the strict gate's contract). The MiniMax contrast
+        // below pins the pre-existing pairing on lanes this change does
+        // not own: no non-DeepSeek lane can produce a forced choice today
+        // (only the DeepSeek-gated strict pipeline maps `required` to
+        // `any`), so the pairing kept there is `auto`-shaped in practice
+        // even though the fixture spells it `required`.
+        let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
+
+        let mut request = request_with("deepseek-v4-pro", Some("high"), None, None);
+        request.tool_choice = Some(serde_json::json!("required"));
+        let body = client.build_anthropic_body(&request, true);
+        assert!(
+            body.get("thinking").is_some(),
+            "the fixture must carry thinking on the wire: {}",
+            body
+        );
+        assert!(
+            body.get("tool_choice").is_none(),
+            "thinking on the wire suppresses tool_choice on the DeepSeek Messages dialect: {}",
+            body
+        );
+
+        let mut off = request_with("deepseek-v4-pro", Some("off"), None, None);
+        off.tool_choice = Some(serde_json::json!("required"));
+        let body = client.build_anthropic_body(&off, true);
+        assert_eq!(
+            body.get("tool_choice"),
+            Some(&serde_json::json!({ "type": "any" })),
+            "thinking-off keeps the required tool choice: {}",
+            body
+        );
+
+        // Non-DeepSeek providers keep the pairing untouched (pre-existing
+        // behavior, out of this change's scope): a reasoning-capable model
+        // on another Messages lane carries thinking AND tool_choice.
+        let other_lane = minimax_test_client();
+        let mut other = request_with("MiniMax-M3", Some("high"), None, None);
+        other.tool_choice = Some(serde_json::json!("required"));
+        let body = other_lane.build_anthropic_body(&other, true);
+        assert!(
+            body.get("thinking").is_some(),
+            "the contrast fixture must carry thinking: {}",
+            body
+        );
+        assert!(
+            body.get("tool_choice").is_some(),
+            "non-DeepSeek providers keep tool_choice beside thinking: {}",
+            body
+        );
     }
 
     #[test]

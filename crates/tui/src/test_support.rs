@@ -189,6 +189,56 @@ pub(crate) fn guarded_environment_provides_state_paths() -> bool {
     .any(|var| guarded_path_is_present(var))
 }
 
+/// A sealed environment for tests whose code path reads persisted settings
+/// while asserting on a config-only fixture: an empty `CODEWHALE_HOME` plus
+/// the ambient launch-override variables removed, all behind the process
+/// env lock. Without the home, a concurrent test persisting a
+/// `default_provider` or `provider_models` into the shared state root could
+/// flip the launch identity these assertions answer from (round 31 — the
+/// launch-scoped doctor reads settings on every surface derivation). The
+/// ambient removal closes the other half: the launch chain reads
+/// `CODEWHALE_PROVIDER`/`CODEWHALE_MODEL` (and their `DEEPSEEK_*` aliases)
+/// and the config-path overrides unconditionally, so an export that leaks
+/// into the process environment re-points the identity no matter how empty
+/// the sealed home is (round 33).
+///
+/// Elements drop in order — home guard, ambient guards, env lock — so the
+/// lock is still held while every variable is restored.
+pub(crate) fn sealed_empty_settings_env() -> (
+    tempfile::TempDir,
+    EnvVarGuard,
+    Vec<EnvVarGuard>,
+    TestEnvLock,
+) {
+    let env_lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("sealed settings tempdir");
+    let codewhale_home = tmp.path().join(".codewhale");
+    std::fs::create_dir_all(&codewhale_home).expect("sealed settings home");
+    let home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+    let ambient = remove_ambient_launch_env();
+    (tmp, home, ambient, env_lock)
+}
+
+/// The launch-override variables the launch chain reads unconditionally,
+/// removed for the returned guards' lifetime and restored on drop. Sealed
+/// settings tests need these gone alongside the empty home: an ambient
+/// `CODEWHALE_MODEL` or a `CODEWHALE_CONFIG_PATH` pointing at a real
+/// document re-points the launch identity through a channel the empty home
+/// does not cover (round 33).
+pub(crate) fn remove_ambient_launch_env() -> Vec<EnvVarGuard> {
+    [
+        "CODEWHALE_PROVIDER",
+        "DEEPSEEK_PROVIDER",
+        "CODEWHALE_MODEL",
+        "DEEPSEEK_MODEL",
+        "CODEWHALE_CONFIG_PATH",
+        "DEEPSEEK_CONFIG_PATH",
+    ]
+    .iter()
+    .map(|key| EnvVarGuard::remove(key))
+    .collect()
+}
+
 impl EnvVarGuard {
     pub(crate) fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
         debug_assert!(

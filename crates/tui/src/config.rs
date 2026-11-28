@@ -1032,10 +1032,15 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
     }
     // A query or fragment is not part of any canonical endpoint the wire
     // surfaces know: the client splices the path suffix directly after the
-    // configured URL, so `https://api.deepseek.com/beta?x=1` would request
-    // `.../beta?x=1/v1/chat/completions` and 404 while the gate and the
-    // doctor still reported the pipeline as acting. Such a URL degrades to
-    // out of scope, the same line the whitespace rejection draws.
+    // configured URL as a string, and `Url::parse` then files everything
+    // from the `?`/`#` onward into the query or fragment — so
+    // `https://api.deepseek.com/beta?x=1` still POSTs to the official
+    // `/beta` path (the spliced suffix is absorbed into the query), while
+    // the gate and the doctor report no official-host treatment. Such a
+    // URL degrades to out of scope, the same line the whitespace rejection
+    // draws (whose surrounding-whitespace half is likewise stripped by
+    // URL normalization before the request dials; only interior
+    // whitespace fails to parse at all).
     if base_url.contains('?') || base_url.contains('#') {
         return false;
     }
@@ -13040,6 +13045,82 @@ pub(crate) fn explicit_launch_provider_override() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// The provider identity a fresh session would launch with: the config's
+/// active identity (or its hand-built fallback off the raw root), re-pointed
+/// by a settings `default_provider` saved from the `/model` route-save band
+/// unless a one-launch CLI/env provider override or an applied fleet
+/// operator route already fixed the surface. The one derivation both the
+/// launch path (`tui/app/init.rs`) and the doctor's launch-surface
+/// prediction read, so the two cannot drift — the doctor-vs-launch
+/// divergence bugs this vocabulary kept producing (rounds 18/21/22/23/29/30)
+/// were each a copy of one half of this chain.
+pub(crate) fn launch_provider_identity(
+    config: &Config,
+    settings: &crate::settings::Settings,
+) -> ProviderIdentity {
+    let provider = config.api_provider();
+    let mut identity = config
+        .active_provider_identity(provider)
+        .unwrap_or_else(|_| {
+            let key = config.provider_identity_for(provider);
+            let exact_id = (!(provider == ApiProvider::Custom
+                && config.uses_legacy_literal_custom_route()))
+            .then(|| key.clone());
+            ProviderIdentity {
+                provider,
+                key,
+                exact_id,
+                migrated_legacy_ollama_cloud_route: false,
+            }
+        });
+    if explicit_launch_provider_override().is_none()
+        && !config.fleet_operator_route_applied
+        && let Some(ref provider_str) = settings.default_provider
+        && let Ok(resolved) = config.resolve_provider_identity(provider_str)
+    {
+        identity = resolved;
+    }
+    identity
+}
+
+/// The model a fresh session would launch with, given the config's own
+/// model answer (`configured_model` — the launch resolves it from the
+/// env-applied config document, so an explicit `--model` already rides
+/// inside it). An explicit one-launch override or an applied fleet operator
+/// route keeps that answer outright; otherwise the per-provider `/model`
+/// memory — then the DeepSeek-centric `settings.default_model` — wins over
+/// it, with the config file winning a case-only spelling disagreement
+/// (case-sensitive self-hosted endpoints reject the wrong spelling; the
+/// selection itself is unchanged).
+pub(crate) fn launch_model_for_identity(
+    config: &Config,
+    settings: &crate::settings::Settings,
+    identity: &ProviderIdentity,
+    configured_model: &str,
+) -> String {
+    if explicit_launch_model_override().is_some() || config.fleet_operator_route_applied {
+        configured_model.to_string()
+    } else {
+        settings
+            .provider_models
+            .as_ref()
+            .and_then(|models| models.get(&identity.key))
+            .cloned()
+            .or_else(|| {
+                // default_model is a DeepSeek-centric setting; other providers
+                // get their model from config.toml / env (e.g. OPENAI_MODEL).
+                matches!(
+                    identity.provider,
+                    ApiProvider::Deepseek | ApiProvider::DeepseekCN
+                )
+                .then(|| settings.default_model.clone())
+                .flatten()
+            })
+            .map(|remembered| prefer_configured_model_spelling(configured_model, remembered))
+            .unwrap_or_else(|| configured_model.to_string())
+    }
 }
 
 pub(crate) fn explicit_cli_api_key_override() -> Option<String> {

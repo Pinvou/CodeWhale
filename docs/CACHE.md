@@ -40,10 +40,10 @@ one-request miss):
 
 | Op | Reason |
 | --- | --- |
-| `/model` (SetModel) | `change:model` |
-| Mode change (agent/plan/operate/yolo) | `change:mode` |
+| `/model` (SetModel) | `change:model` (declared op-time, before the composer can diff the pre-installed context) |
+| Mode change (agent/plan/operate/yolo) | `change:mode` (hash-guarded — with bundled prompts the composition is mode-agnostic, so the miss only materializes when prompt bytes derive from mode) |
 | Goal set / pause / resume / clear / status | `change:goal` |
-| Mid-turn tool-surface change (deferred-tool admission/eviction, tool-search activation, runtime MCP tool arrival) | `change:tool_surface` |
+| Mid-turn tool-surface change (turn-tool-security transition, deferred-tool admission/eviction, tool-search activation, runtime MCP tool arrival, end-of-step backstop comparing the active name-set and catalog length) | `change:tool_surface` |
 | Session sync / restore (SyncSession) | `resume` |
 | Session construction | `initial` |
 
@@ -71,7 +71,11 @@ Two earlier behaviors are rejected, matching the DeepSeek Harness design:
   edges above.
 
 Tool-result redaction (`prepare_model_bound_request`) is content-preserving
-when no secret is configured (the common case), so it does not move the prefix.
+except for one unconditional pass: the credential-shaped scrubber
+(`RedactionPolicy::CredentialShaped`) masks token/JWT/PEM/auth-scheme-shaped
+values even with **no** configured secret, so a tool result that echoes
+credential-shaped text moves the prefix. Beyond that scrubber, redaction is
+content-preserving when no secret is configured, so it does not move the prefix.
 When a configured secret appears in a tool result, redacting it is a security
 requirement that correctly overrides cache stability for that one message.
 
@@ -98,6 +102,64 @@ Never splice a volatile fact (time, an instruction edit, a skill-catalog
 change, a project-file change) into the prefix — append it as a user-role
 message instead. A later request must be `previous ⊕ suffix` unless a logged
 header change or a history reset explains the difference.
+
+DeepSeek strict-mode tool shaping (`prepare_tools_for_strict_mode`) states its
+effect here per that rule: it is **frozen-prefix-compatible**. The removal
+note appended to a tool's description is a deterministic pure function of the
+pinned catalog and the route — the note names are sorted and deduplicated,
+the counts are order-independent, and the per-tool pair-judge budget
+refills at every preparation over a stable catalog order — so on a stable
+strict route the tools bytes are identical every step after the first
+preparation; the shaping runs on a per-request clone and never mutates the
+registry, and the pair-judge budget pools per tool (round 28) so no
+catalog order can change a later tool's verdict. One boundary is
+deliberate (round 25): the pattern-compile memo persists across requests
+while the per-tool compile budget refills with each tool's preparation
+(the memo is entry-bounded at
+512 sources ≈ 8 MB of keys per thread, refuses rather than evicts at the
+bound, and the cached automata are the unaccounted part), so a
+pattern that abstained on a budget-refused first pass can be judged on a
+later pass and flip its tool's verdict — the bytes then differ between the
+first preparation and a warm one without a declared change. (The memo is
+per OS thread, so the boundary is per thread: two preparations on
+different threads hold independent memos; every stability claim above
+holds per thread.) Catalogs within
+the compile budget (the default catalog is far below it) never see the
+boundary.
+
+Every prefix change the engine makes is declared with a reason string,
+and the gate accepts any declared string, re-pinning in place as
+`change:<reason>`. Two emitters feed it. The per-turn header policy diffs
+the explicit prompt inputs and names exactly what differed — `provider`,
+`model`, `route`, `mode`, `goal`, `translation`, `verbosity`, joined with
+`+` when several differ (`model+route`), and `system` for the launch pin
+when no context is pinned yet
+(`core/engine.rs::explicit_prompt_context_change_reason`) — so an
+in-session `/translate` toggle re-declares in place as
+`change:translation`, and a model switch that moves the route limits with
+it declares `model+route` — but only on the composer-mediated path (a
+per-turn planned route, or context that first differs at the next
+submit). An explicit `/model` picker switch (`Op::SetModel`) pre-installs
+its context at op time, so the composer sees no diff and the switch
+declares the bare `change:model` the table above lists. Direct
+declarations add
+`resume` (a session resume, or the conversation carried across an engine
+respawn through `Op::SyncSession`), `tool_surface`, and the
+`mcp-session-boot` install edge; the feature-gated benchmark path adds
+`benchmark_final_only` (`#[cfg(feature = "benchmark-eval-controls")]`).
+A provider retype or a re-planned route made through the surface
+switchers does not flip the gate in place: either change respawns the
+engine, and the fresh engine re-pins — as `resume` when the conversation
+is carried over, as `initial` only on an empty one. The one transition
+with no declared reason is a config-file endpoint edit between sessions,
+which the respawn absorbs. A flip inside the same scope (the canonical
+beta ↔ non-beta path) leaves the shaped bytes identical and produces no
+drift at all. (Round 30: this paragraph previously claimed the tree had
+no `provider`/`route` declared reason and no `translation`/`verbosity`
+field, and that respawned sessions re-pin as `initial`; both halves were
+wrong — the composer at `explicit_prompt_context_change_reason` has
+always emitted those fields, and a carried conversation re-pins as
+`resume`.)
 
 ## Permissions fragment budget compatibility
 
