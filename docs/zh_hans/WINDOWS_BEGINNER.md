@@ -144,7 +144,7 @@ codewhale auth set --provider moonshot --api-key "你的中国区Kimi API key"
 
 1. 输入 `/provider` 打开厂商选择器 → 选 **moonshot**（可能显示 missing key，不用管，继续选）
 2. 如果提示输入 key，就粘贴你的中国区 key
-3. 选模型：`/model kimi-k3`（最强，1M 上下文）或 `/model kimi-k2.7-code`（默认稳定）
+3. 选模型：`/model kimi-k3`（当前默认，1M 上下文），或按需选择 `/model kimi-k3.1-pro`、`/model kimi-k2.7-code`
 4. 发一条测试消息，能正常回复就说明切换成功
 5. 输入 `/status` 确认 provider 是 moonshot、地址是 `api.moonshot.cn/v1`
 
@@ -152,17 +152,19 @@ codewhale auth set --provider moonshot --api-key "你的中国区Kimi API key"
 
 | 模型 ID | 说明 |
 |---|---|
-| `kimi-k3` | 最强，永远思考，1M 上下文；推理档位选 `off` 会被自动当作 `low` |
-| `kimi-k2.7-code` | 编程版，默认稳定，推荐先用这个 |
-| `kimi-k2.6` | 更轻量 |
+| `kimi-k3` | 当前默认，始终思考，1M 上下文；推理档位选 `off` 会被自动当作 `low` |
+| `kimi-k3.1-pro` | K3.1 Pro，始终思考，1M 上下文；`off` 同样规范化为 `low` |
+| `kimi-k3.1-pro-highspeed` | K3.1 Pro 高速版，其他契约与 `kimi-k3.1-pro` 相同 |
+| `kimi-k2.7-code` / `kimi-k2.7-code-highspeed` | 上一代编程模型及其高速版 |
+| `kimi-k2.6` | 上一代轻量模型 |
 
-> 注："k3"是 Kimi Code 平台对 `kimi-k3` 的简写，本文档使用全称 `kimi-k3`。
+> 注：`k3` 和 `k3.1-pro[-highspeed]` 是 Kimi Code 会员端点的模型 ID，不是普通开放平台 ID 的简写；普通中国区 API 入口使用表中的 `kimi-` 全称。
 
 **注意事项**
 
-- **不要用 `/model auto`**：Kimi 没有便宜的"flash 档"，auto 只会落在默认模型上，直接固定模型更实在
+- **`/model auto` 的子任务会用旧模型**：Kimi 没有便宜的"flash 档"，auto 会把启发式子任务落到上一代轻量模型 `kimi-k2.6`；想全程使用 `kimi-k3`，直接固定模型更实在
 - **deepseek 不受影响**：切回用 `/provider deepseek` + `/model deepseek-v4-pro`，随时可换
-- **Kimi Code 会员模型别混用**："k3"（即 `kimi-k3` 的简写）/ `kimi-for-coding` 是 Kimi Code 会员平台专属模型（入口 `api.kimi.com/coding/v1`），与普通 API 入口的 `kimi-k3` 不同，普通中国区 API key 不要用这些 ID
+- **Kimi Code 会员模型别混用**：`k3`、`k3.1-pro[-highspeed]`、`kimi-for-coding[-highspeed]` 是 Kimi Code 会员平台专属模型（入口 `api.kimi.com/coding/v1`，海外别名 `api.kimi.ai/coding/v1`），与普通 API 入口的 `kimi-` ID 不同，普通中国区 API key 不要用这些会员 ID
 - **改动 base_url 后要重启 Codewhale** 才生效
 
 ### 1.3 工作区（workspace）概念

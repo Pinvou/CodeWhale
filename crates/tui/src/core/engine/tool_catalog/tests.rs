@@ -747,3 +747,47 @@ fn forkguard_toolbox_prose_claims_no_bound_under_the_disabled_sentinel() {
         "the disabled-sentinel note must not claim a bound the fork disabled: {note}"
     );
 }
+
+/// The catalog oracle (`tools::registry::tests::every_builtin_schema_…`) walks
+/// registry builders, so the two engine-synthesized interpreter tools never
+/// pass through it: an MFJS-hostile keyword added to either schema would be
+/// dropped from every Moonshot request with no CI signal. Pin both schemas
+/// against the exact production strict gate here. The runtime-dependency
+/// gates mirror `ensure_advanced_tooling`, so a tool is only pinned on a host
+/// where the engine would actually advertise it.
+#[test]
+fn synthesized_interpreter_tool_schemas_pass_the_moonshot_strict_gate() {
+    let mut catalog = build_model_tool_catalog_with_surface(
+        Vec::new(),
+        Vec::new(),
+        AppMode::Agent,
+        &HashSet::new(),
+        crate::model_profile::ToolSurfaceBudget::Standard,
+    );
+    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &HashSet::new());
+    let strict_gate = |tool: &Tool| {
+        let mut schema = tool.input_schema.clone();
+        crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut schema).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{} schema must survive the Moonshot strict gate: {error:?}",
+                    tool.name
+                )
+            },
+        );
+    };
+    if crate::dependencies::resolve_python_interpreter().is_some() {
+        let code_execution = catalog
+            .iter()
+            .find(|tool| tool.name == super::CODE_EXECUTION_TOOL_NAME)
+            .expect("python is available, so code_execution must be synthesized");
+        strict_gate(code_execution);
+    }
+    if crate::dependencies::resolve_node().is_some() {
+        let js_execution = catalog
+            .iter()
+            .find(|tool| tool.name == super::JS_EXECUTION_TOOL_NAME)
+            .expect("node is available, so js_execution must be synthesized");
+        strict_gate(js_execution);
+    }
+}

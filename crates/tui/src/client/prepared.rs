@@ -283,8 +283,8 @@ pub(crate) struct PreparedOutboundRequest {
     /// serialized and POSTed.
     pub(crate) body: Value,
     pub(crate) reasoning: ReasoningReceipt,
-    /// Tokens re-sent because thinking-mode replay substituted
-    /// `reasoning_content` (Chat streaming only).
+    /// Tokens re-sent because thinking-mode replay substituted or preserved
+    /// `reasoning_content` on Chat Completions.
     pub(crate) replay_input_tokens: Option<u32>,
     /// Which transport entry point prepared this request. Never a substitute
     /// for [`Self::wire_stream_field`], which is the wire truth.

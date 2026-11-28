@@ -6456,8 +6456,8 @@ fn normalize_model_scenario() {
     {
         for (alias, expected) in [
             ("kimi", DEFAULT_MOONSHOT_MODEL),
-            ("kimi-k2.7", DEFAULT_MOONSHOT_MODEL),
-            ("kimi-k2.7-code", DEFAULT_MOONSHOT_MODEL),
+            ("kimi-k2.7", MOONSHOT_KIMI_K2_7_CODE_MODEL),
+            ("kimi-k2.7-code", MOONSHOT_KIMI_K2_7_CODE_MODEL),
             ("kimi-code", DEFAULT_MOONSHOT_MODEL),
             ("kimi-k2.6", MOONSHOT_KIMI_K2_6_MODEL),
         ] {
@@ -10244,6 +10244,87 @@ model = "k3[1m]"
     Ok(())
 }
 
+#[test]
+fn moonshot_kimi_code_saved_claude_k31_1m_alias_fails_on_both_routes() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp.path());
+    let config_path = temp.path().join(".deepseek").join("config.toml");
+    ensure_parent_dir(&config_path)?;
+    // Membership remediation names the membership id (plus the direct twin
+    // for orientation); the direct route must not walk the user into its own
+    // cross-pairing rejection by suggesting `k3.1-pro`, so its guidance
+    // names only the direct spelling (review 4689524239).
+    fs::write(
+        &config_path,
+        format!(
+            "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"kimi-code-key\"\nbase_url = \"{DEFAULT_KIMI_CODE_BASE_URL}\"\nmodel = \"k3.1-pro[1m]\"\n"
+        ),
+    )?;
+    let error = Config::load(None, None).expect_err("K3.1 Claude aliases are not API ids");
+    let message = error.to_string();
+    assert!(message.contains("model = \"k3.1-pro\""), "{message}");
+    assert!(message.contains("model = \"kimi-k3.1-pro\""), "{message}");
+
+    fs::write(
+        &config_path,
+        format!(
+            "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"moonshot-key\"\nbase_url = \"{DEFAULT_MOONSHOT_BASE_URL}\"\nmodel = \"k3.1-pro[1m]\"\n"
+        ),
+    )?;
+    let error = Config::load(None, None).expect_err("K3.1 Claude aliases are not API ids");
+    let message = error.to_string();
+    assert!(message.contains("model = \"kimi-k3.1-pro\""), "{message}");
+    assert!(
+        !message.contains("model = \"k3.1-pro\""),
+        "direct remediation must not suggest the membership id: {message}"
+    );
+    Ok(())
+}
+
+#[test]
+fn moonshot_bracketed_alias_remediation_is_endpoint_aware() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp.path());
+    let config_path = temp.path().join(".deepseek").join("config.toml");
+    ensure_parent_dir(&config_path)?;
+
+    // Direct `k3[1m]` must recommend the direct-platform id: recommending
+    // the membership `k3` here would fail the very next pairing check
+    // (review 4689524239).
+    fs::write(
+        &config_path,
+        format!(
+            "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"moonshot-key\"\nbase_url = \"{DEFAULT_MOONSHOT_BASE_URL}\"\nmodel = \"k3[1m]\"\n"
+        ),
+    )?;
+    let error = Config::load(None, None).expect_err("k3[1m] is not an API id");
+    let message = error.to_string();
+    assert!(message.contains("model = \"kimi-k3\""), "{message}");
+    assert!(
+        !message.contains("model = \"k3\"."),
+        "direct remediation must not suggest the membership id: {message}"
+    );
+
+    // A custom Moonshot-compatible gateway keeps the documented pass-through
+    // for the bracketed spellings: only the canonical product endpoints
+    // reject them.
+    fs::write(
+        &config_path,
+        r#"provider = "moonshot"
+
+[providers.moonshot]
+api_key = "gateway-key"
+base_url = "https://gateway.example.internal/v1"
+model = "k3[1m]"
+"#,
+    )?;
+    let config = Config::load(None, None).expect("custom gateways pass through");
+    assert_eq!(config.default_model(), "k3[1m]");
+    Ok(())
+}
+
 /// Env-var-only path: `CODEWHALE_BASE_URL=https://api.kimi.com/coding/v1`
 /// combined with `CODEWHALE_PROVIDER=moonshot` must trigger Kimi Code
 /// model selection even when the TOML has no `base_url`.
@@ -10408,7 +10489,7 @@ fn codewhale_provider_env_takes_precedence_over_deepseek_provider() -> Result<()
 /// model. This is the "I have a Moonshot Platform API key, not a
 /// Kimi Code plan key" path.
 #[test]
-fn moonshot_platform_defaults_to_kimi_k27_code() -> Result<()> {
+fn moonshot_platform_defaults_to_kimi_k3() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -10436,7 +10517,7 @@ api_key = "moonshot-platform-key"
     let config = Config::load(None, None)?;
     assert_eq!(config.api_provider(), ApiProvider::Moonshot);
     assert_eq!(config.deepseek_base_url(), DEFAULT_MOONSHOT_BASE_URL);
-    assert_eq!(config.default_model(), DEFAULT_MOONSHOT_MODEL);
+    assert_eq!(config.default_model(), "kimi-k3");
     assert_eq!(config.deepseek_api_key()?, "moonshot-platform-key");
     Ok(())
 }
@@ -11368,8 +11449,8 @@ fn provider_capability_scenario_3() {
     // from provider_capability_moonshot_default_model_resolves_kimi_metadata
     {
         let cap = provider_capability(ApiProvider::Moonshot, DEFAULT_MOONSHOT_MODEL);
-        assert_eq!(cap.context_window, 262_144);
-        assert_eq!(cap.max_output, Some(32_768));
+        assert_eq!(cap.context_window, 1_048_576);
+        assert_eq!(cap.max_output, Some(131_072));
         assert!(cap.thinking_supported);
         assert!(!cap.cache_telemetry_supported);
         assert_eq!(

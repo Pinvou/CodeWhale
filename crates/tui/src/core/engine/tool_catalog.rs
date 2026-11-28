@@ -380,7 +380,14 @@ pub(crate) fn ensure_advanced_tooling(
             allowed_callers: Some(vec!["direct".to_string()]),
             defer_loading: Some(false),
             input_examples: None,
-            strict: None,
+            // The engine-synthesized discovery tool is load-bearing for every
+            // deferred native/MCP/skill capability, and its bounded schema
+            // (`max_results.minimum`/`maximum`) sits outside the MFJS strict
+            // whitelist. Opt it into the explicit strict:false relaxed lane —
+            // the same escape the `apply_patch` and `agent` tools use — so
+            // the always-active discovery path stays on the wire instead of
+            // being dropped by strict mode (review 4689524086).
+            strict: Some(false),
             cache_control: None,
         });
     }
@@ -883,7 +890,20 @@ pub(crate) fn active_tools_for_request(
     }
     let mut tools = active_tools_for_step(catalog, active);
     if strict_tool_mode {
+        let explicit_non_strict: Vec<Option<Value>> = tools
+            .iter_mut()
+            .map(|tool| {
+                (tool.strict == Some(false))
+                    .then(|| std::mem::replace(&mut tool.input_schema, json!({"type": "object"})))
+            })
+            .collect();
         crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools);
+        for (tool, original) in tools.iter_mut().zip(explicit_non_strict) {
+            if let Some(schema) = original {
+                tool.input_schema = schema;
+                tool.strict = Some(false);
+            }
+        }
     }
     Some(tools)
 }

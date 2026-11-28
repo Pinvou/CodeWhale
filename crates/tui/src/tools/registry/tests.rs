@@ -2031,3 +2031,296 @@ fn keyword_named_property_literal_survives_the_registry_pipeline() {
         tool.input_schema
     );
 }
+
+#[test]
+fn every_builtin_schema_survives_the_moonshot_projection_or_declares_relaxed() {
+    // P1 pin (review 6061318874): the Moonshot wire drops any tool whose
+    // schema fails `sanitize_for_kimi_parameters` (bounds and composition
+    // are hard-rejected by the MFJS validator). A built-in that cannot pass
+    // that projection must DECLARE `strict: false` on its `ToolSpec` so it
+    // ships through the explicit relaxed lane (object-root proof + budgets)
+    // instead of silently vanishing from the request. This test walks a
+    // broad built-in catalog so the failure mode can never ship invisibly
+    // again: a schema change that breaks MFJS compatibility fails HERE
+    // until the tool opts into the relaxed lane.
+    let tmp = tempdir().expect("tempdir");
+    let runtime = {
+        let client_config = crate::config::Config {
+            api_key: Some("test-key".to_string()),
+            ..crate::config::Config::default()
+        };
+        let client =
+            crate::client::DeepSeekClient::new(&client_config).expect("stub client constructs");
+        let manager = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::tools::subagent::SubAgentManager::new(tmp.path().to_path_buf(), 4),
+        ));
+        let runtime_context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        crate::tools::subagent::SubAgentRuntime::new(
+            client,
+            "kimi-k3".to_string(),
+            runtime_context,
+            false,
+            None,
+            manager,
+        )
+    };
+    let mcp_pool = std::sync::Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
+        crate::mcp::McpConfig::default(),
+    )));
+    let registry = ToolRegistryBuilder::new()
+        .with_file_tools()
+        .with_shell_tools()
+        .with_terminal_tools()
+        .with_search_tools()
+        .with_git_tools()
+        .with_git_history_tools()
+        .with_web_tools()
+        .with_finance_tool()
+        .with_patch_tools()
+        .with_revert_turn_tool()
+        .with_user_input_tool()
+        .with_tool_result_retrieval_tool()
+        .with_handle_tools()
+        .with_lsp_tool()
+        .with_native_memory_tools()
+        .with_note_tool()
+        .with_remember_tool()
+        .with_todo_tool(std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::tools::todo::TodoList::new(),
+        )))
+        .with_plan_tool(std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::tools::plan::PlanState::default(),
+        )))
+        .with_goal_tools(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::goal::GoalState::default(),
+        )))
+        .with_runtime_task_tools()
+        .with_runtime_task_shell_tools()
+        .with_diagnostics_tool()
+        // Production assembles these via `with_agent_runtime_surface`
+        // (registry.rs); the oracle previously missed them, so their schemas
+        // had no Moonshot-projection coverage (P3-4).
+        .with_tui_help_tool()
+        .with_validation_tools()
+        .with_test_runner_tool()
+        .with_project_tools()
+        .with_skill_tools()
+        .with_pandoc_tools()
+        // Host-probe conditional, exactly like `with_pandoc_tools` above:
+        // production calls it unconditionally and `ocr_available()` decides
+        // whether `image_ocr` registers, so the oracle mirrors that pattern
+        // instead of silently skipping the builder.
+        .with_image_ocr_tools()
+        .with_read_media_tool()
+        .with_harness_tool()
+        .with_notify_tool()
+        // Host-extra production registrations (core/engine/tool_setup.rs):
+        // the oracle previously missed all four, so `request_plugin_install`,
+        // `registry_sync`, `start_mcp_server`, and `start_registry_mcp_server`
+        // had no Moonshot-projection coverage (P3-3a). Production registers
+        // `request_plugin_install` unconditionally, `registry_sync` behind
+        // Feature::Mcp (default enabled), and the two pool launchers once the
+        // MCP pool is initialized; the oracle always assembles all four.
+        .with_request_plugin_install_tool()
+        .with_registry_mcp_sync_tool()
+        .with_runtime_mcp_tool(std::sync::Arc::clone(&mcp_pool))
+        .with_registry_mcp_start_tool(std::sync::Arc::clone(&mcp_pool))
+        .with_rlm_tool(None, "kimi-k3".to_string())
+        .with_verify_tool(None, "kimi-k3".to_string())
+        .with_review_tool(None, "kimi-k3".to_string())
+        .with_fim_tool(None, "kimi-k3".to_string())
+        // Production threads the session client into speech/vision; the stub
+        // client here is already consumed by the `SubAgentRuntime`, and both
+        // tools only need the client at invocation time, so `None` matches
+        // the existing `with_rlm_tool(None, ..)` stub style (see also
+        // `builder_registers_speech_alias_tools`).
+        .with_speech_tools(None, None)
+        // Production registers vision only when `[vision_model]` is
+        // configured; the oracle always assembles it so `image_analyze`'
+        // schema stays under projection coverage.
+        .with_vision_tools(
+            crate::config::VisionModelConfig {
+                model: "test-vision-model".to_string(),
+                api_key: None,
+                base_url: None,
+            },
+            None,
+        )
+        .with_subagent_tools(runtime.manager.clone(), runtime)
+        .build(crate::tools::spec::ToolContext::new(
+            tmp.path().to_path_buf(),
+        ));
+
+    let tools = registry.to_api_tools();
+    assert!(
+        tools.len() >= 40,
+        "the assembled catalog must stay broad, found {}",
+        tools.len()
+    );
+    // Teeth check for the widened surface: the four production-only builders
+    // must actually contribute tools, not no-op into the chain. This assembles
+    // them in isolation and pins their exact contribution (conditional
+    // `image_ocr` mirrored through the same `ocr_available()` probe
+    // production uses, so a host without OCR does not silently skip it).
+    let four_builder_surface = ToolRegistryBuilder::new()
+        .with_tui_help_tool()
+        .with_image_ocr_tools()
+        .with_speech_tools(None, None)
+        .with_vision_tools(
+            crate::config::VisionModelConfig {
+                model: "test-vision-model".to_string(),
+                api_key: None,
+                base_url: None,
+            },
+            None,
+        )
+        .build(crate::tools::spec::ToolContext::new(
+            tmp.path().to_path_buf(),
+        ));
+    let mut four_builder_names = four_builder_surface
+        .to_api_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    let mut expected_four_builder_names = vec![
+        "image_analyze".to_string(),
+        "speech".to_string(),
+        "tui_help".to_string(),
+        "tts".to_string(),
+    ];
+    if crate::tools::image_ocr::ocr_available() {
+        expected_four_builder_names.push("image_ocr".to_string());
+    }
+    four_builder_names.sort();
+    expected_four_builder_names.sort();
+    assert_eq!(
+        four_builder_names, expected_four_builder_names,
+        "the four production-only builders must contribute exactly their tools"
+    );
+    for name in &four_builder_names {
+        assert!(
+            registry.contains(name),
+            "the assembled oracle catalog must include {name} from the widened production surface"
+        );
+    }
+    // Same teeth check for the host-extra production registrations
+    // (core/engine/tool_setup.rs): assembled in isolation so their exact
+    // contribution stays pinned instead of blending into the >= 40 count.
+    let host_extra_surface = ToolRegistryBuilder::new()
+        .with_request_plugin_install_tool()
+        .with_registry_mcp_sync_tool()
+        .with_runtime_mcp_tool(std::sync::Arc::clone(&mcp_pool))
+        .with_registry_mcp_start_tool(std::sync::Arc::clone(&mcp_pool))
+        .build(crate::tools::spec::ToolContext::new(
+            tmp.path().to_path_buf(),
+        ));
+    let mut host_extra_names = host_extra_surface
+        .to_api_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+    let mut expected_host_extra_names = vec![
+        "registry_sync".to_string(),
+        "request_plugin_install".to_string(),
+        "start_mcp_server".to_string(),
+        "start_registry_mcp_server".to_string(),
+    ];
+    host_extra_names.sort();
+    expected_host_extra_names.sort();
+    assert_eq!(
+        host_extra_names, expected_host_extra_names,
+        "the host-extra production builders must contribute exactly their tools"
+    );
+    for name in &host_extra_names {
+        assert!(
+            registry.contains(name),
+            "the assembled oracle catalog must include {name} from the host-extra production surface"
+        );
+    }
+    let relaxed = tools
+        .iter()
+        .filter(|tool| tool.strict == Some(false))
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    let mut dropped: Vec<String> = Vec::new();
+    let mut relaxed_gate_failures: Vec<String> = Vec::new();
+    for tool in &tools {
+        if tool.strict == Some(false) {
+            // P3-3b pin: the Moonshot wire drops a `strict: false` tool whose
+            // schema fails either relaxed gate (chat.rs
+            // `sanitize_moonshot_chat_tools`), so every relaxed-declared
+            // built-in must pass both — the local resource budgets and the
+            // object-root proof — or the catalog silently shrinks at runtime
+            // with no CI signal. Each failure names the tool.
+            if let Err(error) =
+                crate::tools::schema_sanitize::validate_kimi_relaxed_resource_budgets(
+                    &tool.input_schema,
+                )
+            {
+                relaxed_gate_failures.push(format!(
+                    "  {}: relaxed resource budgets exceeded: {error}",
+                    tool.name
+                ));
+            }
+            if !crate::client::moonshot_parameters_prove_object(&tool.input_schema) {
+                relaxed_gate_failures.push(format!(
+                    "  {}: schema does not prove a JSON object root",
+                    tool.name
+                ));
+            }
+            continue;
+        }
+        let mut schema = tool.input_schema.clone();
+        if let Err(error) = crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut schema)
+        {
+            dropped.push(format!("  {}: {error}", tool.name));
+        }
+    }
+    assert!(
+        dropped.is_empty(),
+        "built-ins the Moonshot projection drops (declare `strict: false` on the ToolSpec or make the schema MFJS-compatible):\n{}",
+        dropped.join("\n")
+    );
+    assert!(
+        relaxed_gate_failures.is_empty(),
+        "`strict: false` built-ins the Moonshot wire would drop (fix the schema budgets/object root or return the tool to the strict lane):\n{}",
+        relaxed_gate_failures.join("\n")
+    );
+    // P3-4 pin: the relaxed lane is EXACTLY the set of builder-registered
+    // built-ins that declare `strict: false`. The previous 9-name allowlist
+    // plus a `>= 15` count left the remaining relaxed tools protected only
+    // indirectly. `tool_search` is intentionally absent: it is a synthetic
+    // client-level discovery tool (`ToolProvenance::Synthetic`), never
+    // produced by a builder, so it cannot appear on this registry surface.
+    let mut relaxed_names = relaxed;
+    relaxed_names.sort_unstable();
+    let mut expected_relaxed = vec![
+        "Web",
+        "agent",
+        "apply_patch",
+        "automation",
+        "create_goal",
+        "finance",
+        "github",
+        "handle_read",
+        "lsp",
+        "memory_search",
+        "request_user_input",
+        "retrieve_tool_result",
+        "revert_turn",
+        "send_later",
+        "task_shell_start",
+        "task_shell_wait",
+        "tasks",
+        "terminal/run",
+        "terminal/send",
+        "terminal/wait",
+        "web.run",
+        "workflow",
+    ];
+    expected_relaxed.sort_unstable();
+    assert_eq!(
+        relaxed_names, expected_relaxed,
+        "the Moonshot relaxed lane must carry exactly the built-ins that declare `strict: false` (22 builder-registered tools)",
+    );
+}

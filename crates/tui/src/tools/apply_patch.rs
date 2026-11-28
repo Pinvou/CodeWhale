@@ -320,6 +320,10 @@ impl ToolSpec for ApplyPatchTool {
         "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `bash`, or repeated `edit` calls — single transactional change with fuzzy matching; the compact JSON result reports counts and touched files (the UI renders the diff)."
     }
 
+    fn strict(&self) -> Option<bool> {
+        Some(false)
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

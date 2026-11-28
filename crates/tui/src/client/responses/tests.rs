@@ -449,6 +449,55 @@ fn responses_body_serializes_the_child_catalog_without_duplication() {
     );
 }
 
+#[test]
+fn responses_always_disables_strict_and_normalizes_explicit_non_strict_tools() {
+    let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
+    let mut request = minimal_responses_request();
+    request.tools = Some(tools.clone());
+    let body = build_responses_body(&request);
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["strict"] == json!(false))
+    );
+
+    let mut apply_patch = tools[0].clone();
+    apply_patch.name = "apply_patch".to_string();
+    apply_patch.strict = Some(false);
+    apply_patch.input_schema = json!({
+        "type": "object",
+        "properties": {
+            "patch": {"type": "string"},
+            "replace": {"type": "array"}
+        },
+        "oneOf": [
+            {"required": ["patch"]},
+            {"required": ["replace"]}
+        ]
+    });
+    let mut non_strict_request = minimal_responses_request();
+    non_strict_request.tools = Some(vec![apply_patch.clone()]);
+    let non_strict_body = build_responses_body(&non_strict_request);
+    let mut expected = apply_patch.input_schema.clone();
+    crate::tools::schema_sanitize::sanitize(&mut expected);
+    crate::tools::schema_canonicalize::canonicalize_schema(&mut expected);
+    crate::tools::schema_sanitize::sanitize_for_responses(&mut expected);
+    assert_eq!(non_strict_body["tools"][0]["parameters"], expected);
+    assert_ne!(
+        non_strict_body["tools"][0]["parameters"],
+        apply_patch.input_schema
+    );
+
+    let mut strict_tool = tools[0].clone();
+    strict_tool.strict = Some(true);
+    let mut strict_request = minimal_responses_request();
+    strict_request.tools = Some(vec![strict_tool]);
+    let strict_body = build_responses_body(&strict_request);
+    assert_eq!(strict_body["tools"][0]["strict"], json!(false));
+}
+
 #[tokio::test]
 async fn responses_stream_open_preserves_wire_headers_through_shared_seam() {
     use wiremock::matchers::header;
@@ -2748,5 +2797,141 @@ async fn forkguard_capture_replay_drops_across_a_base_url_edit() {
             .and_then(Value::as_array)
             .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
         "{body}"
+    );
+}
+
+// Review 6061318874: a Responses SSE stream that ends after output events
+// but before any terminal `response.completed`/`response.incomplete` (or
+// `[DONE]`) marker is a truncated transport failure, not a completion. The
+// stream must yield `Err` instead of synthesizing a clean `MessageStop`, so
+// the engine's incomplete-stream ladder sees the failure rather than
+// treating a dead connection as a finished turn.
+#[tokio::test]
+async fn responses_premature_stream_close_fails_instead_of_completing() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path(CODEX_RESPONSES_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _codex_token =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+        let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+    };
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .expect("premature-close stream opens");
+
+    let mut premature_error = None;
+    let mut saw_stop = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::MessageStop) => saw_stop = true,
+                Err(error) => {
+                    premature_error = Some(error);
+                    break;
+                }
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("prematurely closed stream terminates");
+    assert!(
+        !saw_stop,
+        "a stream with no terminal event must not complete as MessageStop"
+    );
+    let error = premature_error.expect("premature close must surface an error");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("closed before a terminal response"),
+        "{message}"
+    );
+}
+
+// Companion pin for the premature-close gate: the bare OpenAI-style
+// `data: [DONE]` sentinel IS a legitimate terminal marker on its own (the
+// gate's error text names it, and the sibling test pins the mirrored
+// terminal-event-without-`[DONE]` case). A stream that ends with `[DONE]`
+// and no `response.completed` event therefore still completes cleanly —
+// exactly as at base. Review round 3 flagged this shape as unpinned; pin it
+// so a future hardening cannot silently flip the completion semantics.
+#[tokio::test]
+async fn responses_bare_done_sentinel_completes_without_a_terminal_event() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path(CODEX_RESPONSES_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _codex_token =
+            crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+        let _legacy_codex_token = crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+        DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+    };
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .expect("bare-[DONE] stream opens");
+
+    let mut saw_stop = false;
+    let mut saw_error = None;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::MessageStop) => saw_stop = true,
+                Err(error) => {
+                    saw_error = Some(error);
+                    break;
+                }
+                Ok(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("bare-[DONE] stream terminates");
+    assert!(
+        saw_stop,
+        "the bare [DONE] sentinel is a documented terminal marker and must complete the stream"
+    );
+    assert!(
+        saw_error.is_none(),
+        "a [DONE]-terminated stream must not surface the premature-close error"
     );
 }

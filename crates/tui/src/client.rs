@@ -132,7 +132,66 @@ pub(super) fn to_api_tool_name(name: &str) -> String {
     out
 }
 
+/// Decode only the canonical, delimited spelling emitted by
+/// [`to_api_tool_name`]. Bare `xRRRRRR` text is never guessed to be an escape,
+/// and re-encoding the result must reproduce the input byte-for-byte.
+pub(super) fn try_from_api_tool_name(name: &str) -> Result<String> {
+    if name.is_empty() || !name.is_ascii() {
+        bail!("tool wire name is empty or non-ASCII");
+    }
+    let bytes = name.as_bytes();
+    let mut out = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'-' {
+            out.push(char::from(bytes[index]));
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'-') {
+            out.push('-');
+            index += 2;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'x')
+            && index + 9 <= bytes.len()
+            && bytes[index + 8] == b'-'
+            && bytes[index + 2..index + 8]
+                .iter()
+                .all(u8::is_ascii_hexdigit)
+        {
+            let hex = std::str::from_utf8(&bytes[index + 2..index + 8])?;
+            let code = u32::from_str_radix(hex, 16)?;
+            let decoded = std::char::from_u32(code)
+                .ok_or_else(|| anyhow::anyhow!("tool wire escape is not a Unicode scalar"))?;
+            out.push(decoded);
+            index += 9;
+            continue;
+        }
+        bail!("tool wire name contains a non-canonical escape");
+    }
+    if to_api_tool_name(&out) != name {
+        bail!("tool wire name is not the canonical encoding of one identity");
+    }
+    Ok(out)
+}
+
+/// Lenient decoder for GENERIC (non-Moonshot) provider responses — the
+/// legacy decoder this file shipped before #176. It recovers previously
+/// supported resolution of model-mangled names such as `foo_x00002Ebar` →
+/// `foo_.bar` (review 4689524212). Moonshot identity checks never use this —
+/// they go through [`try_from_api_tool_name`] and the request-owned owner
+/// map, where a guessed identity must fail closed instead.
 pub(super) fn from_api_tool_name(name: &str) -> String {
+    legacy_lenient_api_tool_name(name)
+}
+
+/// The legacy decoder this file shipped before #176: delimiter-tolerant
+/// `-xRRRRRR-` recovery plus the bare-hex second pass for names where the
+/// model stripped or replaced the leading delimiter dash. Only characters
+/// `to_api_tool_name` would have encoded decode back; everything else stays
+/// literal.
+fn legacy_lenient_api_tool_name(name: &str) -> String {
     let mut out = String::new();
     let mut iter = name.chars().peekable();
     while let Some(ch) = iter.next() {
@@ -206,6 +265,31 @@ pub(super) fn decode_bare_hex_escapes(input: &str) -> String {
         caps[0].to_string()
     });
     result.into_owned()
+}
+
+/// Normalized form of an explicitly non-strict tool for the relaxed lanes.
+///
+/// Returns `None` — meaning "send the tool verbatim, no clone needed" — when
+/// the tool is not explicitly non-strict (normalization would be a no-op) or
+/// when its schema exceeds the shared structural-depth limit: `sanitize`
+/// already no-ops past that limit, and recursing `canonicalize_schema` into
+/// an unchecked schema would walk the stack without a guard (review
+/// 4689524222). Centralizing the depth policy here keeps the adapters from
+/// restating the registry's rule and from deep-copying every tool before
+/// checking it.
+pub(super) fn normalized_explicit_non_strict_tool(
+    tool: &crate::models::Tool,
+) -> Option<crate::models::Tool> {
+    if tool.strict != Some(false) {
+        return None;
+    }
+    if !crate::tools::schema_sanitize::schema_within_structural_depth_limit(&tool.input_schema) {
+        return None;
+    }
+    let mut normalized = tool.clone();
+    crate::tools::schema_sanitize::sanitize(&mut normalized.input_schema);
+    crate::tools::schema_canonicalize::canonicalize_schema(&mut normalized.input_schema);
+    Some(normalized)
 }
 
 // === Types ===
@@ -4470,6 +4554,26 @@ impl DeepSeekClient {
             ) == format!("{base_url}/chat/completions")
             && self.api_key == api_key
     }
+    /// The blocking path's once-per-request mirror of the streaming
+    /// [`crate::models::StreamEvent::ToolProjectionWarning`]:
+    /// `finish_prepared_stream` prepends the typed event so a transcript can
+    /// render it, but `perform_message` returns a bare `MessageResponse` with
+    /// no event channel, so the same per-tool drop receipt used to vanish
+    /// silently there. The identical bounded message text rides the verbose
+    /// log instead, keyed off the same `omitted_tool_names` seam (round-5
+    /// review C1-F2).
+    fn blocking_tool_projection_warning(prepared: &PreparedOutboundRequest) -> Option<String> {
+        (!prepared.omitted_tool_names.is_empty()).then(|| {
+            crate::core::events::tool_projection_warning_message(
+                &prepared.endpoint.provider_display,
+                &crate::core::events::bounded_tool_projection_warning_names(
+                    &prepared.omitted_tool_names,
+                ),
+                prepared.omitted_tool_names.len(),
+            )
+        })
+    }
+
     async fn perform_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         let _inference = self.acquire_remote_control_inference_permit().await;
         let _permit = self.acquire_provider_request_permit().await;
@@ -4481,6 +4585,9 @@ impl DeepSeekClient {
         let cacheable = self.request_idempotency_header.is_none()
             && crate::llm_response_cache::request_is_cacheable(&request);
         let prepared = self.prepare_outbound_request(request, false)?;
+        if let Some(warning) = Self::blocking_tool_projection_warning(&prepared) {
+            logging::warn(warning);
+        }
         match prepared.dialect {
             WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
             WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
@@ -5588,15 +5695,22 @@ pub(crate) fn build_cache_warmup_request(request: &MessageRequest) -> MessageReq
 pub(crate) use chat::CACHE_WARMUP_MAX_TOKENS;
 pub(crate) use chat::is_reasoning_replay_placeholder;
 
+/// Test-only bridge: the registry catalog oracle re-runs the production
+/// object-root proof on every `strict: false` built-in so a schema drift
+/// fails in CI instead of as a runtime wire drop (see
+/// `tools::registry::tests`).
+#[cfg(test)]
+pub(crate) use chat::moonshot_parameters_prove_object;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::chat::{
         ReasoningDetailsBuffer, build_chat_messages, build_chat_messages_for_request,
         build_chat_messages_for_request_and_provider,
-        build_chat_messages_for_request_and_provider_and_route, count_reasoning_replay_chars,
-        parse_chat_message, parse_sse_chunk, sanitize_thinking_mode_messages, tool_to_chat,
-        tool_to_chat_for_base_url,
+        build_chat_messages_for_request_and_provider_and_route, build_chat_wire_body,
+        count_reasoning_replay_chars, parse_chat_message, parse_sse_chunk,
+        sanitize_thinking_mode_messages, tool_to_chat, tool_to_chat_for_base_url,
     };
     use crate::client::responses::build_responses_body;
     use crate::config::{
@@ -5755,7 +5869,7 @@ mod tests {
             allowed_callers: None,
             defer_loading: Some(false),
             input_examples: None,
-            strict: None,
+            strict: spec.strict(),
             cache_control: None,
         }
     }
@@ -7373,7 +7487,147 @@ mod tests {
         assert!(assistant["tool_calls"].is_array(), "{assistant}");
     }
 
-    async fn assert_kimi_code_apply_patch_schema_is_mfjs_compatible(streaming: bool) {
+    #[tokio::test]
+    async fn legacy_off_replays_reasoning_with_effective_enabled_thinking() {
+        // Fixed-thinking legacy ids have no off form: the route shaper sends
+        // `thinking: enabled` and replay follows that effective state.
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_7_CODE_HIGHSPEED_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_HIGHSPEED_MODEL,
+            ),
+        ] {
+            for streaming in [false, true] {
+                let mut request = k3_request_fixture(model, Some("off"), streaming);
+                request.messages = vec![
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            ContentBlock::Thinking {
+                                thinking: "Inspect the saved tool state".to_string(),
+                                signature: None,
+                                state: None,
+                                redacted_data: None,
+                                reasoning_details: None,
+                            },
+                            ContentBlock::ToolUse {
+                                id: "call-k3-replay".to_string(),
+                                name: "read_file".to_string(),
+                                input: json!({"path": "src/lib.rs"}),
+                                caller: None,
+                                thought_signature: None,
+                            },
+                        ],
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: "call-k3-replay".to_string(),
+                            content: "file contents".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        }],
+                    },
+                ];
+
+                let body = capture_moonshot_chat_request_body(base_url, model, request).await;
+                assert_eq!(body["thinking"]["type"], json!("enabled"), "{model}");
+                let assistant = body["messages"]
+                    .as_array()
+                    .and_then(|messages| {
+                        messages
+                            .iter()
+                            .find(|message| message["role"] == "assistant")
+                    })
+                    .expect("assistant tool history");
+                assert_eq!(
+                    assistant["reasoning_content"],
+                    json!("Inspect the saved tool state"),
+                    "streaming={streaming} {base_url} {model}: effective enabled must preserve the original trace"
+                );
+            }
+        }
+
+        // The disableable legacy ids (direct kimi-k2.6, membership
+        // kimi-for-coding = K2.8 Preview) genuinely turn thinking off for an
+        // explicit off (review 4689524097), so the wire says `disabled` and
+        // the disabled-thinking replay gate strips the trace.
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::DEFAULT_KIMI_CODE_MODEL,
+            ),
+        ] {
+            for streaming in [false, true] {
+                let mut request = k3_request_fixture(model, Some("off"), streaming);
+                request.messages = vec![
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![
+                            ContentBlock::Thinking {
+                                thinking: "Inspect the saved tool state".to_string(),
+                                signature: None,
+                                state: None,
+                                redacted_data: None,
+                                reasoning_details: None,
+                            },
+                            ContentBlock::ToolUse {
+                                id: "call-k3-replay".to_string(),
+                                name: "read_file".to_string(),
+                                input: json!({"path": "src/lib.rs"}),
+                                caller: None,
+                                thought_signature: None,
+                            },
+                        ],
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: "call-k3-replay".to_string(),
+                            content: "file contents".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        }],
+                    },
+                ];
+
+                let body = capture_moonshot_chat_request_body(base_url, model, request).await;
+                assert_eq!(
+                    body["thinking"]["type"],
+                    json!("disabled"),
+                    "streaming={streaming} {base_url} {model}: an explicit off must disable thinking"
+                );
+                let assistant = body["messages"]
+                    .as_array()
+                    .and_then(|messages| {
+                        messages
+                            .iter()
+                            .find(|message| message["role"] == "assistant")
+                    })
+                    .expect("assistant tool history");
+                assert!(
+                    assistant
+                        .get("reasoning_content")
+                        .is_none_or(Value::is_null),
+                    "streaming={streaming} {base_url} {model}: disabled thinking must not replay the trace"
+                );
+            }
+        }
+    }
+
+    async fn assert_kimi_code_apply_patch_schema_preserves_explicit_non_strict(streaming: bool) {
         let mut request =
             k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
         request.tools = Some(vec![apply_patch_request_tool()]);
@@ -7385,21 +7639,10 @@ mod tests {
         )
         .await;
         let function = &body["tools"][0]["function"];
-        let parameters = &function["parameters"];
-        assert_eq!(parameters["type"], "object", "{parameters}");
-        assert!(parameters.get("oneOf").is_none(), "{parameters}");
-        assert!(parameters.get("anyOf").is_none(), "{parameters}");
-        assert!(parameters.get("allOf").is_none(), "{parameters}");
-        assert_eq!(parameters["properties"]["patch"]["type"], "string");
-        assert_eq!(parameters["properties"]["replace"]["type"], "array");
-        assert_eq!(parameters["properties"]["changes"]["type"], "array");
-        assert!(
-            function["description"]
-                .as_str()
-                .is_some_and(|description| description
-                    .contains("Exactly one of these parameter groups must be provided")),
-            "the relaxed wire schema must preserve the runtime constraint in its description: {function}"
-        );
+        let spec = ApplyPatchTool;
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(function["parameters"], spec.input_schema());
+        assert_eq!(function["description"], json!(spec.description()));
     }
 
     // Per-tool degradation regression: the old behavior failed the whole
@@ -7436,6 +7679,178 @@ mod tests {
             !body.to_string().contains("private-root-name-3158"),
             "the wire body must not leak the private $ref value: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_moonshot_pattern_and_format_strict_true_never_reach_the_wire() {
+        for streaming in [false, true] {
+            let mut request = k3_request_fixture(
+                crate::config::MOONSHOT_KIMI_K3_MODEL,
+                Some("low"),
+                streaming,
+            );
+            let mut tool = test_tool("private_pattern_format_tool");
+            tool.strict = Some(true);
+            tool.input_schema = json!({
+                "type": "object",
+                "properties": {
+                    "private-field-9902": {
+                        "type": "string",
+                        "pattern": "^private-regex-9903$",
+                        "format": "private-format-9904"
+                    }
+                }
+            });
+            request.tools = Some(vec![tool]);
+
+            let body = capture_moonshot_chat_request_body(
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K3_MODEL,
+                request,
+            )
+            .await;
+            assert!(body.get("tools").is_none(), "streaming={streaming}: {body}");
+            let wire = body.to_string();
+            assert!(!wire.contains("private-regex-9903"));
+            assert!(!wire.contains("private-format-9904"));
+        }
+    }
+
+    #[test]
+    fn apply_patch_strict_false_survives_registry_engine_and_chat_wire() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let mut registry =
+            crate::tools::ToolRegistry::new(ToolContext::new(workspace.path().to_path_buf()));
+        registry.register(std::sync::Arc::new(ApplyPatchTool));
+        let catalog = registry.to_api_tools();
+        let apply_patch = catalog
+            .iter()
+            .find(|tool| tool.name == "apply_patch")
+            .expect("apply_patch registry entry");
+        assert_eq!(apply_patch.strict, Some(false));
+        let original_schema = apply_patch.input_schema.clone();
+        let original_description = apply_patch.description.clone();
+
+        let active = crate::core::engine::tool_catalog::active_tools_for_request(
+            &catalog,
+            &std::collections::HashSet::from(["apply_patch".to_string()]),
+            true,
+        )
+        .expect("active apply_patch");
+        let request = MessageRequest {
+            model: crate::config::MOONSHOT_KIMI_K2_6_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "patch".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: Some(active),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+        let wire = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("strict:false registry-to-wire projection");
+        let function = &wire.body["tools"][0]["function"];
+        assert_eq!(function["strict"], json!(false));
+        assert_eq!(function["parameters"], original_schema);
+        assert_eq!(function["description"], json!(original_description));
+
+        let other = build_chat_wire_body(
+            &request,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("non-Moonshot Chat projection");
+        assert!(other.body["tools"][0]["function"].get("strict").is_none());
+        let mut normalized_schema = original_schema.clone();
+        crate::tools::schema_sanitize::sanitize(&mut normalized_schema);
+        crate::tools::schema_canonicalize::canonicalize_schema(&mut normalized_schema);
+        assert_eq!(
+            other.body["tools"][0]["function"]["parameters"],
+            normalized_schema
+        );
+        assert_ne!(
+            other.body["tools"][0]["function"]["parameters"],
+            original_schema
+        );
+
+        let deepseek = build_chat_wire_body(
+            &request,
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta",
+            false,
+        )
+        .expect("DeepSeek Chat projection");
+        assert!(
+            deepseek.body["tools"][0]["function"]
+                .get("strict")
+                .is_none()
+        );
+        assert_eq!(
+            deepseek.body["tools"][0]["function"]["parameters"],
+            normalized_schema
+        );
+        let mut strict_tool = request.tools.as_ref().unwrap()[0].clone();
+        strict_tool.strict = Some(true);
+        let mut strict_request = request.clone();
+        strict_request.tools = Some(vec![strict_tool]);
+        let deepseek = build_chat_wire_body(
+            &strict_request,
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta",
+            false,
+        )
+        .expect("DeepSeek strict:true projection");
+        assert_eq!(deepseek.body["tools"][0]["function"]["strict"], json!(true));
+    }
+
+    #[test]
+    fn moonshot_strict_false_enforces_full_relaxed_resource_budgets() {
+        let schemas = [
+            json!({
+                "anyOf": (0..501)
+                    .map(|_| json!({"type": "object", "properties": {}}))
+                    .collect::<Vec<_>>()
+            }),
+            json!({
+                "type": "object",
+                "properties": (0..3001)
+                    .map(|index| (format!("property_{index}"), json!({"type": "string"})))
+                    .collect::<serde_json::Map<_, _>>()
+            }),
+        ];
+        for input_schema in schemas {
+            let mut tool = test_tool("over_relaxed_budget");
+            tool.strict = Some(false);
+            tool.input_schema = input_schema;
+            let mut request =
+                k3_request_fixture(crate::config::MOONSHOT_KIMI_K3_MODEL, None, false);
+            request.tools = Some(vec![tool]);
+            let wire = build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                false,
+            )
+            .expect("over-budget tools are dropped locally");
+            assert_eq!(wire.omitted_tool_names, ["over_relaxed_budget"]);
+            assert!(wire.body.get("tools").is_none(), "{}", wire.body);
+        }
     }
 
     async fn assert_kimi_code_untyped_default_drops_only_that_tool(streaming: bool) {
@@ -7535,14 +7950,14 @@ mod tests {
             .collect();
         assert_eq!(source_names, expected_names);
 
-        // Name the offending first-party tool in test-only diagnostics while
-        // production errors remain fixed and non-secret.
-        for tool in &tools {
-            let mut parameters = tool.input_schema.clone();
-            crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut parameters)
-                .unwrap_or_else(|error| panic!("General child tool {}: {error}", tool.name));
-        }
-
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.name == "agent")
+                .and_then(|tool| tool.strict),
+            Some(false),
+            "the general child's AgentTool opt-out must survive its registry"
+        );
         let mut request = k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), false);
         request.tools = Some(tools);
         let body = capture_moonshot_chat_request_body(
@@ -7553,8 +7968,28 @@ mod tests {
         .await;
 
         let captured = body["tools"].as_array().expect("captured tool catalog");
-        assert_eq!(captured.len(), source_len);
-        for required in &source_names {
+        // tool_search is the always-active discovery path for deferred
+        // native/MCP/skill capabilities; its bounded schema sits outside the
+        // MFJS strict whitelist, so the synthetic definition opts into the
+        // explicit strict:false relaxed lane and must reach the wire
+        // (review 4689524086).
+        assert_eq!(
+            captured.len(),
+            source_len,
+            "tool_search rides the relaxed lane; every catalog tool reaches the wire"
+        );
+        let tool_search = captured_function(&body, "tool_search");
+        assert_eq!(tool_search["strict"], json!(false));
+        assert_eq!(
+            tool_search["parameters"]["properties"]["max_results"]["minimum"],
+            json!(1),
+            "the bounded schema is preserved verbatim on the relaxed lane"
+        );
+        assert_eq!(
+            tool_search["parameters"]["properties"]["max_results"]["maximum"],
+            json!(8)
+        );
+        for required in source_names.iter() {
             assert!(
                 captured_function(&body, required).is_object(),
                 "{required} must reach the Kimi Code wire"
@@ -7571,7 +8006,10 @@ mod tests {
                 .all(|tool| tool["function"]["name"] != "update_goal")
         );
 
-        for tool in captured {
+        for tool in captured
+            .iter()
+            .filter(|tool| tool["function"]["strict"] != false)
+        {
             let parameters = &tool["function"]["parameters"];
             for unsupported in ["const", "nullable", "oneOf", "allOf"] {
                 assert!(
@@ -7670,8 +8108,8 @@ mod tests {
         );
         assert_ne!(
             platform["model"],
-            json!(crate::config::DEFAULT_MOONSHOT_MODEL),
-            "an explicit selection is never replaced by the provider default: {platform}"
+            json!(crate::config::MOONSHOT_KIMI_K2_7_CODE_MODEL),
+            "an explicit selection is never replaced by the legacy K2.7 id: {platform}"
         );
         assert_ne!(
             platform["model"],
@@ -7700,7 +8138,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_message_scenario_2() {
-        // Scenario consolidation of: create_message_routes_only_strict_deepseek_tools_to_beta, create_message_stream_routes_only_strict_deepseek_tools_to_beta, create_message_request_replays_kimi_code_history_for_raw_off, create_message_stream_replays_kimi_code_history_for_raw_off, create_message_request_sends_mfjs_compatible_apply_patch_schema, create_message_stream_sends_mfjs_compatible_apply_patch_schema, create_message_request_drops_invalid_kimi_root_ref_tool, create_message_stream_drops_invalid_kimi_root_ref_tool
+        // Scenario consolidation of: create_message_routes_only_strict_deepseek_tools_to_beta, create_message_stream_routes_only_strict_deepseek_tools_to_beta, create_message_request_replays_kimi_code_history_for_raw_off, create_message_stream_replays_kimi_code_history_for_raw_off, create_message_request_preserves_explicit_non_strict_apply_patch_schema, create_message_stream_preserves_explicit_non_strict_apply_patch_schema, create_message_request_drops_invalid_kimi_root_ref_tool, create_message_stream_drops_invalid_kimi_root_ref_tool
         // from create_message_routes_only_strict_deepseek_tools_to_beta
         {
             assert_deepseek_strict_request_route_boundary(false).await;
@@ -7717,13 +8155,13 @@ mod tests {
         {
             assert_kimi_code_raw_off_replays_tool_history(true).await;
         }
-        // from create_message_request_sends_mfjs_compatible_apply_patch_schema
+        // from create_message_request_preserves_explicit_non_strict_apply_patch_schema
         {
-            assert_kimi_code_apply_patch_schema_is_mfjs_compatible(false).await;
+            assert_kimi_code_apply_patch_schema_preserves_explicit_non_strict(false).await;
         }
-        // from create_message_stream_sends_mfjs_compatible_apply_patch_schema
+        // from create_message_stream_preserves_explicit_non_strict_apply_patch_schema
         {
-            assert_kimi_code_apply_patch_schema_is_mfjs_compatible(true).await;
+            assert_kimi_code_apply_patch_schema_preserves_explicit_non_strict(true).await;
         }
         // from create_message_request_drops_invalid_kimi_root_ref_tool
         {
@@ -7737,7 +8175,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_message_scenario_3() {
-        // Scenario consolidation of: create_message_request_drops_untyped_kimi_default_tool, create_message_stream_drops_untyped_kimi_default_tool, create_message_stream_sends_mfjs_safe_deferred_dynamic_tool, create_message_captures_exact_mfjs_safe_general_child_catalog
+        // Scenario consolidation of: create_message_request_drops_untyped_kimi_default_tool, create_message_stream_drops_untyped_kimi_default_tool, create_message_stream_sends_mfjs_safe_deferred_dynamic_tool, create_message_captures_strict_and_explicit_non_strict_general_child_catalog
         // from create_message_request_drops_untyped_kimi_default_tool
         {
             assert_kimi_code_untyped_default_drops_only_that_tool(false).await;
@@ -7750,7 +8188,7 @@ mod tests {
         {
             assert_kimi_code_streams_mfjs_safe_deferred_dynamic_tool().await;
         }
-        // from create_message_captures_exact_mfjs_safe_general_child_catalog
+        // from create_message_captures_strict_and_explicit_non_strict_general_child_catalog
         {
             assert_kimi_code_captures_exact_general_child_catalog().await;
         }
@@ -7857,12 +8295,18 @@ mod tests {
         for streaming in [false, true] {
             let server = MockServer::start().await;
             let client = moonshot_request_boundary_client(
-                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-                crate::config::KIMI_CODE_K3_MODEL,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K2_6_MODEL,
                 server.uri(),
             );
-            let mut request =
-                k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), streaming);
+            // An explicit off disables thinking on the disableable legacy
+            // route so the named choice reaches the offered-tool predicate
+            // this test exists to pin (review 4689524097).
+            let mut request = k3_request_fixture(
+                crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+                Some("off"),
+                streaming,
+            );
             let good = test_tool("compatible_lookup");
             let mut bad = test_tool("mcp_pattern_tool");
             // One MFJS whitelist serves every Moonshot route: any unlisted
@@ -7993,6 +8437,118 @@ mod tests {
             !body.to_string().contains("private-regex-9901"),
             "omitted schema values must not reach the wire: {body}"
         );
+    }
+
+    /// The blocking path mirrors the streaming side's once-per-request
+    /// projection warning: the same `omitted_tool_names` seam, the same
+    /// provider display and bounded name sample, the same message text. The
+    /// streaming path rides a typed stream event, but `perform_message`
+    /// returns a bare `MessageResponse` with no event channel, so its drop
+    /// receipt used to vanish silently (round-5 review C1-F2).
+    #[test]
+    fn moonshot_blocking_path_builds_the_projection_warning_off_the_same_seam() {
+        let client = moonshot_request_boundary_client(
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K2_6_MODEL,
+            "http://127.0.0.1:9".to_string(),
+        );
+        let mut request =
+            k3_request_fixture(crate::config::MOONSHOT_KIMI_K2_6_MODEL, Some("off"), false);
+        let good = test_tool("compatible_lookup");
+        let mut bad = test_tool("mcp_pattern_tool");
+        bad.input_schema = json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "patternProperties": {"^private-regex-9902$": {"type": "string"}}
+        });
+        request.tools = Some(vec![good, bad]);
+        let prepared = client
+            .prepare_outbound_request(request, false)
+            .expect("a per-tool drop keeps the request sendable");
+        assert_eq!(prepared.omitted_tool_names, vec!["mcp_pattern_tool"]);
+        let warning = DeepSeekClient::blocking_tool_projection_warning(&prepared)
+            .expect("a dropped tool must produce the blocking projection warning");
+        assert!(
+            warning.starts_with("Warning: ")
+                && warning
+                    .contains("omitted incompatible tools for this request: mcp_pattern_tool"),
+            "the text is the streaming-side message verbatim: {warning}"
+        );
+        assert!(
+            warning.contains("Moonshot"),
+            "the provider display rides the same endpoint identity as the stream event: {warning}"
+        );
+        assert!(
+            warning.contains("mcp_pattern_tool"),
+            "the bounded name sample names the dropped tool: {warning}"
+        );
+        assert!(
+            !warning.contains("private-regex-9902"),
+            "schema values must not leak into the diagnostic: {warning}"
+        );
+        assert_eq!(
+            warning.matches("mcp_pattern_tool").count(),
+            1,
+            "one bounded sample entry, so one warn per request carries it"
+        );
+
+        // Nothing omitted -> no warning on the blocking path either.
+        let clean = k3_request_fixture(crate::config::MOONSHOT_KIMI_K2_6_MODEL, Some("off"), false);
+        let prepared = client
+            .prepare_outbound_request(clean, false)
+            .expect("clean request prepares");
+        assert!(prepared.omitted_tool_names.is_empty());
+        assert!(
+            DeepSeekClient::blocking_tool_projection_warning(&prepared).is_none(),
+            "a clean request must not warn"
+        );
+    }
+
+    #[tokio::test]
+    async fn moonshot_stream_closes_tool_blocks_exactly_once_for_each_terminal() {
+        for finish_reason in [None, Some("tool_calls")] {
+            let server = MockServer::start().await;
+            let finish = finish_reason.map_or_else(String::new, |reason| {
+                format!(
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{reason}\"}}]}}\n\n"
+                )
+            });
+            let sse = format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call-once\",\"type\":\"function\",\"function\":{{\"name\":\"compatible_lookup\",\"arguments\":\"{{}}\"}}}}]}}}}]}}\n\n{finish}data: [DONE]\n\n"
+            );
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(sse),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = moonshot_request_boundary_client(
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K3_MODEL,
+                server.uri(),
+            );
+            let mut request =
+                k3_request_fixture(crate::config::KIMI_CODE_K3_MODEL, Some("low"), true);
+            request.tools = Some(vec![test_tool("compatible_lookup")]);
+            request.tool_choice = Some(json!("auto"));
+
+            let mut stream = client.create_message_stream(request).await.expect("stream");
+            let mut stops = 0;
+            let mut message_stops = 0;
+            while let Some(event) = stream.next().await {
+                match event.expect("valid stream") {
+                    StreamEvent::ContentBlockStop { index: 0 } => stops += 1,
+                    StreamEvent::MessageStop => message_stops += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(stops, 1, "finish_reason={finish_reason:?}");
+            assert_eq!(message_stops, 1, "finish_reason={finish_reason:?}");
+        }
     }
 
     fn concentrate_client(server: &MockServer, model: &str) -> DeepSeekClient {
@@ -9361,17 +9917,25 @@ mod tests {
             let decoded = from_api_tool_name(&encoded);
             assert_eq!(decoded, original);
         }
-        // from tool_name_decode_mangled_dot_prefix
+        // The canonical decoder stays strict for Moonshot ownership checks:
+        // non-canonical input is refused, never guessed into another
+        // registry identity.
         {
             let mangled = "multi_tool_use.x00002E-parallel";
-            let decoded = from_api_tool_name(mangled);
-            assert_eq!(decoded, "multi_tool_use..parallel");
+            assert!(try_from_api_tool_name(mangled).is_err());
         }
-        // from tool_name_decode_bare_hex_no_trailing_dash
+        // The generic decoder keeps the legacy recovery for model-mangled
+        // names: a bare `x00002E` (the model stripped or replaced the
+        // leading dash) still resolves to the encoded character (review
+        // 4689524212), byte-for-byte as the legacy decoder always did.
         {
-            let mangled = "foo_x00002Ebar";
-            let decoded = from_api_tool_name(mangled);
-            assert_eq!(decoded, "foo_.bar");
+            let mangled = "multi_tool_use.x00002E-parallel";
+            assert_eq!(from_api_tool_name(mangled), "multi_tool_use..parallel");
+            assert_eq!(from_api_tool_name("foo_x00002Ebar"), "foo_.bar");
+            assert_eq!(
+                try_from_api_tool_name("foo_x00002Ebar").unwrap(),
+                "foo_x00002Ebar"
+            );
         }
         // from tool_name_bare_hex_preserves_alnum
         {
@@ -10705,11 +11269,8 @@ mod tests {
             );
         }
 
-        // The spelling matcher is route-family-wide (documented: "all four
-        // spellings on both vendor routes"), so the cross-family pairings —
-        // the direct spelling on the membership endpoint and vice versa —
-        // replay too, even though config validation rejects those pairings
-        // before a request can be built.
+        // Cross-family pairings do not inherit the other product's replay
+        // contract; config validation also rejects them before transport.
         for (label, base_url, model) in [
             (
                 "direct spelling on the membership route",
@@ -10724,8 +11285,8 @@ mod tests {
         ] {
             assert_eq!(
                 tool_assistant_reasoning(label, ApiProvider::Moonshot, base_url, model, None),
-                Some("Need to call a tool".to_string()),
-                "{label}: the replay contract is spelling-family-wide on vendor routes"
+                None,
+                "{label}: cross-product replay must stay closed"
             );
         }
     }

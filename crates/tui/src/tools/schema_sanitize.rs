@@ -39,9 +39,9 @@
 //!    `minLength`, `maxLength`, `minimum`, `maximum`, `minItems`,
 //!    `maxItems`, and `ValidateLevelDefault == "ultra"` validates with that
 //!    wider set — the published specification does not list any of them, so
-//!    this module takes the narrower face: those keywords are stripped
-//!    upstream of validation (`strip_mfjs_advisory_keywords`), never
-//!    shipped.
+//!    this module takes the narrower face. Pure annotations are stripped;
+//!    bounds are real constraints and fail closed instead of being removed
+//!    into a wider accepted instance set.
 //!
 //! One pipeline serves every Moonshot route (platform `api.moonshot.cn`/`ai`
 //! and coding `api.kimi.com` / `api.kimi.ai`): all of those routes'
@@ -63,7 +63,215 @@ use crate::models::Tool;
 /// - Collapse single-element `oneOf` / `allOf`
 /// - Walk recursively through all subschemas
 pub fn sanitize(schema: &mut Value) {
+    if !schema_within_structural_depth_limit(schema) {
+        return;
+    }
     sanitize_in_instance(schema, &[]);
+}
+
+/// Provider-neutral recursion protection for the shared registry. This guard
+/// deliberately has no MFJS byte budget: other providers may accept documents
+/// larger than 120000 bytes. The iterative walk cannot overflow the call stack.
+pub(crate) fn schema_within_structural_depth_limit(schema: &Value) -> bool {
+    let mut pending = vec![(schema, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        if depth > MFJS_MAX_STRUCTURAL_DEPTH {
+            return false;
+        }
+        match value {
+            Value::Object(map) => {
+                pending.extend(map.values().map(|child| (child, depth + 1)));
+            }
+            Value::Array(items) => {
+                pending.extend(items.iter().map(|child| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Moonshot's raw-input admission check, applied before cloning or recursive
+/// normalization. Serialization happens only after depth safety is established.
+pub(crate) fn schema_within_mfjs_local_budgets(schema: &Value) -> bool {
+    schema_within_structural_depth_limit(schema)
+        && serde_json::to_vec(schema).is_ok_and(|encoded| encoded.len() <= MFJS_MAX_SCHEMA_BYTES)
+}
+
+struct RelaxedResourceTask<'a> {
+    value: &'a Value,
+    property_depth: usize,
+    structural_depth: usize,
+}
+
+fn push_relaxed_resource_tasks<'a>(
+    pending: &mut Vec<RelaxedResourceTask<'a>>,
+    value: &'a Value,
+    property_depth: usize,
+    structural_depth: usize,
+) {
+    if let Value::Array(items) = value {
+        pending.extend(items.iter().map(|item| RelaxedResourceTask {
+            value: item,
+            property_depth,
+            structural_depth: structural_depth + 1,
+        }));
+    } else {
+        pending.push(RelaxedResourceTask {
+            value,
+            property_depth,
+            structural_depth: structural_depth + 1,
+        });
+    }
+}
+
+/// Validate only the local resource budgets for the explicit strict:false
+/// Moonshot path. This performs no MFJS keyword/type validation and never
+/// mutates the schema. References stay unexpanded and literal instance data is
+/// never interpreted as a subschema; unsupported composition is still walked
+/// so its resource use cannot hide from the budgets.
+pub(crate) fn validate_kimi_relaxed_resource_budgets(
+    schema: &Value,
+) -> Result<(), KimiParameterSchemaError> {
+    if !schema_within_mfjs_local_budgets(schema) {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+    }
+
+    let mut pending = vec![RelaxedResourceTask {
+        value: schema,
+        property_depth: 0,
+        structural_depth: 0,
+    }];
+    let mut work = 0usize;
+    let mut total_properties = 0usize;
+    let mut total_enum_values = 0usize;
+    while let Some(RelaxedResourceTask {
+        value,
+        property_depth,
+        structural_depth,
+    }) = pending.pop()
+    {
+        work = work
+            .checked_add(1)
+            .ok_or(KimiParameterSchemaError::ResourceLimitExceeded)?;
+        if work > MFJS_MAX_EXPANDED_STATES
+            || property_depth > MFJS_MAX_OBJECT_DEPTH
+            || structural_depth > MFJS_MAX_STRUCTURAL_DEPTH
+        {
+            return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+        }
+        let Value::Object(obj) = value else {
+            continue;
+        };
+        if obj
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|branches| branches.len() > MFJS_MAX_ANY_OF_ITEMS)
+        {
+            return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+        }
+
+        for (key, child) in obj {
+            match key.as_str() {
+                "properties" => {
+                    if let Some(properties) = child.as_object() {
+                        total_properties = total_properties
+                            .checked_add(properties.len())
+                            .ok_or(KimiParameterSchemaError::ResourceLimitExceeded)?;
+                        if total_properties > MFJS_MAX_TOTAL_PROPERTIES {
+                            return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+                        }
+                        for property in properties.values() {
+                            pending.push(RelaxedResourceTask {
+                                value: property,
+                                property_depth: property_depth + 1,
+                                structural_depth: structural_depth + 1,
+                            });
+                        }
+                    } else {
+                        push_relaxed_resource_tasks(
+                            &mut pending,
+                            child,
+                            property_depth,
+                            structural_depth,
+                        );
+                    }
+                }
+                "$defs" | "definitions" => {
+                    if let Some(definitions) = child.as_object() {
+                        for definition in definitions.values() {
+                            pending.push(RelaxedResourceTask {
+                                value: definition,
+                                property_depth: 0,
+                                structural_depth: structural_depth + 1,
+                            });
+                        }
+                    } else {
+                        push_relaxed_resource_tasks(
+                            &mut pending,
+                            child,
+                            property_depth,
+                            structural_depth,
+                        );
+                    }
+                }
+                "patternProperties" | "dependentSchemas" => {
+                    if let Some(schemas) = child.as_object() {
+                        for subschema in schemas.values() {
+                            pending.push(RelaxedResourceTask {
+                                value: subschema,
+                                property_depth,
+                                structural_depth: structural_depth + 1,
+                            });
+                        }
+                    } else {
+                        push_relaxed_resource_tasks(
+                            &mut pending,
+                            child,
+                            property_depth,
+                            structural_depth,
+                        );
+                    }
+                }
+                "default" | "const" | "examples" => {}
+                "enum" => {
+                    if let Some(values) = child.as_array() {
+                        total_enum_values = total_enum_values
+                            .checked_add(values.len())
+                            .ok_or(KimiParameterSchemaError::ResourceLimitExceeded)?;
+                        if total_enum_values > MFJS_MAX_TOTAL_ENUM_VALUES {
+                            return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+                        }
+                        // The per-string length budget arms at any entry
+                        // count: gating it on a minimum enum size would let a
+                        // small enum carry one oversized string the wire
+                        // rejects (round-4 review).
+                        let mut encoded_length = 0usize;
+                        for value in values {
+                            let literal_length = value
+                                .as_str()
+                                .map(str::len)
+                                .unwrap_or_else(|| value.to_string().len());
+                            encoded_length = encoded_length
+                                .checked_add(literal_length)
+                                .ok_or(KimiParameterSchemaError::ResourceLimitExceeded)?;
+                        }
+                        if encoded_length > MFJS_MAX_ENUM_STRING_LENGTH {
+                            return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+                        }
+                    }
+                }
+                "$ref" | "required" => {}
+                _ => push_relaxed_resource_tasks(
+                    &mut pending,
+                    child,
+                    property_depth,
+                    structural_depth,
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Sanitize a schema for one JSON instance scope.
@@ -144,12 +352,12 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
                         sanitize_in_instance(dep, &local_properties);
                     }
                 }
-            } else if key == "enum" || key == "const" {
-                // Instance data, not schema: each enum entry and the const
-                // value is a literal JSON value the tool can receive, so a
-                // schema-shaped entry (`enum: [{"required": ["x"]}]` for a
-                // property named `required`) must reach the wire
-                // byte-for-byte. The generic recursion used to normalize
+            } else if matches!(key.as_str(), "default" | "enum" | "const") {
+                // Instance data, not schema: each enum entry and every const
+                // or default value is a literal JSON value the tool can
+                // receive, so a schema-shaped entry (`enum: [{"required":
+                // ["x"]}]` for a property named `required`) must reach the
+                // wire byte-for-byte. The generic recursion used to normalize
                 // those literal objects — pruning their `required` into an
                 // all-accepting `{}` — excluding an argument the original
                 // contract admitted and advertising a different one (review
@@ -198,6 +406,11 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
 pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
     let mut all_strict = true;
     for tool in tools {
+        if !schema_within_structural_depth_limit(&tool.input_schema) {
+            tool.strict = None;
+            all_strict = false;
+            continue;
+        }
         if strict_schema_supported(&tool.input_schema) {
             sanitize_for_strict(&mut tool.input_schema);
             tool.strict = Some(true);
@@ -215,6 +428,9 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
 /// rules: every object must set `additionalProperties: false`, and every
 /// property must be listed in `required`.
 pub fn sanitize_for_strict(schema: &mut Value) {
+    if !schema_within_structural_depth_limit(schema) {
+        return;
+    }
     sanitize(schema);
     enforce_strict_subset(schema);
 }
@@ -257,6 +473,11 @@ pub fn sanitize_for_strict(schema: &mut Value) {
 /// The kill reason is emitted at debug level; the user-facing note stays
 /// the flattening pass's own.
 pub fn sanitize_for_xai_parameters(parameters: &mut Value) -> Option<String> {
+    if !schema_within_structural_depth_limit(parameters) {
+        return parameters
+            .as_object()
+            .and_then(root_composition_constraint_note);
+    }
     if root_union_is_all_object_branches(parameters) && union_branches_keep_required(parameters) {
         // Decide on the EFFECTIVE post-normalization shape: the recursive
         // cleanup below can manufacture branch equality that the raw input
@@ -460,7 +681,7 @@ impl DefectWalk {
                             }
                         }
                         // Instance data is never a union.
-                        "const" | "enum" => {}
+                        "default" | "const" | "enum" => {}
                         _ => {
                             if let Some(reason) =
                                 self.subtree_defect(child, &format!("{path}.{key}"))
@@ -756,10 +977,10 @@ fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
 /// equal, flatten the union, and drop one branch's previously valid
 /// input (review 4579521065). When a float participates, JSON Schema
 /// still equates `1` with `1.0`, but an integer converts through f64
-/// losslessly only within ±2^53; outside that window equality is
-/// DECLINED (reported unequal) and the pair fails closed to the
-/// flattening fallback rather than risking a collided proof.
-fn schema_number_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+/// losslessly only within ±2^53; outside that window equality is UNKNOWN
+/// (`None`), never evidence of inequality. Merge callers must abandon the
+/// transformation when they encounter this result.
+fn schema_number_equal(a: &serde_json::Number, b: &serde_json::Number) -> Option<bool> {
     let a_int = a
         .as_i64()
         .map(i128::from)
@@ -769,17 +990,17 @@ fn schema_number_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
         .map(i128::from)
         .or_else(|| b.as_u64().map(i128::from));
     if let (Some(x), Some(y)) = (a_int, b_int) {
-        return x == y;
+        return Some(x == y);
     }
     let (fa, fb) = (a.as_f64(), b.as_f64());
     if fa != fb {
-        return false;
+        return Some(false);
     }
     let converts_exactly = |int_side: Option<i128>| match int_side {
         Some(value) => value.abs() <= 9_007_199_254_740_992,
         None => true,
     };
-    converts_exactly(a_int) && converts_exactly(b_int)
+    (converts_exactly(a_int) && converts_exactly(b_int)).then_some(true)
 }
 
 /// Whether two pin values are PROVABLY disjoint. Pairwise exclusion is an
@@ -862,26 +1083,45 @@ fn compound_values_provably_disjoint(a: &Value, b: &Value) -> bool {
 /// derived equality compares across integer/float variants as unequal —
 /// representation equality would falsely prove two semantically equivalent
 /// branches disjoint and keep an unsatisfiable union (review 4578150947).
-/// Numbers compare by mathematical value through [`schema_number_equal`]
-/// (never routed through f64); arrays and objects recurse element-wise;
-/// everything else compares structurally.
+/// Boolean consumers retain their conservative unknown-as-not-equal behavior.
+/// Schema intersection must instead use [`schema_value_comparison`] directly
+/// so an unknown comparison aborts the merge rather than deleting literals.
 fn schema_value_equal(left: &Value, right: &Value) -> bool {
+    schema_value_comparison(left, right).unwrap_or(false)
+}
+
+/// Three-state JSON Schema equality: `Some(true)` is proven equal,
+/// `Some(false)` is proven different, and `None` is undecidable with the
+/// available numeric representation.
+fn schema_value_comparison(left: &Value, right: &Value) -> Option<bool> {
     match (left, right) {
         (Value::Number(a), Value::Number(b)) => schema_number_equal(a, b),
         (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|(x, y)| schema_value_equal(x, y))
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            for (x, y) in a.iter().zip(b.iter()) {
+                if !schema_value_comparison(x, y)? {
+                    return Some(false);
+                }
+            }
+            Some(true)
         }
         (Value::Object(a), Value::Object(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(key, value)| {
-                    b.get(key)
-                        .is_some_and(|other| schema_value_equal(value, other))
-                })
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            for (key, value) in a {
+                let Some(other) = b.get(key) else {
+                    return Some(false);
+                };
+                if !schema_value_comparison(value, other)? {
+                    return Some(false);
+                }
+            }
+            Some(true)
         }
-        _ => left == right,
+        _ => Some(left == right),
     }
 }
 
@@ -898,6 +1138,20 @@ fn json_value_is_type(candidate: &Value, expected: &str) -> bool {
         "number" => candidate.is_number(),
         "integer" => candidate.is_i64() || candidate.is_u64(),
         _ => false,
+    }
+}
+
+/// Type check for the instance-data narrowing path. It must agree with the
+/// module's own MFJS integer ruling ([`mfjs_integer_value`]: finite, zero
+/// fractional part, within the interop window), under which an f64 spelling
+/// with a zero fractional part IS an integral value on the wire. Raw serde
+/// integrality — [`json_value_is_type`]'s stricter witness-proof test —
+/// would silently drop such a member from a narrowed enum and shrink the
+/// contract the original schema admitted (round-4 review).
+fn instance_data_is_type(candidate: &Value, expected: &str) -> bool {
+    match expected {
+        "integer" => mfjs_integer_value(candidate).is_some(),
+        _ => json_value_is_type(candidate, expected),
     }
 }
 
@@ -1695,11 +1949,11 @@ fn branch_required_would_be_pruned(branch: &Value) -> bool {
         .and_then(Value::as_object)
         .map(|props| props.keys().collect())
         .unwrap_or_default();
-    required.iter().any(|entry| {
-        !entry
-            .as_str()
-            .is_some_and(|name| known_keys.iter().any(|known| *known == name))
-    })
+    let known_keys: std::collections::HashSet<&str> =
+        known_keys.into_iter().map(|known| known.as_str()).collect();
+    required
+        .iter()
+        .any(|entry| !entry.as_str().is_some_and(|name| known_keys.contains(name)))
 }
 
 /// Sanitize a schema for OpenAI Responses function tools.
@@ -1713,6 +1967,11 @@ fn branch_required_would_be_pruned(branch: &Value) -> bool {
 /// Returns a short description note when root composition constraints with
 /// meaningful `required` groups are dropped.
 pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
+    if !schema_within_structural_depth_limit(schema) {
+        return schema
+            .as_object()
+            .and_then(root_composition_constraint_note);
+    }
     let constraint_note = schema
         .as_object()
         .and_then(root_composition_constraint_note);
@@ -1810,6 +2069,20 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
         }
     }
 
+    if !schema_within_structural_depth_limit(schema) {
+        let notes: Vec<String> = ["oneOf", "anyOf", "allOf"]
+            .iter()
+            .filter(|key| schema.get(*key).is_some())
+            .map(|key| {
+                specific_notes
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| root_composition_generic_note(key).to_string())
+            })
+            .collect();
+        return (!notes.is_empty()).then(|| notes.join(" "));
+    }
+
     sanitize(schema);
 
     if !schema.is_object() {
@@ -1860,6 +2133,9 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
 }
 
 fn strict_schema_supported(schema: &Value) -> bool {
+    if !schema_within_structural_depth_limit(schema) {
+        return false;
+    }
     let mut normalized = schema.clone();
     sanitize(&mut normalized);
     !has_strict_incompatible_composition(&normalized, true)
@@ -1876,9 +2152,10 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         if is_root && obj.contains_key("anyOf") {
             return true;
         }
-        return obj
-            .values()
-            .any(|value| has_strict_incompatible_composition(value, false));
+        return obj.iter().any(|(key, value)| {
+            !matches!(key.as_str(), "default" | "enum" | "const")
+                && has_strict_incompatible_composition(value, false)
+        });
     }
     schema.as_array().is_some_and(|arr| {
         arr.iter()
@@ -1901,6 +2178,11 @@ fn collapse_nullable_unions(schema: &mut Value) {
         };
         let (nulls, nons): (Vec<_>, Vec<_>) = members.into_iter().partition(is_null_type);
         if nulls.len() == 1 && nons.len() == 1 {
+            // Only a bare null branch has an obvious nullable spelling. Extra
+            // constraints on that branch would need their own intersection.
+            if nulls[0].as_object().is_none_or(|branch| branch.len() != 1) {
+                continue;
+            }
             // `nullable` is only meaningful when it annotates a concrete
             // schema type. Collapsing `$ref | null` or another untyped branch
             // would manufacture an annotation-only schema and lose the
@@ -1913,16 +2195,315 @@ fn collapse_nullable_unions(schema: &mut Value) {
             if !has_concrete_non_null_type {
                 continue;
             }
-            obj.remove(key);
-            if let Value::Object(non_obj) = nons.into_iter().next().unwrap() {
-                for (k, v) in non_obj {
-                    if k != "type" || v != "null" {
-                        obj.insert(k, v);
+            let mut outer = obj.clone();
+            outer.remove(key);
+            // These siblings constrain null or are forbidden union siblings
+            // in the strict pipeline. Do not smuggle them into one branch
+            // through an OpenAPI-style nullable marker.
+            if outer.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "default"
+                        | "enum"
+                        | "const"
+                        | "$ref"
+                        | "anyOf"
+                        | "oneOf"
+                        | "allOf"
+                        | "not"
+                        | "if"
+                        | "then"
+                        | "else"
+                        | "dependentSchemas"
+                )
+            }) {
+                continue;
+            }
+            let parent_has_type = outer.contains_key("type");
+            let outer_declines_null = outer.get("nullable") == Some(&Value::Bool(false));
+            let Some(non_null) = nons[0].as_object() else {
+                continue;
+            };
+            let Some(mut merged) = merge_schema_intersection(outer, non_null) else {
+                continue;
+            };
+            // A concrete parent type already excludes the null branch. The
+            // exact intersection is therefore just the non-null schema.
+            if !parent_has_type {
+                if outer_declines_null {
+                    // The parent explicitly forbids null while a null branch
+                    // survives the merge: the intersection is unsatisfiable,
+                    // so decline instead of widening the parent back to
+                    // nullable (review 6061318874).
+                    continue;
+                }
+                merged.insert("nullable".into(), Value::Bool(true));
+            }
+            *obj = merged;
+        }
+    }
+}
+
+/// Work ceiling for one merge: comparisons counted across the whole
+/// recursion. The enum intersection is O(outer × inner) per collision, and
+/// hostile or merely oversized schemas (uncapped on the shared registry
+/// lane) could previously spend unbounded time here on every request build.
+/// Exceeding the ceiling declines the merge — the original composition is
+/// preserved, which is the merge's own fail-closed contract (review
+/// 6061318874).
+const MFJS_MAX_MERGE_WORK: usize = 100_000;
+
+/// Merge two schemas that constrain the same instance. Disjoint keywords
+/// combine directly; collisions need a real intersection or the merge is
+/// declined. Returning `None` leaves the original composition untouched.
+///
+/// Takes `outer` by value: the merge builds its result from the caller's
+/// working copy in place, so a declined merge just drops the copy instead of
+/// paying a second full deep clone of the node on every attempt (round-6
+/// review).
+fn merge_schema_intersection(
+    outer: Map<String, Value>,
+    inner: &Map<String, Value>,
+) -> Option<Map<String, Value>> {
+    let mut work = 0usize;
+    merge_schema_intersection_bounded(outer, inner, &mut work)
+}
+
+fn merge_schema_intersection_bounded(
+    outer: Map<String, Value>,
+    inner: &Map<String, Value>,
+    work: &mut usize,
+) -> Option<Map<String, Value>> {
+    // Declaring a new named property changes the domain of a constraining
+    // additionalProperties keyword on either side. Merging different property
+    // sets would therefore turn previously rejected keys into accepted ones.
+    let outer_properties = schema_property_names(&outer);
+    let inner_properties = schema_property_names(inner);
+    let property_sets_differ = match (&outer_properties, &inner_properties) {
+        (Some(outer), Some(inner)) => outer != inner,
+        _ => true,
+    };
+    if property_sets_differ
+        && (additional_properties_constrains(&outer) || additional_properties_constrains(inner))
+    {
+        return None;
+    }
+
+    // A `$ref` cannot be merged beside constraining keywords: the exact
+    // intersection needs the reference target's constraints (unknown here),
+    // and the plausible spelling — `type` beside `$ref` — is exactly the
+    // sibling pair the MFJS ref-sibling whitelist rejects into a misleading
+    // `InvalidReference`. Declining keeps the original composition, whose
+    // union form is exactly representable (round-4 review). Annotations
+    // beside the reference are the whitelist's own allowance.
+    if (outer.contains_key("$ref") || inner.contains_key("$ref"))
+        && outer
+            .keys()
+            .chain(inner.keys())
+            .any(|key| !matches!(key.as_str(), "$ref" | "description"))
+    {
+        return None;
+    }
+
+    // `outer` is the caller's private working copy, so the merged result is
+    // built in place — no second deep clone of the node per attempt.
+    let mut merged = outer;
+    for (key, inner_value) in inner {
+        let Some(outer_value) = merged.get(key).cloned() else {
+            merged.insert(key.clone(), inner_value.clone());
+            continue;
+        };
+        if schema_value_comparison(&outer_value, inner_value)? {
+            continue;
+        }
+        match key.as_str() {
+            "type" => {
+                let outer_type = outer_value.as_str()?;
+                let inner_type = inner_value.as_str()?;
+                merged.insert(
+                    key.clone(),
+                    Value::String(intersect_schema_types(outer_type, inner_type)?.to_string()),
+                );
+            }
+            "enum" => {
+                let outer_values = outer_value.as_array()?;
+                let inner_values = inner_value.as_array()?;
+                // The cap bounds element visits, not pair counts: each
+                // charged pair comparison recursively walks both operands,
+                // so compound members must charge by their serialized size
+                // or ~100k pairs of large values cost ~10^10 element visits
+                // on the byte-uncapped registry lane (round-6 review).
+                // Sizes are computed once per element — O(document)
+                // overall — and the pre-arm whole-array equality shortcut
+                // above stays a single linear pass per key.
+                let operand_size = |value: &Value| {
+                    serde_json::to_vec(value)
+                        .map(|encoded| encoded.len().max(1))
+                        .unwrap_or(usize::MAX)
+                };
+                let outer_sizes: Vec<usize> = outer_values.iter().map(operand_size).collect();
+                let inner_sizes: Vec<usize> = inner_values.iter().map(operand_size).collect();
+                let mut intersection = Vec::new();
+                for (outer_index, candidate) in outer_values.iter().enumerate() {
+                    let mut matched = false;
+                    for (inner_index, value) in inner_values.iter().enumerate() {
+                        *work = work
+                            .saturating_add(outer_sizes[outer_index].max(inner_sizes[inner_index]));
+                        if *work > MFJS_MAX_MERGE_WORK {
+                            return None;
+                        }
+                        if schema_value_comparison(value, candidate)? {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if matched {
+                        intersection.push(candidate.clone());
                     }
                 }
+                if intersection.is_empty() {
+                    return None;
+                }
+                merged.insert(key.clone(), Value::Array(intersection));
             }
-            obj.insert("nullable".into(), Value::Bool(true));
+            "required" => {
+                let outer_required = outer_value.as_array()?;
+                let inner_required = inner_value.as_array()?;
+                if !outer_required.iter().all(Value::is_string)
+                    || !inner_required.iter().all(Value::is_string)
+                {
+                    return None;
+                }
+                // Membership goes through a set: a bare `contains` scan per
+                // inner name is O(|outer| × |inner|) string compares with no
+                // accounting, and the shared registry lane caps neither the
+                // schema nor the names. Every inner name is charged to the
+                // same work ceiling as the enum arm; tripping it declines the
+                // merge exactly like the enum arm (round-4 review).
+                let mut seen: std::collections::HashSet<&str> =
+                    outer_required.iter().filter_map(Value::as_str).collect();
+                let mut required = outer_required.clone();
+                for name in inner_required {
+                    *work = work.saturating_add(1);
+                    if *work > MFJS_MAX_MERGE_WORK {
+                        return None;
+                    }
+                    if let Some(name) = name.as_str()
+                        && seen.insert(name)
+                    {
+                        required.push(Value::String(name.to_owned()));
+                    }
+                }
+                merged.insert(key.clone(), Value::Array(required));
+            }
+            "properties" => {
+                let outer_properties = outer_value.as_object()?;
+                let inner_properties = inner_value.as_object()?;
+                let mut properties = outer_properties.clone();
+                for (name, inner_schema) in inner_properties {
+                    if let Some(outer_schema) = properties.get(name).cloned() {
+                        let intersected = if schema_value_comparison(&outer_schema, inner_schema)? {
+                            inner_schema.clone()
+                        } else {
+                            match (outer_schema.as_object(), inner_schema.as_object()) {
+                                (Some(outer), Some(inner)) => Value::Object(
+                                    merge_schema_intersection_bounded(outer.clone(), inner, work)?,
+                                ),
+                                _ => return None,
+                            }
+                        };
+                        properties.insert(name.clone(), intersected);
+                    } else {
+                        properties.insert(name.clone(), inner_schema.clone());
+                    }
+                }
+                merged.insert(key.clone(), Value::Object(properties));
+            }
+            "$defs" => {
+                let outer_definitions = outer_value.as_object()?;
+                let inner_definitions = inner_value.as_object()?;
+                for (name, definition) in outer_definitions {
+                    if let Some(inner) = inner_definitions.get(name)
+                        && !schema_value_comparison(definition, inner)?
+                    {
+                        return None;
+                    }
+                }
+                let mut definitions = outer_definitions.clone();
+                definitions.extend(inner_definitions.clone());
+                merged.insert(key.clone(), Value::Object(definitions));
+            }
+            _ => return None,
         }
+    }
+    if !narrow_instance_data_to_intersected_type(&mut merged) {
+        return None;
+    }
+    Some(merged)
+}
+
+/// Narrow enum/const instance data to the intersected type. A `type` that
+/// the intersection produced (for example `number` ∩ `integer` → `integer`)
+/// must also constrain the surviving members: keeping a fractional enum
+/// value beside an `integer` type yields a schema MFJS's value-type check
+/// rejects even though the exact intersection is representable (review
+/// 4689524156). An instance-data member the final type can never admit is
+/// removed, under the schema's own integer ruling
+/// ([`instance_data_is_type`]) so an integral f64 spelling such as `3.0`
+/// survives the narrowing it would fail only under raw serde integrality.
+/// Returns `false` when nothing survives — an emptied enum, or a
+/// const incompatible with the final type — meaning no instance satisfies
+/// the intersection and the merge must be declined.
+fn narrow_instance_data_to_intersected_type(merged: &mut Map<String, Value>) -> bool {
+    let Some(final_type) = merged
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return true;
+    };
+    if let Some(values) = merged.get("enum").and_then(Value::as_array).cloned() {
+        let narrowed: Vec<Value> = values
+            .into_iter()
+            .filter(|value| instance_data_is_type(value, &final_type))
+            .collect();
+        if narrowed.is_empty() {
+            return false;
+        }
+        merged.insert("enum".into(), Value::Array(narrowed));
+    }
+    if let Some(constant) = merged.get("const") {
+        let constant = constant.clone();
+        if !instance_data_is_type(&constant, &final_type) {
+            return false;
+        }
+    }
+    true
+}
+
+fn schema_property_names(schema: &Map<String, Value>) -> Option<std::collections::BTreeSet<&str>> {
+    match schema.get("properties") {
+        None => Some(std::collections::BTreeSet::new()),
+        Some(Value::Object(properties)) => Some(properties.keys().map(String::as_str).collect()),
+        Some(_) => None,
+    }
+}
+
+fn additional_properties_constrains(schema: &Map<String, Value>) -> bool {
+    match schema.get("additionalProperties") {
+        None | Some(Value::Bool(true)) => false,
+        Some(Value::Object(schema)) if schema.is_empty() => false,
+        Some(_) => true,
+    }
+}
+
+fn intersect_schema_types<'a>(outer: &'a str, inner: &'a str) -> Option<&'a str> {
+    if outer == inner || (outer == "integer" && inner == "number") {
+        Some(outer)
+    } else if outer == "number" && inner == "integer" {
+        Some(inner)
+    } else {
+        None
     }
 }
 
@@ -2004,44 +2585,54 @@ fn prune_dangling_required(
         .and_then(|v| v.as_object())
         .map(|props| props.keys().cloned().collect())
         .unwrap_or_default();
-    let known_keys: &[String] = if obj.contains_key("properties") && declared_local {
-        &local_keys
-    } else {
-        enclosing_properties
-    };
+    // Set membership keeps the required prune linear in the schema size on
+    // the shared (uncapped-by-bytes) registry lane instead of an
+    // O(required × properties) scan per node (round-5 review).
+    let known_keys: std::collections::HashSet<&str> =
+        if obj.contains_key("properties") && declared_local {
+            local_keys.iter().map(String::as_str).collect()
+        } else {
+            enclosing_properties.iter().map(String::as_str).collect()
+        };
     let Some(required) = obj.get_mut("required").and_then(|v| v.as_array_mut()) else {
         return;
     };
-    required.retain(|entry| {
-        entry
-            .as_str()
-            .is_some_and(|k| known_keys.iter().any(|known| known == k))
-    });
+    required.retain(|entry| entry.as_str().is_some_and(|k| known_keys.contains(k)));
     if required.is_empty() {
         obj.remove("required");
     }
 }
 
-/// Collapse `{"oneOf": [X]}` → X, same for `allOf`.
-///
-/// Single-element unions are semantically equivalent to the element itself;
-/// DeepSeek's strict validator doesn't always flatten them.
+/// Collapse a single-branch composition only when the branch and every
+/// sibling can be represented by their exact intersection.
 fn collapse_single_element_unions(schema: &mut Value) {
     let Some(obj) = schema.as_object_mut() else {
         return;
     };
     for key in ["oneOf", "allOf", "anyOf"] {
+        if obj.contains_key("default") {
+            continue;
+        }
         let single = match obj.get(key).and_then(|v| v.as_array()) {
             Some(arr) if arr.len() == 1 => arr[0].clone(),
             _ => continue,
         };
-        obj.remove(key);
-        if let Value::Object(inner) = single {
-            for (k, v) in inner {
-                if !obj.contains_key(&k) {
-                    obj.insert(k, v);
-                }
-            }
+        let Some(inner) = single.as_object() else {
+            continue;
+        };
+        let mut outer = obj.clone();
+        outer.remove(key);
+        // An outer with no remaining keywords contributes nothing, so the
+        // exact intersection is the branch itself — the property-set guard
+        // below has nothing to protect (a root `anyOf:[object]` must
+        // collapse onto its branch rather than be dropped as root
+        // composition, review 4689524141).
+        if outer.is_empty() {
+            *obj = inner.clone();
+            continue;
+        }
+        if let Some(merged) = merge_schema_intersection(outer, inner) {
+            *obj = merged;
         }
     }
 }
@@ -2051,13 +2642,15 @@ fn enforce_strict_subset(schema: &mut Value) {
         strip_unsupported_strict_keywords(obj);
         if is_object_schema(obj) {
             let originally_required = required_names(obj);
+            // Set membership keeps the strict-subset pass linear instead of
+            // an O(properties × required) scan per node (round-5 review).
+            let required_set: std::collections::HashSet<&str> =
+                originally_required.iter().map(String::as_str).collect();
             let properties = ensure_properties_object(obj);
             let mut property_names: Vec<String> = properties.keys().cloned().collect();
             property_names.sort();
             for property_name in &property_names {
-                if !originally_required
-                    .iter()
-                    .any(|required| required == property_name)
+                if !required_set.contains(property_name.as_str())
                     && let Some(property_schema) = properties.get_mut(property_name)
                 {
                     mark_nullable(property_schema);
@@ -2070,8 +2663,10 @@ fn enforce_strict_subset(schema: &mut Value) {
             obj.insert("additionalProperties".into(), Value::Bool(false));
         }
 
-        for value in obj.values_mut() {
-            enforce_strict_subset(value);
+        for (key, value) in obj.iter_mut() {
+            if !matches!(key.as_str(), "default" | "enum" | "const") {
+                enforce_strict_subset(value);
+            }
         }
     } else if let Some(arr) = schema.as_array_mut() {
         for value in arr {
@@ -2233,20 +2828,10 @@ fn alternative_admits_omission(item: &Value) -> bool {
             .is_none_or(|required| required.is_empty())
 }
 
-/// Strip `dependentSchemas` / `dependentRequired` from every node.
-///
-/// MFJS validates each node against a closed keyword allow-list, so a schema
-/// carrying either keyword is refused outright — and that refusal reaches
-/// `sanitize_moonshot_chat_tools`, which fails the whole request build, so one
-/// composed schema would break *every* tool-bearing Moonshot turn rather than
-/// degrade its own tool.
-///
-/// Status note (2026-11-04): that whole-request failure mode no longer
-/// exists — the request builder degrades per tool (drop + projection
-/// warning). These two conditional keywords remain outside
-/// the MFJS supported keyword set (the walle MFJS specification has no
-/// conditional keywords), so the strip stays the semantics-preserving way to keep such a
-/// tool shippable.
+/// Strip `dependentSchemas` / `dependentRequired` for the compatibility
+/// providers whose existing contract explicitly permits that relaxation.
+/// Moonshot does not call this helper: conditional requirements are real
+/// constraints and its strict pipeline rejects them instead.
 fn drop_dependent_keywords(schema: &mut Value) -> Option<String> {
     strip_dependent_keywords(schema).then(|| {
         "This provider cannot express conditional requirements from the original schema. \
@@ -2268,8 +2853,10 @@ fn strip_dependent_keywords(schema: &mut Value) -> bool {
         Value::Object(obj) => {
             let mut dropped = obj.remove("dependentRequired").is_some();
             dropped |= obj.remove("dependentSchemas").is_some();
-            for value in obj.values_mut() {
-                dropped |= strip_dependent_keywords(value);
+            for (key, value) in obj.iter_mut() {
+                if !matches!(key.as_str(), "default" | "enum" | "const") {
+                    dropped |= strip_dependent_keywords(value);
+                }
             }
             dropped
         }
@@ -2807,51 +3394,407 @@ mod tests {
     }
 
     #[test]
-    fn empty_property_map_merged_from_a_nullable_arm_is_a_declared_scope() {
-        // Provenance is captured after the nullable-union collapse: an arm
-        // carrying an explicitly EMPTY properties map merges that map into
-        // the scope, and it reads as a declaration — strictly local, like
-        // any directly declared empty map — not as a synthetic map to
-        // inherit through (review 5897819279). The untyped sibling branch
-        // at the same instance shows the inherited reading still applies
-        // when nothing was declared.
+    fn nullable_union_with_same_instance_composition_sibling_does_not_collapse() {
         let mut schema = json!({
-            "type": "object",
-            "properties": {
-                "a": {"type": "string"},
-                "b": {"type": "string"}
-            },
+            "anyOf": [
+                {"type": "object", "properties": {}},
+                {"type": "null"}
+            ],
             "oneOf": [
-                {
-                    "anyOf": [
-                        {"type": "object", "properties": {}},
-                        {"type": "null"}
-                    ],
-                    "oneOf": [
-                        {"required": ["a"]},
-                        {"type": "string"}
-                    ]
-                },
-                {
-                    "oneOf": [
-                        {"required": ["a"]},
-                        {"type": "string"}
-                    ]
-                },
+                {"required": ["a"]},
                 {"type": "string"}
             ]
         });
+
         sanitize(&mut schema);
+
+        assert!(schema["anyOf"].is_array());
+        assert!(schema.get("nullable").is_none());
+    }
+
+    #[test]
+    fn nullable_parent_type_and_non_null_siblings_keep_and_semantics() {
+        let mut schema = json!({
+            "type": "string",
+            "minLength": 2,
+            "anyOf": [
+                {"type": "string", "maxLength": 4},
+                {"type": "null"}
+            ]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["type"], "string");
+        assert_eq!(schema["minLength"], 2);
+        assert_eq!(schema["maxLength"], 4);
+        assert!(schema.get("nullable").is_none());
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn single_branch_union_intersects_conflicting_enum_siblings() {
+        let mut schema = json!({
+            "type": "string",
+            "enum": ["a", "b"],
+            "anyOf": [{"type": "string", "enum": ["b", "c"], "minLength": 1}]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["enum"], json!(["b"]));
+        assert_eq!(schema["minLength"], 1);
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn numeric_type_intersection_narrows_enum_members_to_the_result_type() {
+        // Review 4689524156: `number` ∩ `integer` is `integer`, so the
+        // surviving enum must drop fractional members instead of shipping a
+        // schema the MFJS value-type check rejects wholesale.
+        let mut schema = json!({
+            "type": "number",
+            "enum": [0.5, 1, 2],
+            "anyOf": [{"type": "integer"}]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["enum"], json!([1, 2]));
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn numeric_type_intersection_declines_when_no_enum_member_survives() {
+        let mut schema = json!({
+            "type": "number",
+            "enum": [0.5],
+            "anyOf": [{"type": "integer"}]
+        });
+        let original = schema.clone();
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema, original, "an unsatisfiable intersection declines");
+    }
+
+    #[test]
+    fn type_narrowing_preserves_integral_float_enum_members() {
+        // Round-4 review: the narrowing test must agree with the module's own
+        // MFJS integer ruling (`mfjs_integer_value`), under which an f64
+        // spelling with a zero fractional part IS an integral value. Raw
+        // serde integrality used to drop `3.0` and silently shrink the
+        // admitted contract to `[4]`, while a fractional member still goes.
+        let mut schema = json!({
+            "type": "number",
+            "enum": [3.0, 4, 0.5],
+            "anyOf": [{"type": "integer"}]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["enum"], json!([3.0, 4]));
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn type_narrowing_preserves_an_integral_float_const() {
+        let mut schema = json!({
+            "type": "number",
+            "const": 3.0,
+            "anyOf": [{"type": "integer"}]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["const"], json!(3.0));
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn type_narrowing_follows_the_safe_integer_window_exactly() {
+        // The narrowing ruling must stay aligned with `mfjs_integer_value`:
+        // a negative f64 at the -(2^53-1) floor is an admitted integral
+        // value, while a u64-spelled value one past the window fails the
+        // same ruling the MFJS enum check applies and is dropped instead of
+        // shipping a schema validation rejects wholesale.
+        let mut schema = json!({
+            "type": "number",
+            "enum": [-9_007_199_254_740_991.0, 9_007_199_254_740_993u64, 0.5],
+            "anyOf": [{"type": "integer"}]
+        });
+
+        sanitize(&mut schema);
+
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["enum"], json!([-9_007_199_254_740_991.0]));
+    }
+
+    #[test]
+    fn merge_declines_unknown_large_number_equality_without_deleting_enum_values() {
+        let integer = json!(9_007_199_254_740_994_i64);
+        let float = json!(9_007_199_254_740_994.0);
         assert_eq!(
-            schema["oneOf"][0]["oneOf"],
-            json!([{}, {"type": "string"}]),
-            "the merged explicit empty map is a declared scope: required prunes locally: {schema}"
+            schema_number_equal(integer.as_number().unwrap(), float.as_number().unwrap()),
+            None
         );
         assert_eq!(
-            schema["oneOf"][1]["oneOf"],
-            json!([{"required": ["a"]}, {"type": "string"}]),
-            "the undeclared sibling branch inherits the ancestor names: {schema}"
+            schema_value_comparison(&json!([integer.clone()]), &json!([float.clone()])),
+            None
         );
+
+        let mut schema = json!({
+            "type": "number",
+            "enum": [integer, 1],
+            "anyOf": [{
+                "type": "number",
+                "enum": [float, 1.0]
+            }]
+        });
+        let original = schema.clone();
+
+        sanitize(&mut schema);
+
+        assert_eq!(
+            schema, original,
+            "unknown numeric equality must preserve the union and every enum literal"
+        );
+    }
+
+    #[test]
+    fn required_merge_unions_deduplicated_names_in_order() {
+        let merge = |outer: Value, inner: Value| {
+            merge_schema_intersection(
+                outer.as_object().cloned().unwrap(),
+                &inner.as_object().cloned().unwrap(),
+            )
+        };
+        let merged = merge(
+            json!({"type": "object", "required": ["b", "a"]}),
+            json!({"type": "object", "required": ["a", "c", "a"]}),
+        )
+        .expect("a required-vs-required merge is an exact intersection");
+
+        assert_eq!(
+            merged.get("required"),
+            Some(&json!(["b", "a", "c"])),
+            "outer order stands, unseen inner names append in order"
+        );
+    }
+
+    #[test]
+    fn required_merge_completes_fifty_thousand_names_under_the_cap() {
+        // Round-4 review: the `required` arm's bare `contains` scan was
+        // O(|outer| × |inner|) string compares with no work accounting —
+        // ≈1.25e9 compares on this shape, uncapped on the shared registry
+        // lane. With the set-backed scan and the per-name charge the merge
+        // completes into the exact union.
+        let inner_names: Vec<Value> = (0..50_000)
+            .map(|index| Value::String(format!("private-field-{index}")))
+            .collect();
+        let merged = merge_schema_intersection(
+            json!({"type": "object", "required": ["private-field-anchor"]})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            &json!({"type": "object", "required": inner_names})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )
+        .expect("50_000 charged name comparisons sit under the cap");
+
+        let required = merged.get("required").and_then(Value::as_array).unwrap();
+        assert_eq!(required.len(), 50_001);
+        assert_eq!(required[0], json!("private-field-anchor"));
+    }
+
+    #[test]
+    fn required_merge_declines_when_charged_work_exceeds_the_cap() {
+        // The band pin for the required arm's work ceiling, mirroring the
+        // enum-merge band pattern: 100_001 charged inner names — one past
+        // MFJS_MAX_MERGE_WORK — must decline the merge (returning `None`
+        // preserves the original composition, the merge's fail-closed
+        // contract), and loosening the cap would complete this merge and
+        // flip the assertion.
+        let inner_names: Vec<Value> = (0..100_001)
+            .map(|index| Value::String(format!("private-field-{index}")))
+            .collect();
+        let merged = merge_schema_intersection(
+            json!({"type": "object", "required": ["private-field-anchor"]})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            &json!({"type": "object", "required": inner_names})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+
+        assert!(
+            merged.is_none(),
+            "over-cap required merge work must decline instead of scanning"
+        );
+    }
+
+    #[test]
+    fn merge_declines_rather_than_placing_a_ref_beside_constraining_keywords() {
+        // Round-4 review: merging a `$ref` with a constraining keyword would
+        // manufacture a schema the MFJS ref-sibling whitelist rejects (a
+        // misleading `InvalidReference` for a resolvable reference). The
+        // merge declines so the original union form survives; annotations
+        // beside the reference stay mergeable.
+        let merged = merge_schema_intersection(
+            json!({"type": "object"}).as_object().cloned().unwrap(),
+            &json!({"$ref": "#/$defs/A"}).as_object().cloned().unwrap(),
+        );
+        assert!(merged.is_none(), "type beside $ref is not mergeable");
+
+        let annotated = merge_schema_intersection(
+            json!({"description": "payload"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            &json!({"$ref": "#/$defs/A"}).as_object().cloned().unwrap(),
+        )
+        .expect("an annotation beside a $ref is the whitelist's own allowance");
+        assert_eq!(annotated.get("$ref"), Some(&json!("#/$defs/A")));
+        assert_eq!(annotated.get("description"), Some(&json!("payload")));
+    }
+
+    #[test]
+    fn property_union_does_not_widen_constraining_additional_properties() {
+        for (outer_closed, inner_closed) in [(true, false), (false, true)] {
+            let mut schema = json!({
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "properties": {"a": {"type": "string"}},
+                        "anyOf": [{
+                            "type": "object",
+                            "properties": {"b": {"type": "string"}}
+                        }]
+                    }
+                }
+            });
+            if outer_closed {
+                schema["properties"]["payload"]["additionalProperties"] = json!(false);
+            }
+            if inner_closed {
+                schema["properties"]["payload"]["anyOf"][0]["additionalProperties"] = json!(false);
+            }
+
+            sanitize(&mut schema);
+
+            let payload = &schema["properties"]["payload"];
+            assert!(payload["anyOf"].is_array(), "unsafe merge must be declined");
+            assert!(payload["properties"].get("b").is_none());
+        }
+    }
+
+    #[test]
+    fn default_literals_are_instance_data_in_every_shared_walk() {
+        let literal = json!({
+            "required": ["x"],
+            "oneOf": [{}, {}],
+            "dependentRequired": {"x": ["y"]},
+            "properties": {"x": {"type": "string"}}
+        });
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"value": {"type": "object"}},
+            "default": literal.clone()
+        });
+
+        sanitize(&mut schema);
+        sanitize_for_strict(&mut schema);
+
+        assert_eq!(schema["default"], literal);
+        assert_eq!(drop_dependent_keywords(&mut schema), None);
+        assert_eq!(oneof_semantic_defect(&schema), None);
+        assert!(!has_strict_incompatible_composition(&schema, true));
+    }
+
+    #[test]
+    fn recursive_public_entry_points_fail_closed_on_overdepth_schemas() {
+        let mut literal = json!("leaf");
+        for _ in 0..=MFJS_MAX_STRUCTURAL_DEPTH {
+            literal = json!({"nested": literal});
+        }
+        let plain = json!({"type": "object", "default": literal});
+
+        for (name, entry) in [
+            ("generic", sanitize as fn(&mut Value)),
+            ("strict", sanitize_for_strict as fn(&mut Value)),
+            (
+                "kimi",
+                (|schema: &mut Value| {
+                    // Overdepth input trips the entry-point depth guard, so
+                    // the result is `Ok` here; the pointer table only needs
+                    // the fail-closed "no mutation" behavior under test.
+                    sanitize_for_kimi(schema)
+                        .expect("overdepth input must take the guard's silent Ok path");
+                }) as fn(&mut Value),
+            ),
+        ] {
+            let mut schema = plain.clone();
+            entry(&mut schema);
+            assert_eq!(schema, plain, "{name} must leave overdepth input unchanged");
+        }
+        assert!(!strict_schema_supported(&plain));
+
+        let mut tools = vec![test_tool("deep", plain.clone())];
+        tools[0].strict = Some(true);
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].input_schema, plain);
+
+        let mut responses = plain.clone();
+        assert_eq!(sanitize_for_responses(&mut responses), None);
+        assert_eq!(responses, plain);
+        let mut xai = plain.clone();
+        assert_eq!(sanitize_for_xai_parameters(&mut xai), None);
+        assert_eq!(xai, plain);
+        let mut anthropic = plain.clone();
+        assert_eq!(sanitize_for_anthropic_messages(&mut anthropic), None);
+        assert_eq!(anthropic, plain);
+
+        let mut literal = json!("leaf");
+        for _ in 0..=MFJS_MAX_STRUCTURAL_DEPTH {
+            literal = json!({"nested": literal});
+        }
+        let composed = json!({
+            "default": literal,
+            "oneOf": [
+                {"required": ["patch"]},
+                {"required": ["replace"]}
+            ]
+        });
+        let expected =
+            "Exactly one of these parameter groups must be provided: `patch` | `replace`."
+                .to_string();
+        let mut responses = composed.clone();
+        assert_eq!(
+            sanitize_for_responses(&mut responses).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(responses, composed);
+        let mut xai = composed.clone();
+        assert_eq!(
+            sanitize_for_xai_parameters(&mut xai).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(xai, composed);
+        let mut anthropic = composed.clone();
+        assert_eq!(
+            sanitize_for_anthropic_messages(&mut anthropic).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(anthropic, composed);
     }
 
     #[test]
@@ -7041,73 +7984,355 @@ mod tests {
     }
 }
 
-/// Normalize a tool's function schema for Kimi / Moonshot API compatibility.
-///
-/// Kimi's API enforces stricter JSON Schema validation: when a schema uses
-/// `anyOf` / `oneOf`, the `type` field must be placed inside each item rather
-/// than on the parent object.  This function walks the schema root and any
-/// nested objects, pushing `"type": "object"` down into `anyOf` / `oneOf`
-/// items when present.
-///
-/// Invariant: only mutates objects that carry a top-level `type` + an
-/// `anyOf` or `oneOf` array — pure schemas without conditional alternatives
-/// are left untouched.
-pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
+/// Intersect a parent `type` with every nested `anyOf` branch. Branches with
+/// a provably disjoint type are removed; an untyped `$ref` branch ships
+/// verbatim only when its resolved target carries the parent type exactly —
+/// any other `$ref` (unresolvable, strictly broader than the intersection,
+/// or without a plain-string target type) aborts the whole node so
+/// validation rejects the retained `type` + `anyOf` pair instead of a
+/// branch whose parent constraint lost its wire carrier — array-form
+/// `type` branches are narrowed to the intersection exactly, and
+/// bool-schema branches are projected exactly (a `false` branch
+/// is removed, a `true` branch collapses the union onto the parent type) so
+/// a representable contract does not fail validation as a whole. A parent
+/// type that conflicts with EVERY branch is reported as
+/// [`KimiParameterSchemaError::ContradictoryParentUnion`] instead of leaving
+/// an emptied union for validation to misreport as a resource failure.
+/// `oneOf` is deliberately not rewritten.
+pub fn sanitize_for_kimi(schema: &mut serde_json::Value) -> Result<(), KimiParameterSchemaError> {
+    // Recursion protection for the walk below: the guard runs once here
+    // instead of at every recursion node — re-walking the full subtree per
+    // node made the pass O(n·d) with a transient allocation per node, and
+    // the entry budgets already bound the root depth (round-6 review).
+    // Mutations below can only add depth bounded by the input structure,
+    // and `validate_mfjs_parameters` re-checks the final depth.
+    if !schema_within_structural_depth_limit(schema) {
+        return Ok(());
+    }
+    // Branch-level `$ref` projection resolves against the root `$defs`.
+    // Snapshot them once (the lane's byte budget bounds the copy) so the
+    // walk can read the author's declared targets without borrowing against
+    // the in-flight mutations.
+    let defs = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    sanitize_kimi_node(schema, &defs)
+}
+
+fn sanitize_kimi_node(
+    schema: &mut serde_json::Value,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<(), KimiParameterSchemaError> {
     if let Some(obj) = schema.as_object_mut() {
-        // Recurse first so a type injected into this object's alternatives is
-        // not immediately removed again by processing that freshly-mutated item.
         for map_key in ["properties", "$defs"] {
             if let Some(children) = obj.get_mut(map_key).and_then(Value::as_object_mut) {
                 for child in children.values_mut() {
-                    sanitize_for_kimi(child);
+                    sanitize_kimi_node(child, defs)?;
                 }
             }
         }
         if let Some(items) = obj.get_mut("items") {
-            sanitize_for_kimi(items);
+            sanitize_kimi_node(items, defs)?;
         }
         if let Some(additional) = obj.get_mut("additionalProperties")
             && additional.is_object()
         {
-            sanitize_for_kimi(additional);
-        }
-        for union_key in ["anyOf", "oneOf"] {
-            if let Some(branches) = obj.get_mut(union_key).and_then(Value::as_array_mut) {
-                for branch in branches {
-                    sanitize_for_kimi(branch);
-                }
-            }
+            sanitize_kimi_node(additional, defs)?;
         }
 
-        // If this object has `type` + `anyOf`/`oneOf`, push `type` into
-        // each item and remove it from the parent. Otherwise leave it alone.
-        let should_push =
-            obj.contains_key("type") && (obj.contains_key("anyOf") || obj.contains_key("oneOf"));
-        if should_push && let Some(type_val) = obj.remove("type") {
-            for key in ["anyOf", "oneOf"] {
-                if let Some(items) = obj.get_mut(key).and_then(|v| v.as_array_mut()) {
-                    for item in items {
-                        if let Some(item_obj) = item.as_object_mut()
-                            && !item_obj.contains_key("type")
-                        {
-                            item_obj.insert("type".to_string(), type_val.clone());
-                        }
-                    }
+        let parent_type = obj.get("type").and_then(Value::as_str).map(str::to_string);
+        if parent_type.is_some() && obj.get("anyOf").is_some_and(Value::is_array) {
+            // Bool-schema branches fail MFJS validation verbatim and would
+            // take the whole tool with them; the exact projections are
+            // trivial. A `true` branch admits every instance, so the whole
+            // union is the parent type alone and the union keyword goes —
+            // an emptied union would itself fail validation. A `false`
+            // branch contributes nothing and is dropped before the typed
+            // walk; an all-`false` union is unsatisfiable and reports the
+            // same contradiction the walk reports for a fully disjoint
+            // union (round-4 review).
+            let union_is_vacuous =
+                obj.get("anyOf")
+                    .and_then(Value::as_array)
+                    .is_some_and(|branches| {
+                        branches
+                            .iter()
+                            .any(|branch| matches!(branch, Value::Bool(true)))
+                    });
+            if union_is_vacuous {
+                obj.remove("anyOf");
+            } else if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+                branches.retain(|branch| !branch.is_boolean());
+                if branches.is_empty() {
+                    return Err(KimiParameterSchemaError::ContradictoryParentUnion);
+                }
+                // All-or-nothing: a branch that cannot be projected exactly
+                // (an unresolvable or over-broad `$ref`, an unrepresentable
+                // `type` form) aborts the node, which is left as
+                // `{type, anyOf}` for the validator's union-sibling whitelist
+                // to reject with its precise diagnosis. The projection is
+                // only written back when every branch carries the exact
+                // intersection — a branch must never ship after its parent
+                // constraint lost its wire carrier (round-5 review).
+                if project_typed_union_branches(branches, parent_type.as_deref().unwrap(), defs)? {
+                    obj.remove("type");
                 }
             }
-            // The provider-neutral sanitizer injects an empty `properties`
-            // map on every bare object before this provider pass. MFJS permits
-            // only annotations beside `anyOf`, so remove that semantic no-op
-            // after moving the object type into each branch.
-            if obj
+        }
+        // The projection above runs BEFORE this descent: a branch killed by
+        // its own nested union is dropped there, so the walk below never
+        // enters a branch whose subtree is unsatisfiable — walking it first
+        // raised `ContradictoryParentUnion` for the whole tool even though
+        // the enclosing union keeps live branches (round-6 review).
+        if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+            for branch in branches {
+                sanitize_kimi_node(branch, defs)?;
+            }
+        }
+        if parent_type.is_some()
+            && obj.get("anyOf").is_some()
+            && obj
                 .get("properties")
                 .and_then(Value::as_object)
                 .is_some_and(Map::is_empty)
-            {
-                obj.remove("properties");
-            }
+        {
+            obj.remove("properties");
         }
     }
+    Ok(())
+}
+
+/// Outcome of projecting one branch of a typed union onto the parent type.
+#[derive(Debug)]
+enum BranchProjection {
+    /// The branch carries the exact intersection after in-place projection.
+    Keep,
+    /// The branch is provably disjoint from the parent type.
+    Drop,
+    /// The branch cannot be projected exactly; the enclosing union must be
+    /// left verbatim so its retained `type` beside `anyOf` fails validation
+    /// closed instead of a constraint-free branch shipping.
+    AbortNode,
+}
+
+/// Project every branch of a typed union all-or-nothing. Returns whether the
+/// projection applied: `false` means some branch could not be represented
+/// exactly and the caller must leave the union's `type` in place (the
+/// validator then rejects the `type`-beside-`anyOf` pair with its precise
+/// diagnosis). A provably disjoint branch is dropped; a union whose branches
+/// all vanish reports
+/// [`KimiParameterSchemaError::ContradictoryParentUnion`]. The projected
+/// branches are only written back once every branch projected, so an abort
+/// never leaves a half-projected union behind.
+fn project_typed_union_branches(
+    branches: &mut Vec<Value>,
+    parent_type: &str,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<bool, KimiParameterSchemaError> {
+    let original = branches.clone();
+    let mut kept = Vec::with_capacity(original.len());
+    for mut branch in original {
+        match intersect_kimi_branch_type(&mut branch, parent_type, defs) {
+            Ok(BranchProjection::Keep) => kept.push(branch),
+            Ok(BranchProjection::Drop) => {}
+            Ok(BranchProjection::AbortNode) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    if kept.is_empty() {
+        return Err(KimiParameterSchemaError::ContradictoryParentUnion);
+    }
+    *branches = kept;
+    Ok(true)
+}
+
+/// Project a `$ref` branch of a typed union. The wire allows `$ref` only
+/// beside annotations and `type` only beside the union keyword, so the
+/// parent constraint has no carrier of its own: it survives only inside the
+/// resolved target. An untyped `$ref` therefore ships verbatim when its
+/// target provably carries the intersection, drops when it is provably
+/// disjoint, and aborts the node whenever exactness cannot be proven
+/// (round-5 review: verbatim-keeping used to widen the wire).
+fn project_ref_branch(
+    obj: &mut serde_json::Map<String, Value>,
+    parent_type: &str,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<BranchProjection, KimiParameterSchemaError> {
+    let Some(target) = obj
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| resolve_kimi_ref_target(defs, reference))
+    else {
+        return Ok(BranchProjection::AbortNode);
+    };
+    match target.get("type").and_then(Value::as_str) {
+        Some(target_type) => match intersect_schema_types(parent_type, target_type) {
+            // The target itself carries the intersection exactly: the
+            // reference ships verbatim (the shape round-4 pinned).
+            Some(effective) if effective == target_type => Ok(BranchProjection::Keep),
+            // The intersection is strictly narrower than the target; no
+            // verbatim spelling is exact, so the node aborts closed.
+            Some(_) => Ok(BranchProjection::AbortNode),
+            None => Ok(BranchProjection::Drop),
+        },
+        // A target without a plain-string `type` cannot prove exactness.
+        None => Ok(BranchProjection::AbortNode),
+    }
+}
+
+/// Resolve a branch-level `#/$defs/<name>` reference against the root
+/// `$defs`, admitting one decoded single-name segment exactly like
+/// [`resolve_mfjs_reference`] does (round-4 review).
+fn resolve_kimi_ref_target<'a>(
+    defs: &'a serde_json::Map<String, Value>,
+    reference: &str,
+) -> Option<&'a Value> {
+    let name = reference.strip_prefix("#/$defs/")?;
+    let decoded = name.replace("~1", "/").replace("~0", "~");
+    if decoded.is_empty() || decoded.contains('/') {
+        return None;
+    }
+    defs.get(&decoded).filter(|target| target.is_object())
+}
+
+/// Apply a same-instance parent type to one branch of a typed union. Nested
+/// unions receive the constraint recursively instead of gaining an invalid
+/// `type + anyOf` pair. An untyped `$ref` branch is projected through its
+/// resolved target (see [`project_ref_branch`]); a `$ref` that already
+/// carries a `type` keeps the plain typed-branch path, where a disjoint
+/// spelling is dropped and a satisfiable one is stamped for the validator's
+/// ref-sibling whitelist to judge. Array-form `type` members are narrowed to
+/// their exact intersection with the parent instead of shipping un-narrowed.
+/// Bool-schema branches are projected exactly: `false` admits no instance
+/// and is removed, `true` admits every instance so the union collapses onto
+/// its effective type. A branch that cannot be projected exactly reports
+/// [`BranchProjection::AbortNode`]; a branch whose own nested union has no
+/// live branch left is itself unsatisfiable and drops from the enclosing
+/// union, which surfaces the
+/// [`KimiParameterSchemaError::ContradictoryParentUnion`] diagnosis only
+/// when no live branch remains there.
+fn intersect_kimi_branch_type(
+    branch: &mut Value,
+    parent_type: &str,
+    defs: &serde_json::Map<String, Value>,
+) -> Result<BranchProjection, KimiParameterSchemaError> {
+    let Some(obj) = branch.as_object_mut() else {
+        // Non-object branches stay for the validator to reject verbatim.
+        return Ok(BranchProjection::Keep);
+    };
+    if obj.contains_key("$ref") && !obj.contains_key("type") {
+        return project_ref_branch(obj, parent_type, defs);
+    }
+    let type_node = obj.get("type").cloned();
+    let effective_type = match type_node.as_ref() {
+        Some(Value::String(branch_type)) => {
+            match intersect_schema_types(parent_type, branch_type) {
+                Some(effective) => effective.to_string(),
+                None => return Ok(BranchProjection::Drop),
+            }
+        }
+        Some(Value::Array(members)) => {
+            // Exact projection of an array-form `type`: narrow to the single
+            // MFJS carrier the surviving members share. Every survivor is
+            // either the parent type itself or a strictly narrower subtype,
+            // so the broadest survivor — the parent whenever any member
+            // survives as it — subsumes the rest, and the branch stamps that
+            // plain string. Re-shipping the narrowed array failed MFJS
+            // validation outright (`MissingType` standalone, the
+            // union-sibling whitelist beside a nested `anyOf`), dropping the
+            // whole tool (round-6 review); verbatim-keeping used to ship the
+            // branch un-narrowed, dropping the parent constraint (round-5
+            // review, same class as the `$ref` carrier hole). Falling
+            // through — instead of returning early — lets a nested union
+            // take the same projection the plain-string path uses, so
+            // `type` never ships beside the union keyword.
+            let mut survivor: Option<String> = None;
+            for member in members {
+                match member.as_str() {
+                    Some(member_type) => {
+                        if let Some(effective) = intersect_schema_types(parent_type, member_type) {
+                            let effective = effective.to_string();
+                            if effective == parent_type {
+                                survivor = Some(effective);
+                                break;
+                            }
+                            match &survivor {
+                                Some(existing) if *existing != effective => {
+                                    // Unreachable over the JSON type lattice:
+                                    // only the parent subsumes a narrowed
+                                    // survivor. Fail closed rather than pick.
+                                    return Ok(BranchProjection::AbortNode);
+                                }
+                                _ => survivor = Some(effective),
+                            }
+                        }
+                    }
+                    None => return Ok(BranchProjection::AbortNode),
+                }
+            }
+            match survivor {
+                Some(effective_type) => effective_type,
+                None => return Ok(BranchProjection::Drop),
+            }
+        }
+        // An unrepresentable `type` form cannot be intersected exactly.
+        Some(_) => return Ok(BranchProjection::AbortNode),
+        None => parent_type.to_string(),
+    };
+    if obj.get("anyOf").is_some_and(Value::is_array) {
+        // Both bool spellings fail MFJS validation verbatim and would take
+        // the whole tool with them, while the exact projections are trivial:
+        // a `true` branch makes the union admit everything, so the branch is
+        // exactly its effective type and the union keyword goes; a `false`
+        // branch contributes nothing and is dropped before the typed walk —
+        // an all-`false` union is unsatisfiable and reports the same
+        // contradiction the walk reports for a fully disjoint union
+        // (round-4 review).
+        let union_is_vacuous = obj
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|branches| {
+                branches
+                    .iter()
+                    .any(|branch| matches!(branch, Value::Bool(true)))
+            });
+        if union_is_vacuous {
+            obj.remove("anyOf");
+            obj.insert("type".into(), Value::String(effective_type));
+            return Ok(BranchProjection::Keep);
+        }
+        if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
+            branches.retain(|branch| !branch.is_boolean());
+            if branches.is_empty() {
+                // Every nested branch was a provably disjoint `false`, so
+                // this branch admits no instance under the parent: it drops
+                // from the enclosing union instead of failing the whole
+                // tool. The walk that owns the enclosing union surfaces
+                // `ContradictoryParentUnion` only when no live branch
+                // remains (round-6 review).
+                return Ok(BranchProjection::Drop);
+            }
+            match project_typed_union_branches(branches, &effective_type, defs) {
+                Ok(true) => {}
+                Ok(false) => return Ok(BranchProjection::AbortNode),
+                Err(KimiParameterSchemaError::ContradictoryParentUnion) => {
+                    // The nested walk only reports this when every nested
+                    // branch was provably disjoint, so this branch is
+                    // unsatisfiable under the parent and drops exactly; the
+                    // enclosing union keeps its live branches and reports
+                    // the diagnosis itself if none remain.
+                    return Ok(BranchProjection::Drop);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        obj.remove("type");
+    } else {
+        obj.insert("type".into(), Value::String(effective_type));
+    }
+    Ok(BranchProjection::Keep)
 }
 
 /// A safe, provider-facing reason that Kimi parameters could not be emitted.
@@ -7130,6 +8355,8 @@ pub enum KimiParameterSchemaError {
     UnsupportedNestedAllOf,
     #[error("Moonshot function parameters contain conflicting nested union composition")]
     ConflictingNestedUnion,
+    #[error("Moonshot function parameters contain a contradictory typed union branch")]
+    ContradictoryParentUnion,
     #[error("Moonshot function parameters contain an unsupported const literal")]
     UnsupportedConstLiteral,
     #[error("Moonshot function parameters contain conflicting literal constraints")]
@@ -7154,21 +8381,18 @@ pub enum KimiParameterSchemaError {
 
 /// Normalize a complete Kimi / Moonshot `function.parameters` object.
 ///
-/// Function parameters have an additional MFJS constraint: the root must end
-/// as a plain `type: "object"` schema. Root composition is flattened using the
-/// same compatibility pass as Responses and xAI, while supported nested
-/// `anyOf` branches remain nested. Internal root `$ref` values are resolved
-/// and inlined before normalization so we never manufacture the invalid
-/// `type + allOf($ref)` shape rejected by MFJS.
+/// Function parameters must have a plain object root in the strict pipeline.
+/// Every root union is rejected, including a union reached through `$ref`;
+/// no Responses-style property merge or first-wins flattening is applied.
+/// Internal root `$ref` values are inlined only when neither the root nor a
+/// chained reference carries siblings that could be lost or override it.
 ///
 /// One pipeline serves every Moonshot route (api.moonshot.cn / ai platform,
 /// api.kimi.com and api.kimi.ai coding endpoints): the documents behind those
 /// routes all point at the same MFJS specification, so the wire contract is
-/// uniform. Keywords the specification does not list are either stripped
-/// (annotation and unlisted bound keywords, whose removal is a
-/// semantics-lossless or soft-constraint-losing simplification) or drop the
-/// whole tool with a projection warning (composition and pattern keywords
-/// with no simplification equivalent).
+/// uniform. Pure annotations outside that specification are stripped. Real
+/// constraints and composition without an exact supported representation
+/// reject the tool instead of being dropped into a wider schema.
 ///
 /// Unsupported, unresolved, cyclic, and non-object root references fail
 /// closed with a non-secret diagnostic instead of being sent to Moonshot.
@@ -7177,19 +8401,25 @@ pub enum KimiParameterSchemaError {
 /// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md>
 pub fn sanitize_for_kimi_parameters(
     parameters: &mut Value,
-) -> Result<Option<String>, KimiParameterSchemaError> {
+) -> Result<(), KimiParameterSchemaError> {
+    if !schema_within_mfjs_local_budgets(parameters) {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+    }
     // Work on a clone so a rejected schema remains byte-for-byte unchanged for
     // callers that retain the catalog and retry against another provider.
     let mut candidate = parameters.clone();
-    let constraint_note = sanitize_kimi_parameters_candidate(&mut candidate)?;
+    sanitize_kimi_parameters_candidate(&mut candidate)?;
     validate_mfjs_parameters(&candidate)?;
     *parameters = candidate;
-    Ok(constraint_note)
+    Ok(())
 }
 
 fn sanitize_kimi_parameters_candidate(
     parameters: &mut Value,
-) -> Result<Option<String>, KimiParameterSchemaError> {
+) -> Result<(), KimiParameterSchemaError> {
+    if contains_dependent_keywords(parameters) {
+        return Err(KimiParameterSchemaError::UnsupportedKeyword);
+    }
     let Some(root) = parameters.as_object() else {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     };
@@ -7201,104 +8431,75 @@ fn sanitize_kimi_parameters_candidate(
     }
 
     inline_internal_kimi_root_ref(parameters)?;
-
-    // A function schema's root cannot carry MFJS composition because the
-    // Tool Use documentation requires an object root ("The root of
-    // `parameters` must be an `object`",
-    // https://platform.kimi.ai/docs/api/tool-use, fetched 2026-11-05). The
-    // MFJS specification lists `anyOf` as an applicator without authorizing
-    // it at a parameters root, so on the conflicting documents the strict
-    // face wins: every root union is flattened, and the flatten retains the
-    // dropped required-group contract as a prompt note for the model. (The
-    // 2026-11-04 live probe of the coding endpoint accepted a root union with
-    // 200 — an observation, and per policy never a shipping basis against the
-    // documents.)
-    // MFJS has no conditional keywords. The shared compatibility pass drops
-    // them with a bounded description note instead of sending a shape the
-    // validator would reject (which would drop the whole tool).
-    let constraint_note = sanitize_for_responses(parameters);
-
-    // Restore nullable unions collapsed by the registry's provider-neutral
-    // sanitizer, translate MFJS-safe scalar const values, and normalize nested
-    // composition. This changes model-facing schema guidance only; each tool
-    // keeps responsibility for validating its own arguments. Nested allOf
-    // fails closed.
+    // Root composition is not rejected here: `normalize_kimi_compatibility`
+    // first collapses exact singleton unions onto their branch (an
+    // `anyOf:[object]` root is the equivalent plain object and must not be
+    // dropped — the final root checks below still reject every surviving
+    // union), so an early rejection would preempt the collapse (review
+    // 4689524141).
     normalize_kimi_compatibility(parameters, true)?;
+    sanitize_for_kimi(parameters)?;
 
-    // MFJS requires `type` to live inside each anyOf branch, never alongside
-    // the union keyword. The root is composition-free at this point, so this
-    // only adjusts valid nested unions.
-    sanitize_for_kimi(parameters);
-
-    // Keywords the MFJS specification does not list are removed before
-    // validation when removal is a semantics-lossless or
-    // soft-constraint-losing simplification, so the tool still ships and the
-    // wire carries only the document's supported set. Anything without such
-    // an equivalent (pattern, format, $schema, prefixItems, nested allOf,
-    // exclusive bounds) is left for the validator to fail closed.
+    // Only annotations are removed. Bounds and dependent keywords are real
+    // constraints, so they remain for validation to reject rather than being
+    // stripped into a wider schema.
     strip_mfjs_advisory_keywords(parameters);
-    // Unsupported `enum` values are NOT stripped: an enum carrying boolean,
-    // null, object, array, or mixed-kind literals is a real constraint the
-    // engine never re-enforces (the supported plugin path forwards input
-    // without revalidating the original schema), so removing the keyword
-    // would silently widen the advertised contract — the exact widening the
-    // boolean-enum fix (review 5910671961) already refuses for fixed pins.
-    // The keyword stays and the validator rejects the whole tool
-    // (review 5914018939): the validator mirrors the MFJS-supported literal
-    // set exactly, so every enum this strip would have removed fails closed
-    // there instead.
-
-    // JSON Schema reads an empty `items` schema as "items are unconstrained",
-    // which is exactly the MFJS-legal shape with the keyword absent. MFJS
-    // itself has no empty schema node and fails the whole tool with
-    // MissingType, so repair the equivalent shape instead of dropping the
-    // tool from the request (the Pinvou browser `evaluate_script` catalog
-    // historically shipped `args: {"type": "array", "items": {}}`).
     remove_empty_mfjs_items_schemas(parameters);
 
-    let Some(root) = parameters.as_object() else {
+    let Some(root) = parameters.as_object_mut() else {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     };
-    if root.get("type").and_then(Value::as_str) != Some("object")
-        || root.contains_key("anyOf")
-        || root.contains_key("oneOf")
-        || root.contains_key("allOf")
-        || root.contains_key("$ref")
-    {
+    if root.contains_key("oneOf") || root.contains_key("allOf") || root.contains_key("$ref") {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     }
+    if root.contains_key("anyOf") || root.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(KimiParameterSchemaError::RootMustBeObject);
+    }
+    root.entry("properties")
+        .or_insert_with(|| Value::Object(Map::new()));
 
-    Ok(constraint_note)
+    Ok(())
+}
+
+fn contains_dependent_keywords(schema: &Value) -> bool {
+    match schema {
+        Value::Object(obj) => {
+            if obj.contains_key("dependentRequired") || obj.contains_key("dependentSchemas") {
+                return true;
+            }
+            obj.iter().any(|(key, child)| {
+                if matches!(key.as_str(), "default" | "enum" | "const") {
+                    return false;
+                }
+                if matches!(
+                    key.as_str(),
+                    "properties" | "$defs" | "definitions" | "patternProperties"
+                ) {
+                    return child
+                        .as_object()
+                        .is_some_and(|map| map.values().any(contains_dependent_keywords));
+                }
+                contains_dependent_keywords(child)
+            })
+        }
+        Value::Array(items) => items.iter().any(contains_dependent_keywords),
+        _ => false,
+    }
 }
 
 /// Remove the advisory keywords the MFJS specification does not support from
 /// every schema node of a Kimi parameters document.
 ///
-/// The strip/fail-closed boundary this function embodies is the module's
-/// degradation policy: keywords whose removal is lossless (annotations) or
-/// loses only a soft constraint (numeric bounds) are stripped so the wire
-/// still carries the document's supported set; form keywords with no
-/// document support that materially steer generation (`pattern`, `format`,
-/// `prefixItems`, …) keep the baseline whole-tool removal — better a missing
-/// tool than an unguaranteed shape. Source-comparison note (not a shipping
-/// basis): the walle implementation carries `pattern` and friends in its
-/// `FutureKeywords` set — future, i.e. not currently validated — which is
-/// consistent with, and only corroborates, keeping them off the wire.
+/// Only lossless annotations (`title`, `$comment`, `$id`) are removed. The
+/// specification's supported keyword set is closed, and min/max bounds are
+/// validation constraints rather than advisory hints: they stay in the
+/// document so `validate_mfjs_parameters` rejects them. Pattern, format,
+/// prefixItems, exclusive bounds, and unsupported composition fail the same
+/// way. Source-comparison note: walle's `FutureKeywords` are not a shipping
+/// basis for widening this whitelist.
 ///
-/// The specification's supported keyword set is closed ("若官方规范中的某些
-/// 概念、关键字或特性在本文档中未被提及，则表示当前 MFJS 尚未提供官方支持",
-/// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md>,
-/// fetched 2026-11-05), and its unsupported-features list names the
-/// annotation group (`title`, `$comment`) explicitly. The bound keywords
-/// (`minLength`, `maxLength`, `minimum`, `maximum`, `minItems`, `maxItems`)
-/// and the document identity keyword `$id` are likewise unlisted. Stripping
-/// them is either semantics-lossless (annotations) or loses only soft
-/// constraints (bounds the model is free to violate without breaking the
-/// call), so removal keeps the tool shippable instead of degrading it —
-/// strictly more conservative on the wire than shipping an unlisted keyword.
-/// Every other unlisted keyword (pattern, format, $schema, prefixItems,
-/// exclusive bounds, nested allOf) has no such simplification equivalent and
-/// is left for `validate_mfjs_parameters` to fail closed.
+/// The traversal visits schema positions only, never instance data beneath
+/// `default`, `enum`, or `const`.
 ///
 /// The traversal matches `remove_empty_mfjs_items_schemas`: property values,
 /// `$defs` entries, `anyOf` branches, object-form `additionalProperties`, and
@@ -7306,17 +8507,7 @@ fn sanitize_kimi_parameters_candidate(
 /// this runs after `normalize_kimi_compatibility`, which has already
 /// converted or rejected every such node.
 fn strip_mfjs_advisory_keywords(value: &mut Value) {
-    const ADVISORY_KEYWORDS: [&str; 9] = [
-        "title",
-        "$comment",
-        "$id",
-        "minLength",
-        "maxLength",
-        "minimum",
-        "maximum",
-        "minItems",
-        "maxItems",
-    ];
+    const ADVISORY_KEYWORDS: [&str; 3] = ["title", "$comment", "$id"];
     let Some(obj) = value.as_object_mut() else {
         return;
     };
@@ -7354,9 +8545,8 @@ fn strip_mfjs_advisory_keywords(value: &mut Value) {
 /// Empty-schema nodes sit exactly where schema values live: property values,
 /// `items`, object-form `additionalProperties`, `anyOf` branches, and `$defs`
 /// entries. `properties` itself is a name map, so its own emptiness is legal
-/// and only its values are visited. `oneOf` needs no visit: this runs after
-/// `normalize_kimi_compatibility` has converted every non-root `oneOf` to
-/// `anyOf`, and root composition was already flattened before that.
+/// and only its values are visited. `oneOf` needs no visit: normalization
+/// either merges a single branch exactly or rejects the composition.
 /// Schema values under keywords MFJS rejects (`contains`, `prefixItems`,
 /// `patternProperties`, `not`, `if`/`then`/`else`, `propertyNames`,
 /// `unevaluatedProperties`, `unevaluatedItems`, nested `allOf`, tuple-form
@@ -7365,9 +8555,7 @@ fn strip_mfjs_advisory_keywords(value: &mut Value) {
 /// `UnsupportedNestedAllOf` for a nested `allOf` and `InvalidSchemaNode`
 /// for tuple-form `items` already in `normalize_kimi_compatibility` —
 /// before a stranded empty `items` node inside one could matter.
-/// `dependentSchemas` is the one
-/// exception in shape: `strip_dependent_keywords` removes it (with its
-/// subtree) rather than failing closed, so it cannot strand one either.
+/// `dependentSchemas` is rejected before this traversal runs.
 ///
 /// Children are visited before the node's own `items` check so a nested
 /// repair can empty the parent (`"items": {"items": {}}` is vacuously true
@@ -7418,6 +8606,13 @@ fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParam
     let Some(root_ref) = document_root.get("$ref") else {
         return Ok(());
     };
+    let annotation = |key: &str| matches!(key, "description" | "title" | "$id" | "$comment");
+    if document_root
+        .keys()
+        .any(|key| key != "$ref" && key != "$defs" && !annotation(key))
+    {
+        return Err(KimiParameterSchemaError::UnsupportedRootReference);
+    }
     let Some(mut reference) = root_ref.as_str() else {
         return Err(KimiParameterSchemaError::UnsupportedRootReference);
     };
@@ -7437,6 +8632,12 @@ fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParam
             .as_object()
             .ok_or(KimiParameterSchemaError::ReferencedRootMustBeObject)?;
         if let Some(next_ref) = target.get("$ref") {
+            // Intermediate descriptions are annotations too, but silently
+            // dropping them would lose tool guidance. Keep the strict path
+            // simple: chained references must be bare references.
+            if target.len() != 1 {
+                return Err(KimiParameterSchemaError::UnsupportedRootReference);
+            }
             reference = next_ref
                 .as_str()
                 .ok_or(KimiParameterSchemaError::UnsupportedRootReference)?;
@@ -7445,12 +8646,15 @@ fn inline_internal_kimi_root_ref(parameters: &mut Value) -> Result<(), KimiParam
         if target.get("type").and_then(Value::as_str) != Some("object") {
             return Err(KimiParameterSchemaError::ReferencedRootMustBeObject);
         }
+        if target.contains_key("$defs") {
+            return Err(KimiParameterSchemaError::UnsupportedRootReference);
+        }
         break target.clone();
     };
 
     let mut inlined = resolved;
     for (key, value) in document_root {
-        if key != "$ref" {
+        if key == "$defs" || annotation(key) {
             inlined.insert(key.clone(), value.clone());
         }
     }
@@ -7462,45 +8666,41 @@ fn normalize_kimi_compatibility(
     schema: &mut Value,
     is_root: bool,
 ) -> Result<(), KimiParameterSchemaError> {
+    if matches!(schema, Value::Bool(_)) {
+        // A bool schema carries no keywords to normalize. Its fate is the
+        // parent-union walk's exact projection on a typed union and the
+        // validator's own bool-schema rejection everywhere else — not the
+        // malformed-node error a keyword-less object would earn (round-4
+        // review).
+        return Ok(());
+    }
+    if !is_root {
+        collapse_nullable_unions(schema);
+    }
+    collapse_single_element_unions(schema);
     let Some(obj) = schema.as_object_mut() else {
         return Err(KimiParameterSchemaError::InvalidSchemaNode);
     };
 
-    if !is_root {
-        if obj.contains_key("allOf") {
-            // The walle MFJS specification does not list the keyword anywhere,
-            // and unlike annotation or bound keywords its removal has no
-            // semantics-preserving equivalent, so the whole tool fails
-            // closed with a projection warning.
-            return Err(KimiParameterSchemaError::UnsupportedNestedAllOf);
-        }
-        if let Some(one_of) = obj.remove("oneOf") {
-            if obj.contains_key("anyOf") {
-                return Err(KimiParameterSchemaError::ConflictingNestedUnion);
-            }
-            obj.insert("anyOf".to_string(), one_of);
-        }
+    if obj.contains_key("allOf") {
+        return Err(KimiParameterSchemaError::UnsupportedNestedAllOf);
+    }
+    if obj.contains_key("oneOf") {
+        return Err(KimiParameterSchemaError::ConflictingNestedUnion);
     }
 
     if let Some(constant) = obj.remove("const") {
         // A string/number const translates onto the MFJS-supported enum
         // landing verbatim. A bool/null const has no supported equivalent:
-        // translating it to `enum: [v]` only hands the node to the
-        // unsupported-enum-value strip, which would leave the bare declared
-        // type behind — silently widening the author's pin (`const: true`
-        // becoming "any boolean"), and the engine never re-enforces the
-        // original schema before execution (review 4539829125). Like the
-        // unsupported `allOf` and the non-scalar consts, that fails closed
-        // and drops the tool instead of broadening its contract.
+        // its enum would fail validation, so accepting the translation here
+        // could only widen the author's pin (`const: true` becoming "any
+        // boolean") if a later pass erased it. Fail closed immediately.
         if !is_mfjs_scalar_const(&constant) {
             return Err(KimiParameterSchemaError::UnsupportedConstLiteral);
         }
         if !obj.contains_key("type") {
-            // Type inference stays limited to the MFJS-supported enum value
-            // kinds: the strip never invents a type the schema author did
-            // not declare, so an untyped bool/null const ends up with no
-            // type once its translated enum is stripped and fails
-            // MissingType in the validator.
+            // Type inference stays limited to MFJS-supported enum values;
+            // unsupported literals were rejected above.
             if let Some(inferred) = mfjs_literal_kind(&constant) {
                 let schema_type = match inferred {
                     MfjsLiteralKind::Integer => "integer",
@@ -7511,15 +8711,16 @@ fn normalize_kimi_compatibility(
             }
         }
         if let Some(existing) = obj.get("enum") {
-            let agrees = existing
-                .as_array()
-                .is_some_and(|values| values.as_slice() == [constant.clone()]);
+            let agrees = existing.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| schema_value_equal(value, &constant))
+            });
             if !agrees {
                 return Err(KimiParameterSchemaError::ConflictingLiteralConstraint);
             }
-        } else {
-            obj.insert("enum".to_string(), Value::Array(vec![constant]));
         }
+        obj.insert("enum".to_string(), Value::Array(vec![constant]));
     }
 
     let nullable = obj.remove("nullable");
@@ -7535,7 +8736,13 @@ fn normalize_kimi_compatibility(
         Some(Some(false)) => {}
         Some(Some(true)) if is_root => {
             // Function parameters are required to be an object at the root;
-            // null was never a valid wire instance there.
+            // null was never a valid wire instance there, so the marker
+            // admits nothing the wire does not already admit and is dropped
+            // exactly. The registry collapse stamps this marker on every
+            // `anyOf: [{type: object, ...}, {type: null}]` root (the
+            // standard Pydantic-Optional shape), so erroring here dropped
+            // those tools from every Moonshot request instead of shipping
+            // the exact object schema (round-6 review).
         }
         Some(Some(true)) => {
             let non_null = Value::Object(std::mem::take(obj));
@@ -7546,8 +8753,158 @@ fn normalize_kimi_compatibility(
         Some(None) => return Err(KimiParameterSchemaError::InvalidNullable),
     }
 
+    let obj = schema
+        .as_object_mut()
+        .ok_or(KimiParameterSchemaError::InvalidSchemaNode)?;
+    if obj.contains_key("anyOf") {
+        if obj
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+        if obj
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(Map::is_empty)
+        {
+            obj.remove("properties");
+        }
+        // The registry collapse retains union compositions that carry
+        // instance data verbatim (the round-6 carve-out), so without this
+        // distribution the strict lane dropped every tool with the common
+        // `Optional[T] = default` property shape on the union-sibling
+        // whitelist, although the exact wire form exists: move
+        // `default`/`enum` onto the branches that provably admit them (base
+        // shipped exactly this distributed form by flattening first).
+        // Instance data nothing admits stays on the node for the sibling
+        // whitelist to reject, exactly as before (fail-closed).
+        distribute_kimi_union_instance_data(obj);
+        if obj.keys().any(|key| {
+            !matches!(key.as_str(), "anyOf" | "type" | "description")
+                && !(is_root && key == "$defs")
+        }) {
+            return Err(KimiParameterSchemaError::InvalidKeywordValue);
+        }
+    } else if is_root && !obj.contains_key("type") {
+        obj.insert("type".into(), Value::String("object".into()));
+    }
+
     normalize_kimi_child_schemas(schema)?;
     Ok(())
+}
+
+/// Move node-level instance data beside a retained `anyOf` onto the
+/// branches that provably admit it. `default` annotates instance data, so
+/// admitting branches gain it verbatim and the accepted instance set is
+/// untouched; `enum` is a constraint, so each admitting branch carries the
+/// subset of values its type admits and a branch admitting none is dropped
+/// exactly (it admits no instance under the original node-level enum).
+/// Branches that already constrain the same instance data, `$ref`/bool
+/// branches, and unprovable type forms cannot take the distribution and
+/// stay as-is; if that leaves any value or key undistributed, the key stays
+/// on the node for the union-sibling whitelist to reject — the same
+/// fail-closed outcome as before this helper existed (round-7 review).
+fn distribute_kimi_union_instance_data(obj: &mut serde_json::Map<String, Value>) {
+    if let Some(value) = obj.get("default").cloned() {
+        let branches = obj.get_mut("anyOf").and_then(Value::as_array_mut);
+        if let Some(branches) = branches
+            && distribute_single_instance_value(branches, "default", &value)
+        {
+            obj.remove("default");
+        }
+    }
+    if let Some(Value::Array(values)) = obj.get("enum").cloned() {
+        let branches = obj.get_mut("anyOf").and_then(Value::as_array_mut);
+        if let Some(branches) = branches
+            && distribute_enum_across_branches(branches, &values)
+        {
+            obj.remove("enum");
+        }
+    }
+}
+
+/// Whether one branch provably admits an instance value for distribution.
+fn branch_admits_instance(branch: &Value, value: &Value) -> bool {
+    let Some(branch_obj) = branch.as_object() else {
+        return false;
+    };
+    if branch_obj.contains_key("const")
+        || branch_obj.contains_key("enum")
+        || branch_obj.contains_key("$ref")
+        || branch_obj.contains_key("anyOf")
+        || branch_obj.contains_key("oneOf")
+        || branch_obj.contains_key("allOf")
+    {
+        return false;
+    }
+    match branch_obj.get("type") {
+        None => true,
+        Some(Value::String(branch_type)) => instance_data_is_type(value, branch_type),
+        Some(Value::Array(members)) => members.iter().any(|member| {
+            member
+                .as_str()
+                .is_some_and(|t| instance_data_is_type(value, t))
+        }),
+        Some(_) => false,
+    }
+}
+
+/// Annotate every admitting branch with one instance-data value. Returns
+/// whether at least one branch admitted it.
+fn distribute_single_instance_value(branches: &mut [Value], key: &str, value: &Value) -> bool {
+    let mut distributed = false;
+    for branch in branches.iter_mut() {
+        if branch_admits_instance(branch, value)
+            && let Some(branch_obj) = branch.as_object_mut()
+        {
+            branch_obj.insert(key.to_string(), value.clone());
+            distributed = true;
+        }
+    }
+    distributed
+}
+
+/// Distribute a node-level `enum` across the branches: each admitting
+/// branch carries the values its type admits, and a branch admitting no
+/// value is dropped exactly. Returns whether every value was admitted by at
+/// least one surviving branch and at least one branch survives.
+fn distribute_enum_across_branches(branches: &mut Vec<Value>, values: &[Value]) -> bool {
+    let mut per_branch: Vec<Option<Vec<Value>>> = Vec::with_capacity(branches.len());
+    for _ in branches.iter() {
+        per_branch.push(None);
+    }
+    for value in values {
+        let mut admitted = false;
+        for (index, branch) in branches.iter().enumerate() {
+            if branch_admits_instance(branch, value) {
+                admitted = true;
+                per_branch[index]
+                    .get_or_insert_with(Vec::new)
+                    .push(value.clone());
+            }
+        }
+        if !admitted {
+            return false;
+        }
+    }
+    let mut kept = Vec::new();
+    for (branch, subset) in branches.drain(..).zip(per_branch) {
+        if let Some(values) = subset {
+            let mut branch_obj = match branch.as_object() {
+                Some(branch_obj) => branch_obj.clone(),
+                None => return false,
+            };
+            branch_obj.insert("enum".to_string(), Value::Array(values));
+            kept.push(Value::Object(branch_obj));
+        }
+    }
+    if kept.is_empty() {
+        return false;
+    }
+    *branches = kept;
+    true
 }
 
 fn normalize_kimi_child_schemas(schema: &mut Value) -> Result<(), KimiParameterSchemaError> {
@@ -7581,10 +8938,8 @@ fn normalize_kimi_child_schemas(schema: &mut Value) -> Result<(), KimiParameterS
 
 /// Whether a `const` value maps onto an MFJS-supported enum literal:
 /// strings and numbers do (their const→enum landing is verbatim), while
-/// bool/null consts have no supported equivalent — a translated
-/// `enum: [true]` is stripped downstream and would silently widen the pin
-/// to its bare declared type (review 4539829125), so they fail closed
-/// like object/array consts.
+/// bool/null consts have no supported equivalent and fail closed like
+/// object/array consts.
 fn is_mfjs_scalar_const(value: &Value) -> bool {
     value.is_string() || value.is_number()
 }
@@ -7602,16 +8957,19 @@ fn is_mfjs_scalar_const(value: &Value) -> bool {
 /// (walle `SupportedKeywords`) additionally accepts `title`, `$id`, and the
 /// min/max bound keywords, but its published specification does not — on the
 /// conflicting documents the specification text governs, so the narrower set
-/// wins and the advisory keywords are stripped upstream in the sanitizer.
+/// wins. Annotations are stripped upstream; bounds fail validation.
 pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterSchemaError> {
+    if !schema_within_mfjs_local_budgets(parameters) {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
+    }
     let root = parameters
         .as_object()
         .ok_or(KimiParameterSchemaError::RootMustBeObject)?;
-    if root.get("type").and_then(Value::as_str) != Some("object")
+    if root.contains_key("oneOf")
         || root.contains_key("anyOf")
-        || root.contains_key("oneOf")
         || root.contains_key("allOf")
         || root.contains_key("$ref")
+        || root.get("type").and_then(Value::as_str) != Some("object")
     {
         return Err(KimiParameterSchemaError::RootMustBeObject);
     }
@@ -7626,15 +8984,29 @@ pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterS
     state.validate_schema(parameters, true, false, 0, 0)?;
 
     let mut visiting_refs = HashSet::new();
-    let mut prepass_work = 0usize;
+    let mut termination_state = MfjsTerminationState::default();
     if !mfjs_schema_can_terminate(
         parameters,
         parameters,
         &mut visiting_refs,
         0,
-        &mut prepass_work,
+        &mut termination_state,
     )? {
         return Err(KimiParameterSchemaError::NonTerminatingReference);
+    }
+    if let Some(definitions) = root.get("$defs").and_then(Value::as_object) {
+        for definition in definitions.values() {
+            visiting_refs.clear();
+            if !mfjs_schema_can_terminate(
+                definition,
+                parameters,
+                &mut visiting_refs,
+                0,
+                &mut termination_state,
+            )? {
+                return Err(KimiParameterSchemaError::NonTerminatingReference);
+            }
+        }
     }
 
     // One shared walk state across the root and every named definition: the
@@ -7657,22 +9029,17 @@ pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterS
 // note, not a document clause: the MFJS specification sets no numeric
 // limits): MaxAnyOfItems=500, MaxTotalPropertiesKeysNum=3000,
 // MaxSchemaDepth=30, MaxEnumItems=1000, MaxEnumStringLength=75000.
-// MaxSchemaSize=120000 below already matches. The alignment exists so a
-// third-party schema the server's own validator would accept is not dropped
-// by an engine-local tightening. The enum-length check threshold stays
-// engine-local: applying the same MaxEnumStringLength budget from 250 values
-// up is a stricter checking cadence than walle's 2500-value threshold, never
-// a wider budget. Scope caveat, same spirit: walle's MaxEnumItems is
-// per-node (`len(enum) > MaxEnumItems` in keyword_validators.go) while
-// MFJS_MAX_TOTAL_ENUM_VALUES accumulates across the whole document, so a
-// multi-node document can be dropped here at a total the server would
-// accept node-by-node. MFJS_MAX_STRUCTURAL_DEPTH is engine-only — a
-// recursion guard for this walker, not a walle budget.
+// MaxSchemaSize=120000 below already matches. Local rules deliberately take
+// the stricter intersection and must not be relaxed merely because walle
+// accepts a shape: the enum-length budget arms at any entry count rather
+// than walle's 250-value floor (a small enum must not carry one oversized
+// string), and MFJS_MAX_TOTAL_ENUM_VALUES is document-wide rather than
+// per-node. MFJS_MAX_STRUCTURAL_DEPTH is also an engine-local safety guard;
+// raw input is checked iteratively before clone or recursive normalization.
 const MFJS_MAX_ANY_OF_ITEMS: usize = 500;
 const MFJS_MAX_OBJECT_DEPTH: usize = 30;
 const MFJS_MAX_TOTAL_PROPERTIES: usize = 3_000;
 const MFJS_MAX_TOTAL_ENUM_VALUES: usize = 1_000;
-const MFJS_ENUM_LENGTH_CHECK_THRESHOLD: usize = 250;
 const MFJS_MAX_ENUM_STRING_LENGTH: usize = 75_000;
 const MFJS_MAX_SCHEMA_BYTES: usize = 120_000;
 const MFJS_MAX_STRUCTURAL_DEPTH: usize = 64;
@@ -7728,8 +9095,11 @@ impl<'a> MfjsValidationState<'a> {
         // source's `SupportedKeywords` additionally contains `title`, `$id`,
         // and the min/max bound keywords, but the published specification
         // does not list them; the document governs, so they sit outside this
-        // set (the sanitizer strips them upstream, so only a direct
-        // unsanitized call can reach this rejection).
+        // set. The Kimi candidate pipeline keeps bounds deliberately (only
+        // annotations are stripped upstream), so a bounds-carrying schema
+        // reaches and fails THIS rejection — which is exactly why tools
+        // carrying such keywords must opt into the explicit strict:false
+        // relaxed lane at their ToolSpec boundary (review 6061318874).
         const ALLOWED_KEYWORDS: &[&str] = &[
             "$ref",
             "$defs",
@@ -7980,17 +9350,18 @@ fn validate_mfjs_enum(
         return Err(KimiParameterSchemaError::InvalidKeywordValue);
     }
 
-    if values.len() > MFJS_ENUM_LENGTH_CHECK_THRESHOLD {
-        let encoded_length = values.iter().try_fold(0usize, |total, value| {
-            let literal_length = value
-                .as_str()
-                .map(str::len)
-                .unwrap_or_else(|| value.to_string().len());
-            total.checked_add(literal_length)
-        });
-        if encoded_length.is_none_or(|length| length > MFJS_MAX_ENUM_STRING_LENGTH) {
-            return Err(KimiParameterSchemaError::ResourceLimitExceeded);
-        }
+    // The per-string length budget arms at any entry count: gating it on a
+    // minimum enum size would let a small enum carry one oversized string
+    // the wire rejects (round-4 review).
+    let encoded_length = values.iter().try_fold(0usize, |total, value| {
+        let literal_length = value
+            .as_str()
+            .map(str::len)
+            .unwrap_or_else(|| value.to_string().len());
+        total.checked_add(literal_length)
+    });
+    if encoded_length.is_none_or(|length| length > MFJS_MAX_ENUM_STRING_LENGTH) {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
     Ok(())
 }
@@ -8006,7 +9377,15 @@ fn resolve_mfjs_reference<'a>(document: &'a Value, reference: &str) -> Option<&'
         return Some(document);
     }
     let name = reference.strip_prefix("#/$defs/")?;
-    if name.is_empty() || name.contains('/') {
+    // Admission and resolution must judge one spelling: the JSON Pointer
+    // lookup below decodes `~1`→`/` and `~0`→`~` (serde_json applies the
+    // same replace order), so the single-name rule runs on the decoded form.
+    // A literal `~1` in a `$defs` key stays reachable through its escaped
+    // `~01` spelling, while an escaped slash can no longer pass the raw-name
+    // check and then resolve elsewhere — deeper into the document or into a
+    // misleading `InvalidReference` (round-4 review).
+    let decoded = name.replace("~1", "/").replace("~0", "~");
+    if decoded.is_empty() || decoded.contains('/') {
         return None;
     }
     document
@@ -8014,25 +9393,29 @@ fn resolve_mfjs_reference<'a>(document: &'a Value, reference: &str) -> Option<&'
         .filter(|target| target.is_object())
 }
 
-/// The termination prepass runs before the expanded-depth walk, and its
-/// per-branch/per-property `visiting_refs` clones can multiply shared-subgraph
-/// work the same way the walk did: a compact DAG of duplicate refs with a
-/// required non-terminating leaf explores every path before it can answer.
-/// The `work` counter bounds TOTAL visits under
-/// [`MFJS_MAX_EXPANDED_STATES`] and fails closed into the same per-tool drop
-/// (review thread on 5896144003) — the memoized walk downstream does not run
-/// when this prepass answers.
+/// Termination is a pure function of the node: the walk only descends into
+/// schemas a finite instance is actually forced through (required object
+/// properties, arrays with a positive `minItems`), so an untainted verdict
+/// memoizes on node identity and structural depth alone. Nodes whose subtree
+/// hit the reference-cycle guard keep their path context — a guard early
+/// return is only valid for the active reference set — so they are never
+/// memoized and instead re-walk per path under the strict total-state
+/// budget. This keeps shared acyclic reference DAGs linear without paying
+/// one owned active-path key per visited path (review 4689524122).
+#[derive(Default)]
+struct MfjsTerminationState {
+    memo: std::collections::HashMap<(usize, usize), bool>,
+    work: usize,
+    cycle_guard_hits: usize,
+}
+
 fn mfjs_schema_can_terminate(
     schema: &Value,
     document: &Value,
     visiting_refs: &mut HashSet<String>,
     structural_depth: usize,
-    work: &mut usize,
+    state: &mut MfjsTerminationState,
 ) -> Result<bool, KimiParameterSchemaError> {
-    *work += 1;
-    if *work > MFJS_MAX_EXPANDED_STATES {
-        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
-    }
     if structural_depth > MFJS_MAX_STRUCTURAL_DEPTH {
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
@@ -8042,105 +9425,130 @@ fn mfjs_schema_can_terminate(
 
     if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
         if !visiting_refs.insert(reference.to_string()) {
+            state.cycle_guard_hits += 1;
             return Ok(false);
         }
         let target = resolve_mfjs_reference(document, reference)
             .ok_or(KimiParameterSchemaError::InvalidReference)?;
         let terminates =
-            mfjs_schema_can_terminate(target, document, visiting_refs, structural_depth + 1, work)?;
+            mfjs_schema_can_terminate(target, document, visiting_refs, structural_depth + 1, state);
         visiting_refs.remove(reference);
-        return Ok(terminates);
+        return terminates;
     }
 
-    if let Some(branches) = obj.get("anyOf").and_then(Value::as_array) {
-        for branch in branches {
-            let mut branch_refs = visiting_refs.clone();
-            if mfjs_schema_can_terminate(
-                branch,
-                document,
-                &mut branch_refs,
-                structural_depth + 1,
-                work,
-            )? {
-                return Ok(true);
-            }
-        }
-        return Ok(false);
+    let key = (schema as *const Value as usize, structural_depth);
+    if let Some(cached) = state.memo.get(&key) {
+        return Ok(*cached);
+    }
+    state.work += 1;
+    if state.work > MFJS_MAX_EXPANDED_STATES {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
 
-    match obj.get("type").and_then(Value::as_str) {
-        Some("object") => {
-            let Some(required) = obj.get("required").and_then(Value::as_array) else {
-                return Ok(true);
-            };
-            if required.is_empty() {
-                return Ok(true);
-            }
-            let properties = obj
-                .get("properties")
-                .and_then(Value::as_object)
-                .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
-            for name in required {
-                let property = name
-                    .as_str()
-                    .and_then(|name| properties.get(name))
-                    .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
-                let mut property_refs = visiting_refs.clone();
-                if !mfjs_schema_can_terminate(
-                    property,
+    let guards_before = state.cycle_guard_hits;
+    let result = (|| {
+        if let Some(branches) = obj.get("anyOf").and_then(Value::as_array) {
+            for branch in branches {
+                let mut branch_refs = visiting_refs.clone();
+                if mfjs_schema_can_terminate(
+                    branch,
                     document,
-                    &mut property_refs,
+                    &mut branch_refs,
                     structural_depth + 1,
-                    work,
+                    state,
                 )? {
-                    return Ok(false);
+                    return Ok(true);
                 }
             }
-            Ok(true)
+            return Ok(false);
         }
-        Some("array") => {
-            // `minItems` is outside the specification's supported set, so the
-            // sanitizer has already stripped it and an absent keyword reads
-            // as 0 — an empty array always satisfies, so the node terminates.
-            // A direct unsanitized validation call can still surface a
-            // carried `minItems` here; reading it as the lower bound stays
-            // the conservative reading.
-            let min_items = obj.get("minItems").and_then(Value::as_u64).unwrap_or(0);
-            if min_items == 0 {
-                return Ok(true);
+
+        match obj.get("type").and_then(Value::as_str) {
+            Some("object") => {
+                // walle's termination test is instance-based ("whether a
+                // finite instance exists"): optional properties and
+                // unconstrained additional keys are omission exits, so only
+                // REQUIRED properties can force a recursion that never
+                // bottoms out. A required name with no declared property is
+                // a malformed node and fails closed.
+                if let Some(required) = obj.get("required").and_then(Value::as_array)
+                    && !required.is_empty()
+                {
+                    let properties = obj
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+                    for name in required {
+                        let property = name
+                            .as_str()
+                            .and_then(|name| properties.get(name))
+                            .ok_or(KimiParameterSchemaError::InvalidKeywordValue)?;
+                        let mut property_refs = visiting_refs.clone();
+                        if !mfjs_schema_can_terminate(
+                            property,
+                            document,
+                            &mut property_refs,
+                            structural_depth + 1,
+                            state,
+                        )? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                Ok(true)
             }
-            // Ported from codewhale-hq e3e563204 (the #7015 review
-            // follow-up): MFJS allows `items` to be absent, and an
-            // unconstrained array can always be satisfied, so absent `items`
-            // counts as terminating instead of failing with
-            // InvalidSchemaNode.
-            let Some(items) = obj.get("items") else {
-                return Ok(true);
-            };
-            mfjs_schema_can_terminate(items, document, visiting_refs, structural_depth + 1, work)
+            Some("array") => {
+                // An array whose lower bound is zero admits the empty
+                // instance, so a cyclic `items` schema still terminates;
+                // only a positive `minItems` forces an element (and only
+                // MFJS-unsupported bounds ever reach here unsanitized, so
+                // an absent keyword reads as zero).
+                let min_items = obj.get("minItems").and_then(Value::as_u64).unwrap_or(0);
+                if min_items == 0 {
+                    return Ok(true);
+                }
+                // MFJS allows `items` to be absent, and an unconstrained
+                // array can always be satisfied, so absent `items` counts
+                // as terminating instead of failing with InvalidSchemaNode.
+                let Some(items) = obj.get("items") else {
+                    return Ok(true);
+                };
+                mfjs_schema_can_terminate(
+                    items,
+                    document,
+                    visiting_refs,
+                    structural_depth + 1,
+                    state,
+                )
+            }
+            Some(schema_type) if is_mfjs_concrete_type(schema_type) => Ok(true),
+            _ => Err(KimiParameterSchemaError::MissingType),
         }
-        Some(schema_type) if is_mfjs_concrete_type(schema_type) => Ok(true),
-        _ => Err(KimiParameterSchemaError::MissingType),
+    })();
+    if let Ok(terminates) = result
+        && state.cycle_guard_hits == guards_before
+    {
+        state.memo.insert(key, terminates);
     }
+    result
 }
 
 /// Shared state for one [`validate_mfjs_expanded_depth`] traversal.
 ///
-/// `completed` memoizes fully-walked (node identity, property depth,
-/// structural depth) states: the walk's verdict for a state depends only on
-/// the state, and an error propagates before anything is memoized, so a
-/// shared acyclic reference subgraph reached again at the same depths is
-/// skipped instead of re-walked — a compact DAG of shared `$ref`s would
-/// otherwise recompute every path and turn request preparation into
-/// exponential synchronous work on a bounded-size document (review
-/// 5886233560). `visiting_refs` stays the per-path cycle guard; its early
-/// return is path-contextual, so it is never memoized. `work` counts
-/// computed states against [`MFJS_MAX_EXPANDED_STATES`].
+/// `completed` memoizes fully-walked (node identity, depths) states. The
+/// walk descends into schemas a finite instance is forced through, so a
+/// node's traversal is path-independent and needs no active-reference key;
+/// a node whose subtree hit the reference-cycle guard keeps its path
+/// context, so its entry is removed again and other paths re-walk it under
+/// the strict total-state budget (review 4689524122). `visiting_refs` stays
+/// the per-path cycle guard. `work` counts computed states against
+/// [`MFJS_MAX_EXPANDED_STATES`].
 #[derive(Default)]
 struct MfjsExpandedWalkState {
     visiting_refs: HashSet<String>,
     completed: HashSet<(usize, usize, usize)>,
     work: usize,
+    cycle_guard_hits: usize,
 }
 
 fn validate_mfjs_expanded_depth(
@@ -8159,6 +9567,7 @@ fn validate_mfjs_expanded_depth(
 
     if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
         if !state.visiting_refs.insert(reference.to_string()) {
+            state.cycle_guard_hits += 1;
             return Ok(());
         }
         let target = resolve_mfjs_reference(document, reference)
@@ -8175,7 +9584,9 @@ fn validate_mfjs_expanded_depth(
     }
 
     // The document is never mutated during validation, so the node address
-    // is a stable identity for the memo.
+    // is a stable identity for the memo. Insert before walking so a
+    // descendant re-entry skips instead of re-descending; a cycle-tainted
+    // node drops its entry after the walk.
     let state_key = (
         schema as *const Value as usize,
         property_depth,
@@ -8189,6 +9600,7 @@ fn validate_mfjs_expanded_depth(
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
 
+    let guards_before = state.cycle_guard_hits;
     if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
         for property in properties.values() {
             validate_mfjs_expanded_depth(
@@ -8226,6 +9638,9 @@ fn validate_mfjs_expanded_depth(
             )?;
         }
     }
+    if state.cycle_guard_hits != guards_before {
+        state.completed.remove(&state_key);
+    }
     Ok(())
 }
 
@@ -8237,28 +9652,26 @@ mod kimi_tests {
     use serde_json::json;
 
     #[test]
-    fn kimi_sanitize_pushes_type_into_anyof_items() {
+    fn kimi_sanitize_intersects_parent_type_and_drops_contradictory_branches() {
         let mut schema = json!({
             "type": "object",
             "properties": {
                 "handle": {
-                    "type": "object",
+                    "type": "string",
                     "anyOf": [
                         {"type": "string"},
-                        {"type": "null"}
+                        {"type": "null"},
+                        {"type": "integer"}
                     ]
                 }
             }
         });
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
         let handle = &schema["properties"]["handle"];
-        assert!(
-            !handle.as_object().unwrap().contains_key("type"),
-            "root type should be removed"
-        );
+        assert!(!handle.as_object().unwrap().contains_key("type"));
         let any_of = handle["anyOf"].as_array().unwrap();
+        assert_eq!(any_of.len(), 1);
         assert_eq!(any_of[0]["type"], "string");
-        assert_eq!(any_of[1]["type"], "null");
     }
 
     #[test]
@@ -8271,7 +9684,7 @@ mod kimi_tests {
             ]
         });
 
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
 
         assert!(
             !schema.as_object().unwrap().contains_key("type"),
@@ -8319,13 +9732,11 @@ mod kimi_tests {
     }
 
     #[test]
-    fn mfjs_termination_prepass_is_bounded_on_shared_reference_dags() {
-        // The termination prepass clones its ref set per required property
-        // and memoizes nothing, so a compact shared DAG costs 2^depth walks
-        // even when every leaf terminates — synchronous request-preparation
-        // work the downstream memoized walk never reaches (review thread on
-        // 5896144003). The prepass now shares the total-work budget and
-        // fails closed into the same per-tool drop.
+    fn mfjs_termination_prepass_memoizes_required_shared_reference_dags() {
+        // Required properties are what the instance-based termination rule
+        // forces the walk through, so the shared-DAG shape below is the
+        // real worst case. The node+depth memo keeps the walk linear
+        // instead of exploring 2^depth duplicate paths.
         let mut definitions = serde_json::Map::new();
         definitions.insert(
             "D21".to_string(),
@@ -8351,13 +9762,108 @@ mod kimi_tests {
             "$defs": Value::Object(definitions)
         });
 
+        validate_mfjs_parameters(&schema)
+            .expect("the context-aware termination memo must keep a shared DAG linear");
+    }
+
+    #[test]
+    fn mfjs_termination_memo_includes_active_reference_context() {
+        // The cycle must run through a REQUIRED property to be real under
+        // the instance-based termination rule: an optional property is an
+        // omission exit. The first context's false verdict is guard-tainted,
+        // so it must not leak into the context without R.
+        let document = json!({
+            "type": "object",
+            "properties": {},
+            "$defs": {
+                "R": {"type": "string"},
+                "Shared": {
+                    "type": "object",
+                    "required": ["again"],
+                    "properties": {"again": {"$ref": "#/$defs/R"}}
+                }
+            }
+        });
+        let shared = document.pointer("/$defs/Shared").unwrap();
+        let mut visiting = HashSet::from(["#/$defs/R".to_string()]);
+        let mut state = MfjsTerminationState::default();
+
         assert!(
-            matches!(
-                validate_mfjs_parameters(&schema),
-                Err(KimiParameterSchemaError::ResourceLimitExceeded)
-            ),
-            "the termination prepass must trip the shared work budget on a \
-             shared-reference DAG: {schema}"
+            !mfjs_schema_can_terminate(shared, &document, &mut visiting, 0, &mut state)
+                .expect("an active R is a cycle in the first context")
+        );
+        visiting.clear();
+        assert!(
+            mfjs_schema_can_terminate(shared, &document, &mut visiting, 0, &mut state)
+                .expect("R terminates when it is no longer active"),
+            "a false result cached under active R must not leak into a context without R"
+        );
+    }
+
+    #[test]
+    fn mfjs_termination_admits_recursion_through_an_optional_property() {
+        // Review 4689524112: walle's termination test is instance-based —
+        // omitting an optional property is a finite instance, so recursion
+        // through it terminates and must not fail the tool.
+        let schema = json!({
+            "type": "object",
+            "properties": {"next": {"$ref": "#/$defs/node"}},
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "next": {"$ref": "#/$defs/node"}
+                    }
+                }
+            }
+        });
+
+        validate_mfjs_parameters(&schema)
+            .expect("optional-property recursion has a finite instance");
+    }
+
+    #[test]
+    fn mfjs_termination_admits_recursion_through_an_unbounded_array() {
+        // The empty array is a finite instance when no positive minItems
+        // forces an element, so a recursive `items` schema terminates.
+        let schema = json!({
+            "type": "object",
+            "properties": {"children": {"type": "array", "items": {"$ref": "#/$defs/node"}}},
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}
+                    }
+                }
+            }
+        });
+
+        validate_mfjs_parameters(&schema).expect("empty-array recursion terminates");
+    }
+
+    #[test]
+    fn mfjs_termination_still_rejects_recursion_through_required_properties() {
+        // A required property forces at least one more nesting level, so the
+        // cycle never bottoms out — exactly walle's rejected shape.
+        let schema = json!({
+            "type": "object",
+            "required": ["next"],
+            "properties": {"next": {"$ref": "#/$defs/node"}},
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "required": ["next"],
+                    "properties": {"next": {"$ref": "#/$defs/node"}}
+                }
+            }
+        });
+
+        assert_eq!(
+            validate_mfjs_parameters(&schema).unwrap_err(),
+            KimiParameterSchemaError::NonTerminatingReference
         );
     }
 
@@ -8405,6 +9911,38 @@ mod kimi_tests {
     }
 
     #[test]
+    fn mfjs_expanded_walk_memo_includes_active_reference_context() {
+        let mut deep = json!({"type": "string"});
+        for _ in 0..MFJS_MAX_OBJECT_DEPTH + 1 {
+            deep = json!({"type": "object", "properties": {"next": deep}});
+        }
+        let document = json!({
+            "type": "object",
+            "properties": {},
+            "$defs": {
+                "R": {"type": "object", "properties": {"deep": deep}},
+                "Shared": {
+                    "type": "object",
+                    "properties": {"again": {"$ref": "#/$defs/R"}}
+                }
+            }
+        });
+        let shared = document.pointer("/$defs/Shared").unwrap();
+        let mut state = MfjsExpandedWalkState::default();
+        state.visiting_refs.insert("#/$defs/R".to_string());
+
+        validate_mfjs_expanded_depth(shared, &document, 0, 0, &mut state)
+            .expect("the active R reference skips its subtree in the first context");
+        state.visiting_refs.clear();
+
+        assert_eq!(
+            validate_mfjs_expanded_depth(shared, &document, 0, 0, &mut state),
+            Err(KimiParameterSchemaError::ResourceLimitExceeded),
+            "a cache entry created under an active R must not hide R's deep subtree"
+        );
+    }
+
+    #[test]
     fn kimi_sanitize_preserves_type_injected_into_nested_anyof_item() {
         let mut schema = json!({
             "type": "object",
@@ -8417,13 +9955,405 @@ mod kimi_tests {
             ]
         });
 
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
 
         let outer_item = &schema["anyOf"][0];
-        assert_eq!(outer_item["type"], "object");
+        assert!(outer_item.get("type").is_none());
+        assert_eq!(outer_item["anyOf"][0]["type"], "object");
         assert!(
             !schema.as_object().unwrap().contains_key("type"),
             "outer parent type should be removed"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_keeps_untyped_ref_branches_of_a_typed_parent_union() {
+        // Round-4 review: an untyped `$ref` branch is exactly representable
+        // as a union member when its resolved target carries the parent
+        // type. Stamping the parent type onto it used to manufacture the
+        // `type` + `$ref` sibling pair the MFJS ref-sibling whitelist
+        // rejects, trading a resolvable reference for a misleading
+        // `InvalidReference`.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "anyOf": [{"$ref": "#/$defs/A"}, {"type": "string"}]
+                }
+            },
+            "$defs": {
+                "A": {"type": "object", "properties": {"x": {"type": "string"}}}
+            }
+        });
+
+        sanitize_for_kimi(&mut schema).expect("a $ref union branch must sanitize");
+
+        let payload = &schema["properties"]["payload"];
+        assert!(
+            !payload.as_object().unwrap().contains_key("type"),
+            "the verbatim reference target carries the parent type exactly"
+        );
+        let any_of = payload["anyOf"].as_array().unwrap();
+        assert_eq!(any_of.len(), 1, "the disjoint string branch is removed");
+        assert_eq!(
+            any_of[0],
+            json!({"$ref": "#/$defs/A"}),
+            "the reference branch ships verbatim"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_drops_a_ref_branch_disjoint_from_the_typed_parent() {
+        // Round-5 review: verbatim-keeping an untyped `$ref` branch whose
+        // target does not carry the parent type shipped a constraint-free
+        // branch — the parent type has no wire carrier beside `$ref` or the
+        // union keyword. A provably disjoint target is a dead branch and is
+        // dropped exactly like a disjoint typed branch.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "anyOf": [{"$ref": "#/$defs/S"}, {"type": "object"}]
+                }
+            },
+            "$defs": {"S": {"type": "string"}}
+        });
+
+        sanitize_for_kimi(&mut schema).expect("a disjoint ref branch projects as dead");
+
+        let payload = &schema["properties"]["payload"];
+        assert!(!payload.as_object().unwrap().contains_key("type"));
+        assert_eq!(payload["anyOf"], json!([{"type": "object"}]));
+    }
+
+    #[test]
+    fn kimi_sanitize_aborts_a_node_when_a_ref_target_is_broader_than_the_parent() {
+        // The intersection (`integer`) is strictly narrower than the target
+        // (`number`); no verbatim spelling is exact, so the node keeps its
+        // `type` + `anyOf` pair and the whole tool fails closed at
+        // validation instead of widening the wire to every number.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "anyOf": [{"$ref": "#/$defs/N"}]
+                }
+            },
+            "$defs": {"N": {"type": "number"}}
+        });
+
+        sanitize_for_kimi(&mut schema)
+            .expect("the sanitizer defers the rejection to the validator");
+
+        let count = &schema["properties"]["count"];
+        assert_eq!(
+            count["type"], "integer",
+            "the parent type must stay on the node when a branch cannot project"
+        );
+        assert_eq!(count["anyOf"], json!([{"$ref": "#/$defs/N"}]));
+
+        let mut candidate = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "anyOf": [{"$ref": "#/$defs/N"}]}
+            },
+            "$defs": {"N": {"type": "number"}}
+        });
+        let error = sanitize_for_kimi_parameters(&mut candidate)
+            .expect_err("an over-broad ref target must fail the tool closed");
+        assert_eq!(
+            error,
+            KimiParameterSchemaError::InvalidKeywordValue,
+            "the retained type+anyOf pair is what the union-sibling whitelist rejects"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_aborts_a_node_on_an_unresolvable_ref_branch() {
+        // Same carrier rule for an unresolvable reference: exactness cannot
+        // be proven, so the node keeps `type` + `anyOf` and validation
+        // rejects the tool closed.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "anyOf": [{"$ref": "#/$defs/Missing"}]
+                }
+            }
+        });
+
+        sanitize_for_kimi(&mut schema)
+            .expect("the sanitizer defers the rejection to the validator");
+
+        let count = &schema["properties"]["count"];
+        assert_eq!(count["type"], "integer");
+        assert_eq!(count["anyOf"], json!([{"$ref": "#/$defs/Missing"}]));
+
+        let mut candidate = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "anyOf": [{"$ref": "#/$defs/Missing"}]}
+            }
+        });
+        assert!(
+            sanitize_for_kimi_parameters(&mut candidate).is_err(),
+            "an unresolvable branch reference must fail the tool closed"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_narrows_array_typed_branches_to_the_parent_intersection() {
+        // Same carrier rule for array-form `type` branches: members are
+        // narrowed to their exact intersection with the parent, which is
+        // always a single MFJS carrier — the parent whenever any member
+        // survives as it, else the narrowed subtype — and the projection
+        // falls through to the nested-union walk so `type` never ships
+        // beside a union keyword. Re-shipping the narrowed array failed
+        // validation outright and dropped the whole tool (round-6 review),
+        // so this pin runs the full parameters pipeline, validator
+        // included.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "anyOf": [{"type": ["string", "object"]}, {"type": "string"}]
+                },
+                "b": {"type": "number", "anyOf": [{"type": ["string", "integer"]}]}
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("array-form types project onto a shippable wire form");
+
+        let a = &schema["properties"]["a"];
+        assert!(!a.as_object().unwrap().contains_key("type"));
+        assert_eq!(
+            a["anyOf"],
+            json!([{"type": "object"}]),
+            "the surviving member is narrowed to the intersection as a string"
+        );
+        let b = &schema["properties"]["b"];
+        assert!(!b.as_object().unwrap().contains_key("type"));
+        assert_eq!(b["anyOf"], json!([{"type": "integer"}]));
+
+        // The common Optional[X] spelling: an array-form branch beside a
+        // nested union narrows onto the carrier string and the nested union
+        // projects exactly (null branch dies, the branch `type` is
+        // absorbed), so the property ships instead of the tool dropping.
+        let mut optional = json!({
+            "type": "object",
+            "properties": {
+                "c": {
+                    "type": "object",
+                    "anyOf": [{"type": ["object", "null"]}, {"type": "null"}]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut optional)
+            .expect("array-form + nested union projects exactly");
+        let c = &optional["properties"]["c"];
+        assert!(!c.as_object().unwrap().contains_key("type"));
+        assert_eq!(
+            c["anyOf"],
+            json!([{"type": "object"}]),
+            "the null branch dies and the array-form member stamps its carrier"
+        );
+
+        let mut all_dead = json!({
+            "type": "object",
+            "properties": {"a": {"type": "object", "anyOf": [{"type": ["string"]}]}}
+        });
+        assert_eq!(
+            sanitize_for_kimi(&mut all_dead).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion
+        );
+
+        // A member that is not a plain string cannot be intersected; the
+        // node aborts closed instead of shipping un-narrowed.
+        let mut unrepresentable = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [{"type": ["string", 3]}]}
+            }
+        });
+        sanitize_for_kimi(&mut unrepresentable)
+            .expect("the sanitizer defers the rejection to the validator");
+        let a = &unrepresentable["properties"]["a"];
+        assert_eq!(a["type"], "object");
+        assert_eq!(a["anyOf"], json!([{"type": ["string", 3]}]));
+        // The deferral claim itself: the retained form must actually be what
+        // the validator rejects, not a shape that slips through.
+        let error = validate_mfjs_parameters(&unrepresentable)
+            .expect_err("the validator must reject the retained non-string type member");
+        assert_eq!(error, KimiParameterSchemaError::InvalidKeywordValue);
+    }
+
+    #[test]
+    fn kimi_lane_ships_a_dead_nested_union_branch_by_dropping_the_branch() {
+        // Round-6 review: a branch killed by its own nested union used to
+        // raise the tool-fatal `ContradictoryParentUnion` even though the
+        // node is satisfiable — dropping that one branch is the exact
+        // projection. The diagnosis is reserved for the node whose whole
+        // union dies.
+        let mut satisfiable = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [
+                    {"type": "object"},
+                    {"type": "object", "anyOf": [{"type": "null"}]}
+                ]}
+            }
+        });
+        sanitize_for_kimi_parameters(&mut satisfiable)
+            .expect("the live branch keeps the node satisfiable");
+        let a = &satisfiable["properties"]["a"];
+        assert!(!a.as_object().unwrap().contains_key("type"));
+        assert_eq!(
+            a["anyOf"],
+            json!([{"type": "object"}]),
+            "only the live branch ships"
+        );
+
+        // When every branch dies the node is genuinely unsatisfiable and
+        // the tool-fatal diagnosis stands.
+        let mut all_dead = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [
+                    {"type": "object", "anyOf": [{"type": "null"}]},
+                    {"type": "object", "anyOf": [{"type": "string"}]}
+                ]}
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi(&mut all_dead).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion,
+            "a fully dead union still reports the contradiction"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_ships_a_root_nullable_marker_from_the_registry_collapse() {
+        // Round-6 review: the shared registry collapse stamps `nullable:
+        // true` on every `anyOf: [{type: object, ...}, {type: null}]` root
+        // (the standard Pydantic-Optional shape). At an object-only root
+        // the marker admits nothing the wire does not already admit, so it
+        // is dropped exactly; erroring here dropped those tools from every
+        // Moonshot request.
+        let mut collapsed = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "nullable": true
+        });
+        sanitize_for_kimi_parameters(&mut collapsed)
+            .expect("a root nullable marker ships as the exact object schema");
+        assert!(collapsed.get("nullable").is_none(), "the marker is dropped");
+        assert_eq!(
+            collapsed,
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"]
+            })
+        );
+
+        // End-to-end through the shared registry lane that produces the
+        // collapsed form.
+        let mut pydantic_root = json!({
+            "anyOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut pydantic_root);
+        sanitize_for_kimi_parameters(&mut pydantic_root)
+            .expect("the registry-collapsed Optional root ships");
+        assert_eq!(
+            pydantic_root["type"], "object",
+            "the collapsed root keeps its object schema"
+        );
+    }
+
+    #[test]
+    fn kimi_sanitize_absorbs_a_true_branch_of_a_typed_parent_union() {
+        // Round-4 review: bool-schema branches fail MFJS validation
+        // verbatim and used to take the whole tool with them, while the
+        // exact projection of `true` is absorption — the union IS the
+        // parent type, including the single-branch case.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string", "anyOf": [true, {"type": "string"}]},
+                "b": {"type": "string", "anyOf": [true]}
+            }
+        });
+
+        sanitize_for_kimi(&mut schema).expect("true branches project exactly");
+
+        assert_eq!(schema["properties"]["a"]["type"], "string");
+        assert!(schema["properties"]["a"].get("anyOf").is_none());
+        assert_eq!(schema["properties"]["b"]["type"], "string");
+        assert!(schema["properties"]["b"].get("anyOf").is_none());
+    }
+
+    #[test]
+    fn kimi_sanitize_absorbs_a_true_branch_inside_a_nested_union() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "object", "anyOf": [{"anyOf": [false, true]}]}
+            }
+        });
+
+        sanitize_for_kimi(&mut schema)
+            .expect("a nested union with a true branch collapses onto its type");
+
+        let nested = &schema["properties"]["a"]["anyOf"][0];
+        assert_eq!(nested["type"], "object");
+        assert!(nested.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn kimi_sanitize_drops_false_branches_and_reports_an_all_false_union() {
+        // `false` admits no instance: anyOf X,false ≡ X. The typed walk
+        // proceeds on the survivors; a union of only `false` branches is
+        // unsatisfiable and reports the same contradiction a fully
+        // disjoint union does, instead of leaving an emptied union behind.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string", "anyOf": [false, {"type": "string"}]}
+            }
+        });
+
+        sanitize_for_kimi(&mut schema).expect("the surviving branch keeps the union exact");
+
+        let a = &schema["properties"]["a"];
+        assert!(!a.as_object().unwrap().contains_key("type"));
+        assert_eq!(a["anyOf"], json!([{"type": "string"}]));
+
+        let mut unsatisfiable = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string", "anyOf": [false]}}
+        });
+        assert_eq!(
+            sanitize_for_kimi(&mut unsatisfiable).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion
+        );
+
+        let mut nested_unsatisfiable = json!({
+            "type": "object",
+            "properties": {"a": {"type": "object", "anyOf": [{"anyOf": [false]}]}}
+        });
+        assert_eq!(
+            sanitize_for_kimi(&mut nested_unsatisfiable).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion
         );
     }
 
@@ -8435,7 +10365,7 @@ mod kimi_tests {
             "required": ["x"]
         });
         let mut schema = original.clone();
-        sanitize_for_kimi(&mut schema);
+        sanitize_for_kimi(&mut schema).expect("satisfiable schema must sanitize");
         assert_eq!(schema, original);
     }
 
@@ -8462,31 +10392,67 @@ mod kimi_tests {
         assert!(schema["properties"].get("type").is_none());
     }
 
-    // Function parameters must end as a plain object root. Composition stays
-    // available only in valid nested anyOf positions: the Moonshot Tool Use
-    // documentation requires "The root of `parameters` must be an `object`"
-    // (https://platform.kimi.ai/docs/api/tool-use, fetched 2026-11-05), and
-    // the MFJS specification lists `anyOf` as an applicator without
-    // authorizing it at a parameters root — on the conflicting documents the
-    // strict face wins, so every root union is flattened. The tests below pin
-    // those protective shapes.
+    #[test]
+    fn kimi_parameters_rejects_nested_property_union_that_would_widen_additional_properties() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "additionalProperties": false,
+                    "anyOf": [{
+                        "type": "object",
+                        "properties": {"b": {"type": "string"}}
+                    }]
+                }
+            }
+        });
+        let original = schema.clone();
+
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::InvalidKeywordValue
+        );
+        assert_eq!(schema, original);
+    }
+
+    // Strict and default Moonshot handling rejects every root union. Only the
+    // chat layer's explicit strict:false escape may choose another pipeline.
 
     #[test]
-    fn kimi_parameters_add_type_to_anyof_root() {
+    fn kimi_parameters_rejects_all_object_root_anyof_without_flattening() {
         let mut schema = json!({
             "anyOf": [
-                {"type": "object", "properties": {"path": {"type": "string"}}},
-                {"type": "null"}
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                    "additionalProperties": false
+                }
             ]
         });
-        sanitize_for_kimi_parameters(&mut schema).unwrap();
-        assert_eq!(schema["type"], "object");
-        assert!(schema.get("anyOf").is_none());
-        assert_eq!(schema["properties"]["path"]["type"], "string");
+        let original = schema.clone();
+
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::RootMustBeObject
+        );
+        assert_eq!(schema, original);
+        assert_eq!(
+            validate_mfjs_parameters(&schema).unwrap_err(),
+            KimiParameterSchemaError::RootMustBeObject
+        );
     }
 
     #[test]
-    fn kimi_parameters_add_type_to_allof_root() {
+    fn kimi_parameters_collapses_equivalent_single_allof_root() {
         let mut schema = json!({
             "allOf": [
                 {"type": "object", "properties": {"name": {"type": "string"}}}
@@ -8499,96 +10465,96 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_add_type_to_oneof_root() {
+    fn kimi_parameters_rejects_root_oneof_without_flattening() {
         let mut schema = json!({
             "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {"id": {"type": "integer"}},
-                    "required": ["id"]
-                },
-                {
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"]
-                }
+                {"type": "object", "properties": {"id": {"type": "integer"}}},
+                {"type": "object", "properties": {"name": {"type": "string"}}}
             ]
         });
+        let original = schema.clone();
 
-        sanitize_for_kimi_parameters(&mut schema).unwrap();
-
-        assert_eq!(schema["type"], "object");
-        assert!(schema.get("oneOf").is_none());
-        assert_eq!(schema["properties"]["id"]["type"], "integer");
-        assert_eq!(schema["properties"]["name"]["type"], "string");
-        validate_mfjs_parameters(&schema).unwrap();
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::ConflictingNestedUnion
+        );
+        assert_eq!(schema, original);
     }
 
     #[test]
-    fn kimi_parameters_still_flattens_root_union_with_non_object_branch() {
-        // A branch without an explicit object type keeps the protective
-        // flatten: the Tool Use documentation requires an object root, and a
-        // union with e.g. a null branch has no documented wire shape.
+    fn kimi_parameters_rejects_root_anyof_with_non_object_branch() {
         let mut schema = json!({
             "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                },
+                {"type": "object", "properties": {"path": {"type": "string"}}},
                 {"type": "null"}
             ]
         });
-        sanitize_for_kimi_parameters(&mut schema).unwrap();
-        assert_eq!(schema["type"], "object");
-        assert!(schema.get("anyOf").is_none());
-        assert_eq!(schema["properties"]["path"]["type"], "string");
+        let original = schema.clone();
+
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::RootMustBeObject
+        );
+        assert_eq!(schema, original);
     }
 
     #[test]
-    fn kimi_parameters_still_flattens_root_union_with_extra_root_keywords() {
-        // Keywords beside the union that would be lost by a union passthrough
-        // (here: root `properties`) keep the flatten — a parameters root must
-        // be an object schema, so every root union merges into one.
+    fn kimi_parameters_rejects_root_anyof_with_constraint_siblings() {
+        // With the root union no longer rejected before normalization, the
+        // surviving multi-branch union fails in the compatibility pass on its
+        // disallowed `properties` sibling: MFJS requires `type` inside each
+        // branch, so a root-adjacent sibling constraint has no supported
+        // representation.
+        let mut schema = json!({
+            "anyOf": [
+                {"type": "object", "properties": {"path": {"type": "string"}}},
+                {"type": "object", "properties": {"url": {"type": "string"}}}
+            ],
+            "properties": {"legacy": {"type": "string"}}
+        });
+        let original = schema.clone();
+
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::InvalidKeywordValue
+        );
+        assert_eq!(schema, original);
+    }
+
+    #[test]
+    fn kimi_parameters_collapses_singleton_root_anyof_onto_its_branch() {
+        // Review 4689524141: an exact singleton root union is the equivalent
+        // plain object and must survive instead of being dropped as root
+        // composition.
         let mut schema = json!({
             "anyOf": [
                 {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                },
-                {
-                    "type": "object",
-                    "properties": {"url": {"type": "string"}},
-                    "required": ["url"]
+                    "required": ["path"],
+                    "additionalProperties": false
                 }
-            ],
-            "properties": {"legacy": {"type": "string"}}
+            ]
         });
-        sanitize_for_kimi_parameters(&mut schema).unwrap();
-        assert_eq!(schema["type"], "object");
+
+        sanitize_for_kimi_parameters(&mut schema).expect("singleton collapse");
+
         assert!(schema.get("anyOf").is_none());
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["path"]["type"], "string");
+        assert_eq!(schema["required"], json!(["path"]));
     }
 
     #[test]
-    fn kimi_parameters_flattens_actual_apply_patch_root_and_returns_constraint_note() {
+    fn kimi_parameters_rejects_actual_apply_patch_root_instead_of_flattening() {
         let mut schema = ApplyPatchTool.input_schema();
+        let original = schema.clone();
 
-        let note = sanitize_for_kimi_parameters(&mut schema).unwrap();
-
-        assert_eq!(schema["type"], "object");
-        assert!(schema.get("oneOf").is_none());
-        assert!(schema.get("anyOf").is_none());
-        assert!(schema.get("allOf").is_none());
-        assert_eq!(schema["properties"]["patch"]["type"], "string");
-        assert_eq!(schema["properties"]["replace"]["type"], "array");
-        assert_eq!(schema["properties"]["changes"]["type"], "array");
         assert_eq!(
-            note.as_deref(),
-            Some(
-                "Exactly one of these parameter groups must be provided: `changes` | `patch` | `replace`."
-            )
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::ConflictingNestedUnion
         );
+        assert_eq!(schema, original);
     }
 
     #[test]
@@ -8617,7 +10583,7 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_converts_nested_oneof_to_supported_anyof() {
+    fn kimi_parameters_rejects_nested_oneof_instead_of_renaming_it() {
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -8630,13 +10596,13 @@ mod kimi_tests {
                 }
             }
         });
+        let original = schema.clone();
 
-        sanitize_for_kimi_parameters(&mut schema).unwrap();
-
-        let selector = &schema["properties"]["selector"];
-        assert!(selector.get("oneOf").is_none());
-        assert!(selector["anyOf"].is_array());
-        assert!(selector.get("type").is_none());
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::ConflictingNestedUnion
+        );
+        assert_eq!(schema, original);
     }
 
     #[test]
@@ -8704,6 +10670,34 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_intersects_scalar_const_with_multi_value_enum() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "const": "b", "enum": ["a", "b", "c"]},
+                "level": {"type": "number", "const": 2, "enum": [1, 2, 3]}
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
+
+        assert_eq!(schema["properties"]["kind"]["enum"], json!(["b"]));
+        assert_eq!(schema["properties"]["level"]["enum"], json!([2]));
+        assert!(schema["properties"]["kind"].get("const").is_none());
+
+        let mut disjoint = json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "const": "d", "enum": ["a", "b"]}
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut disjoint).unwrap_err(),
+            KimiParameterSchemaError::ConflictingLiteralConstraint
+        );
+    }
+
+    #[test]
     fn kimi_parameters_rejects_unsafe_const_without_mutating_or_leaking() {
         // Non-scalar consts have no scalar-enum translation, so they keep
         // failing closed exactly as before.
@@ -8723,11 +10717,137 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_preserves_integral_float_enum_members_on_the_wire() {
+        // Round-4 review: `number` ∩ `integer` narrows with the module's own
+        // MFJS integer ruling, so the f64-spelled `3.0` stays an admitted
+        // value. Raw serde integrality used to drop it during the singleton
+        // collapse and silently shrink the wire contract to `[4]`.
+        let mut parameters = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "anyOf": [{"type": "number", "enum": [3.0, 4]}]}
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut parameters)
+            .expect("an integral float enum member is a representable contract");
+
+        assert_eq!(parameters["properties"]["count"]["enum"], json!([3.0, 4]));
+        assert!(parameters["properties"]["count"].get("anyOf").is_none());
+    }
+
+    #[test]
+    fn kimi_parameters_lands_an_integral_float_const_on_the_integer_enum() {
+        let mut parameters = json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "anyOf": [{"type": "number", "const": 3.0}]}
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut parameters)
+            .expect("an integral float const lands on the integer enum verbatim");
+
+        assert_eq!(parameters["properties"]["count"]["enum"], json!([3.0]));
+        assert!(parameters["properties"]["count"].get("anyOf").is_none());
+    }
+
+    #[test]
+    fn kimi_parameters_drops_enum_members_outside_the_integer_window_instead_of_failing() {
+        // A u64-spelled value one past 2^53-1 fails `mfjs_integer_value`, so
+        // narrowing removes it exactly as the MFJS enum check would rule:
+        // the surviving member ships instead of the whole tool failing
+        // validation on a member the integer contract never admitted.
+        let mut parameters = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "anyOf": [{"type": "number", "enum": [9_007_199_254_740_993u64, 4]}]
+                }
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut parameters)
+            .expect("the in-window member keeps the tool shippable");
+
+        assert_eq!(parameters["properties"]["count"]["enum"], json!([4]));
+    }
+
+    #[test]
+    fn kimi_parameters_ships_a_typed_parent_union_with_a_ref_branch() {
+        // Round-4 review: `{type:"object"}` beside a `$ref` is a sibling
+        // pair the MFJS whitelist rejects, so the exact union form must
+        // survive the whole pipeline and the reference must resolve — the
+        // tool ships instead of failing with a misleading
+        // `InvalidReference`.
+        let mut parameters = json!({
+            "type": "object",
+            "properties": {
+                "payload": {"type": "object", "anyOf": [{"$ref": "#/$defs/A"}]}
+            },
+            "$defs": {
+                "A": {"type": "object", "properties": {"x": {"type": "string"}}}
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut parameters)
+            .expect("an object-typed $ref union branch is exactly representable");
+
+        // The union that could not collapse keeps its exact form: the
+        // reference branch verbatim, no manufactured `type` sibling beside
+        // it.
+        let payload = &parameters["properties"]["payload"];
+        assert_eq!(payload["anyOf"][0], json!({"$ref": "#/$defs/A"}));
+        assert!(payload.get("type").is_none());
+    }
+
+    #[test]
+    fn kimi_parameters_ships_exact_bool_branch_projections_transactionally() {
+        // Round-4 review: bool-schema branches used to fail MFJS validation
+        // wholesale, dropping the whole tool. The exact projections ship:
+        // anyOf X,false ≡ X, and an all-false union is unsatisfiable with
+        // the precise contradiction diagnosis — transactionally, leaving a
+        // rejected schema byte-for-byte unchanged.
+        let mut parameters = json!({
+            "type": "object",
+            "properties": {
+                "doc": {
+                    "type": "object",
+                    "anyOf": [
+                        {"type": "object", "properties": {"x": {"type": "string"}}},
+                        false
+                    ]
+                }
+            }
+        });
+
+        sanitize_for_kimi_parameters(&mut parameters)
+            .expect("the false branch is removed instead of failing validation");
+
+        let doc = &parameters["properties"]["doc"];
+        let branches = doc["anyOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0]["properties"]["x"]["type"], "string");
+
+        let mut unsatisfiable = json!({
+            "type": "object",
+            "properties": {"doc": {"type": "object", "anyOf": [false]}}
+        });
+        let original = unsatisfiable.clone();
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut unsatisfiable).unwrap_err(),
+            KimiParameterSchemaError::ContradictoryParentUnion
+        );
+        assert_eq!(unsatisfiable, original, "rejection must be transactional");
+    }
+
+    #[test]
     fn kimi_parameters_fails_closed_on_bool_and_null_const() {
         // MFJS supports enum literals of string/number only, and a bool/null
         // const has no supported equivalent. Translating it to `enum: [v]`
-        // would hand the node to the unsupported-enum-value strip and ship
-        // the bare declared type — silently widening the author's pin
+        // would hand the node to validation for an unsupported literal and
+        // must never ship the bare declared type — silently widening the pin
         // (`const: true` becoming "any boolean" the engine never
         // re-validates against, review 4539829125). Fail closed instead:
         // the tool drops with UnsupportedConstLiteral, exactly like a
@@ -9015,106 +11135,34 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_min_items_without_absent_items_terminates_upstream() {
-        // Ported from codewhale-hq e3e563204 (the #7015 review follow-up):
-        // once an empty `items` repairs to the keyword being absent, a
-        // required array no longer fails mfjs_schema_can_terminate with
-        // InvalidSchemaNode — MFJS allows `items` to be absent, and an
-        // unconstrained array can always be satisfied, so the repaired tool
-        // ships at every terminator-checked position. `minItems` itself sits
-        // outside the specification's supported set, so the advisory strip
-        // removes it first and the wire carries the document-exact
-        // unconstrained shape.
-        let mut schema = json!({
-            "type": "object",
-            "properties": {"a": {"type": "array", "items": {}, "minItems": 1}},
-            "required": ["a"]
-        });
-        sanitize_for_kimi_parameters(&mut schema)
-            .expect("a required array without items terminates after the repairs");
-        assert_eq!(
-            schema["properties"]["a"],
-            json!({"type": "array"}),
-            "empty items and unlisted minItems both repair to the absent form"
-        );
-
-        // The same repairs apply at the terminator's other checked positions:
-        // an `anyOf` branch and a `$ref` target reached from a required
-        // property.
-        let mut schema = json!({
-            "type": "object",
-            "properties": {
-                "a": {
-                    "anyOf": [
+    fn kimi_parameters_empty_items_does_not_make_min_items_advisory() {
+        for mut schema in [
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "array", "items": {}, "minItems": 1}}
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"anyOf": [
                         {"type": "array", "items": {}, "minItems": 1},
                         {"type": "string"}
-                    ]
+                    ]}
                 }
-            },
-            "required": ["a"]
-        });
-        sanitize_for_kimi_parameters(&mut schema)
-            .expect("an anyOf branch array without items terminates");
-        assert_eq!(
-            schema["properties"]["a"]["anyOf"][0],
-            json!({"type": "array"})
-        );
-
-        let mut schema = json!({
-            "type": "object",
-            "$defs": {"a": {"type": "array", "items": {}, "minItems": 1}},
-            "properties": {"x": {"$ref": "#/$defs/a"}},
-            "required": ["x"]
-        });
-        sanitize_for_kimi_parameters(&mut schema)
-            .expect("a $ref target array without items terminates");
-        assert_eq!(schema["$defs"]["a"], json!({"type": "array"}));
-
-        // A carried `minItems >= 1` beside present `items` keeps the items
-        // constraint out of the terminator's way only because the strip
-        // already removed the keyword; a direct unsanitized validation call
-        // still reads the conservative lower bound through the port.
-        let mut schema = json!({
-            "type": "object",
-            "properties": {"a": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
-            "required": ["a"]
-        });
-        sanitize_for_kimi_parameters(&mut schema)
-            .expect("the carried items schema survives with minItems stripped");
-        assert_eq!(
-            schema["properties"]["a"],
-            json!({"type": "array", "items": {"type": "string"}})
-        );
-
-        // Tuple semantics stay out of the document entirely: `prefixItems`
-        // is unlisted, has no strip equivalent, and fails the tool closed.
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "a": {
-                    "type": "array",
-                    "minItems": 1,
-                    "prefixItems": [{"type": "string"}]
-                }
-            },
-            "required": ["a"]
-        });
-        validate_mfjs_parameters(&schema).expect_err("prefixItems is outside the document set");
-
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "a": {
-                    "type": "array",
-                    "prefixItems": [
-                        {"type": "array", "items": {"$ref": "#"}}
-                    ]
-                }
-            },
-            "required": ["a"]
-        });
-        validate_mfjs_parameters(&schema)
-            .expect_err("a non-terminating tuple prefix still fails closed");
+            }),
+            json!({
+                "type": "object",
+                "$defs": {"a": {"type": "array", "items": {}, "minItems": 1}},
+                "properties": {"x": {"$ref": "#/$defs/a"}}
+            }),
+        ] {
+            let original = schema.clone();
+            assert_eq!(
+                sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+                KimiParameterSchemaError::UnsupportedKeyword
+            );
+            assert_eq!(schema, original);
+        }
     }
 
     fn probe_observed_keyword_schema() -> Value {
@@ -9247,13 +11295,7 @@ mod kimi_tests {
     }
 
     #[test]
-    fn advisory_keywords_are_stripped_not_shipped() {
-        // Keywords the MFJS specification does not list but whose removal is
-        // a semantics-lossless or soft-constraint-losing simplification are
-        // stripped in place instead of dropping the tool: the annotation
-        // keywords (title, $comment, $id) and the unlisted bound keywords
-        // (minLength, maxLength, minimum, maximum, minItems, maxItems). The
-        // wire must carry only the document's supported set.
+    fn advisory_annotations_are_stripped_without_touching_default_data() {
         let mut schema = json!({
             "title": "Outer annotation",
             "$comment": "why this tool exists",
@@ -9263,50 +11305,32 @@ mod kimi_tests {
                 "label": {
                     "title": "Label",
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 40
-                },
-                "price": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 100
-                },
-                "row": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 2,
-                    "items": {"type": "string"}
+                    "default": {
+                        "title": "instance data",
+                        "minLength": 7,
+                        "dependentRequired": {"x": ["y"]}
+                    }
                 }
             },
             "required": ["label"]
         });
 
-        sanitize_for_kimi_parameters(&mut schema)
-            .expect("advisory keywords must not drop the tool");
+        sanitize_for_kimi_parameters(&mut schema).unwrap();
 
-        for keyword in [
-            "title",
-            "$comment",
-            "$id",
-            "minLength",
-            "maxLength",
-            "minimum",
-            "maximum",
-            "minItems",
-            "maxItems",
-        ] {
-            assert!(
-                !contains_key_anywhere(&schema, keyword),
-                "{keyword} must not reach the wire: {schema}"
-            );
-        }
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["properties"]["label"]["type"], "string");
-        assert_eq!(schema["properties"]["row"]["items"]["type"], "string");
+        assert!(schema.get("title").is_none());
+        assert!(schema.get("$comment").is_none());
+        assert!(schema.get("$id").is_none());
+        assert!(schema["properties"]["label"].get("title").is_none());
+        assert_eq!(
+            schema["properties"]["label"]["default"],
+            json!({
+                "title": "instance data",
+                "minLength": 7,
+                "dependentRequired": {"x": ["y"]}
+            })
+        );
         validate_mfjs_parameters(&schema).unwrap();
 
-        // The same document sanitizes identically everywhere: one pipeline,
-        // one wire contract for every Moonshot route.
         let mut reference = schema.clone();
         sanitize_for_kimi_parameters(&mut reference).unwrap();
         assert_eq!(schema, reference);
@@ -9448,10 +11472,9 @@ mod kimi_tests {
     #[test]
     fn kimi_parameters_empty_enum_fails_closed_in_the_validator() {
         // An empty enum accepts nothing, so stripping it would silently
-        // widen an unsatisfiable constraint into "anything goes". The strip
-        // keeps the keyword (the homogeneous check is vacuously true for an
-        // empty array) and the validator's non-empty rule fails the whole
-        // tool — the documented "malformed keyword is a schema bug" policy.
+        // widen an unsatisfiable constraint into "anything goes". The
+        // sanitizer keeps the keyword and the validator's non-empty rule
+        // fails the whole tool — the documented malformed-schema policy.
         let mut schema = json!({
             "type": "object",
             "properties": {"choice": {"type": "string", "enum": []}},
@@ -9464,8 +11487,8 @@ mod kimi_tests {
             "empty enum drops via the validator: {error:?}"
         );
 
-        // A non-array `enum` takes the same road: kept by the strip, then
-        // failed closed by the validator.
+        // A non-array `enum` takes the same road: kept by normalization,
+        // then failed closed by the validator.
         let mut malformed = json!({
             "type": "object",
             "properties": {"choice": {"type": "string", "enum": "fast"}}
@@ -9548,6 +11571,65 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_keeps_stricter_local_validation_rules() {
+        // These are intentional local fail-closed rules, not candidates for
+        // relaxation to match a more permissive validator.
+        let cases = [
+            (
+                json!({
+                    "type": "object",
+                    "properties": {"": {"type": "string"}}
+                }),
+                KimiParameterSchemaError::InvalidKeywordValue,
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x", "x"]
+                }),
+                KimiParameterSchemaError::InvalidKeywordValue,
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": {"x": {"enum": ["a"]}}
+                }),
+                KimiParameterSchemaError::MissingType,
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": {"x": {"type": ["string", "null"], "enum": ["a"]}}
+                }),
+                KimiParameterSchemaError::MissingType,
+            ),
+            // The `Optional[T] = default` union shape is no longer in this
+            // table: the round-7 instance-data distribution ships it onto the
+            // admitting branch (the exact form base shipped by flattening),
+            // pinned by
+            // `kimi_lane_ships_optional_property_default_into_the_admitting_branch`.
+            (
+                json!({
+                    "type": "object",
+                    "properties": {"x": {"$ref": "#/$defs/X", "default": "a"}},
+                    "$defs": {"X": {"type": "string"}}
+                }),
+                KimiParameterSchemaError::InvalidReference,
+            ),
+        ];
+
+        for (mut schema, expected) in cases {
+            let original = schema.clone();
+            assert_eq!(
+                sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+                expected
+            );
+            assert_eq!(schema, original);
+        }
+    }
+
+    #[test]
     fn kimi_parameters_rejects_required_direct_and_mutual_recursion() {
         let fixtures = [
             json!({
@@ -9603,7 +11685,7 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_preserves_optional_and_nullable_recursive_termination() {
+    fn kimi_parameters_rejects_optional_non_terminating_ref_and_preserves_nullable_exit() {
         let mut optional = json!({
             "type": "object",
             "properties": {
@@ -9619,7 +11701,25 @@ mod kimi_tests {
                 }
             }
         });
-        sanitize_for_kimi_parameters(&mut optional).unwrap();
+        let original = optional.clone();
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut optional).unwrap_err(),
+            KimiParameterSchemaError::NonTerminatingReference
+        );
+        assert_eq!(optional, original);
+
+        let mut unused_cycle = json!({
+            "type": "object",
+            "properties": {},
+            "$defs": {
+                "A": {"$ref": "#/$defs/B"},
+                "B": {"$ref": "#/$defs/A"}
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut unused_cycle).unwrap_err(),
+            KimiParameterSchemaError::NonTerminatingReference
+        );
 
         let mut nullable = json!({
             "type": "object",
@@ -9752,8 +11852,7 @@ mod kimi_tests {
             KimiParameterSchemaError::ResourceLimitExceeded
         );
 
-        // The encoded-length budget only arms past the check threshold, so
-        // both probes below carry enough values to reach it: 1000 values of
+        // The encoded-length budget arms on every enum node: 1000 values of
         // 74 encoded chars total just under the aligned 75000 budget and
         // must ship; the same count at 88 chars oversteps it and must not.
         let long_enum = |padding: usize| {
@@ -9814,6 +11913,41 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_check_enum_text_on_small_enums_too() {
+        // Round-4 review: the per-string length check used to arm only past
+        // 250 entries, so a ≤250-value enum could carry one ~100KB string
+        // violating MFJS_MAX_ENUM_STRING_LENGTH and still pass local
+        // validation. The probe sizes the string between the two budgets —
+        // one past 75000 encoded chars, well under the 120000 byte budget —
+        // so only the enum-text check can reject it.
+        let mut small_enum_over = json!({
+            "type": "object",
+            "properties": {
+                "blob": {
+                    "type": "string",
+                    "enum": [Value::String("x".repeat(MFJS_MAX_ENUM_STRING_LENGTH + 1))]
+                }
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut small_enum_over).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+
+        let mut small_enum_at = json!({
+            "type": "object",
+            "properties": {
+                "blob": {
+                    "type": "string",
+                    "enum": [Value::String("x".repeat(MFJS_MAX_ENUM_STRING_LENGTH))]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut small_enum_at)
+            .expect("a single enum string at the exact budget ships");
+    }
+
+    #[test]
     fn kimi_parameters_total_enum_budget_accumulates_across_nodes() {
         // The enum budget is document-wide (state.total_enum_values), while
         // walle's MaxEnumItems counts per node — the constant block discloses
@@ -9843,8 +11977,8 @@ mod kimi_tests {
 
     #[test]
     fn kimi_parameters_whole_document_byte_budget_rejects_oversized_schemas() {
-        // MFJS_MAX_SCHEMA_BYTES bounds the whole serialized document after
-        // the strip; it has no probe anywhere else, so pin both faces here.
+        // MFJS_MAX_SCHEMA_BYTES bounds the raw document before normalization
+        // and the normalized document again before validation.
         let blob_schema = |description_len: usize| {
             json!({
                 "type": "object",
@@ -9868,12 +12002,189 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_checks_raw_budget_before_clone_or_annotation_strip() {
+        let mut oversized = json!({
+            "title": "x".repeat(MFJS_MAX_SCHEMA_BYTES),
+            "type": "object",
+            "properties": {}
+        });
+        let original = oversized.clone();
+        assert!(schema_within_structural_depth_limit(&oversized));
+        assert!(!schema_within_mfjs_local_budgets(&oversized));
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut oversized).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        assert_eq!(oversized, original);
+
+        let mut literal = json!("leaf");
+        for _ in 0..=MFJS_MAX_STRUCTURAL_DEPTH {
+            literal = json!({"nested": literal});
+        }
+        let mut deep_default = json!({
+            "type": "object",
+            "properties": {
+                "value": {"type": "string", "default": literal}
+            }
+        });
+        let original = deep_default.clone();
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut deep_default).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        assert_eq!(deep_default, original);
+    }
+
+    #[test]
+    fn kimi_relaxed_budgets_reject_501_anyof_and_3001_properties() {
+        let branches =
+            |count| Value::Array((0..count).map(|_| json!({"type": "string"})).collect());
+        let at_any_of_limit = json!({
+            "type": ["object", "null"],
+            "anyOf": branches(500)
+        });
+        let original = at_any_of_limit.clone();
+        validate_kimi_relaxed_resource_budgets(&at_any_of_limit)
+            .expect("500 branches and a non-MFJS type array are resource-valid");
+        assert_eq!(at_any_of_limit, original);
+
+        let over_any_of = json!({"anyOf": branches(501)});
+        let original = over_any_of.clone();
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&over_any_of).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        assert_eq!(over_any_of, original);
+
+        let properties = |count| {
+            let mut properties = Map::new();
+            for index in 0..count {
+                properties.insert(format!("p{index}"), json!({}));
+            }
+            Value::Object(properties)
+        };
+        let over_properties = json!({
+            "type": "object",
+            "properties": properties(3001)
+        });
+        let original = over_properties.clone();
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&over_properties).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        assert_eq!(over_properties, original);
+    }
+
+    #[test]
+    fn kimi_relaxed_budgets_do_not_interpret_default_or_const_as_schemas() {
+        let literal = json!({
+            "anyOf": (0..501).map(|_| json!({"type": "string"})).collect::<Vec<_>>(),
+            "enum": (0..1001).collect::<Vec<_>>()
+        });
+        let schema = json!({
+            "default": literal.clone(),
+            "const": literal.clone(),
+            "customComposition": {
+                "oneOf": [{"allOf": [{"not": {"type": "string"}}]}]
+            }
+        });
+
+        validate_kimi_relaxed_resource_budgets(&schema)
+            .expect("literal budgets and unsupported semantics must not be enforced");
+        assert_eq!(schema["default"], literal.clone());
+        assert_eq!(schema["const"], literal);
+    }
+
+    #[test]
+    fn kimi_relaxed_budgets_enforce_property_depth_and_document_enum_limits() {
+        let nested = |depth| {
+            let mut node = json!({"type": "string"});
+            for _ in 0..depth {
+                node = json!({"type": "object", "properties": {"next": node}});
+            }
+            node
+        };
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&nested(31)).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        validate_kimi_relaxed_resource_budgets(&nested(30))
+            .expect("30 property levels remain within the local budget");
+
+        let enums = |left, right| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "left": {"enum": (0..left).collect::<Vec<_>>()},
+                    "right": {"enum": (0..right).collect::<Vec<_>>()}
+                }
+            })
+        };
+        validate_kimi_relaxed_resource_budgets(&enums(500, 500))
+            .expect("1000 enum values across the document are allowed");
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&enums(500, 501)).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+    }
+
+    #[test]
+    fn kimi_relaxed_budgets_check_enum_text_at_any_entry_count() {
+        // Round-4 review: the enum-text budget used to arm only past 250
+        // entries, letting a small enum carry one oversized string the wire
+        // rejects. The check now arms at any entry count — a single
+        // over-budget string fails exactly like an over-budget total, while
+        // a moderate enum of the old probe's size still ships.
+        let enum_strings = |count, length| {
+            Value::Array(
+                (0..count)
+                    .map(|index| Value::String(format!("{index}-{}", "x".repeat(length))))
+                    .collect(),
+            )
+        };
+        validate_kimi_relaxed_resource_budgets(&json!({"enum": enum_strings(250, 200)}))
+            .expect("a 250-value enum of moderate strings ships");
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&json!({"enum": enum_strings(251, 300)}))
+                .unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+        validate_kimi_relaxed_resource_budgets(&json!({
+            "enum": [Value::String("x".repeat(MFJS_MAX_ENUM_STRING_LENGTH))]
+        }))
+        .expect("a single string at the exact budget ships");
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&json!({
+                "enum": [Value::String("x".repeat(MFJS_MAX_ENUM_STRING_LENGTH + 1))]
+            }))
+            .unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(
+                &json!({"title": "x".repeat(MFJS_MAX_SCHEMA_BYTES)})
+            )
+            .unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+
+        let mut literal = json!("leaf");
+        for _ in 0..=MFJS_MAX_STRUCTURAL_DEPTH {
+            literal = json!({"nested": literal});
+        }
+        assert_eq!(
+            validate_kimi_relaxed_resource_budgets(&json!({"default": literal})).unwrap_err(),
+            KimiParameterSchemaError::ResourceLimitExceeded
+        );
+    }
+
+    #[test]
     fn kimi_parameters_structural_depth_boundary_is_engine_local() {
-        // MFJS_MAX_STRUCTURAL_DEPTH=64 counts every node descent (items
-        // chains included) and is an engine-only recursion guard — walle has
-        // no counterpart budget. 63 wrapped item levels reach exactly 64
-        // structural entries from the root and ship; one more level exceeds
-        // the guard.
+        // The raw-input guard counts JSON containers as well as schema nodes,
+        // including the root properties map and the scalar type value. With
+        // 61 wrapped item levels the leaf sits at JSON depth 64; one more
+        // level exceeds the local guard.
         let nested_items = |levels: usize| {
             let mut node = json!({"type": "string"});
             for _ in 0..levels {
@@ -9885,10 +12196,11 @@ mod kimi_tests {
                 "required": ["tree"]
             })
         };
-        let mut at_guard = nested_items(63);
+        let mut at_guard = nested_items(61);
+        assert!(schema_within_mfjs_local_budgets(&at_guard));
         sanitize_for_kimi_parameters(&mut at_guard)
-            .expect("64 structural levels reach the engine guard exactly and ship");
-        let mut over = nested_items(64);
+            .expect("a leaf at raw JSON depth 64 reaches the engine guard exactly and ships");
+        let mut over = nested_items(62);
         assert_eq!(
             sanitize_for_kimi_parameters(&mut over).unwrap_err(),
             KimiParameterSchemaError::ResourceLimitExceeded
@@ -9954,12 +12266,9 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_parameters_strips_bounds_instead_of_rejecting_them() {
-        // The bound keywords sit outside the specification's supported set,
-        // so even malformed or inverted bounds never degrade the tool: the
-        // advisory strip removes them (losing only the soft constraint) and
-        // the wire carries the unconstrained node. No bound value is ever
-        // validated, because none ever ships.
+    fn kimi_parameters_rejects_bounds_instead_of_stripping_real_constraints() {
+        // Every bound is a real validation constraint, including inverted or
+        // fractional spellings. None may be erased into an unconstrained node.
         for (mut schema, keywords) in [
             (
                 json!({
@@ -10007,15 +12316,15 @@ mod kimi_tests {
                 vec!["maximum"],
             ),
         ] {
-            sanitize_for_kimi_parameters(&mut schema)
-                .expect("bounds must strip, never degrade the tool");
+            let original = schema.clone();
+            assert_eq!(
+                sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+                KimiParameterSchemaError::UnsupportedKeyword
+            );
+            assert_eq!(schema, original, "rejection must be transactional");
             for keyword in keywords {
-                assert!(
-                    !contains_key_anywhere(&schema, keyword),
-                    "{keyword} must not reach the wire: {schema}"
-                );
+                assert!(contains_key_anywhere(&schema, keyword));
             }
-            validate_mfjs_parameters(&schema).expect("the stripped schema must validate");
         }
     }
 
@@ -10045,6 +12354,90 @@ mod kimi_tests {
     }
 
     #[test]
+    fn kimi_parameters_rejects_root_and_chained_ref_constraint_siblings() {
+        let mut root_sibling = json!({
+            "$ref": "#/$defs/FileArgs",
+            "$defs": {
+                "FileArgs": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            },
+            "required": [],
+            "properties": {}
+        });
+        let original = root_sibling.clone();
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut root_sibling).unwrap_err(),
+            KimiParameterSchemaError::UnsupportedRootReference
+        );
+        assert_eq!(root_sibling, original);
+
+        let mut chained_sibling = json!({
+            "$ref": "#/$defs/Alias",
+            "$defs": {
+                "Alias": {
+                    "$ref": "#/$defs/FileArgs",
+                    "required": ["other"]
+                },
+                "FileArgs": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        });
+        let original = chained_sibling.clone();
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut chained_sibling).unwrap_err(),
+            KimiParameterSchemaError::UnsupportedRootReference
+        );
+        assert_eq!(chained_sibling, original);
+
+        let mut chained_description = json!({
+            "$ref": "#/$defs/Alias",
+            "$defs": {
+                "Alias": {
+                    "$ref": "#/$defs/FileArgs",
+                    "description": "must not be dropped"
+                },
+                "FileArgs": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}}
+                }
+            }
+        });
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut chained_description).unwrap_err(),
+            KimiParameterSchemaError::UnsupportedRootReference
+        );
+    }
+
+    #[test]
+    fn kimi_parameters_rejects_root_ref_to_union() {
+        let mut schema = json!({
+            "$ref": "#/$defs/Choice",
+            "$defs": {
+                "Choice": {
+                    "type": "object",
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "object", "properties": {"b": {"type": "string"}}}
+                    ]
+                }
+            }
+        });
+        let original = schema.clone();
+
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::RootMustBeObject
+        );
+        assert_eq!(schema, original);
+    }
+
+    #[test]
     fn kimi_parameters_rejects_unresolved_root_ref_without_leaking_it() {
         let mut schema = json!({
             "$ref": "#/$defs/private-schema-name-9217",
@@ -10057,6 +12450,68 @@ mod kimi_tests {
         assert_eq!(error, KimiParameterSchemaError::UnresolvedRootReference);
         assert!(!error.to_string().contains("private-schema-name-9217"));
         assert_eq!(schema, original, "a rejected schema must never be emitted");
+    }
+
+    #[test]
+    fn mfjs_reference_resolution_judges_the_decoded_pointer_segment() {
+        // Round-4 review: the JSON Pointer lookup decodes `~1`→`/` and
+        // `~0`→`~`, so the single-name admission rule must judge the same
+        // decoded spelling. A `$defs` key carrying a literal `~1`/`~0`
+        // resolves through its escaped spelling, an escaped slash can no
+        // longer pass the raw-name check and resolve elsewhere (deeper into
+        // a nested schema or into a misleading `InvalidReference`), and the
+        // hostile spellings stay rejected.
+        let document = json!({
+            "type": "object",
+            "properties": {
+                "slash": {"$ref": "#/$defs/patch~01config"},
+                "tilde": {"$ref": "#/$defs/patch~00config"}
+            },
+            "$defs": {
+                "patch~1config": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}}
+                },
+                "patch~0config": {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}}
+                }
+            }
+        });
+        validate_mfjs_parameters(&document)
+            .expect("escaped reference spellings must reach their literal keys");
+
+        // The discriminating case: an escaped slash spanning pointer
+        // segments used to resolve DEEPER into a live schema — an address
+        // the single-segment `$defs` grammar never admitted.
+        let mut deep = document.clone();
+        deep["properties"] = json!({"probe": {"$ref": "#/$defs/patch~1properties~1a"}});
+        deep["$defs"] = json!({
+            "patch": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}}
+            }
+        });
+        assert_eq!(
+            validate_mfjs_parameters(&deep).unwrap_err(),
+            KimiParameterSchemaError::InvalidReference
+        );
+
+        for (hostile, label) in [
+            (
+                "#/$defs/patch~1config",
+                "an escaped slash decodes into a rejected multi-segment name",
+            ),
+            ("#/$defs/", "an empty name stays rejected"),
+        ] {
+            let mut probing = document.clone();
+            probing["properties"] = json!({"probe": {"$ref": hostile}});
+            assert_eq!(
+                validate_mfjs_parameters(&probing).unwrap_err(),
+                KimiParameterSchemaError::InvalidReference,
+                "{label}"
+            );
+        }
     }
 
     fn contains_key_anywhere(value: &Value, key: &str) -> bool {
@@ -10088,26 +12543,15 @@ mod kimi_tests {
     }
 
     #[test]
-    fn kimi_degrades_dependent_keywords_to_the_flat_schema() {
+    fn kimi_rejects_dependent_keywords_instead_of_flattening_constraints() {
         let mut schema = action_discriminated_schema();
+        let original = schema.clone();
 
-        let note = sanitize_for_kimi_parameters(&mut schema).expect("must not refuse the schema");
-
-        assert!(!contains_key_anywhere(&schema, "dependentSchemas"));
-        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
-        let properties = schema["properties"].as_object().expect("properties");
-        for name in ["action", "prompt", "agent_id"] {
-            assert!(properties.contains_key(name), "{name} left the flat schema");
-        }
-        assert_eq!(schema["required"], json!(["action"]));
-        validate_mfjs_parameters(&schema).expect("degraded schema must validate");
-
-        let note = note.expect("dropping a requirement must be reported to the model");
         assert_eq!(
-            note,
-            "This provider cannot express conditional requirements from the original schema. \
-             Honor any such requirements documented by the tool when calling it."
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::UnsupportedKeyword
         );
+        assert_eq!(schema, original);
     }
 
     #[test]
@@ -10118,17 +12562,12 @@ mod kimi_tests {
             "required": ["path"]
         });
 
-        let note = sanitize_for_kimi_parameters(&mut schema).expect("plain schema");
-
-        assert_eq!(
-            note, None,
-            "a schema that lost nothing must not gain a note"
-        );
+        sanitize_for_kimi_parameters(&mut schema).expect("plain schema");
         assert_eq!(schema["required"], json!(["path"]));
     }
 
     #[test]
-    fn kimi_degrades_dependent_keywords_nested_under_properties() {
+    fn kimi_rejects_dependent_keywords_nested_under_properties() {
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -10142,34 +12581,30 @@ mod kimi_tests {
                 }
             }
         });
+        let original = schema.clone();
 
-        let note = sanitize_for_kimi_parameters(&mut schema).expect("nested composition");
-
-        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
-        assert!(
-            schema["properties"]["target"]["properties"]
-                .as_object()
-                .expect("nested properties")
-                .contains_key("path")
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::UnsupportedKeyword
         );
-        validate_mfjs_parameters(&schema).expect("degraded schema must validate");
-        assert!(note.is_some(), "nested drop must still be reported");
+        assert_eq!(schema, original);
     }
 
     #[test]
-    fn kimi_reports_malformed_dependent_keywords_that_it_drops() {
+    fn kimi_rejects_malformed_dependent_keywords_too() {
         let mut schema = json!({
             "type": "object",
             "properties": {},
             "dependentRequired": false,
             "dependentSchemas": ["invalid"]
         });
+        let original = schema.clone();
 
-        let note = sanitize_for_kimi_parameters(&mut schema).expect("degraded schema");
-
-        assert!(note.is_some(), "every dropped dependency must be reported");
-        assert!(!contains_key_anywhere(&schema, "dependentRequired"));
-        assert!(!contains_key_anywhere(&schema, "dependentSchemas"));
+        assert_eq!(
+            sanitize_for_kimi_parameters(&mut schema).unwrap_err(),
+            KimiParameterSchemaError::UnsupportedKeyword
+        );
+        assert_eq!(schema, original);
     }
 
     #[test]
@@ -10302,12 +12737,8 @@ mod kimi_tests {
         }
 
         let mut parameters = shipped.clone();
-        let note = sanitize_for_kimi_parameters(&mut parameters)
+        sanitize_for_kimi_parameters(&mut parameters)
             .expect("the shipped make_pptx schema must pass Moonshot normalization");
-        assert_eq!(
-            note, None,
-            "the shipped schema drops no composition, so it must stay unannotated"
-        );
         validate_mfjs_parameters(&parameters)
             .expect("the normalized schema must satisfy the MFJS validator");
 
@@ -10404,6 +12835,387 @@ mod kimi_tests {
                 .iter()
                 .all(|keyword| supported.contains(&keyword.as_str())),
             "only specification-supported keywords may reach the wire: {wire_keywords:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod r7_instance_data_pins {
+    use super::*;
+    use serde_json::json;
+
+    // Round-7 P2-2: the registry collapse retains the common
+    // `Optional[T] = default` union verbatim; the strict lane used to drop
+    // the whole tool on the union-sibling whitelist although the exact wire
+    // form (default inside the admitting branch) exists — base shipped it
+    // by flattening first.
+    #[test]
+    fn kimi_lane_ships_optional_property_default_into_the_admitting_branch() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": "fast"
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema).expect("Optional-with-default must ship exactly");
+        assert_eq!(
+            schema["properties"]["mode"],
+            json!({"anyOf": [
+                {"type": "string", "default": "fast"},
+                {"type": "null"}
+            ]}),
+            "the default rides the admitting branch, not the union node"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_distributes_node_enum_across_branches_by_type() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "v": {
+                    "anyOf": [{"type": "string"}, {"type": "integer"}],
+                    "enum": ["a", 1]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("a fully admitted node enum distributes onto the branches");
+        assert_eq!(
+            schema["properties"]["v"],
+            json!({"anyOf": [
+                {"type": "string", "enum": ["a"]},
+                {"type": "integer", "enum": [1]}
+            ]}),
+            "each branch carries exactly its admitted subset"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_drops_a_branch_admitting_no_enum_value_exactly() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "v": {
+                    "anyOf": [{"type": "string"}, {"type": "integer"}],
+                    "enum": ["a", "b"]
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema)
+            .expect("the string-only enum admits every original instance");
+        assert_eq!(
+            schema["properties"]["v"],
+            json!({"anyOf": [{"type": "string", "enum": ["a", "b"]}]}),
+            "the integer branch admits no enum value and drops exactly"
+        );
+    }
+
+    #[test]
+    fn kimi_lane_keeps_undistributable_instance_data_fail_closed() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": {"nested": true}
+                }
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an object default admits no branch and must keep failing closed");
+        assert_eq!(error, KimiParameterSchemaError::InvalidKeywordValue);
+    }
+
+    #[test]
+    fn kimi_lane_enum_with_an_unadmitted_value_stays_fail_closed() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "v": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "enum": ["a", true]
+                }
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("an enum value no branch admits must keep the node-level rejection");
+        assert_eq!(error, KimiParameterSchemaError::InvalidKeywordValue);
+    }
+
+    #[test]
+    fn kimi_lane_distributes_a_null_default_onto_the_null_branch() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "maybe": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": null
+                }
+            }
+        });
+        sanitize_for_kimi_parameters(&mut schema).expect("a null default rides the null branch");
+        assert_eq!(
+            schema["properties"]["maybe"],
+            json!({"anyOf": [
+                {"type": "string"},
+                {"type": "null", "default": null}
+            ]}),
+            "the null default rides the admitting null branch"
+        );
+    }
+}
+// NOTE: appended inside the file's existing test module boundary is not
+// possible from a script; these two tests live in their own module that
+// reaches the private walkers through the public `sanitize` seam.
+
+#[cfg(test)]
+mod review_wave_tests {
+    use serde_json::{Value, json};
+
+    #[test]
+    fn nullable_false_parent_declines_the_null_branch_collapse() {
+        // Review 6061318874: an explicit `nullable: false` parent intersected
+        // with a surviving null branch is unsatisfiable — the collapse must
+        // decline (keep the original) instead of widening the parent back to
+        // nullable.
+        let schema = json!({
+            "nullable": false,
+            "anyOf": [{"type": "string"}, {"type": "null"}]
+        });
+        let original = schema.clone();
+        let mut worked = schema;
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, original,
+            "an explicit nullable:false must decline the collapse, not widen"
+        );
+    }
+
+    #[test]
+    fn enum_intersection_work_is_capped_and_declines_instead_of_hanging() {
+        // Review 6061318874: the enum intersection is O(outer × inner) per
+        // collision. Beyond MFJS_MAX_MERGE_WORK comparisons the merge must
+        // decline (preserving the union) in bounded time rather than spin.
+        let build_enum = |start: u64, count: u64| -> Value {
+            Value::Array((start..start + count).map(Value::from).collect())
+        };
+        let schema = json!({
+            "type": "integer",
+            "enum": build_enum(0, 30_000),
+            "anyOf": [{"type": "integer", "enum": build_enum(30_000, 30_000)}]
+        });
+        let mut worked = schema.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, schema,
+            "the over-budget merge must decline, preserving the original union"
+        );
+    }
+
+    #[test]
+    fn enum_intersection_merge_completes_under_the_cap_and_declines_at_it() {
+        // The decline pinned by
+        // `enum_intersection_work_is_capped_and_declines_instead_of_hanging`
+        // fires for any cap value: the disjoint enums there also decline on
+        // the empty intersection, and with no cap at all the bounded scan
+        // still ends in the same decline. This test pins the cap VALUE. The
+        // control performs 50 × 100 candidate comparisons and must COMPLETE
+        // into the exact five-value intersection; the band case performs
+        // ≈500 × 1000 = 500k comparisons — over the 100_000 cap and under
+        // 100_000_000 — so loosening the cap past 500k would complete the
+        // band merge and flip this assertion. The five shared values sit at
+        // the END of the inner enum so the per-candidate match short-circuit
+        // cannot undercut the O(outer × inner) accounting: every outer
+        // candidate scans essentially the whole inner enum either way.
+        let build_enum = |start: u64, count: u64| -> Value {
+            Value::Array((start..start + count).map(Value::from).collect())
+        };
+        let enum_with_shared_tail =
+            |filler_start: u64, filler_count: u64, shared_start: u64, shared_count: u64| -> Value {
+                let mut values: Vec<Value> = (filler_start..filler_start + filler_count)
+                    .map(Value::from)
+                    .collect();
+                values.extend((shared_start..shared_start + shared_count).map(Value::from));
+                Value::Array(values)
+            };
+
+        // Control: well under the cap — the merge must complete.
+        let mut worked = json!({
+            "type": "integer",
+            "enum": build_enum(0, 50),
+            "anyOf": [{
+                "type": "integer",
+                "enum": enum_with_shared_tail(1_000, 95, 45, 5)
+            }]
+        });
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked,
+            json!({"type": "integer", "enum": build_enum(45, 5)}),
+            "under the merge-work cap the exact intersection must complete"
+        );
+
+        // Band: ≈500k comparisons — over the real cap, under any loosened
+        // value a mutation would introduce — so the merge must decline and
+        // the ORIGINAL union must be preserved verbatim.
+        let band = json!({
+            "type": "integer",
+            "enum": build_enum(0, 500),
+            "anyOf": [{
+                "type": "integer",
+                "enum": enum_with_shared_tail(1_000, 995, 495, 5)
+            }]
+        });
+        let mut worked = band.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, band,
+            "≈500k comparisons exceed the 100_000 merge-work cap: the merge \
+             must decline and preserve the original union, not collapse it \
+             to the five shared values"
+        );
+    }
+
+    #[test]
+    fn enum_merge_work_is_charged_by_comparison_cost_not_pair_count() {
+        // Round-6 review: each charged pair comparison recursively walks
+        // both operands, so pricing the cap at one unit per pair let ~100k
+        // pairs of compound members cost ~10^10 element visits on the
+        // byte-uncapped registry lane. The cap is now charged by the
+        // operands' serialized size. The discriminating fixture shares one
+        // large compound member between the two enum sides, so the pair
+        // comparison SHORT-CIRCUITS on equality and a merge under pair-count
+        // pricing would complete onto the intersection — while size charging
+        // trips the cap mid-loop and declines, preserving the original
+        // union. The final assertion is observable only in the declined
+        // world, which is what makes this pin bite for the pricing mutation
+        // (a pair-count revert fails it).
+        let shared = {
+            let mut fields = serde_json::Map::new();
+            for index in 0..800 {
+                fields.insert(
+                    format!("field-{index:04}"),
+                    Value::String(format!("shared-payload-{index:04}-value-long-suffix")),
+                );
+            }
+            fields.insert("tail".into(), Value::String("shared-tail".to_string()));
+            Value::Object(fields)
+        };
+        let differing_outer = {
+            let mut fields = shared.as_object().expect("shared is an object").clone();
+            fields.insert("tail".into(), Value::String("outer-a-tail".to_string()));
+            Value::Object(fields)
+        };
+        let differing_inner = {
+            let mut fields = shared.as_object().expect("shared is an object").clone();
+            fields.insert("tail".into(), Value::String("inner-b-tail".to_string()));
+            Value::Object(fields)
+        };
+        // ~43 KB per operand: the merge attempt charges (shared,shared),
+        // then (outer-a,shared), then (outer-a,inner-b) — the third charge
+        // crosses the 100_000 cap before its comparison runs, so the merge
+        // declines even though its intersection would have been the shared
+        // member.
+        let compound = json!({
+            "type": "object",
+            "enum": [shared.clone(), differing_outer],
+            "anyOf": [{"type": "object", "enum": [shared, differing_inner]}]
+        });
+        let mut worked = compound.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked["enum"], compound["enum"],
+            "size charging must decline this merge: three ~36KB-sized pair charges exhaust the 100_000 cap before the third comparison runs, so the original union survives verbatim — pair-count pricing (1 per pair) would complete the merge and collapse the enum onto the shared member, flipping this assertion"
+        );
+        assert_eq!(
+            worked["anyOf"][0]["enum"], compound["anyOf"][0]["enum"],
+            "the inner enum must equally survive the declined merge verbatim"
+        );
+
+        // Control: the same pair count with tiny members — the pair loop
+        // completes (declining only on the empty intersection), so the
+        // collapse behaves exactly as it did before the size-charging.
+        let small = json!({
+            "type": "string",
+            "enum": ["outer-a", "outer-b", "outer-c"],
+            "anyOf": [{"type": "string", "enum": ["inner-a", "inner-b", "inner-c"]}]
+        });
+        let mut worked = small.clone();
+        crate::tools::schema_sanitize::sanitize(&mut worked);
+        assert_eq!(
+            worked, small,
+            "9 tiny pairs stay under the cap: the merge must decline only \
+             on the empty intersection, preserving the union — both \
+             spellings differ, so the union form survives identically"
+        );
+    }
+
+    #[test]
+    fn contradictory_parent_union_reports_the_conflict_instead_of_a_resource_limit() {
+        // A parent `type` that provably excludes every `anyOf` branch is a
+        // schema contradiction. The reconciliation used to leave the emptied
+        // union behind for MFJS validation to trip over, surfacing as the
+        // misleading `ResourceLimitExceeded` (or a root-shape error); the
+        // fail-closed outcome must carry the precise diagnosis instead.
+        let expect_contradiction = |schema: &Value, label: &str| {
+            let mut candidate = schema.clone();
+            let error = crate::tools::schema_sanitize::sanitize_for_kimi_parameters(&mut candidate)
+                .expect_err("a parent type excluding every anyOf branch must be rejected");
+            assert_eq!(
+                error,
+                crate::tools::schema_sanitize::KimiParameterSchemaError::ContradictoryParentUnion,
+                "{label}: the rejection must name the parent/branch contradiction"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("contradictory typed union branch"),
+                "{label}: the message must name the conflict, got: {error}"
+            );
+        };
+        // The review's shape: the contradiction sits on a property, so the
+        // emptied union used to surface at validation as
+        // `ResourceLimitExceeded`.
+        expect_contradiction(
+            &json!({
+                "type": "object",
+                "properties": {
+                    "victim": {
+                        "type": "object",
+                        "anyOf": [{"type": "string"}, {"type": "integer"}]
+                    }
+                }
+            }),
+            "property-level contradiction",
+        );
+        // The same contradiction at the root.
+        expect_contradiction(
+            &json!({
+                "type": "object",
+                "anyOf": [{"type": "string"}, {"type": "integer"}]
+            }),
+            "root-level contradiction",
+        );
+        // And inside a branch: the effective parent type flows through the
+        // outer branch and conflicts with every nested branch.
+        expect_contradiction(
+            &json!({
+                "type": "object",
+                "properties": {
+                    "victim": {
+                        "type": "object",
+                        "anyOf": [{
+                            "type": "object",
+                            "anyOf": [{"type": "string"}, {"type": "integer"}]
+                        }]
+                    }
+                }
+            }),
+            "branch-nested contradiction",
         );
     }
 }

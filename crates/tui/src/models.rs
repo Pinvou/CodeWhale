@@ -25,30 +25,6 @@ pub const KIMI_K3_CONTEXT_WINDOW_TOKENS: u32 = 1_048_576;
 /// not inherit that direct-platform maximum.
 pub const KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS: u32 = 131_072;
 
-/// The K3.1 family's documented **maximum** generation size. The official
-/// K3.1 quickstart distinguishes it from the 131,072 default: the default
-/// stays a request-sizing fact (route_budget keeps automatic requests at the
-/// ordinary 64K cap), while this value is what the static catalogue may
-/// publish as the model's output ceiling. Explicit operator overrides within
-/// the resolved route/window ceiling must survive it (review 5927442709).
-pub const KIMI_K31_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
-
-/// Whether this id's catalogue output row is the K3.1 family's documented
-/// maximum (see [`KIMI_K31_MAX_OUTPUT_TOKENS`]). Route budget demotes that
-/// ceiling on routes that report no output limit of their own — a gateway
-/// gives no evidence it accepts requests that large, so such routes keep
-/// the family's default-sized conservative ceiling (review 5929534479).
-#[must_use]
-pub(crate) fn is_kimi_k31_documented_maximum_row(model: &str) -> bool {
-    // Delegate to the shared family matcher (case-insensitive with
-    // insignificant padding): the downgrade guard runs on the
-    // user-configured spelling, so a `KIMI-K3.1-PRO` variant must name the
-    // same row as its lowercase form instead of dodging the conservative
-    // gateway ceiling. The roster constants list exactly these four
-    // spellings, so delegation is behavior-preserving for the lowercase
-    // forms and strictly wider for the variants.
-    crate::config::is_kimi_k31_model_spelling(model)
-}
 /// Documented maximum output for the exact direct Kimi K3 API route.
 ///
 /// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
@@ -112,7 +88,13 @@ pub struct MessageResponse {
 }
 
 /// True when the provider ended generation because its output allowance was
-/// exhausted. Providers use several wire spellings for the same condition.
+/// exhausted. Providers use several wire spellings for the same condition,
+/// including the OpenAI-shim `model_length` (review round 4: kept in step
+/// with the engine turn loop's wider local alias set in
+/// `stop_reason_is_output_limit`, which additionally accepts `output_limit`
+/// and `max_completion_tokens`; that residual difference is deliberate —
+/// those two spellings have no in-tree provider or fixture, and widening the
+/// shared incomplete-handling for them is unproven).
 #[must_use]
 pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
     reason.is_some_and(|reason| {
@@ -122,7 +104,7 @@ pub(crate) fn is_output_limit_stop_reason(reason: Option<&str>) -> bool {
             .unwrap_or_else(|| reason.trim());
         matches!(
             reason.to_ascii_lowercase().as_str(),
-            "length" | "max_tokens" | "max_output_tokens"
+            "length" | "max_tokens" | "max_output_tokens" | "model_length"
         )
     })
 }
@@ -401,17 +383,12 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "k3-256k" | "opencode-go/kimi-k3" => {
             Some(KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS)
         }
-        // The K3.1 family publishes its documented **maximum** generation
-        // size, not the 131,072 default: the catalogue row is consumed as a
-        // capability ceiling (`OutputCeilingSource::Documented`), and a
-        // default-sized row there clamped explicit operator overrides on the
-        // direct route even though the route correctly records the 1M
-        // maximum (review 5927442709). Default request sizing stays
-        // separate — route_budget caps automatic requests at the ordinary
-        // 64K — and membership/gateway limits stay scoped through the
-        // endpoint-aware route intersection and the entitlement report.
+        // Static K3.1 rows use the family's conservative default generation
+        // ceiling. Concrete route facts may promote this to the documented 1M
+        // maximum; membership and gateways never inherit that promotion from
+        // a model spelling alone.
         "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed" => {
-            Some(KIMI_K31_MAX_OUTPUT_TOKENS)
+            Some(KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS)
         }
         // Kimi K2.7 Code has a 256K context window but its documented default
         // maximum generation is 32K. Keeping those separate prevents the
@@ -491,6 +468,14 @@ pub fn model_supports_reasoning(model: &str) -> bool {
     if lower.starts_with("kimi-") {
         return true;
     }
+    // NOTE: the bare Kimi Code K3/K3.1 membership spellings (`k3`,
+    // `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`) are deliberately NOT
+    // matched here. Direct Moonshot and arbitrary OpenAI-compatible routes
+    // can also expose a model named `k3`, and this heuristic's consumers
+    // include the route-scoped replay and stream-dialect gates, which must
+    // not let those routes inherit the vendor dialect. The registry carries
+    // the documented always-thinking fact for the exact seeded ids at the
+    // seed boundary instead (review 4689524231).
     if lower.starts_with("mistral-medium")
         || lower.starts_with("mistral-small")
         || lower.starts_with("magistral")
@@ -900,8 +885,10 @@ mod tests {
             "length",
             "max_tokens",
             "max_output_tokens",
+            "model_length",
             " MAX_TOKENS ",
             "incomplete:max_output_tokens",
+            "incomplete:model_length",
         ] {
             assert!(is_output_limit_stop_reason(Some(reason)), "{reason}");
         }
@@ -918,6 +905,7 @@ mod tests {
             "model_context_window_exceeded"
         )));
         assert!(is_incomplete_stop_reason(Some("max_tokens")));
+        assert!(is_incomplete_stop_reason(Some("model_length")));
         assert!(!is_incomplete_stop_reason(Some("end_turn")));
         assert_eq!(
             stop_reason_detail(Some("incomplete:content_filter")),
@@ -1377,12 +1365,9 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
         // The K3.1 family sits in the same K3-series column for context: the
         // direct spellings carry `kimi-k3`'s 1M, the membership spellings
-        // bare `k3`'s plan-dependent safe floor. Output rows publish the
-        // family's documented **maximum** (1,048,576 per the K3.1 quickstart,
-        // distinguished from its 131,072 default) so explicit operator
-        // overrides survive the capability intersection; the 131,072 default
-        // remains a request-sizing fact owned by route_budget, not a ceiling
-        // (review 5927442709).
+        // bare `k3`'s plan-dependent safe floor. Static output rows stay at
+        // the conservative 131,072 default; concrete route facts may promote
+        // them to the family's larger documented maximum.
         assert_eq!(context_window_for_model("kimi-k3.1-pro"), Some(1_048_576));
         assert_eq!(
             context_window_for_model("kimi-k3.1-pro-highspeed"),
@@ -1393,18 +1378,15 @@ mod tests {
             context_window_for_model("k3.1-pro-highspeed"),
             Some(262_144)
         );
-        assert_eq!(
-            max_output_tokens_for_model("kimi-k3.1-pro"),
-            Some(1_048_576)
-        );
+        assert_eq!(max_output_tokens_for_model("kimi-k3.1-pro"), Some(131_072));
         assert_eq!(
             max_output_tokens_for_model("kimi-k3.1-pro-highspeed"),
-            Some(1_048_576)
+            Some(131_072)
         );
-        assert_eq!(max_output_tokens_for_model("k3.1-pro"), Some(1_048_576));
+        assert_eq!(max_output_tokens_for_model("k3.1-pro"), Some(131_072));
         assert_eq!(
             max_output_tokens_for_model("k3.1-pro-highspeed"),
-            Some(1_048_576)
+            Some(131_072)
         );
         // Never project max output as the context window.
         assert_ne!(

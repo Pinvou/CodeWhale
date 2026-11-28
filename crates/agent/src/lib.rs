@@ -763,10 +763,7 @@ impl Default for ModelRegistry {
                 id: "kimi-k2.7-code".to_string(),
                 provider: ProviderKind::Moonshot,
                 aliases: vec![
-                    "kimi".to_string(),
-                    "kimi-k2".to_string(),
                     "kimi-k2.7".to_string(),
-                    "kimi-code".to_string(),
                     "moonshot-kimi-k2.7-code".to_string(),
                 ],
                 supports_tools: true,
@@ -791,7 +788,12 @@ impl Default for ModelRegistry {
             ModelInfo {
                 id: "kimi-k3".to_string(),
                 provider: ProviderKind::Moonshot,
-                aliases: vec!["moonshot-kimi-k3".to_string()],
+                aliases: vec![
+                    "kimi".to_string(),
+                    "kimi-k2".to_string(),
+                    "kimi-code".to_string(),
+                    "moonshot-kimi-k3".to_string(),
+                ],
                 supports_tools: true,
                 supports_reasoning: true,
             },
@@ -2025,17 +2027,21 @@ mod tests {
     }
 
     #[test]
-    fn moonshot_default_and_aliases_use_kimi_k27_code() {
+    fn moonshot_default_and_aliases_use_kimi_k3() {
         let registry = ModelRegistry::default();
 
-        for requested in [None, Some("kimi"), Some("kimi-k2.7-code")] {
+        for requested in [None, Some("kimi"), Some("kimi-k2")] {
             let resolved = registry.resolve_ok(requested, Some(ProviderKind::Moonshot));
 
             assert_eq!(resolved.resolved.provider, ProviderKind::Moonshot);
-            assert_eq!(resolved.resolved.id, "kimi-k2.7-code");
+            assert_eq!(resolved.resolved.id, "kimi-k3");
             assert!(resolved.resolved.supports_tools);
             assert!(resolved.resolved.supports_reasoning);
         }
+
+        let explicit_legacy =
+            registry.resolve_ok(Some("kimi-k2.7-code"), Some(ProviderKind::Moonshot));
+        assert_eq!(explicit_legacy.resolved.id, "kimi-k2.7-code");
     }
 
     #[test]

@@ -84,9 +84,11 @@ impl DeepSeekClient {
         if let Some(tools) = request.tools.as_ref()
             && !tools.is_empty()
         {
-            // Every Messages lane ships input_schema exactly as the tool
-            // declared it, with one recorded exception: the genuine Anthropic
-            // endpoint has returned HTTP 400 "input_schema does not support
+            // Explicit strict:false tools first repeat the generic registry
+            // sanitize + canonicalize baseline. Every lane otherwise starts
+            // from the declared input_schema, with one recorded provider
+            // exception: the genuine Anthropic endpoint has returned HTTP 400
+            // "input_schema does not support
             // oneOf, allOf, or anyOf at the top level" since at least
             // 2025-07 (f8e757322 quotes a live failure; CHANGELOG 0.9.0;
             // anthropics/claude-code#4886/#30212), so the first-party lane —
@@ -104,22 +106,28 @@ impl DeepSeekClient {
             // dangling-required pruning) still applied there. Provider
             // identity stays in the gate beside the endpoint because
             // ANTHROPIC_BASE_URL overrides commonly front the genuine
-            // validator through a proxy. The other lanes ship verbatim:
-            // DeepSeek's
+            // validator through a proxy. Without the explicit non-strict
+            // baseline above, the other lanes ship verbatim: DeepSeek's
             // Anthropic-compatible line marks input_schema "Fully Supported"
             // (api-docs.deepseek.com/guides/anthropic_api, fetched
             // 2026-11-05), the Anthropic tool-use guide and its
             // structured-outputs restrictions list name no root-composition
-            // ban, and MiniMax / Model Studio document none. MCP tool
-            // schemas carry no registry sanitization upstream of this
-            // adapter, so on the narrowing lane this pass is their only
-            // normalization; the native-registry sanitizer is unchanged.
+            // ban, and MiniMax / Model Studio document none. Strict/default
+            // MCP tool schemas carry no registry sanitization upstream of this
+            // adapter, so on the narrowing lane the provider pass is their
+            // only normalization; the native-registry sanitizer is unchanged.
             let narrow_root_compositions = matches!(self.api_provider, ApiProvider::Anthropic)
                 || is_native_anthropic_base_url(&self.base_url);
             body["tools"] = json!(
                 tools
                     .iter()
                     .map(|tool| {
+                        // The explicit non-strict clone only happens when
+                        // normalization actually applies and the schema is
+                        // within the shared depth limit (review 4689524222);
+                        // otherwise the borrowed tool is used verbatim.
+                        let normalized = super::normalized_explicit_non_strict_tool(tool);
+                        let tool = normalized.as_ref().unwrap_or(tool);
                         // A schema-less MCP tool (no `inputSchema` in the
                         // server manifest) deserializes to JSON null and
                         // `McpTool::to_api_tools` forwards it verbatim; null
@@ -127,7 +135,8 @@ impl DeepSeekClient {
                         // it as declared. The narrowing lane already replaces
                         // non-object roots with `{}`; restore the same empty
                         // object here so every lane keeps the pre-#146
-                        // baseline while real schemas stay byte-verbatim.
+                        // baseline while real schemas stay byte-verbatim
+                        // (#177, rebased under the round-7 normalization).
                         let input_schema = if tool.input_schema.is_null() {
                             json!({})
                         } else {
@@ -153,8 +162,8 @@ impl DeepSeekClient {
                             "description": description,
                             "input_schema": schema,
                         });
-                        if let Some(strict) = tool.strict {
-                            value["strict"] = json!(strict);
+                        if tool.strict == Some(true) {
+                            value["strict"] = json!(true);
                         }
                         if let Some(cache) = tool.cache_control.as_ref() {
                             value["cache_control"] = json!({ "type": cache.cache_type });
@@ -1252,6 +1261,27 @@ mod tests {
             ..Default::default()
         };
         DeepSeekClient::new(&config).expect("Openmodel Messages client constructs")
+    }
+
+    #[test]
+    fn explicit_non_strict_uses_generic_baseline_but_true_is_preserved() {
+        let mut tool = root_union_tool("apply_patch", "Patch files");
+        tool.strict = Some(false);
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![tool.clone()]);
+        let body = test_client().build_anthropic_body(&request, true);
+        assert!(body["tools"][0].get("strict").is_none());
+        let mut expected = tool.input_schema.clone();
+        crate::tools::schema_sanitize::sanitize(&mut expected);
+        crate::tools::schema_canonicalize::canonicalize_schema(&mut expected);
+        crate::tools::schema_sanitize::sanitize_for_anthropic_messages(&mut expected);
+        assert_eq!(body["tools"][0]["input_schema"], expected);
+        assert_ne!(body["tools"][0]["input_schema"], tool.input_schema);
+
+        tool.strict = Some(true);
+        request.tools = Some(vec![tool]);
+        let body = test_client().build_anthropic_body(&request, true);
+        assert_eq!(body["tools"][0]["strict"], json!(true));
     }
 
     fn root_union_tool(name: &str, description: &str) -> Tool {
