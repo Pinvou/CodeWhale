@@ -162,6 +162,32 @@ pub struct WorkerRuntimeProfile {
     /// which clears the cloned runtime's list before the registry reads it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied_tools: Vec<String>,
+    /// The subset of `denied_tools` that an **operator or spawn caller asked
+    /// for by name** (the session's `--disallowed-tools` preferences and the
+    /// spawn request's explicit `disallowed_tools`), as opposed to the rules a
+    /// role clamp installs automatically (the raw-shell, network, and
+    /// verification-surface lists). The strings of the two sources overlap, so
+    /// the distinction must be carried, not re-derived: the bounded read-only
+    /// bash lane exists to override the clamp's automatic denial, and must
+    /// never override one of these.
+    ///
+    /// A child can only ever *add* entries — `derive_child()` unions this list
+    /// the same way it unions `denied_tools`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_denied_tools: Vec<String>,
+    /// Whether `explicit_denied_tools` was persisted together with this
+    /// record by the dual-ledger save. Schema-1 records never serialized the
+    /// explicit ledger, so a deserialized empty set proves nothing about
+    /// provenance and a resume must treat every deny as potentially
+    /// operator-asked (the conservative migration). Records stamped by the
+    /// current save carry `true`: their empty explicit set is **meaningful
+    /// provenance** — every `denied_tools` entry is a clamp or
+    /// authority-derived rule the bounded carve-outs may lift (review
+    /// 6033553944: promoting it on resume removed a bash surface the child
+    /// had before the save). Old payloads deserialize `false`, so the
+    /// legacy migration keeps its conservative behavior.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_denies_persisted: bool,
     /// Remaining nested-delegation budget. A worker may spawn children while
     /// `max_spawn_depth > 0`; each level decrements it. Clamped to the workspace
     /// ceiling.
@@ -205,10 +231,11 @@ impl WorkerRuntimeProfile {
         // the network or from shell for no role reason cannot do its job.
         let (permissions, shell) = match role {
             // Read-only investigators: no workspace writes, but network reach
-            // and the bounded verification surface so a scout/reviewer lane
-            // can run git/gh/web inspection. Raw shell stays denied by the
-            // registry clamp (read-only classifier), so this widens capability
-            // without widening mutation authority.
+            // so a scout/reviewer lane can run git/gh/web inspection. Raw
+            // shell stays denied by the registry clamp (read-only
+            // classifier), so this widens capability without widening
+            // mutation authority; the bounded verification surface is the
+            // Verifier's own arm below, not a scout/reviewer tool.
             FleetRole::Scout | FleetRole::Reviewer => {
                 (PermissionSet::read_only_with_network(), ShellPolicy::Full)
             }
@@ -249,6 +276,10 @@ impl WorkerRuntimeProfile {
             // wins via `derive_child`, same as every other role.
             reasoning_effort: matches!(role, FleetRole::Consultant).then(|| "high".to_string()),
             denied_tools: Vec::new(),
+            // A freshly constructed role posture has no persisted-ledger
+            // provenance yet; the save site stamps it.
+            explicit_denies_persisted: false,
+            explicit_denied_tools: Vec::new(),
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
             max_steps: Self::default_max_steps(role.clone()),
             background: true,
@@ -269,6 +300,41 @@ impl WorkerRuntimeProfile {
     /// The child keeps its own requested role, model route, and
     /// foreground/background preference (these don't grant capability), but its
     /// provider falls back to the parent's when unset.
+    /// Conservative migration for a preserved legacy record: schema-1
+    /// persistence carried no explicit-origin field, so a saved profile
+    /// whose `explicit_denied_tools` deserialized to the default empty set
+    /// proves nothing about where its `denied_tools` entries came from.
+    /// When such a profile replaces a freshly stamped runtime on resume,
+    /// every ambiguous entry is treated as operator-explicit — the bounded
+    /// read-only bash carve-out may override the automatic role clamps,
+    /// never an untraceable restriction. Records that already carry explicit
+    /// entries (fresh dual-stamped saves) pass through unchanged.
+    ///
+    /// A record stamped `explicit_denies_persisted` (saved by the dual-ledger
+    /// code) skips the migration entirely: its empty explicit set is
+    /// meaningful provenance — clamp/authority rules stay liftable by the
+    /// carve-outs exactly as they were before the save (review 6033553944).
+    pub fn with_ambiguous_denies_treated_explicit(mut self) -> Self {
+        if self.explicit_denies_persisted {
+            return self;
+        }
+        if self.explicit_denied_tools.is_empty() && !self.denied_tools.is_empty() {
+            self.explicit_denied_tools = self.denied_tools.clone();
+            // The promoted ledger is now recorded on this profile and is
+            // persisted with it, so later resumes see a non-ambiguous record.
+            self.explicit_denies_persisted = true;
+        }
+        self
+    }
+
+    /// Stamp this profile as carrying a persisted explicit ledger. Applied
+    /// at the save site for every profile the dual-ledger code constructed.
+    #[must_use]
+    pub fn with_persisted_explicit_denies(mut self) -> Self {
+        self.explicit_denies_persisted = true;
+        self
+    }
+
     #[must_use]
     pub fn derive_child(&self, requested: &WorkerRuntimeProfile) -> WorkerRuntimeProfile {
         let permissions = self.permissions.intersect(requested.permissions);
@@ -279,6 +345,15 @@ impl WorkerRuntimeProfile {
         for rule in &requested.denied_tools {
             if !denied_tools.contains(rule) {
                 denied_tools.push(rule.clone());
+            }
+        }
+        // Same union for the operator/caller subset: a descendant cannot drop
+        // an explicit restriction an ancestor carries, and only
+        // `inherit_disallowed_tools: false` may clear the inherited half.
+        let mut explicit_denied_tools = self.explicit_denied_tools.clone();
+        for rule in &requested.explicit_denied_tools {
+            if !explicit_denied_tools.contains(rule) {
+                explicit_denied_tools.push(rule.clone());
             }
         }
         let tools = match (&self.tools, &requested.tools) {
@@ -314,6 +389,9 @@ impl WorkerRuntimeProfile {
                 .clone()
                 .or_else(|| self.reasoning_effort.clone()),
             denied_tools,
+            explicit_denied_tools,
+            explicit_denies_persisted: self.explicit_denies_persisted
+                || requested.explicit_denies_persisted,
             max_spawn_depth,
             max_steps: requested.max_steps,
             background: requested.background,
@@ -388,6 +466,103 @@ mod tests {
         // Even though the child asks for everything, the read-only parent wins.
         let got = parent.intersect(greedy_child);
         assert_eq!(got, PermissionSet::read_only());
+    }
+
+    /// The conservative migration for preserved legacy records: a schema
+    /// without the explicit-origin field leaves `explicit_denied_tools`
+    /// empty while the operator's rules still sit in the mixed
+    /// `denied_tools`, and the bounded read-only bash carve-out consults
+    /// exactly that explicit set — so an ambiguous profile migrates every
+    /// entry to explicit, and a fresh dual-stamped record passes through
+    /// untouched.
+    #[test]
+    fn ambiguous_legacy_denies_migrate_to_explicit() {
+        let mut legacy = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
+        legacy.denied_tools = vec!["exec_shell".to_string(), "bash".to_string()];
+        legacy.explicit_denied_tools.clear();
+        let migrated = legacy.with_ambiguous_denies_treated_explicit();
+        assert!(
+            migrated
+                .explicit_denied_tools
+                .contains(&"exec_shell".to_string())
+                && migrated.explicit_denied_tools.contains(&"bash".to_string()),
+            "every ambiguous entry must land in the explicit set: {:?}",
+            migrated.explicit_denied_tools
+        );
+
+        // A fresh dual-stamped record (explicit entries already present) is
+        // not rewritten by the migration.
+        let fresh = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
+        let untouched = fresh.clone().with_ambiguous_denies_treated_explicit();
+        assert_eq!(
+            untouched.explicit_denied_tools, fresh.explicit_denied_tools,
+            "a record carrying explicit provenance passes through unchanged"
+        );
+    }
+
+    /// (review 6033553944: resuming an ordinary workflow removed a
+    /// capability that was available before the save) The exact-Fleet
+    /// workflow path installs its derived authority clamp in `denied_tools`
+    /// WITHOUT operator bookkeeping — the bounded surfaces the authority
+    /// deliberately kept must stay liftable by the carve-outs. A record
+    /// saved by the dual-ledger code carries that provenance in its empty
+    /// explicit set; the full save → deserialize → resume lifecycle must
+    /// preserve it, while a genuine schema-1 payload (field absent) still
+    /// promotes.
+    #[test]
+    fn stamped_resume_preserves_the_liftable_clamp_across_save_and_reopen() {
+        // The exact-Fleet authority clamp shape: `bash` denied as a clamp,
+        // explicit ledger empty (the authority bypass is why it is empty).
+        let saved =
+            WorkerRuntimeProfile::for_role(FleetRole::Verifier).with_persisted_explicit_denies();
+        let mut saved = saved;
+        saved.denied_tools = vec!["bash".to_string()];
+        saved.explicit_denied_tools.clear();
+
+        // Full lifecycle: persist → load (serde round trip is the storage
+        // contract) → the resume-side migration sees the stamp and must NOT
+        // promote the clamp into the operator ledger.
+        let json = serde_json::to_string(&saved).expect("persist the spec profile");
+        let reloaded: WorkerRuntimeProfile =
+            serde_json::from_str(&json).expect("reload the spec profile");
+        assert!(
+            reloaded.explicit_denies_persisted,
+            "the stamp must survive the storage round trip"
+        );
+        let resumed = reloaded.with_ambiguous_denies_treated_explicit();
+        assert!(
+            !resumed.explicit_denied_tools.contains(&"bash".to_string()),
+            "a stamped record's clamp stays liftable across save and resume: \
+             {:?}",
+            resumed.explicit_denied_tools
+        );
+
+        // The same shape WITHOUT the stamp — a schema-1 payload (field
+        // absent) deserializes unstamped, and its genuinely ambiguous deny
+        // must still promote (the conservative migration is unchanged).
+        let mut legacy_json = serde_json::to_value(&saved).expect("legacy shape");
+        // A schema-1 payload omits the ledger-stamp field entirely (the
+        // serde default is what a missing field deserializes to).
+        legacy_json
+            .as_object_mut()
+            .expect("object payload")
+            .remove("explicit_denies_persisted");
+        let legacy: WorkerRuntimeProfile =
+            serde_json::from_value(legacy_json).expect("reload a schema-1 payload");
+        assert!(!legacy.explicit_denies_persisted);
+        let migrated = legacy.with_ambiguous_denies_treated_explicit();
+        assert!(
+            migrated.explicit_denied_tools.contains(&"bash".to_string()),
+            "a schema-1 payload's ambiguous deny still promotes: {:?}",
+            migrated.explicit_denied_tools
+        );
+
+        // The promotion itself re-stamps: its ledger is now recorded, so a
+        // later resume cycle cannot re-open the ambiguity.
+        assert!(
+            migrated.explicit_denies_persisted,
+            "a promoted ledger is a recorded ledger"
+        );
     }
 
     #[test]
@@ -612,6 +787,34 @@ mod tests {
         assert!(child.denied_tools.contains(&"exec_shell".to_string()));
         assert!(child.denied_tools.contains(&"mcp_*".to_string()));
         assert!(child.denied_tools.contains(&"write_file".to_string()));
+    }
+
+    /// The operator/caller subset of the deny list unions the same way: a
+    /// descendant cannot drop an explicit restriction an ancestor carries.
+    /// The registry reads this list to keep role carve-outs (the bounded
+    /// read-only bash lane) from overriding operator rules whose strings are
+    /// identical to the clamp's own.
+    #[test]
+    fn child_explicit_denied_tools_union_never_drops_parent_rule() {
+        let mut parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+        parent.explicit_denied_tools = vec!["bash".into()];
+        let requested = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+
+        let child = parent.derive_child(&requested);
+        assert_eq!(child.explicit_denied_tools, vec!["bash".to_string()]);
+
+        let mut parent_with_both = parent.clone();
+        parent_with_both.explicit_denied_tools = vec!["bash".into(), "mcp_*".into()];
+        let mut requesting_child = WorkerRuntimeProfile::for_role(FleetRole::Builder);
+        requesting_child.explicit_denied_tools = vec!["write_file".into()];
+        let merged = parent_with_both.derive_child(&requesting_child);
+        for rule in ["bash", "mcp_*", "write_file"] {
+            assert!(
+                merged.explicit_denied_tools.contains(&rule.to_string()),
+                "explicit operator rule `{rule}` must survive derive_child: {:?}",
+                merged.explicit_denied_tools
+            );
+        }
     }
 
     /// Every built-in role keeps network reads by default: a worker cut off

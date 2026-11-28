@@ -1521,11 +1521,15 @@ pub(crate) fn network_posture_warning_for_task(
         return None;
     }
 
+    // Name the shell the role actually runs under (read-only roles run
+    // narrowed), not the requested default — the same truth the receipts
+    // report.
+    let effective = crate::fleet::role::effective_runtime_profile_for_role(&agent_type, &runtime);
     Some(format!(
         "Fleet task `{}` mentions network-backed verification, but role `{}` has network=off and shell={}. Dispatch a `worker` role with shell `read_only` for gh/curl evidence, or revise the brief.",
         task.id,
         role.as_deref().unwrap_or("worker"),
-        shell_policy_label(runtime.shell),
+        shell_policy_label(effective.shell),
     ))
 }
 
@@ -1600,7 +1604,12 @@ mod tests {
             ..WorkerRuntimeProfile::default()
         };
 
-        for role in [FleetRole::Scout, FleetRole::Reviewer, FleetRole::Planner] {
+        for role in [
+            FleetRole::Scout,
+            FleetRole::Reviewer,
+            FleetRole::Planner,
+            FleetRole::Verifier,
+        ] {
             let effective = role::effective_runtime_profile_for_role(&role, &requested);
             assert_eq!(effective.shell, ShellPolicy::ReadOnly, "{role:?}");
             assert_eq!(
